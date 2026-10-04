@@ -14,18 +14,28 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
 
-use super::{ApiError, ApiResult, ApiState, auth, database_unavailable, owner, validate_profile};
+use super::{
+    ApiError, ApiResult, ApiState, Operation, auth_with_mode, authorize, database_unavailable,
+    owner, validate_profile,
+};
 
 const MAX_CHECK_HEADER_BYTES: usize = 1_048_576;
 
 /// `GET /v1/vault/key-profiles` — every registered epoch, oldest first.
 pub(super) async fn list(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Value>> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Read).await?;
+    let mut tx = crate::scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "key_profiles_list_begin"))?;
     let rows = sqlx::query("SELECT k.key_epoch,k.public_key_profile,k.encrypted_vault_check_header,k.profile_fingerprint,k.activated_at IS NOT NULL AS activated,k.key_epoch=v.key_epoch AS current FROM vault_key_profiles k JOIN vaults v ON v.vault_id=k.vault_id WHERE k.vault_id=$1 ORDER BY k.key_epoch")
         .bind(p.vault)
-        .fetch_all(&s.db)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "key_profiles_list"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "key_profiles_list_commit"))?;
     Ok(Json(json!({
         "key_profiles": rows.into_iter().map(|row| json!({
             "key_epoch": row.get::<i32, _>("key_epoch"),
@@ -53,7 +63,8 @@ pub(super) async fn register(
     h: HeaderMap,
     Json(x): Json<RegisterProfile>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Publish).await?;
     owner(&p)?;
     let invalid = ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_key_profile");
     let vault = validate_profile(&x.public_key_profile, &x.profile_fingerprint, x.key_epoch)
@@ -69,10 +80,9 @@ pub(super) async fn register(
         return Err(invalid);
     }
     let epoch = x.key_epoch as i32;
-    let mut tx =
-        s.db.begin()
-            .await
-            .map_err(|error| database_unavailable(&error, "key_profile_begin"))?;
+    let mut tx = crate::scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "key_profile_begin"))?;
     let current: i32 =
         sqlx::query_scalar("SELECT key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE")
             .bind(p.vault)
@@ -137,12 +147,12 @@ pub(super) async fn activate(
     h: HeaderMap,
     Path(key_epoch): Path<i32>,
 ) -> ApiResult<Json<Value>> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Publish).await?;
     owner(&p)?;
-    let mut tx =
-        s.db.begin()
-            .await
-            .map_err(|error| database_unavailable(&error, "key_activate_begin"))?;
+    let mut tx = crate::scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "key_activate_begin"))?;
     let current: i32 =
         sqlx::query_scalar("SELECT key_epoch FROM vaults WHERE vault_id=$1 FOR UPDATE")
             .bind(p.vault)

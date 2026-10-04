@@ -1,0 +1,103 @@
+name: Publish community image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Harbor repository, without a tag
+        required: true
+        type: string
+      context:
+        description: Build context relative to the checked-out revision
+        required: true
+        type: string
+      dockerfile:
+        description: Dockerfile relative to the checked-out revision
+        required: true
+        type: string
+      tag:
+        description: Trusted branch alias or stable semantic version
+        required: true
+        type: string
+      environment:
+        description: Trusted publication environment (staging or production)
+        required: true
+        type: string
+      sha:
+        description: Immutable Git commit SHA to build and label
+        required: true
+        type: string
+    secrets:
+      HARBOR_USERNAME:
+        required: false
+      HARBOR_PASSWORD:
+        required: false
+      COSIGN_PRIVATE_KEY:
+        required: false
+      COSIGN_PASSWORD:
+        required: false
+      COSIGN_PUBLIC_KEY:
+        required: false
+    outputs:
+      digest:
+        description: Published immutable image digest
+        value: ${{ jobs.publish.outputs.digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    # A workflow dispatch is accepted only for the protected stable-release
+    # caller; branch pushes may publish only their matching channel alias.
+    if: >-
+      github.sha == inputs.sha &&
+      ((github.event_name == 'push' &&
+        ((inputs.environment == 'production' && github.ref == 'refs/heads/production' && inputs.tag == 'edge') ||
+         (inputs.environment == 'staging' && github.ref == 'refs/heads/staging' && inputs.tag == 'staging'))) ||
+       (github.event_name == 'workflow_dispatch' && inputs.environment == 'production' && github.ref == 'refs/heads/production' &&
+        inputs.tag != 'edge' && inputs.tag != 'staging'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@345e99f9e6985762f6cd2a05c64a13f1bfac5b72 # v3.10.0
+      - name: Validate trusted publication input
+        env:
+          IMAGE: ${{ inputs.image }}
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          [[ "$IMAGE" =~ ^hub\.docker\.visnovsky\.us/library/[a-z0-9][a-z0-9._/-]*$ ]]
+          [[ "$CONTEXT" != /* && "$CONTEXT" != .. && "$CONTEXT" != ../* ]]
+          [[ "$DOCKERFILE" != /* && "$DOCKERFILE" != .. && "$DOCKERFILE" != ../* ]]
+          test -f "$DOCKERFILE"
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TAG" =~ ^(edge|staging|[0-9]+\.[0-9]+\.[0-9]+)$ ]]
+      - name: Log in to Harbor
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          : "${HARBOR_USERNAME:?missing Harbor username}" "${HARBOR_PASSWORD:?missing Harbor password}"
+          printf '%s' "$HARBOR_PASSWORD" | docker login hub.docker.visnovsky.us --username "$HARBOR_USERNAME" --password-stdin
+      - name: Publish or promote signed immutable image
+        id: publish
+        env:
+          IMAGE: ${{ inputs.image }}
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        run: infra/release/publish-image.sh

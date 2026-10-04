@@ -15,21 +15,21 @@ tar -C "$root/linux" -czf "$fixture/desktop-linux-development-artifacts/desktop-
 printf mac > "$fixture/desktop-macos-development-artifacts/apps/desktop/src-tauri/target/release/bundle/dmg/Peppy_X_aarch64.dmg"
 printf archive > "$fixture/desktop-macos-development-artifacts/dist/desktop-macos-bundles.tar.gz"
 printf exe > "$fixture/desktop-windows-development-artifacts/nsis/Peppy_X_x64-setup.exe"; printf msi > "$fixture/desktop-windows-development-artifacts/msi/Peppy_X_x64_en-US.msi"
-"$script_dir/stage-assets.sh" 0.2.0-main.5 prerelease "$fixture" "$root/prerelease"
-test -f "$root/prerelease/peppy-0.2.0-main.5-linux-amd64.deb"; test ! -e "$root/prerelease/peppy-0.2.0-main.5-linux-x86_64.rpm"; test -s "$root/prerelease/SHA256SUMS"
-test -f "$root/prerelease/peppy-0.2.0-main.5-android-unsigned.apk"; test -f "$root/prerelease/peppy-0.2.0-main.5-android-unsigned.aab"
-test ! -e "$root/prerelease/peppy-0.2.0-main.5-android-debug.apk"
+"$script_dir/stage-assets.sh" 0.2.0-staging.5 prerelease "$fixture" "$root/prerelease"
+test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-amd64.deb"; test ! -e "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.rpm"; test -s "$root/prerelease/SHA256SUMS"
+test -f "$root/prerelease/peppy-0.2.0-staging.5-android-unsigned.apk"; test -f "$root/prerelease/peppy-0.2.0-staging.5-android-unsigned.aab"
+test ! -e "$root/prerelease/peppy-0.2.0-staging.5-android-debug.apk"
 test "$(find "$root/prerelease" -type f | wc -l | tr -d ' ')" = 9; test "$(grep -c . "$root/prerelease/SHA256SUMS")" = 8
-grep -Fq 'peppy-0.2.0-main.5-android-unsigned.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-main.5-android-unsigned.aab' "$root/prerelease/SHA256SUMS"
+grep -Fq 'peppy-0.2.0-staging.5-android-unsigned.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-staging.5-android-unsigned.aab' "$root/prerelease/SHA256SUMS"
 "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/stable"; test -f "$root/stable/peppy-0.2.0-linux-x86_64.rpm"
 rm "$fixture/android-release-artifacts/peppy-android-unsigned.apk"
 if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/missing" >/dev/null 2>&1; then printf 'expected missing asset failure\n' >&2; exit 1; fi
 printf release > "$fixture/android-release-artifacts/peppy-android-unsigned.apk"; mkdir "$fixture/android-release-artifacts/duplicate"; cp "$fixture/android-release-artifacts/peppy-android-unsigned.apk" "$fixture/android-release-artifacts/duplicate/peppy-android-unsigned.apk"
 if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/duplicate" >/dev/null 2>&1; then printf 'expected duplicate asset failure\n' >&2; exit 1; fi
 rm -rf "$fixture/android-release-artifacts/duplicate"
-selected=$(printf '%s\n' '' v0.2.0-main.9 v0.2.0-main.10 v0.1.0-main.99 v0.2.0 other | "$script_dir/prune-prereleases.sh" --keep 2 --select)
-test "$selected" = v0.1.0-main.99
-test "$(printf '%s\n' 'v0.2.0-main.6' | "$script_dir/prune-prereleases.sh" --keep 10 --select)" = ''
-check_guard() { expected=$1; tags=$2; actual=$(printf '%s\n' "$tags" | "$script_dir/prerelease-guard.sh" --tags-from-stdin 0.2.0-main.5); test "$actual" = "skip=$expected"; }
-check_guard true v0.2.0-main.6; check_guard true v0.2.0-main.5; check_guard true v0.2.0; check_guard false v0.1.9-main.99; check_guard false ''
+selected=$(printf '%s\n' '' v0.2.0-staging.9 v0.2.0-staging.10 v0.1.0-staging.99 v0.2.0 other | "$script_dir/prune-prereleases.sh" --keep 2 --select)
+test "$selected" = v0.1.0-staging.99
+test "$(printf '%s\n' 'v0.2.0-staging.6' | "$script_dir/prune-prereleases.sh" --keep 10 --select)" = ''
+check_guard() { expected=$1; tags=$2; actual=$(printf '%s\n' "$tags" | "$script_dir/prerelease-guard.sh" --tags-from-stdin 0.2.0-staging.5); test "$actual" = "skip=$expected"; }
+check_guard true v0.2.0-staging.6; check_guard true v0.2.0-staging.5; check_guard true v0.2.0; check_guard false v0.1.9-staging.99; check_guard false ''
 printf 'release script tests passed\n'

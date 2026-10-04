@@ -11,6 +11,8 @@ const MAX_REPLAY_RETENTION_DAYS: u32 = 3650;
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub database_url: String,
+    /// Safe build identity exposed by the deployment health contract.
+    pub release_identity: String,
     pub s3: Option<S3Config>,
     pub public_api_url: Option<Url>,
     pub public_attachment_url: Option<Url>,
@@ -28,6 +30,7 @@ impl fmt::Debug for Config {
             .debug_struct("Config")
             .field("bind_addr", &self.bind_addr)
             .field("database_url", &"[redacted]")
+            .field("release_identity", &self.release_identity)
             .field("s3_configured", &self.s3.is_some())
             .field("public_api_url", &self.public_api_url)
             .field("public_attachment_url", &self.public_attachment_url)
@@ -48,6 +51,10 @@ pub struct S3Config {
     pub bucket: String,
     pub access_key: String,
     pub secret_key: String,
+    /// S3-compatible providers such as B2 require their configured signing region.
+    pub signing_region: String,
+    /// The deployment operator has already created the bucket.
+    pub precreated_bucket: bool,
     pub readiness_timeout: Duration,
 }
 
@@ -91,6 +98,18 @@ impl Config {
         }
 
         let database_url = required(&get, "DATABASE_URL")?;
+        let release_identity = get("PEPPY_RELEASE_ID").unwrap_or_else(|| "unknown".into());
+        if release_identity.is_empty()
+            || release_identity.len() > 128
+            || !release_identity.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
+            })
+        {
+            return Err(ConfigError::Invalid {
+                name: "PEPPY_RELEASE_ID",
+                message: "must be a non-empty safe release identifier".into(),
+            });
+        }
         let production = get("PEPPY_ENV").as_deref() == Some("production");
         let public_api_url = public_url(&get, "PUBLIC_API_URL", production)?;
         let public_attachment_url = public_url(&get, "PUBLIC_ATTACHMENT_URL", production)?;
@@ -159,6 +178,10 @@ impl Config {
                     bucket: bucket.ok_or(ConfigError::Missing("S3_BUCKET"))?,
                     access_key,
                     secret_key,
+                    signing_region: get("S3_SIGNING_REGION")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "us-east-1".into()),
+                    precreated_bucket: bool_env(&get, "S3_PRECREATED_BUCKET")?,
                     readiness_timeout: Duration::from_secs(2),
                 })
             }
@@ -198,6 +221,7 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            release_identity,
             s3,
             public_api_url,
             public_attachment_url,
@@ -216,6 +240,20 @@ fn required(
     get(name)
         .filter(|value| !value.is_empty())
         .ok_or(ConfigError::Missing(name))
+}
+
+fn bool_env(
+    get: &impl Fn(&str) -> Option<String>,
+    name: &'static str,
+) -> Result<bool, ConfigError> {
+    match get(name).as_deref().unwrap_or("false") {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        value => Err(ConfigError::Invalid {
+            name,
+            message: format!("expected true or false, got {value:?}"),
+        }),
+    }
 }
 
 fn public_url(
@@ -383,5 +421,70 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(error, ConfigError::S3EndpointMustBeOrigin));
+    }
+
+    #[test]
+    fn s3_signing_configuration_defaults_and_validates_precreated_bucket() {
+        let config = Config::from_get(|name| match name {
+            "S3_INTERNAL_ENDPOINT" => Some("http://localhost:8333".into()),
+            "S3_ACCESS_KEY" | "S3_SECRET_KEY" => Some("safe_key-1".into()),
+            "S3_BUCKET" => Some("peppy-private".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        let s3 = config.s3.unwrap();
+        assert_eq!(s3.signing_region, "us-east-1");
+        assert!(!s3.precreated_bucket);
+
+        let config = Config::from_get(|name| match name {
+            "S3_INTERNAL_ENDPOINT" => Some("http://localhost:8333".into()),
+            "S3_ACCESS_KEY" | "S3_SECRET_KEY" => Some("safe_key-1".into()),
+            "S3_BUCKET" => Some("peppy-private".into()),
+            "S3_SIGNING_REGION" => Some("us-west-004".into()),
+            "S3_PRECREATED_BUCKET" => Some("true".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        let s3 = config.s3.unwrap();
+        assert_eq!(s3.signing_region, "us-west-004");
+        assert!(s3.precreated_bucket);
+
+        let error = Config::from_get(|name| match name {
+            "S3_INTERNAL_ENDPOINT" => Some("http://localhost:8333".into()),
+            "S3_ACCESS_KEY" | "S3_SECRET_KEY" => Some("safe_key-1".into()),
+            "S3_BUCKET" => Some("peppy-private".into()),
+            "S3_PRECREATED_BUCKET" => Some("sometimes".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                name: "S3_PRECREATED_BUCKET",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn release_identity_is_safe_to_expose() {
+        let config = Config::from_get(|name| match name {
+            "PEPPY_RELEASE_ID" => Some("sha256:abc-123".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert_eq!(config.release_identity, "sha256:abc-123");
+        let error = Config::from_get(|name| match name {
+            "PEPPY_RELEASE_ID" => Some("not safe/for headers".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                name: "PEPPY_RELEASE_ID",
+                ..
+            }
+        ));
     }
 }

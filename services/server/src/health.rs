@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode};
+use axum::{Json, extract::State, http::StatusCode};
 use futures_util::StreamExt;
+use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use time::OffsetDateTime;
 
@@ -14,6 +15,7 @@ struct Dependencies {
     database: PgPool,
     storage: Option<(Storage, std::time::Duration)>,
     timeout: std::time::Duration,
+    release_identity: String,
 }
 
 impl HealthState {
@@ -25,6 +27,15 @@ impl HealthState {
             .acquire_timeout(std::time::Duration::from_secs(2))
             .connect(&config.database_url)
             .await?;
+        Self::from_database(config, database).await
+    }
+
+    /// Builds health dependencies around an already-owned runtime pool.
+    /// Storage initialization happens here exactly once for the server instance.
+    pub async fn from_database(
+        config: &Config,
+        database: PgPool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let storage = match config.s3.as_ref() {
             Some(s3) => Some((
                 tokio::time::timeout(s3.readiness_timeout, Storage::initialize(s3)).await??,
@@ -36,12 +47,30 @@ impl HealthState {
             database,
             storage,
             timeout: std::time::Duration::from_secs(2),
+            release_identity: config.release_identity.clone(),
         })))
     }
 
     pub fn database(&self) -> PgPool {
         self.0.database.clone()
     }
+
+    pub(crate) fn storage(&self) -> Option<Storage> {
+        self.0.storage.as_ref().map(|(storage, _)| storage.clone())
+    }
+}
+
+#[derive(Serialize)]
+pub struct ReleaseIdentity {
+    pub revision: String,
+}
+
+/// Deployment identity is intentionally separate from readiness so existing
+/// status-only probes remain compatible.
+pub async fn release(State(state): State<HealthState>) -> Json<ReleaseIdentity> {
+    Json(ReleaseIdentity {
+        revision: state.0.release_identity.clone(),
+    })
 }
 
 pub async fn liveness() -> StatusCode {
@@ -59,7 +88,11 @@ pub async fn storage_contract_check(
         "peppy-readiness-check-{}.txt",
         OffsetDateTime::now_utc().unix_timestamp_nanos()
     );
-    storage.ensure_bucket().await?;
+    if !s3.precreated_bucket {
+        storage.ensure_bucket().await?;
+    } else {
+        storage.probe().await?;
+    }
     let payload = b"peppy-private-s3-contract";
     storage.put_bytes(&key, payload.to_vec()).await?;
     let mut stream = storage.get(&key).await?;

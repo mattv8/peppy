@@ -1,0 +1,15 @@
+[package]
+name = "peppy-hosted-api"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license = "MPL-2.0"
+
+[lib]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+schemars = { workspace = true, features = ["uuid1"] }

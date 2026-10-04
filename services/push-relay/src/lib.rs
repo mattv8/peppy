@@ -5,7 +5,7 @@ pub mod providers;
 use std::{
     collections::HashMap,
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -15,10 +15,11 @@ use axum::extract::DefaultBodyLimit;
 use axum::{
     Json, Router,
     extract::{ConnectInfo, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
+use ipnet::IpNet;
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,6 +38,8 @@ const MAX_IDENTITY_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_BYTES: usize = 128;
 const MAX_NONCE_BYTES: usize = 256;
 const SECRET_HEX_BYTES: usize = 64;
+const MAX_FORWARDED_HEADER_BYTES: usize = 8192;
+const MAX_FORWARDED_HOPS: usize = 16;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -44,6 +47,8 @@ pub struct AppState {
     provider: Arc<dyn PushProvider>,
     admissions: Arc<Mutex<HashMap<String, Admission>>>,
     wake_admissions: Arc<Mutex<HashMap<String, Admission>>>,
+    trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+    release_identity: Arc<String>,
 }
 struct Admission {
     window: SystemTime,
@@ -76,7 +81,7 @@ pub enum ProviderError {
     Permanent,
     Unavailable,
 }
-struct UnconfiguredProvider;
+pub struct UnconfiguredProvider;
 impl PushProvider for UnconfiguredProvider {
     fn configured(&self) -> bool {
         false
@@ -164,11 +169,21 @@ impl AppState {
         Self::with_provider(pool, Arc::new(UnconfiguredProvider))
     }
     pub fn with_provider(pool: PgPool, provider: Arc<dyn PushProvider>) -> Self {
+        Self::with_provider_and_proxy_cidrs(pool, provider, Vec::new(), "unknown".into())
+    }
+    pub fn with_provider_and_proxy_cidrs(
+        pool: PgPool,
+        provider: Arc<dyn PushProvider>,
+        trusted_proxy_cidrs: Vec<IpNet>,
+        release_identity: String,
+    ) -> Self {
         Self {
             pool,
             provider,
             admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admissions: Arc::new(Mutex::new(HashMap::new())),
+            trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs),
+            release_identity: Arc::new(release_identity),
         }
     }
     pub fn provider_configured(&self) -> bool {
@@ -198,6 +213,9 @@ impl AppState {
         entry.count += 1;
         Ok(())
     }
+    async fn admit_request(&self, peer: SocketAddr, headers: &HeaderMap) -> Result<(), ApiError> {
+        self.admit(self.client_ip(peer, headers)).await
+    }
     async fn admit_wake(&self, ip: SocketAddr) -> Result<(), ApiError> {
         let now = SystemTime::now();
         let mut entries = self.wake_admissions.lock().await;
@@ -222,18 +240,92 @@ impl AppState {
         entry.count += 1;
         Ok(())
     }
+    async fn admit_wake_request(
+        &self,
+        peer: SocketAddr,
+        headers: &HeaderMap,
+    ) -> Result<(), ApiError> {
+        self.admit_wake(self.client_ip(peer, headers)).await
+    }
+    fn client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> SocketAddr {
+        resolve_client_ip(peer, headers, &self.trusted_proxy_cidrs)
+    }
+}
+
+/// Parses the comma-separated CIDR allowlist used for proxy forwarding.
+/// An unset or empty value disables forwarded-header trust entirely.
+pub fn trusted_proxy_cidrs(value: Option<&str>) -> Result<Vec<IpNet>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|cidr| {
+            if cidr.is_empty() || cidr.trim() != cidr {
+                return Err(
+                    "PEPPY_RELAY_TRUSTED_PROXY_CIDRS must be a comma-separated CIDR list".into(),
+                );
+            }
+            cidr.parse::<IpNet>()
+                .map_err(|_| format!("invalid trusted proxy CIDR: {cidr}"))
+        })
+        .collect()
+}
+
+fn resolve_client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> SocketAddr {
+    if !trusted.iter().any(|network| network.contains(&peer.ip())) {
+        return peer;
+    }
+    let forwarded: Vec<_> = headers.get_all("x-forwarded-for").iter().collect();
+    if forwarded.len() != 1 {
+        return peer;
+    }
+    let value = forwarded[0].as_bytes();
+    if value.len() > MAX_FORWARDED_HEADER_BYTES {
+        return peer;
+    }
+    let hops: Option<Vec<IpAddr>> = std::str::from_utf8(value)
+        .ok()
+        .and_then(|value| {
+            let hops: Vec<_> = value.split(',').map(str::trim).collect();
+            (1..=MAX_FORWARDED_HOPS)
+                .contains(&hops.len())
+                .then_some(hops)
+                .filter(|hops| hops.iter().all(|hop| !hop.is_empty()))
+        })
+        .and_then(|hops| hops.into_iter().map(|hop| hop.parse().ok()).collect());
+    let Some(hops) = hops else { return peer };
+    for hop in hops.into_iter().rev() {
+        if !trusted.iter().any(|network| network.contains(&hop)) {
+            return SocketAddr::new(hop, peer.port());
+        }
+    }
+    peer
 }
 
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
+        .route("/__release", get(release))
         .route("/v1/registrations", post(register))
         .route("/v1/registrations/{id}/confirm", post(confirm))
         .route("/v1/routes/{id}/wake", post(wake))
         .route("/v1/routes/{id}/revoke", post(revoke))
         .layer(DefaultBodyLimit::max(8 * 1024))
         .with_state(state)
+}
+#[derive(Debug, Serialize)]
+struct ReleaseIdentity {
+    revision: String,
+}
+async fn release(State(state): State<AppState>) -> Json<ReleaseIdentity> {
+    Json(ReleaseIdentity {
+        revision: (*state.release_identity).clone(),
+    })
 }
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     (
@@ -255,8 +347,18 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
             StatusCode::SERVICE_UNAVAILABLE,
             Json(Health {
                 status: "unavailable",
-                provider: "unconfigured",
-                warning: "database unavailable; provider is unconfigured",
+                provider: state.provider.provider_name(),
+                warning: "database unavailable",
+            }),
+        );
+    }
+    if !state.provider.configured() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(Health {
+                status: "unavailable",
+                provider: state.provider.provider_name(),
+                warning: "no provider adapter configured; relay cannot deliver push",
             }),
         );
     }
@@ -265,11 +367,7 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
         Json(Health {
             status: "ready",
             provider: state.provider.provider_name(),
-            warning: if state.provider.configured() {
-                "provider configured; delivery is best effort"
-            } else {
-                "no provider adapter configured; relay cannot deliver push"
-            },
+            warning: "provider configured; delivery is best effort",
         }),
     )
 }
@@ -277,6 +375,7 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
 async fn register(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<RegisterRequest>,
 ) -> ApiResult<RegistrationPending> {
     valid_nonempty(
@@ -284,7 +383,7 @@ async fn register(
         MAX_TOKEN_BYTES,
         "invalid_device_token",
     )?;
-    state.admit(peer).await.map_err(rate)?;
+    state.admit_request(peer, &headers).await.map_err(rate)?;
     if !state.provider.supports(request.provider) {
         return Err(unconfigured());
     }
@@ -323,13 +422,14 @@ async fn confirm(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<ConfirmRequest>,
 ) -> ApiResult<RouteCredentials> {
     valid_secret(&request.challenge, "invalid_challenge")?;
     if let Some(identity) = &request.installation_public_identity {
         valid_nonempty(identity, MAX_IDENTITY_BYTES, "invalid_identity")?;
     }
-    state.admit(peer).await.map_err(rate)?;
+    state.admit_request(peer, &headers).await.map_err(rate)?;
     if !state.provider.configured() {
         return Err(unconfigured());
     }
@@ -368,6 +468,7 @@ async fn wake(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<WakeRequest>,
 ) -> ApiResult<serde_json::Value> {
     valid_secret(&request.wake_credential, "invalid_wake_credential")?;
@@ -383,7 +484,10 @@ async fn wake(
     )?;
     // Wake traffic has an independent, higher pre-auth budget so server wake
     // bursts cannot consume public enrollment capacity or bypass brute-force limits.
-    state.admit_wake(peer).await.map_err(rate)?;
+    state
+        .admit_wake_request(peer, &headers)
+        .await
+        .map_err(rate)?;
     if !state.provider.configured() {
         return Err(unconfigured());
     }
@@ -489,10 +593,14 @@ async fn revoke(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<RevokeRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     valid_secret(&request.manage_credential, "invalid_manage_credential")?;
-    state.admit_wake(peer).await.map_err(rate)?;
+    state
+        .admit_wake_request(peer, &headers)
+        .await
+        .map_err(rate)?;
     let mut tx = state.pool.begin().await.map_err(db)?;
     let row = sqlx::query_as::<_, (Uuid, Vec<u8>)>("SELECT registration_id,manage_digest FROM relay_routes WHERE id=$1 AND revoked_at IS NULL FOR UPDATE")
         .bind(id).fetch_optional(&mut *tx).await.map_err(db)?;
@@ -648,6 +756,9 @@ mod tests {
         }
     }
     async fn test_pool() -> (PgPool, String) {
+        test_pool_with_connections(1).await
+    }
+    async fn test_pool_with_connections(connections: u32) -> (PgPool, String) {
         let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
         let schema = format!("relay_test_{}", Uuid::new_v4().simple());
         let mut admin = PgConnection::connect(&url).await.unwrap();
@@ -663,7 +774,7 @@ mod tests {
         drop(admin);
         let schema_for_pool = schema.clone();
         let pool = PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(connections)
             .after_connect(move |conn, _| {
                 let s = schema_for_pool.clone();
                 Box::pin(async move {
@@ -890,12 +1001,145 @@ mod tests {
 
         // readyz should report warning about unconfigured provider
         let ready_resp = client.get(format!("{base}/readyz")).send().await.unwrap();
-        assert_eq!(ready_resp.status(), StatusCode::OK);
+        assert_eq!(ready_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let health_text = ready_resp.text().await.unwrap();
         assert!(health_text.contains("unconfigured"));
         assert!(health_text.contains("no provider adapter configured"));
 
+        let release_resp = client
+            .get(format!("{base}/__release"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(release_resp.status(), StatusCode::OK);
+        assert_eq!(
+            release_resp.json::<serde_json::Value>().await.unwrap()["revision"],
+            "unknown"
+        );
+
         task.abort();
+        cleanup(pool, schema).await;
+    }
+
+    #[test]
+    fn trusted_proxy_resolution_is_bounded_and_fails_closed() {
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let trusted = trusted_proxy_cidrs(Some("10.0.0.0/8,2001:db8::/32")).unwrap();
+        let peer: SocketAddr = "10.0.0.8:443".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.9, 10.0.0.4, 2001:db8::2"),
+        );
+        assert_eq!(
+            resolve_client_ip(peer, &headers, &trusted).ip(),
+            "198.51.100.9".parse::<IpAddr>().unwrap()
+        );
+
+        // An untrusted direct peer cannot spoof its admission identity.
+        let direct: SocketAddr = "203.0.113.12:443".parse().unwrap();
+        assert_eq!(resolve_client_ip(direct, &headers, &trusted), direct);
+
+        let mut duplicate = headers.clone();
+        duplicate.append("x-forwarded-for", HeaderValue::from_static("198.51.100.10"));
+        assert_eq!(resolve_client_ip(peer, &duplicate, &trusted), peer);
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), peer);
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(&format!("{}1", "1".repeat(MAX_FORWARDED_HEADER_BYTES))).unwrap(),
+        );
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), peer);
+    }
+
+    #[test]
+    fn proxy_configuration_rejects_invalid_cidrs() {
+        assert!(trusted_proxy_cidrs(Some("10.0.0.0/8,not-a-cidr")).is_err());
+        assert!(trusted_proxy_cidrs(Some(" 10.0.0.0/8")).is_err());
+        assert!(trusted_proxy_cidrs(None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn trusted_clients_have_independent_admission_buckets() {
+        let (pool, schema) = test_pool().await;
+        let state = AppState::with_provider_and_proxy_cidrs(
+            pool.clone(),
+            Arc::new(FakeProvider::default()),
+            trusted_proxy_cidrs(Some("127.0.0.0/8")).unwrap(),
+            "test-release".into(),
+        );
+        let peer: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        for client in ["198.51.100.1", "198.51.100.2"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-forwarded-for",
+                axum::http::HeaderValue::from_str(client).unwrap(),
+            );
+            for _ in 0..ADMISSION_LIMIT {
+                state.admit_request(peer, &headers).await.unwrap();
+            }
+            assert!(state.admit_request(peer, &headers).await.is_err());
+        }
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn simultaneous_workers_lease_one_delivery_without_duplicate_provider_send() {
+        struct BlockingProvider {
+            started: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            wakes: StdMutex<u16>,
+        }
+        impl PushProvider for BlockingProvider {
+            fn configured(&self) -> bool {
+                true
+            }
+            fn supports(&self, _: Provider) -> bool {
+                true
+            }
+            fn provider_name(&self) -> &'static str {
+                "blocking-fake"
+            }
+            fn send_challenge<'a>(
+                &'a self,
+                _: Provider,
+                _: &'a str,
+                _: &'a str,
+            ) -> ProviderFuture<'a> {
+                Box::pin(async { Ok(()) })
+            }
+            fn send_wake<'a>(&'a self, _: Provider, _: &'a str, _: &'a str) -> ProviderFuture<'a> {
+                Box::pin(async move {
+                    *self.wakes.lock().unwrap() += 1;
+                    self.started.notify_one();
+                    self.release.notified().await;
+                    Ok(())
+                })
+            }
+        }
+        let (pool, schema) = test_pool_with_connections(2).await;
+        let route_id = Uuid::new_v4();
+        let registration_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at) VALUES($1,'fcm','token',$2,now()+interval '10 minutes')")
+            .bind(registration_id).bind(vec![0_u8; 32]).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relay_routes(id,registration_id,provider,token,manage_digest,wake_digest) VALUES($1,$2,'fcm','token',$3,$3)")
+            .bind(route_id).bind(registration_id).bind(vec![0_u8; 32]).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO relay_wake_jobs(route_id,idempotency_id,opaque_nonce,state) VALUES($1,'one','nonce','pending')")
+            .bind(route_id).execute(&pool).await.unwrap();
+        let provider = Arc::new(BlockingProvider {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            wakes: StdMutex::new(0),
+        });
+        let state = AppState::with_provider(pool.clone(), provider.clone());
+        let first_state = state.clone();
+        let first = tokio::spawn(async move { deliver_one(&first_state).await });
+        provider.started.notified().await;
+        assert!(!deliver_one(&state).await.unwrap());
+        provider.release.notify_one();
+        assert!(first.await.unwrap().unwrap());
+        assert_eq!(*provider.wakes.lock().unwrap(), 1);
         cleanup(pool, schema).await;
     }
 

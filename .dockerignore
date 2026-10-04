@@ -10,7 +10,12 @@ target
 node_modules
 **/node_modules
 apps
-packages
+packages/**
+!packages/desktop-ui/
+!packages/desktop-ui/src/
+!packages/desktop-ui/src/peppy-tokens.css
+!packages/desktop-ui/src/fonts/
+!packages/desktop-ui/src/fonts/*.ttf
 tests
 *.sqlite
 *.sqlite-*

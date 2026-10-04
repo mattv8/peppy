@@ -65,6 +65,7 @@ pub struct Storage {
     endpoint: Url,
     bucket: String,
     credentials: Credentials,
+    signing_region: String,
     client: Client,
 }
 
@@ -74,7 +75,9 @@ impl Storage {
     /// requiring a separate operator-only storage check first.
     pub async fn initialize(config: &S3Config) -> Result<Self, StorageError> {
         let storage = Self::new(config);
-        storage.ensure_bucket().await?;
+        if !config.precreated_bucket {
+            storage.ensure_bucket().await?;
+        }
         Ok(storage)
     }
 
@@ -97,6 +100,7 @@ impl Storage {
             endpoint: config.endpoint.clone(),
             bucket: config.bucket.clone(),
             credentials,
+            signing_region: config.signing_region.clone(),
             client,
         }
     }
@@ -318,7 +322,7 @@ impl Storage {
         settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
         let params = v4::SigningParams::builder()
             .identity(&identity)
-            .region("us-east-1")
+            .region(&self.signing_region)
             .name("s3")
             .time(SystemTime::now())
             .settings(settings)

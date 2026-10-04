@@ -42,3 +42,25 @@ Snapshot history does not execute carrier work. The automated encrypted recovery
 Keep historical passphrases and key-profile material for history that must remain readable. Epoch rotation is manual; there is no automatic recovery when required historical material is lost.
 
 Peppy is a single-node foundation, not HA. Reserve storage for complete backup and restore data. `PEPPY_REPLAY_RETENTION_DAYS` defaults to `30` and accepts `1` through `3650`; expired or ahead cursors require snapshot resynchronization. Immutable snapshots have separate retention. Do not discard historical key material because transport replay rows aged out.
+# Prebuilt community edition
+
+The public server image is `hub.docker.visnovsky.us/library/peppy-server`.
+Set `PEPPY_SERVER_IMAGE` to the release's immutable `@sha256:…` reference and
+configure the normal root Compose environment. With Docker Compose v2.24+:
+
+```sh
+docker compose -f docker-compose.yml -f docker/compose.community.yml pull
+docker compose -f docker-compose.yml -f docker/compose.community.yml up -d --no-build
+```
+
+This overlay reuses the shared PostgreSQL, authenticated SeaweedFS, migration,
+and server configuration; it replaces only the local image builds. It requires
+no hosted account or Stripe configuration. Hosted-only code is built and
+distributed separately from the private platform repository. Verify the
+release digest/signature with the operator-published signing key before use.
+
+The default API listener is loopback-only. When a reverse proxy runs on another
+host, set `API_BIND_IP` to the server's private interface and restrict access to
+the trusted proxy in the network/firewall configuration. For the planned
+Docker2 staging deployment that interface is `10.10.0.101`; the public origin
+still uses HTTPS through Proxy, not the internal HTTP port.

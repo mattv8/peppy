@@ -128,15 +128,15 @@ Native clients require manual credential import and manual passphrase unlock. Sn
 
 ## Branches and pull requests
 
-Branch from `main`, use Conventional Commit messages on each commit, and open a pull request to `main`. For contributors without bypass permission, the `gate` check must pass and the branch must be up to date; use **Update branch** when needed. Rebase is the default merge method (`gh pr merge --auto --rebase`); merge commits are also allowed (`--merge`), while squash merges are disabled. Branches auto-delete after merging. PR CI runs only jobs affected by changed paths; pushes to `main` run everything and publish the prerelease.
+Branch from `production`, use Conventional Commit messages on each commit, and open a pull request to `production` (or use `staging` for prerelease integration). For contributors without bypass permission, the `gate` check must pass and the branch must be up to date; use **Update branch** when needed. Rebase is the default merge method (`gh pr merge --auto --rebase`); merge commits are also allowed (`--merge`), while squash merges are disabled. Branches auto-delete after merging. PR CI runs only jobs affected by changed paths; pushes to `staging` publish prereleases and trusted Harbor staging images after `gate`; production pushes advance only the community edge image.
 
-Repository Admin and Maintain roles can bypass pull-request requirements, required CI checks, and force-push restrictions on `main`. A separate ruleset blocks deletion of the default branch and grants no bypass permissions.
+Repository Admin and Maintain roles can bypass pull-request requirements, required CI checks, and force-push restrictions on `production`. A separate ruleset blocks deletion of the default branch and grants no bypass permissions.
 
 ## Commit messages and versioning
 
 Use Conventional Commits (`type(scope): message`) to drive automatic version bumps. While major version is 0, the rules are: `feat` and breaking changes bump minor; `fix` and `perf` bump patch; `docs`, `ci`, `build`, `refactor`, `test`, `chore`, and `style` do not bump. Mark breaking changes with `type!:` (for example `feat!:`) or a `BREAKING CHANGE:` footer; while the version is `0.x` they bump minor. Merge commits are ignored; unconventional non-merge subjects bump patch.
 
-Moving to `1.0.0` is explicit: set the **Release** workflow's `version` input. After changing `infra/release/` or the release workflows, run `just release-test`.
+Moving to `1.0.0` is explicit: set the **Release** workflow's `version` input. After changing `infra/release/` or the release workflows, run `just release-test`. Before the branch migration, an administrator must create protected `production` and `staging` branches, configure their Harbor/cosign environment secrets, require the `gate` job in branch rulesets, and run `infra/release/migrate-branches.sh` (add `--apply` only after its validation succeeds). The script sets the remote default branch but intentionally does not weaken or rewrite rulesets.
 
 ## Troubleshooting
 

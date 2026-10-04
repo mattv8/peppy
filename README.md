@@ -1,12 +1,12 @@
 # Peppy
 
-[![CI](https://github.com/mattv8/peppy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mattv8/peppy/actions/workflows/ci.yml)
+[![CI](https://github.com/mattv8/peppy/actions/workflows/ci.yml/badge.svg?branch=production)](https://github.com/mattv8/peppy/actions/workflows/ci.yml)
 
 Peppy is a self-hosted messaging foundation for developer and operator evaluation. It includes an encrypted-envelope server, encrypted attachment storage, snapshots, explicit public image copies, a simulated gateway, native desktop client, Android SMS companion, and capability-gated Swift client.
 
 ## Status
 
-Development remains in progress. The simulator exercises synthetic messages, not a carrier. CI builds development artifacts on each push to `main` and publishes prerelease artifacts automatically. For stable releases, use the "Release" workflow with inputs for version bump, explicit version override, or a `dry_run` test. Download prerelease and CI artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases) and [CI runs](https://github.com/mattv8/peppy/actions/workflows/ci.yml). All artifacts provide build evidence only:
+Development remains in progress. The simulator exercises synthetic messages, not a carrier. CI builds development artifacts on pushes to `production` and `staging`; staging publishes prerelease artifacts automatically. For stable releases, use the "Release" workflow from `production` with inputs for version bump, explicit version override, or a `dry_run` test. Download prerelease and CI artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases) and [CI runs](https://github.com/mattv8/peppy/actions/workflows/ci.yml). All artifacts provide build evidence only:
 
 - Android release APK/AAB artifacts are unsigned.
 - macOS bundles and DMGs, Windows installers, and Linux packages are development outputs. macOS bundles are development bundles, not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
@@ -141,11 +141,11 @@ Operators must read [backup and restore guidance](infra/compose/README.md) befor
 
 Releases are git tags; checked-in manifests keep development placeholder versions and CI stamps the computed version into each build.
 
-- **Prereleases:** when CI passes for a push to `main`, it publishes the GitHub prerelease `vX.Y.Z-main.N`, where `X.Y.Z` is the next version predicted from Conventional Commits and `N` counts commits since the last stable tag. Only the latest green run publishes; queued runs superseded by a newer push are skipped. The newest 10 prereleases are kept. The server image is pushed to `ghcr.io/mattv8/peppy-server` as `X.Y.Z-main.N` and `edge`.
-- **Stable releases:** run the **Release** workflow from `main`. Inputs: `bump` (`auto`, `patch`, `minor`, `major`), an optional explicit `version` (`X.Y.Z`, for example `1.0.0`), and `dry_run` (build without publishing). The workflow requires a successful CI push run for the current `main` commit, rebuilds with the stable version, and creates the `vX.Y.Z` tag only when it publishes the release. Images are tagged `X.Y.Z`, `X.Y`, `latest`, and `X` from `1.0.0`.
+- **Staging prereleases:** when CI passes for a push to `staging`, it publishes the GitHub prerelease `vX.Y.Z-staging.N`, where `X.Y.Z` is the next version predicted from Conventional Commits and `N` counts commits since the last stable tag. The Android and WiX version codes retain the monotonic prerelease sequence. The newest 10 prereleases are kept. The server and relay images are pushed only after the same SHA's `gate` job succeeds, as `hub.docker.visnovsky.us/library/peppy-server:staging` and `hub.docker.visnovsky.us/library/peppy-push-relay:staging`, plus immutable `sha-<commit>` tags.
+- **Production edge and stable:** a green push to `production` advances only the community `:edge` aliases and immutable SHA tags. Run the **Release** workflow from `production` for a stable release. Inputs: `bump` (`auto`, `patch`, `minor`, `major`), an optional explicit `version` (`X.Y.Z`, for example `1.0.0`), and `dry_run` (build without publishing). The workflow requires a successful CI push run for the exact production commit, creates the `vX.Y.Z` release, and publishes both Harbor images as `X.Y.Z`, `X.Y`, `latest`, and `X` from `1.0.0`.
 - **Assets:** unsigned Android `peppy-<version>-android-unsigned.apk` and `.aab`; Linux AppImage, deb, and rpm (stable only); macOS DMG and app archive; Windows MSI and NSIS installer; `SHA256SUMS`; generated release notes. iOS artifacts stay in CI runs and are not published.
 - On Windows, uninstall a prerelease MSI before installing the stable MSI of the same `X.Y.Z`.
 
 Releases do not sign, notarize, publish to stores, or turn unsigned artifacts into signed releases. Store readiness additionally requires the appropriate Apple, Windows, Android, update-signing, privacy, policy, recovery, and review work. Keep signing credentials only in protected CI environment secrets; never generate or commit them in this repository.
 
-Preview the next version with `just version --channel prerelease`. Run `just release-test` after changing `infra/release/` or the release workflows; it needs git-cliff 2.14.2 on `PATH`, which `infra/release/install-git-cliff.sh <dir>` installs.
+Preview the next version with `just version --channel prerelease`. Run `just release-test` after changing `infra/release/` or the release workflows; it needs git-cliff 2.14.2 on `PATH`, which `infra/release/install-git-cliff.sh <dir>` installs. Harbor publication requires protected `staging` and `production` environments with `HARBOR_USERNAME`, `HARBOR_PASSWORD`, `COSIGN_PRIVATE_KEY`, and `COSIGN_PASSWORD`; no billing capability is included in these public images.

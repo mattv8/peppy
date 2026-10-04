@@ -31,7 +31,11 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::sync::parse_cursor;
-use super::{ApiError, ApiResult, ApiState, auth, database_unavailable, insert_error};
+use super::{
+    ApiError, ApiResult, ApiState, Operation, attachment_quota, auth_with_mode, authorize,
+    authorize_resolved, database_unavailable, insert_error,
+};
+use crate::scope;
 use crate::storage::{Storage, StorageError};
 
 const MAX_ATTACHMENT_BYTES: i64 = 64 * 1024 * 1024;
@@ -177,15 +181,21 @@ async fn lock_vault(tx: &mut Transaction<'_, Postgres>, vault: Uuid) -> ApiResul
 
 /// Records `key` as an unclaimed attempt that becomes deletable after the grace.
 async fn record_intent(db: &PgPool, key: &str, vault: Uuid, reason: &str) -> ApiResult<()> {
+    let mut tx = scope::begin(db, vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "storage_intent_begin"))?;
     sqlx::query("INSERT INTO storage_deletions(object_key,vault_id,reason,not_before) VALUES($1,$2,$3,now() + ($4::bigint * interval '1 second'))")
         .bind(key)
         .bind(vault)
         .bind(reason)
         .bind(ATTEMPT_INTENT_GRACE_SECONDS)
-        .execute(db)
+        .execute(&mut *tx)
         .await
         .map(|_| ())
-        .map_err(|error| database_unavailable(&error, "storage_intent_insert"))
+        .map_err(|error| database_unavailable(&error, "storage_intent_insert"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "storage_intent_commit"))
 }
 
 const QUEUE_NOW: &str = "INSERT INTO storage_deletions(object_key,vault_id,reason) VALUES($1,$2,$3) ON CONFLICT (object_key) DO UPDATE SET not_before=now()";
@@ -193,13 +203,18 @@ const QUEUE_NOW: &str = "INSERT INTO storage_deletions(object_key,vault_id,reaso
 /// Makes `key` deletable now. Used for the attempt's own unreferenced key when
 /// it cannot be attached; logs rather than failing the already-failed request.
 async fn queue_now(db: &PgPool, key: &str, vault: Uuid, reason: &str) {
-    if let Err(error) = sqlx::query(QUEUE_NOW)
-        .bind(key)
-        .bind(vault)
-        .bind(reason)
-        .execute(db)
-        .await
-    {
+    let result = async {
+        let mut tx = scope::begin(db, vault).await?;
+        sqlx::query(QUEUE_NOW)
+            .bind(key)
+            .bind(vault)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
+    }
+    .await;
+    if let Err(error) = result {
         tracing::warn!(error_kind = %error, "storage deletion enqueue failed; intent grace still applies");
     }
 }
@@ -233,7 +248,8 @@ pub(super) async fn reserve_attachment(
     h: HeaderMap,
     Json(request): Json<ReserveAttachment>,
 ) -> ApiResult<Json<ReservedAttachment>> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Upload).await?;
     storage(&s)?;
     let hash = sha256_hex(&request.declared_ciphertext_sha256).ok_or(ApiError(
         StatusCode::BAD_REQUEST,
@@ -245,18 +261,28 @@ pub(super) async fn reserve_attachment(
             "attachment_too_large",
         ));
     }
+    // Policy callbacks may consult the runtime pool. Resolve them before taking
+    // a connection for the scoped admission transaction so a size-one pool is safe.
+    let quota = attachment_quota(&s, &principal)
+        .await
+        .unwrap_or(s.vault_attachment_quota_bytes);
+    if quota <= 0 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "vault_quota_exceeded",
+        ));
+    }
     // Cheap DB-only fencing so this vault's expired reservations stop counting
     // immediately; object deletion is left to the retrying worker.
-    retire_expired_reservations(&s.db, Some(principal.vault), 64)
+    retire_expired_reservations_for_vault(&s.db, principal.vault, 64)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_reservation_retire"))?;
     let attachment_id = request.attachment_id.unwrap_or_else(Uuid::new_v4);
     // Placeholder key: never written. Each upload attempt gets its own key.
     let key = format!("private/{}/{}", principal.vault, Uuid::new_v4());
-    let mut tx =
-        s.db.begin()
-            .await
-            .map_err(|error| database_unavailable(&error, "attachment_reserve_begin"))?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_reserve_begin"))?;
     // Serializing on the vault row makes aggregate quota admission race-free.
     lock_vault(&mut tx, principal.vault).await?;
     if let Some(existing) = sqlx::query("SELECT device_id,declared_bytes,declared_sha256,expires_at > now() AS live,deleting_at IS NULL AS available FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2")
@@ -272,7 +298,7 @@ pub(super) async fn reserve_attachment(
     let used = quota_used(&mut tx, principal.vault).await?;
     if used
         .checked_add(request.declared_ciphertext_bytes)
-        .is_none_or(|total| total > s.vault_attachment_quota_bytes)
+        .is_none_or(|total| total > quota)
     {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -299,16 +325,20 @@ pub(super) async fn upload_attachment(
     Path(attachment_id): Path<Uuid>,
     body: Body,
 ) -> ApiResult<StatusCode> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Upload).await?;
     let store = storage(&s)?;
     let _slot = upload_slot(&s)?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_upload_lookup_begin"))?;
     let row = sqlx::query(&format!(
         "SELECT declared_bytes,declared_sha256 FROM upload_reservations WHERE {OPEN_RESERVATION}"
     ))
     .bind(principal.vault)
     .bind(attachment_id)
     .bind(principal.device)
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "attachment_upload_lookup"))?
     .ok_or(ApiError(
@@ -317,6 +347,7 @@ pub(super) async fn upload_attachment(
     ))?;
     let declared: i64 = row.get("declared_bytes");
     let expected: Vec<u8> = row.get("declared_sha256");
+    drop(tx);
     let mut spool = Spool::create().await?;
     let (received, actual, _) = spool
         .fill(
@@ -376,8 +407,7 @@ async fn attach_upload(
     bytes: i64,
     sha256: &[u8],
 ) -> ApiResult<()> {
-    let mut tx = db
-        .begin()
+    let mut tx = scope::begin(db, vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_upload_begin"))?;
     let previous = sqlx::query(&format!("SELECT object_key,uploaded_at IS NOT NULL AS uploaded FROM upload_reservations WHERE {OPEN_RESERVATION} FOR UPDATE"))
@@ -423,16 +453,20 @@ pub(super) async fn finalize_attachment(
     h: HeaderMap,
     Path(attachment_id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Upload).await?;
     let store = storage(&s)?;
     let _slot = upload_slot(&s)?;
     let unavailable = ApiError(StatusCode::CONFLICT, "attachment_unavailable");
     // A concurrent re-upload can replace the object between the unlocked HEAD
     // and the locked commit; re-verify the new object a bounded number of times.
     for _ in 0..3 {
+        let mut lookup_tx = scope::begin(&s.db, principal.vault)
+            .await
+            .map_err(|error| database_unavailable(&error, "attachment_finalize_lookup_begin"))?;
         let row = sqlx::query("SELECT object_key,declared_bytes,finalized_at IS NOT NULL AS finalized,uploaded_at IS NOT NULL AS uploaded FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now())")
             .bind(principal.vault).bind(attachment_id).bind(principal.device)
-            .fetch_optional(&s.db).await
+            .fetch_optional(&mut *lookup_tx).await
             .map_err(|error| database_unavailable(&error, "attachment_finalize_lookup"))?
             .ok_or(ApiError(StatusCode::NOT_FOUND, "upload_reservation_not_found"))?;
         if row.get::<bool, _>("finalized") {
@@ -445,6 +479,7 @@ pub(super) async fn finalize_attachment(
         }
         let key: String = row.get("object_key");
         let bytes: i64 = row.get("declared_bytes");
+        drop(lookup_tx);
         // Bounded storage HEAD with no database lock held.
         let stored = store.head_bytes(&key).await.map_err(|error| {
             storage_failure(
@@ -456,10 +491,9 @@ pub(super) async fn finalize_attachment(
         if stored != bytes {
             return Err(unavailable);
         }
-        let mut tx =
-            s.db.begin()
-                .await
-                .map_err(|error| database_unavailable(&error, "attachment_finalize_begin"))?;
+        let mut tx = scope::begin(&s.db, principal.vault)
+            .await
+            .map_err(|error| database_unavailable(&error, "attachment_finalize_begin"))?;
         let locked = sqlx::query("SELECT object_key,declared_sha256,finalized_at IS NOT NULL AS finalized FROM upload_reservations WHERE vault_id=$1 AND attachment_id=$2 AND device_id=$3 AND deleting_at IS NULL AND (finalized_at IS NOT NULL OR expires_at > now()) FOR UPDATE")
             .bind(principal.vault).bind(attachment_id).bind(principal.device)
             .fetch_optional(&mut *tx).await
@@ -500,17 +534,22 @@ pub(super) async fn download_attachment(
     h: HeaderMap,
     Path(attachment_id): Path<Uuid>,
 ) -> ApiResult<Response> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Read).await?;
     let store = storage(&s)?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_download_lookup_begin"))?;
     let key: String = sqlx::query_scalar(
         "SELECT object_key FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
     )
     .bind(principal.vault)
     .bind(attachment_id)
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|error| database_unavailable(&error, "attachment_download_lookup"))?
     .ok_or(ApiError(StatusCode::NOT_FOUND, "attachment_not_found"))?;
+    drop(tx);
     let stream = store.get(&key).await.map_err(|error| {
         storage_failure(
             error,
@@ -550,7 +589,8 @@ pub(super) async fn register_attachment_references(
     Path(attachment_id): Path<Uuid>,
     Json(request): Json<RegisterAttachmentReferences>,
 ) -> ApiResult<StatusCode> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Publish).await?;
     if request.references.is_empty() || request.references.len() > MAX_REFERENCES_PER_REQUEST {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_reference_count"));
     }
@@ -584,10 +624,9 @@ pub(super) async fn register_attachment_references(
         sequences.push(sequence);
     }
 
-    let mut tx =
-        s.db.begin()
-            .await
-            .map_err(|error| database_unavailable(&error, "register_attachment_refs_begin"))?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "register_attachment_refs_begin"))?;
     // FOR SHARE on the live row blocks a concurrent release (which deletes it)
     // until this registration commits, and lets concurrent registrations proceed.
     let tracked: bool = sqlx::query_scalar("SELECT r.reference_tracked FROM attachments a JOIN upload_reservations r ON r.vault_id=a.vault_id AND r.attachment_id=a.attachment_id AND r.object_key=a.object_key AND r.finalized_at IS NOT NULL WHERE a.vault_id=$1 AND a.attachment_id=$2 FOR SHARE OF a")
@@ -638,14 +677,14 @@ pub(super) async fn release_attachment(
     Path(attachment_id): Path<Uuid>,
     Json(request): Json<ReleaseAttachment>,
 ) -> ApiResult<StatusCode> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::AttachmentDelete).await?;
     let generation = parse_cursor(&request.compaction_generation)?;
     let cutoff = parse_cursor(&request.release_before_cursor)?;
     let not_proven = ApiError(StatusCode::CONFLICT, "attachment_release_not_proven");
-    let mut tx =
-        s.db.begin()
-            .await
-            .map_err(|error| database_unavailable(&error, "attachment_release_begin"))?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_release_begin"))?;
 
     // Lock order: vault, then the live attachment row.
     let vault = sqlx::query(
@@ -754,23 +793,28 @@ pub(super) async fn create_public_copy(
     Path(attachment_id): Path<Uuid>,
     body: Body,
 ) -> ApiResult<Json<Value>> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Publish).await?;
     let store = storage(&s)?;
     let _slot = upload_slot(&s)?;
     // Any active device of the vault may derive a public copy of a finalized attachment it can
     // already read (for example a received MMS image). The copy is a separate, client re-encoded
     // object owned by the requester; the private original is never promoted or exposed.
     // Revocation remains creator/owner-only, and other vaults' attachments stay invisible.
+    let mut lookup_tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_attachment_lookup_begin"))?;
     let readable: Option<i32> =
         sqlx::query_scalar("SELECT 1 FROM attachments WHERE vault_id=$1 AND attachment_id=$2")
             .bind(principal.vault)
             .bind(attachment_id)
-            .fetch_optional(&s.db)
+            .fetch_optional(&mut *lookup_tx)
             .await
             .map_err(|error| database_unavailable(&error, "public_copy_attachment_lookup"))?;
     if readable.is_none() {
         return Err(ApiError(StatusCode::NOT_FOUND, "attachment_not_found"));
     }
+    drop(lookup_tx);
     let name = h
         .get("x-file-name")
         .and_then(|value| value.to_str().ok())
@@ -788,19 +832,26 @@ pub(super) async fn create_public_copy(
     let digest = Sha256::digest(token.as_bytes());
     let share_id = Uuid::new_v4();
     let key = format!("public/{}/{}", principal.vault, Uuid::new_v4());
+    // As with private reservations, resolve policy before opening the scoped
+    // admission transaction; policy implementations may query this same pool.
+    let quota = attachment_quota(&s, &principal)
+        .await
+        .unwrap_or(s.vault_attachment_quota_bytes);
+    if quota <= 0 {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "vault_quota_exceeded",
+        ));
+    }
 
     // Admission: quota check, pending row and attempt intent commit together
     // under the vault lock, so concurrent copies cannot overbook.
-    let mut tx =
-        s.db.begin()
-            .await
-            .map_err(|error| database_unavailable(&error, "public_copy_begin"))?;
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_begin"))?;
     lock_vault(&mut tx, principal.vault).await?;
     let used = quota_used(&mut tx, principal.vault).await?;
-    if used
-        .checked_add(bytes)
-        .is_none_or(|total| total > s.vault_attachment_quota_bytes)
-    {
+    if used.checked_add(bytes).is_none_or(|total| total > quota) {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
             "vault_quota_exceeded",
@@ -826,10 +877,9 @@ pub(super) async fn create_public_copy(
     }
     drop(spool);
     let ready = async {
-        let mut tx =
-            s.db.begin()
-                .await
-                .map_err(|error| database_unavailable(&error, "public_copy_ready_begin"))?;
+        let mut tx = scope::begin(&s.db, principal.vault)
+            .await
+            .map_err(|error| database_unavailable(&error, "public_copy_ready_begin"))?;
         if !claim_intent(&mut tx, &key).await? {
             return Err(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -856,12 +906,17 @@ pub(super) async fn create_public_copy(
 }
 
 async fn retire_failed_copy(db: &PgPool, share_id: Uuid, key: &str, vault: Uuid) {
-    if let Err(error) =
+    let result = async {
+        let mut tx = scope::begin(db, vault).await?;
         sqlx::query("UPDATE public_attachment_copies SET retired_at=COALESCE(retired_at,now()) WHERE share_id=$1")
             .bind(share_id)
-            .execute(db)
+            .execute(&mut *tx)
             .await
-    {
+            ?;
+        tx.commit().await
+    }
+    .await;
+    if let Err(error) = result {
         tracing::warn!(error_kind = %error, "public copy retire failed; intent grace still applies");
     }
     queue_now(db, key, vault, "public_copy").await;
@@ -872,14 +927,21 @@ pub(super) async fn revoke_public_copy(
     h: HeaderMap,
     Path(share_id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    let principal = auth(&s.db, &h).await?;
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Revoke).await?;
     // Revocation and deletion enqueue are one transaction (fenced deletion).
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_revoke_begin"))?;
     let revoked = sqlx::query("WITH revoked AS (UPDATE public_attachment_copies SET revoked_at=now(),retired_at=COALESCE(retired_at,now()) WHERE share_id=$1 AND vault_id=$2 AND (created_by_device_id=$3 OR $4='owner') AND revoked_at IS NULL RETURNING object_key,vault_id) INSERT INTO storage_deletions(object_key,vault_id,reason) SELECT object_key,vault_id,'public_copy' FROM revoked ON CONFLICT (object_key) DO UPDATE SET not_before=now() RETURNING 1")
         .bind(share_id).bind(principal.vault).bind(principal.device).bind(&principal.role)
-        .fetch_optional(&s.db).await.map_err(|error| database_unavailable(&error, "public_copy_revoke"))?;
+        .fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "public_copy_revoke"))?;
     if revoked.is_none() {
         return Err(ApiError(StatusCode::NOT_FOUND, "public_copy_not_found"));
     }
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_revoke_commit"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -897,14 +959,37 @@ pub(super) async fn download_public_copy(
         return Err(not_found());
     }
     let digest = Sha256::digest(token.as_bytes());
+    // Hosted RLS cannot expose the copy table before the token selects a vault.
+    // The resolver returns only that vault; metadata stays behind the scoped read.
+    let query = if s.row_security {
+        "SELECT vault_id FROM peppy.resolve_public_copy_vault($1)"
+    } else {
+        "SELECT vault_id FROM public_attachment_copies WHERE token_digest=$1 AND revoked_at IS NULL AND retired_at IS NULL AND ready_at IS NOT NULL AND expires_at > now()"
+    };
+    let row = sqlx::query(query)
+        .bind(digest.as_slice())
+        .fetch_optional(&s.db)
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_lookup"))?
+        .ok_or_else(not_found)?;
+    let vault_id = row.get("vault_id");
+    authorize_resolved(&s, vault_id, Uuid::nil(), Operation::Export).await?;
+    let mut tx = scope::begin(&s.db, vault_id)
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_scoped_lookup_begin"))?;
     let row = sqlx::query("SELECT object_key,safe_name,media_type FROM public_attachment_copies WHERE token_digest=$1 AND revoked_at IS NULL AND retired_at IS NULL AND ready_at IS NOT NULL AND expires_at > now()")
-        .bind(digest.as_slice()).fetch_optional(&s.db).await.map_err(|error| database_unavailable(&error, "public_copy_lookup"))?.ok_or_else(not_found)?;
+        .bind(digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "public_copy_scoped_lookup"))?
+        .ok_or_else(not_found)?;
     let stored_name: String = row.get("safe_name");
     if safe_name != stored_name {
         return Err(not_found());
     }
     let key: String = row.get("object_key");
     let media_type: String = row.get("media_type");
+    drop(tx);
     let stream = storage(&s)?
         .get(&key)
         .await
@@ -937,6 +1022,23 @@ pub(super) async fn retire_expired_reservations(
         .execute(db)
         .await?
         .rows_affected())
+}
+
+/// Per-vault request fencing counterpart to the worker-only cross-vault sweep.
+async fn retire_expired_reservations_for_vault(
+    db: &PgPool,
+    vault: Uuid,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = scope::begin(db, vault).await?;
+    let retired = sqlx::query("WITH expired AS (DELETE FROM upload_reservations WHERE ctid IN (SELECT ctid FROM upload_reservations WHERE finalized_at IS NULL AND deleting_at IS NULL AND expires_at <= now() AND vault_id=$1 ORDER BY expires_at LIMIT $2 FOR UPDATE SKIP LOCKED) RETURNING vault_id,object_key,uploaded_at) INSERT INTO storage_deletions(object_key,vault_id,reason) SELECT object_key,vault_id,'expired_reservation' FROM expired WHERE uploaded_at IS NOT NULL ON CONFLICT (object_key) DO UPDATE SET not_before=now()")
+        .bind(vault)
+        .bind(limit)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(retired)
 }
 
 /// Retires expired public copies and queues their objects in one statement.

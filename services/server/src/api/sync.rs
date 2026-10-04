@@ -19,7 +19,9 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::{ApiError, ApiResult, ApiState, auth, database_unavailable};
+use super::{
+    ApiError, ApiResult, ApiState, Operation, auth_with_mode, authorize, database_unavailable,
+};
 use crate::storage::Storage;
 
 pub(super) const MAX_PAGE: u16 = 200;
@@ -196,12 +198,11 @@ async fn watermarks(
     })
 }
 
-async fn read_only_snapshot(db: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
-    let mut tx = db.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    Ok(tx)
+async fn read_only_snapshot(
+    db: &PgPool,
+    vault: Uuid,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    crate::scope::begin_read_only_repeatable(db, vault).await
 }
 
 /// One committed envelope, kept as the database's serialized JSON so pages
@@ -308,7 +309,7 @@ pub(super) async fn replay_page(
     after: i64,
     limit: i64,
 ) -> Result<ReplayPage, sqlx::Error> {
-    let mut tx = read_only_snapshot(db).await?;
+    let mut tx = read_only_snapshot(db, vault).await?;
     let marks = watermarks(&mut tx, vault).await?;
     if let Some(resync) = Resync::classify(after, marks.high_water, marks.replay_floor) {
         tx.commit().await?;
@@ -337,7 +338,7 @@ pub(super) async fn position(
     vault: Uuid,
     cursor: i64,
 ) -> Result<Result<(i64, i64), Resync>, sqlx::Error> {
-    let mut tx = read_only_snapshot(db).await?;
+    let mut tx = read_only_snapshot(db, vault).await?;
     let marks = watermarks(&mut tx, vault).await?;
     tx.commit().await?;
     Ok(
@@ -376,7 +377,8 @@ pub(super) async fn events(
     h: HeaderMap,
     Query(q): Query<EventsQuery>,
 ) -> Result<Response, ApiError> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Sync).await?;
     let after = parse_cursor(q.after.as_deref().unwrap_or("0"))?;
     match replay_page(&s.db, p.vault, after, page_limit(q.limit))
         .await
@@ -402,9 +404,10 @@ pub(super) async fn snapshot_start(
     State(s): State<ApiState>,
     h: HeaderMap,
 ) -> ApiResult<Json<Value>> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Export).await?;
     let read = async {
-        let mut tx = read_only_snapshot(&s.db).await?;
+        let mut tx = read_only_snapshot(&s.db, p.vault).await?;
         let marks = watermarks(&mut tx, p.vault).await?;
         let row = sqlx::query("SELECT key_epoch,profile_fingerprint FROM vaults WHERE vault_id=$1")
             .bind(p.vault)
@@ -417,21 +420,20 @@ pub(super) async fn snapshot_start(
         .bind(marks.high_water)
         .fetch_one(&mut *tx)
         .await?;
+        let compaction_active: bool = sqlx::query_scalar(ROSTER_FENCED)
+            .bind(p.vault)
+            .fetch_one(&mut *tx)
+            .await?;
         tx.commit().await?;
-        Ok::<_, sqlx::Error>((marks, row, count))
+        Ok::<_, sqlx::Error>((marks, row, count, compaction_active))
     };
-    let (marks, row, count) = read
+    let (marks, row, count, compaction_active) = read
         .await
         .map_err(|error| database_unavailable(&error, "snapshot_start"))?;
     // `compaction_supported` means this server stores compaction metadata and
     // fences snapshot pages by generation, so clients always send the fence.
     // Physical deletion is separately gated on every non-revoked device having
     // declared that it fences (`compaction_active`).
-    let compaction_active: bool = sqlx::query_scalar(ROSTER_FENCED)
-        .bind(p.vault)
-        .fetch_one(&s.db)
-        .await
-        .map_err(|error| database_unavailable(&error, "snapshot_compaction_readiness"))?;
     Ok(Json(json!({
         "snapshot_version": 1,
         "compaction_supported": true,
@@ -465,7 +467,8 @@ pub(super) async fn snapshot_records(
     h: HeaderMap,
     Query(q): Query<SnapshotPageQuery>,
 ) -> Result<Response, ApiError> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Export).await?;
     let high_water = parse_cursor(&q.high_water)?;
     let compaction_generation = q
         .compaction_generation
@@ -485,7 +488,7 @@ pub(super) async fn snapshot_records(
             .map_err(|error| database_unavailable(&error, "snapshot_compaction_declare"))?;
     }
     let read = async {
-        let mut tx = read_only_snapshot(&s.db).await?;
+        let mut tx = read_only_snapshot(&s.db, p.vault).await?;
         let marks = watermarks(&mut tx, p.vault).await?;
         // Pre-compaction clients remain compatible until physical deletion. At
         // that point a missing generation fails closed instead of returning a
@@ -548,17 +551,24 @@ pub(super) async fn pending_commands(
     h: HeaderMap,
     Query(q): Query<PendingQuery>,
 ) -> ApiResult<Json<Value>> {
-    let p = auth(&s.db, &h).await?;
+    let p = auth_with_mode(&s, &h).await?;
+    authorize(&s, &p, Operation::Sync).await?;
     let after = parse_cursor(q.after.as_deref().unwrap_or("0"))?;
     let gateway_filter = (p.role == "gateway").then_some(p.device);
+    let mut tx = crate::scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "pending_commands_begin"))?;
     let rows = sqlx::query("SELECT c.command_id,c.producer_device_id,c.gateway_device_id,c.cursor FROM commands c WHERE c.vault_id=$1 AND ($2::uuid IS NULL OR c.gateway_device_id=$2) AND c.cursor>$3 AND NOT EXISTS (SELECT 1 FROM command_receipts r WHERE r.vault_id=c.vault_id AND r.command_id=c.command_id AND r.gateway_device_id=c.gateway_device_id) ORDER BY c.cursor LIMIT $4")
         .bind(p.vault)
         .bind(gateway_filter)
         .bind(after)
         .bind(page_limit(q.limit))
-        .fetch_all(&s.db)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|error| database_unavailable(&error, "pending_commands"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "pending_commands_commit"))?;
     Ok(Json(json!({
         "commands": rows.into_iter().map(|row| json!({
             "command_id": row.get::<Uuid, _>("command_id"),
@@ -693,11 +703,13 @@ pub(super) async fn declare_compaction_fence(
     vault: Uuid,
     device: Uuid,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = crate::scope::begin(db, vault).await?;
     sqlx::query("UPDATE devices SET compaction_generation_fence=TRUE WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL AND NOT compaction_generation_fence")
         .bind(vault)
         .bind(device)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

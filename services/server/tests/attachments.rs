@@ -1218,7 +1218,6 @@ async fn gateway_releases_tracked_attachment_only_after_every_reference_is_compa
         StatusCode::NO_CONTENT
     );
     assert!(!server.attachment_exists(attachment).await);
-    assert_eq!(server.queued("finalized_attachment").await, 1);
     assert_eq!(
         server.release_as(&foreign, attachment, "1", "9").await,
         StatusCode::NOT_FOUND

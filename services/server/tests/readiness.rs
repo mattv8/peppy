@@ -34,6 +34,8 @@ async fn storage_initialization_provisions_the_configured_bucket() {
         bucket: "fresh-private-bucket".into(),
         access_key: "testaccess".into(),
         secret_key: "testsecret".into(),
+        signing_region: "us-east-1".into(),
+        precreated_bucket: false,
         readiness_timeout: Duration::from_secs(2),
     };
 
@@ -51,6 +53,8 @@ async fn storage_initialization_fails_closed_when_provisioning_is_unreachable() 
         bucket: "fresh-private-bucket".into(),
         access_key: "testaccess".into(),
         secret_key: "testsecret".into(),
+        signing_region: "us-east-1".into(),
+        precreated_bucket: false,
         readiness_timeout: Duration::from_secs(2),
     };
 

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use peppy_server::{app, config::Config, health::HealthState};
+use peppy_server::{ServerBuilder, config::Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -46,10 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if command.as_deref() == Some("healthcheck") {
         return healthcheck(config.bind_addr).await;
     }
-    let state = HealthState::connect(&config).await?;
-    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
-    tracing::info!(address = %config.bind_addr, "peppy server listening");
-    axum::serve(listener, app(state))
+    let bind_addr = config.bind_addr;
+    let runtime_db = sqlx::PgPool::connect(&config.database_url).await?;
+    let mut server = ServerBuilder::new(config, runtime_db).build().await?;
+    server.start_maintenance()?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    tracing::info!(address = %bind_addr, "peppy server listening");
+    axum::serve(listener, server.router())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

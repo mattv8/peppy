@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 axum.workspace = true
 hex = "=0.4.3"
+ipnet = "=2.11.0"
 jsonwebtoken = "=9.3.1"
 rand = "=0.8.8"
 reqwest = { version = "=0.12.24", default-features = false, features = ["json", "rustls-tls", "http2"] }

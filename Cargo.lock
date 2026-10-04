@@ -1938,6 +1938,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "peppy-hosted-api"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "peppy-hosted-onboarding"
 version = "0.1.0"
 dependencies = [
@@ -1982,6 +1992,7 @@ dependencies = [
  "axum",
  "hex",
  "http-body-util",
+ "ipnet",
  "jsonwebtoken",
  "rand 0.8.8",
  "reqwest",

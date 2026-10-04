@@ -34,7 +34,7 @@ jobs:
       wix_version: ${{ steps.compute.outputs.wix_version }}
       sha: ${{ steps.target.outputs.sha }}
     steps:
-      - if: github.ref != 'refs/heads/main'
+      - if: github.ref != 'refs/heads/production'
         run: exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -123,15 +123,37 @@ jobs:
     with:
       ref: ${{ needs.prepare.outputs.sha }}
       version: ${{ needs.prepare.outputs.version }}
-      upload: true
   publish:
     if: ${{ !inputs.dry_run }}
-    needs: [prepare, artifacts, container]
+    needs: [prepare, artifacts, container, publish-server-image, publish-relay-image]
     permissions:
       contents: write
-      packages: write
     uses: ./.github/workflows/publish-release.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
       channel: stable
       sha: ${{ needs.prepare.outputs.sha }}
+  publish-server-image:
+    if: ${{ !inputs.dry_run }}
+    needs: [prepare, container]
+    uses: ./.github/workflows/publish-community-image.yml
+    with:
+      image: hub.docker.visnovsky.us/library/peppy-server
+      context: .
+      dockerfile: docker/server.Dockerfile
+      tag: ${{ needs.prepare.outputs.version }}
+      environment: production
+      sha: ${{ needs.prepare.outputs.sha }}
+    secrets: inherit
+  publish-relay-image:
+    if: ${{ !inputs.dry_run }}
+    needs: [prepare, container]
+    uses: ./.github/workflows/publish-community-image.yml
+    with:
+      image: hub.docker.visnovsky.us/library/peppy-push-relay
+      context: .
+      dockerfile: docker/push-relay.Dockerfile
+      tag: ${{ needs.prepare.outputs.version }}
+      environment: production
+      sha: ${{ needs.prepare.outputs.sha }}
+    secrets: inherit

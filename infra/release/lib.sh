@@ -3,7 +3,9 @@
 # shellcheck disable=SC2034
 PEPPY_STABLE_TAG_REGEX='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 # shellcheck disable=SC2034
-PEPPY_PRERELEASE_TAG_REGEX='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-main\.(0|[1-9][0-9]*)$'
+# `main` remains accepted while the branch migration is rolling out so a
+# stable release cannot move backward relative to an already-published tag.
+PEPPY_PRERELEASE_TAG_REGEX='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(main|staging)\.(0|[1-9][0-9]*)$'
 
 semver_compare() {
     local a b a_major a_minor a_patch a_word a_number b_major b_minor b_patch b_word b_number

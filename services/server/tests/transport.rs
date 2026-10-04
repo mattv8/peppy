@@ -63,10 +63,23 @@ impl TestServer {
         Self::start_custom(TransportOptions::default(), Some(real), None).await
     }
 
+    async fn start_without_maintenance() -> Self {
+        Self::start_custom_mode(TransportOptions::default(), None, None, false).await
+    }
+
     async fn start_custom(
         options: TransportOptions,
         real: Option<(Value, String, Vec<u8>, Uuid)>,
         relay_url: Option<Url>,
+    ) -> Self {
+        Self::start_custom_mode(options, real, relay_url, true).await
+    }
+
+    async fn start_custom_mode(
+        options: TransportOptions,
+        real: Option<(Value, String, Vec<u8>, Uuid)>,
+        relay_url: Option<Url>,
+        start_maintenance: bool,
     ) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
@@ -108,9 +121,31 @@ impl TestServer {
         let addr = listener.local_addr().unwrap();
         let server_pool = pool.clone();
         let task = tokio::spawn(async move {
-            let router = match relay_url {
-                Some(relay_url) => router_with_options_and_relay(server_pool, options, relay_url),
-                None => router_with_options(server_pool, options),
+            let router = if start_maintenance {
+                match relay_url {
+                    Some(relay_url) => {
+                        router_with_options_and_relay(server_pool, options, relay_url)
+                    }
+                    None => router_with_options(server_pool, options),
+                }
+            } else {
+                let config = peppy_server::config::Config {
+                    bind_addr: addr,
+                    database_url: isolated_url.into(),
+                    release_identity: "test".into(),
+                    s3: None,
+                    public_api_url: None,
+                    public_attachment_url: None,
+                    vault_attachment_quota_bytes: 512 * 1024 * 1024,
+                    trusted_proxy_cidrs: Vec::new(),
+                    replay_retention: options.replay_retention,
+                    relay_url,
+                };
+                peppy_server::ServerBuilder::new(config, server_pool)
+                    .build()
+                    .await
+                    .unwrap()
+                    .router()
             };
             axum::serve(listener, router).await.unwrap();
         });
@@ -953,7 +988,7 @@ async fn pairing_admission_capacity_evicts_random_tokens_without_blocking_valid_
 #[tokio::test]
 async fn pairing_intent_maintenance_removes_expired_and_consumed_rows_only() {
     let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start().await;
+    let server = TestServer::start_without_maintenance().await;
     let expired = [7_u8; 32];
     let active = [8_u8; 32];
     let consumed = [9_u8; 32];

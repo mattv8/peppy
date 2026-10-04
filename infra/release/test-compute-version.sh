@@ -17,15 +17,15 @@ new_repo() {
 
 # shellcheck source=infra/release/lib.sh
 . "$script_dir/lib.sh"
-assert_eq "$(semver_compare 0.2.0 0.2.0-main.9)" 1
-assert_eq "$(semver_compare 0.2.0-main.10 0.2.0-main.9)" 1
+assert_eq "$(semver_compare 0.2.0 0.2.0-staging.9)" 1
+assert_eq "$(semver_compare 0.2.0-staging.10 0.2.0-staging.9)" 1
 assert_eq "$(semver_compare 1.0.0 0.99.99)" 1
 assert_eq "$(semver_compare v1.0.0 v1.0.0)" 0
 assert_eq "$(semver_bump v0.1.9 minor)" 0.2.0
 grep -F "tag_pattern = '$PEPPY_STABLE_TAG_REGEX'" "$script_dir/cliff.toml" >/dev/null
 
 repo=$tmp/no-tags; new_repo "$repo"
-assert_eq "$(field "$(run "$repo" --channel prerelease)" version)" 0.1.0-main.1
+assert_eq "$(field "$(run "$repo" --channel prerelease)" version)" 0.1.0-staging.1
 out=$(run "$repo" --channel stable); assert_eq "$(field "$out" version)" 0.1.0
 assert_eq "$(field "$out" android_version_code)" 100999
 assert_eq "$(field "$(run "$repo" --channel dev)" version)" 0.1.0-dev.1
@@ -58,11 +58,11 @@ assert_eq "$(field "$(run "$repo" --channel stable --version 0.10.0)" bump)" exp
 if run "$repo" --channel dev --version 0.10.0 >/dev/null 2>&1; then exit 1; fi
 if run "$repo" --channel stable --version 0.8.2 >/dev/null 2>&1; then exit 1; fi
 
-git -C "$repo" tag v0.8.2-main.99
+git -C "$repo" tag v0.8.2-staging.99
 assert_eq "$(field "$(run "$repo" --channel prerelease --bump patch)" base_version)" 0.8.3
 git -C "$repo" tag v0.8.3
 if run "$repo" --channel stable >/dev/null 2>&1; then exit 1; else [[ $? == 4 ]]; fi
-out=$(run "$repo" --channel prerelease); assert_eq "$(field "$out" version)" 0.8.4-main.0
+out=$(run "$repo" --channel prerelease); assert_eq "$(field "$out" version)" 0.8.4-staging.0
 assert_eq "$(field "$out" android_version_code)" 804000
 assert_eq "$(field "$out" wix_version)" 0.8.4.0
 
@@ -109,8 +109,8 @@ git -C "$repo" tag v0.1.0
 i=0; while ((i < 999)); do git -C "$repo" commit --allow-empty -qm "fix: $i"; i=$((i + 1)); done
 if run "$repo" --channel prerelease --bump patch >/dev/null 2>&1; then exit 1; else [[ $? == 5 ]]; fi
 
-repo=$tmp/notes; new_repo "$repo"; git -C "$repo" tag v0.1.0; git -C "$repo" commit --allow-empty -qm 'feat(api): note'; git -C "$repo" tag v0.2.0-main.1
-notes=$(cd "$repo" && "$script_dir/release-notes.sh" 0.2.0-main.9)
+repo=$tmp/notes; new_repo "$repo"; git -C "$repo" tag v0.1.0; git -C "$repo" commit --allow-empty -qm 'feat(api): note'; git -C "$repo" tag v0.2.0-staging.1
+notes=$(cd "$repo" && "$script_dir/release-notes.sh" 0.2.0-staging.9)
 printf '%s\n' "$notes" | grep -F 'unsigned development-grade prerelease' >/dev/null
 printf '%s\n' "$notes" | grep -F 'note' >/dev/null
 repo=$tmp/groups; new_repo "$repo"; git -C "$repo" tag v0.1.0

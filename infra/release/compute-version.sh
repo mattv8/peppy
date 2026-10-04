@@ -99,7 +99,7 @@ if [[ $head_released == true ]]; then
 fi
 case $channel in
     stable) version=$base_version; sequence=999 ;;
-    prerelease) version=$base_version-main.$commits_since; sequence=$commits_since ;;
+    prerelease) version=$base_version-staging.$commits_since; sequence=$commits_since ;;
     dev) version=$base_version-dev.$commits_since; sequence=$commits_since ;;
 esac
 IFS=. read -r major minor patch <<EOF
