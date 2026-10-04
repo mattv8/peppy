@@ -13,6 +13,25 @@
       ],
       "type": "object"
     },
+    "BillingPlans": {
+      "additionalProperties": false,
+      "properties": {
+        "default_price_id": {
+          "type": "string"
+        },
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/PlanSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "default_price_id",
+        "plans"
+      ],
+      "type": "object"
+    },
     "BillingSummary": {
       "additionalProperties": false,
       "properties": {
@@ -189,7 +208,7 @@
       "additionalProperties": false,
       "properties": {
         "expected_price_id": {
-          "description": "A stale quote is rejected; this never selects the server-side price.",
+          "description": "The selected, configured quote; stale or unconfigured quotes are rejected.",
           "type": "string"
         },
         "operation_id": {
@@ -342,6 +361,9 @@
     "payment_method_setup": {
       "$ref": "#/$defs/PaymentMethodSetupResponse"
     },
+    "plan_catalog": {
+      "$ref": "#/$defs/BillingPlans"
+    },
     "session": {
       "$ref": "#/$defs/WebSessionResponse"
     },
@@ -357,6 +379,7 @@
     "config",
     "account",
     "billing",
+    "plan_catalog",
     "operation",
     "subscribe_request",
     "subscribe_response",
@@ -376,6 +399,7 @@
     "paymentAction": "/hosted/v1/web/billing/payment-action",
     "paymentMethod": "/hosted/v1/web/billing/payment-method",
     "paymentMethodConfirm": "/hosted/v1/web/billing/payment-method/confirm",
+    "plans": "/hosted/v1/web/billing/plans",
     "reconcile": "/hosted/v1/web/billing/reconcile",
     "resume": "/hosted/v1/web/billing/resume",
     "session": "/hosted/v1/web/session",

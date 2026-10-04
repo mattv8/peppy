@@ -67,7 +67,7 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
-      - uses: sigstore/cosign-installer@345e99f9e6985762f6cd2a05c64a13f1bfac5b72 # v3.10.0
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
       - name: Validate trusted publication input
         env:
           IMAGE: ${{ inputs.image }}
