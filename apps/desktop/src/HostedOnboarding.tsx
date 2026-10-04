@@ -139,8 +139,8 @@ export function HostedOnboarding({ onSelfHosted }: { onSelfHosted(): void }) {
   }, []);
 
   useEffect(() => {
-    heading.current?.focus();
-  }, [view?.screen]);
+    if (!approvalOpen) heading.current?.focus();
+  }, [view?.screen, approvalOpen]);
 
   useEffect(() => {
     if (!view) return;
@@ -420,7 +420,7 @@ export function HostedOnboarding({ onSelfHosted }: { onSelfHosted(): void }) {
         </div>
         {bridgeError && <p role="alert" className="settings-error">{copy("preview_error")}</p>}
       </div>
-      {approvalOpen && (
+      {approvalOpen && (view.screen === "approval" || view.screen === "settings") && (
         <ApprovalSheet
           code={code}
           onClose={closeApproval}

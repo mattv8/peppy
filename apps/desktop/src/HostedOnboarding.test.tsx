@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostedOnboarding } from "./HostedOnboarding";
 import { bridge, type HostedPreviewView } from "./bridge";
@@ -109,6 +109,25 @@ describe("HostedOnboarding", () => {
     fireEvent.click(screen.getByRole("button", { name: peppyCopy.try_again }));
     await waitFor(() => expect(advance).toHaveBeenLastCalledWith("provision_finished"));
     expect(advance).toHaveBeenCalledTimes(3);
+  });
+
+  it("waits for approval state before making the sheet actionable", async () => {
+    let resolveApproval!: (next: HostedPreviewView) => void;
+    const pending = new Promise<HostedPreviewView>(resolve => { resolveApproval = resolve; });
+    const advance = vi.spyOn(bridge, "hosted_preview_advance")
+      .mockReturnValueOnce(pending)
+      .mockResolvedValueOnce(view("join"));
+    renderView(view("join"));
+    const trigger = await screen.findByRole("button", { name: peppyCopy.preview_approval });
+    fireEvent.click(trigger);
+    expect(trigger).toBeDisabled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await act(async () => { resolveApproval(view("approval")); });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(document.getElementById("approval-sheet-heading")).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(advance).toHaveBeenCalledWith("back"));
+    await waitFor(() => expect(document.getElementById("hosted-screen-heading")).toHaveFocus());
   });
 
   it("opens approval, advances Allow, and neutral Escape returns focus", async () => {

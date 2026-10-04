@@ -274,6 +274,8 @@ fn s3_config(fixture: &ComposeFixture) -> S3Config {
             "recovery_secret_{}",
             &fixture.project[fixture.project.len() - 12..]
         ),
+        signing_region: "us-east-1".into(),
+        precreated_bucket: false,
         readiness_timeout: Duration::from_secs(2),
     }
 }
