@@ -36,10 +36,12 @@ doctor:
 dev-up:
     {{ dev_prereq }}
     {{ dev_prepare }}
-    {{ dev_compose }} up --build --detach --wait
+    {{ compose }} rm --stop --force api migrate
+    {{ dev_compose }} up --build --detach --wait --wait-timeout 1800
 
 dev-down:
     {{ dev_prereq }}
+    {{ compose }} rm --stop --force api migrate
     {{ dev_compose }} down
 
 dev-setup:
@@ -57,12 +59,12 @@ dev-start:
 dev-build:
     {{ dev_prereq }}
     {{ dev_prepare }}
-    {{ dev_compose }} exec dev run build server
+    {{ dev_compose }} run --rm --no-deps dev run build server
 
 dev-test:
     {{ dev_prereq }}
     {{ dev_prepare }}
-    {{ dev_compose }} exec dev run test rust
+    {{ dev_compose }} run --rm --no-deps dev run test rust
 
 dev-demo:
     bash infra/dev/dev.sh dev-demo
