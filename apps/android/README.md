@@ -6,7 +6,13 @@ This native Kotlin/Compose app is a **gateway phone**, not a replacement for the
 
 ## Enrollment and account
 
-Pair from the desktop's owner-approved QR flow or import a v1 credential JSON file. The QR payload is JSON with exactly `https_origin` and `intent_token`; it contains no vault metadata, passphrase, owner token, or private key. The phone creates and keeps its signing key in native secure storage, verifies the matching locally computed SAS, then waits for owner approval before consuming the challenge. The existing shared vault passphrase is entered manually to unlock keys and is not stored.
+**Peppy Hosted:** use the native Google sign-in flow to create or access an account at `https://peppy.pro`. Billing opens Peppy's website; sign in there with the same Google account, then return to check the subscription. The app uses the server's entitlement response before creating a vault. Passphrase generation and confirmation stay native. Prepared vault material and retry grants are Keystore-protected; interrupted setup resumes the same operation.
+
+Hosted builds need a dedicated native-backend Google OAuth client ID through the Gradle property `peppyGoogleServerClientId` or environment variable `PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID`. Register an Android OAuth client for `dev.peppy.mobile` and the signing certificate of the installed build. The backend's native Google audience allowlist must include the native-backend client ID, separate from the browser OAuth client. Missing configuration leaves hosted sign-in unavailable; it never selects a simulated provider. Native Apple authentication is not currently advertised.
+
+Pair using an enrolled owner's QR code or import a v1 credential JSON file. The QR payload is JSON with exactly `https_origin` and `intent_token`; it contains no vault metadata, passphrase, owner token, or private key. The phone creates and keeps its signing key in native secure storage, verifies the matching locally computed SAS, then waits for owner approval before consuming the challenge. The existing shared vault passphrase is entered manually to unlock keys and is not stored.
+
+A phone that creates the first hosted vault is its owner. Its Account tab can create a pairing QR code and approve another device after the user compares the verification codes. Approval requires unlocked keys and current owner authority. A phone joining an existing vault remains a gateway; pairing does not grant owner privileges.
 
 The Account tab shows the server-reported role and device roster. A device may disconnect itself; only a server-reported `owner` can remove another device or reveal the typed-`ERASE` vault-delete control. A gateway role does not grant owner privileges. Disconnect archives local encrypted state; it is not a reset or a claim that a revoked credential can resume sync.
 
@@ -32,9 +38,17 @@ Experimental MMS requires participating clients that advertise MMS content versi
 
 For group MMS replies, the app reads the default SMS SIM's own number from the carrier (via `READ_PHONE_NUMBERS` on Android 13+, or the existing `READ_SMS` on older releases) solely so replies to a group MMS go to everyone except this phone. If the carrier does not provide the number, the MMS settings offer manual entry.
 
+## Build configuration
+
+**Public OAuth settings:** Hosted sign-in requires `peppyGoogleServerClientId` (Gradle property) or `PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID` (environment variable). This is the public-facing OAuth client ID for the native-backend authentication flow, separate from the browser OAuth client. Missing or empty values produce self-hosting-capable builds with hosted sign-in unavailable. Rebuild the app after changing the ID.
+
+**Rust library profile:** Set `PEPPY_ANDROID_NATIVE_PROFILE=debug` (default) or `release` to control whether the Rust-native bindings library is built with optimizations. The artifact workflow explicitly selects `release`; developer and local smoke tests default to `debug`. Profile selection does not change runtime security gates or debug origin checks.
+
 ## Generate and verify
 
 Generated Kotlin is Rust-owned output under `app/src/main/java`; do not edit it manually. From the repository root:
+
+Before generating or verifying, install pkg-config and system libsodium: Ubuntu `apt install pkg-config libsodium-dev`; macOS `brew install pkg-config libsodium`.
 
 ```sh
 cargo build --locked -p peppy-mobile-bindings

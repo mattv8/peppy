@@ -223,7 +223,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - run: rustup target add aarch64-linux-android x86_64-linux-android
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev
+      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
       - run: |
           set +e
           set +o pipefail

@@ -64,7 +64,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - run: rustup target add aarch64-linux-android x86_64-linux-android
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev
+      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
       - name: Install Android NDK
         run: |
           set +e
@@ -77,6 +77,8 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
+          PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
+          PEPPY_ANDROID_NATIVE_PROFILE: release
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           infra/compose/verify-android-native.sh
@@ -210,6 +212,10 @@ jobs:
         with:
           toolchain: 1.98.1
       - name: Build simulator app and unsigned device archive
+        env:
+          PEPPY_GOOGLE_IOS_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_IOS_CLIENT_ID }}
+          PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
+          PEPPY_GOOGLE_REVERSED_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_REVERSED_CLIENT_ID }}
         run: infra/build/build-ios-artifacts.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
