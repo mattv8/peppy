@@ -11,7 +11,7 @@ export type MessageView = { id: string; revision: string; sender: "self" | "othe
 export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; participants?: string[]; replyBlockedReason?: string };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
-export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
+export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type SendDraftInput = DraftInput & { gatewayId: string; simId: string };
@@ -48,6 +48,8 @@ export type BridgeError = { code: string; message: string; currentRevision?: str
 /** Public pairing intent data only; credentials and challenge tokens stay native. */
 export type PairingIntent = { httpsOrigin: string; intentToken: string; expiresInSeconds: number };
 export type PairingStatus = { claimed: boolean; approved: boolean; deviceId?: string; keyDigest?: string; sas?: string; expiresInSeconds: number };
+export type HostedAccountView = { available: boolean; signedIn: boolean; accountLabel: string | null; classification: "new" | "pending" | "incomplete" | "provisioning" | "existing" | "lapsed" | null; entitlement: string | null; access: "read_write" | "read_only" | null; hasVault: boolean; resumable: boolean };
+export type JoinView = { state: "idle" | "waiting" | "claimed" | "confirm" | "approved" | "expired" | "denied" | "failed"; qrPayload?: string; expiresInSeconds?: number; sas?: string; origin?: string; errorCode?: string };
 export type HostedPreviewView = {
   scenario: string; screen: string; accountState: string; entitlementState: string;
   approvalState: string; unlocked: boolean; rejected: boolean;
@@ -103,19 +105,23 @@ export interface DesktopBridge {
   pick_contact_photo(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null>;
   list_restorable_contacts(bookId: string): Promise<RestorableContact[]>;
   restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome>;
-  hosted_preview_state(): Promise<HostedPreviewView>;
-  hosted_preview_start(scenario: string): Promise<HostedPreviewView>;
-  hosted_preview_advance(event: string): Promise<HostedPreviewView>;
-  hosted_preview_create_passphrase(): Promise<HostedPreviewView>;
-  hosted_preview_unlock(): Promise<HostedPreviewView>;
-  hosted_preview_reset(): Promise<HostedPreviewView>;
+  hosted_account(): Promise<HostedAccountView>;
+  hosted_sign_in(provider: "google"): Promise<HostedAccountView>;
+  hosted_sign_out(): Promise<void>;
+  hosted_open_billing(): Promise<void>;
+  hosted_provision(): Promise<void>;
+  join_start(origin: string | null): Promise<JoinView>;
+  join_status(): Promise<JoinView>;
+  join_cancel(): Promise<void>;
+  join_confirm(): Promise<JoinView>;
+
 }
 
 const fixtureMessages: MessageView[] = [
   { id: "message-aurora-1", revision: "1", sender: "other", body: "Can you send over the estimate?", timestamp: "09:41", attachments: [] },
   { id: "message-aurora-2", revision: "2", sender: "self", body: "I'll have it to you shortly.", timestamp: "09:43", status: "sent", attachments: [] },
 ];
-const fixtureSnapshot: DesktopSnapshot = { version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "Yesterday", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: false, capability: "unsupported" }, pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" } };
+const fixtureSnapshot: DesktopSnapshot = { version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "Yesterday", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" } };
 // Exercise the same display-only contact resolution path as the native snapshot.
 fixtureSnapshot.conversations[0].name = "+12025550123";
 fixtureSnapshot.conversations[0].participants = ["+12025550123"];
@@ -128,7 +134,8 @@ fixtureSnapshot.contactsPendingCount = 1;
 const fixtureDrafts = new Map<string, Draft>();
 let fixtureCreated = 0;
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
-const hostedPreviewScreen = () => typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("hostedPreviewScreen");
+const fixtureAccount = (): HostedAccountView => ({ available: true, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false });
+let fixtureJoin: JoinView = { state: "idle" };
 /** Display-only fixture views deliberately have no reducer or event transition logic. */
 const cannedHostedView = (screen = "welcome", scenario = "new"): HostedPreviewView => ({
   scenario, screen, accountState: screen === "welcome" ? "anonymous" : "signed_in", entitlementState: screen === "lapsed" ? "expired" : "active", approvalState: screen === "approval" ? "pending" : "none", unlocked: screen === "settings", rejected: false,
@@ -171,7 +178,7 @@ const fixtureSave = (input: DraftInput): Draft => {
 };
 export const fixtureBridge: DesktopBridge = {
   load_state: async conversationId => {
-    if (hostedPreviewScreen()) return { ...fixtureSnapshot, connection: { state: "offline", errorCode: "server-required" }, activeConversationId: undefined };
+
     const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
     return { ...fixtureSnapshot, conversations: [...fixtureSnapshot.conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active) };
   },
@@ -229,18 +236,25 @@ export const fixtureBridge: DesktopBridge = {
   pick_contact_photo: async () => ({ dataUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", naturalWidth: 1, naturalHeight: 1 }),
   list_restorable_contacts: async bookId => [{ id: "contact-deleted", bookId, displayName: "Casey Rowan", deletedAt: "Yesterday" }],
   restore_contact: async () => ({ state: "pending", requestId: `fixture-restore-${Date.now()}` }),
-  hosted_preview_state: async () => cannedHostedView(hostedPreviewScreen() ?? "welcome"),
-  hosted_preview_start: async scenario => cannedHostedView("welcome", scenario),
-  hosted_preview_advance: async () => cannedHostedView(hostedPreviewScreen() ?? "welcome"),
-  hosted_preview_create_passphrase: async () => cannedHostedView(hostedPreviewScreen() ?? "welcome"),
-  hosted_preview_unlock: async () => cannedHostedView(hostedPreviewScreen() ?? "welcome"),
-  hosted_preview_reset: async () => cannedHostedView("welcome"),
+  hosted_account: async () => fixtureAccount(),
+  hosted_sign_in: async () => ({ ...fixtureAccount(), signedIn: true, accountLabel: "Fixture account", classification: "new" }),
+  hosted_sign_out: async () => undefined,
+  hosted_open_billing: async () => undefined,
+  hosted_provision: async () => undefined,
+  join_start: async origin => {
+    fixtureJoin = { state: "waiting", origin: origin ?? "https://peppy.pro", qrPayload: `fixture-join-${Date.now()}`, expiresInSeconds: 300 };
+    return fixtureJoin;
+  },
+  join_status: async () => fixtureJoin,
+  join_cancel: async () => { fixtureJoin = { state: "idle" }; },
+  join_confirm: async () => { fixtureJoin = { ...fixtureJoin, state: "approved" }; return fixtureJoin; },
+
 };
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
 export const tauriBridge: DesktopBridge = {
   load_state: conversationId => invoke("load_state", { conversationId }), configure_server: origin => invoke("configure_server", { origin }), import_credentials: () => invoke("import_credentials"), unlock_sync: () => invoke("unlock_sync"), create_pairing_intent: () => invoke("create_pairing_intent"), pairing_intent_status: intentToken => invoke("pairing_intent_status", { intentToken }), approve_pairing_intent: (intentToken, keyDigest) => invoke("approve_pairing_intent", { intentToken, keyDigest }), save_draft: input => invoke("save_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-  list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset) => invoke("list_contacts", { bookId, query, offset }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_preview_state: () => invoke("hosted_preview_state"), hosted_preview_start: scenario => invoke("hosted_preview_start", { scenario }), hosted_preview_advance: event => invoke("hosted_preview_advance", { event }), hosted_preview_create_passphrase: () => invoke("hosted_preview_create_passphrase"), hosted_preview_unlock: () => invoke("hosted_preview_unlock"), hosted_preview_reset: () => invoke("hosted_preview_reset"),
+  list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset) => invoke("list_contacts", { bookId, query, offset }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), join_start: origin => invoke("join_start", { origin }), join_status: () => invoke("join_status"), join_cancel: () => invoke("join_cancel"), join_confirm: () => invoke("join_confirm"),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };
 

@@ -172,3 +172,30 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
         }
     }
 }
+
+/** Hosted account transport has the same redirect, timeout, and response-budget boundary as sync. */
+internal class HostedHttp(private val bearerToken: String? = null) {
+    fun get(path: String) = request("GET", path, null)
+    fun postJson(path: String, body: String) = request("POST", path, body)
+    fun delete(path: String) = request("DELETE", path, null)
+
+    private fun request(method: String, path: String, body: String?): HttpResult {
+        require(path.startsWith("/hosted/v1/") && !path.contains('?') && !path.contains('#') && !path.contains("//"))
+        val connection = URL("https://peppy.pro$path").openConnection() as HttpURLConnection
+        try {
+            connection.instanceFollowRedirects = false; connection.useCaches = false
+            connection.requestMethod = method; connection.connectTimeout = GatewayHttp.TIMEOUT_MS; connection.readTimeout = GatewayHttp.TIMEOUT_MS
+            connection.setRequestProperty("Accept", "application/json")
+            bearerToken?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
+            if (body != null) {
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                connection.doOutput = true; connection.setFixedLengthStreamingMode(bytes.size)
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(bytes) }
+            }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            return HttpResult(code, stream?.use { GatewayHttp.readBounded(it, 256 * 1024) })
+        } finally { connection.disconnect() }
+    }
+}

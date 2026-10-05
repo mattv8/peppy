@@ -9,7 +9,7 @@ body,
   overflow: hidden;
 }
 body {
-  background: var(--peppy-surface-desk);
+  background: transparent;
   color: var(--peppy-text-primary);
 }
 #desktop-shell,
@@ -20,7 +20,11 @@ body {
   flex-direction: column;
   background: var(--peppy-surface-desk);
   overflow: hidden;
+  border-radius: var(--peppy-window-radius);
 }
+html[data-window-rounded="false"] #desktop-shell,
+html[data-window-rounded="false"] #composer-shell,
+#composer-shell.head-panel-shell { border-radius: 0; }
 .desktop-layout {
   display: flex;
   flex: 1;
@@ -70,10 +74,6 @@ body {
   color: var(--peppy-text-primary);
 }
 .settings-check { display: flex; gap: 6px; align-items: center; font-size: 12px; }
-#pinned-head-list { width: 100%; padding: 0; margin: 0; list-style: none; }
-#pinned-head-list li { display: flex; align-items: center; gap: var(--peppy-space-sm, 8px); padding: var(--peppy-space-sm, 8px) 0; border-top: 1px solid var(--peppy-border); font-size: 12px; }
-#pinned-head-list span { flex: 1; }
-#pinned-head-list button { min-height: 26px; padding: 0 var(--peppy-space-sm, 8px); border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); }
 .head-panel-shell { width: 100%; min-width: 0; }
 #head-panel-header { position: relative; z-index: 2; display: flex; min-height: 36px; align-items: center; gap: 6px; padding: 0 8px; background: var(--peppy-accent); color: var(--peppy-accent-text); }
 #head-panel-header::before { position: absolute; top: -7px; left: 20px; width: 14px; height: 14px; content: ""; background: var(--peppy-accent); transform: rotate(45deg); }

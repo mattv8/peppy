@@ -21,8 +21,9 @@ mod fsutil;
 mod gateways;
 mod heads;
 mod heads_runtime;
-#[cfg(debug_assertions)]
-mod hosted_preview;
+
+mod hosted;
+mod join;
 mod lifecycle;
 mod media;
 mod net;
@@ -37,6 +38,7 @@ mod sync;
 #[cfg(test)]
 mod tests;
 mod tray;
+mod window_chrome;
 mod windows;
 
 use credentials::{
@@ -255,6 +257,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         draft: None,
         head: head(),
         desktop: None,
+        device_role: None,
         pending_count: 0,
         quarantine_count: 0,
         contact_resolution: None,
@@ -355,6 +358,41 @@ async fn import_credentials(
         None
     };
     activate_import_locked(&state, credential).await?;
+    if let Some(permit) = permit {
+        permit.finish().await?;
+    }
+    (state.notifier)();
+    Ok(())
+}
+
+/// Activates a credential produced natively by hosted provisioning or QR join. Its origin is
+/// selected first so the existing origin-binding, verification and activation checks apply
+/// unchanged; the previous configuration is restored if any step fails.
+async fn activate_native_credential(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+) -> BridgeResult<()> {
+    let credential = Arc::new(parse_credential(&bytes)?);
+    drop(bytes);
+    let _import = state.import_lock.lock().await;
+    let previous = state.config()?;
+    let permit = if previous.active_binding() != Some(&credential.binding()) {
+        Some(lifecycle::prepare_switch(app).await?)
+    } else {
+        None
+    };
+    let result = async {
+        state.update_config(|config| config.select_origin(&credential.origin))?;
+        verify_import(state, &credential).await?;
+        activate_import_locked(state, credential.clone()).await
+    }
+    .await;
+    if let Err(error) = result {
+        let rollback = previous.clone();
+        let _ = state.update_config(|config| *config = rollback);
+        return Err(error);
+    }
     if let Some(permit) = permit {
         permit.finish().await?;
     }
@@ -1289,6 +1327,21 @@ async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -
 pub fn run() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let builder = tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                return;
+            }
+            if webview.label() != tray::MAIN
+                && tray::composer_conversation(webview.label()).is_none()
+            {
+                return;
+            }
+            let head_panel = payload
+                .url()
+                .query_pairs()
+                .any(|(key, value)| key == "head" && value == "1");
+            window_chrome::sync_webview(webview, head_panel);
+        })
         // Must precede setup: a second manual launch activates the resident
         // main window before it can open another database/session.
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
@@ -1328,8 +1381,8 @@ pub fn run() {
             ));
             #[cfg(not(target_os = "macos"))]
             app.manage(AppState::new(root, Arc::new(KeyringStore), notifier));
-            #[cfg(debug_assertions)]
-            app.manage(hosted_preview::HostedPreviewState::default());
+            app.manage(hosted::HostedState::default());
+            app.manage(join::JoinState::default());
             // The state hint is emitted after normal live applies and snapshot work alike. Core's
             // queue contains only live first-insert candidates, so this native drain cannot turn
             // history/snapshot replay into banners.
@@ -1388,6 +1441,20 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             heads_runtime::panel_window_event(window, event);
+            if matches!(
+                event,
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+            ) && (window.label() == tray::MAIN
+                || tray::composer_conversation(window.label()).is_some())
+            {
+                if let Some(webview_window) = window.app_handle().get_webview_window(window.label())
+                {
+                    window_chrome::sync_webview_window(
+                        &webview_window,
+                        heads_runtime::is_panel(window.app_handle(), window.label()),
+                    );
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let is_main = window.label() == tray::MAIN;
                 if is_main || tray::composer_conversation(window.label()).is_some() {
@@ -1472,17 +1539,17 @@ pub fn run() {
         $($extra,)*
     ] };
     }
-    #[cfg(debug_assertions)]
     let builder = builder.invoke_handler(command_handler!(
-        hosted_preview::hosted_preview_state,
-        hosted_preview::hosted_preview_start,
-        hosted_preview::hosted_preview_advance,
-        hosted_preview::hosted_preview_create_passphrase,
-        hosted_preview::hosted_preview_unlock,
-        hosted_preview::hosted_preview_reset,
+        hosted::hosted_account,
+        hosted::hosted_sign_in,
+        hosted::hosted_sign_out,
+        hosted::hosted_open_billing,
+        hosted::hosted_provision,
+        join::join_start,
+        join::join_status,
+        join::join_cancel,
+        join::join_confirm,
     ));
-    #[cfg(not(debug_assertions))]
-    let builder = builder.invoke_handler(command_handler!());
     let app = builder
         .build(tauri::generate_context!())
         .expect("error while building Peppy desktop");

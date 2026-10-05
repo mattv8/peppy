@@ -25,6 +25,7 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
+    "@remixicon/react": "^4.9.0",
     "libphonenumber-js": "^1.13.14",
     "lucide-react": "^0.468.0",
     "qrcode": "^1.5.4"

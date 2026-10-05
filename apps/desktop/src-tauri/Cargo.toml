@@ -32,6 +32,7 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 futures-util = "0.3"
 getrandom = "0.3"
+sha2 = "0.10"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream"] }
 base64 = "0.22"
 url = "2"
@@ -43,7 +44,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 peppy-client-core = { path = "../../../crates/client-core", version = "0.1.0" }
 peppy-crypto = { path = "../../../crates/crypto", version = "0.1.0" }
 peppy-protocol = { path = "../../../crates/protocol", version = "0.1.0" }
-peppy-hosted-onboarding = { path = "../../../crates/hosted-onboarding", version = "0.1.0" }
+peppy-hosted-client = { path = "../../../crates/hosted-client", version = "0.1.0" }
+peppy-hosted-api = { path = "../../../crates/hosted-api", version = "0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
@@ -51,7 +53,7 @@ objc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Official Win32 Credential UI bindings; the dialog uses DO_NOT_PERSIST.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Accessibility"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Accessibility"] }
 
 [dev-dependencies]
 tempfile = "3"

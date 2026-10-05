@@ -4,7 +4,7 @@
 //! in `spawn_blocking`; the Tokio workers never block on SQLCipher, Argon2 or file crypto.
 use crate::{
     error::{core_error, BridgeError, BridgeResult},
-    gateways::{gateway_views, CapabilitiesResponse, DevicesResponse},
+    gateways::{extract_device_role, gateway_views, CapabilitiesResponse, DevicesResponse},
     net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES},
     origin::websocket_url,
     session::{Session, VaultSummary},
@@ -120,11 +120,14 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
         .await?;
     let views = gateway_views(&devices, &capabilities);
+    let device_role = extract_device_role(&devices, &session.binding.device_id);
     let changed = {
         let mut status = session.status.lock().unwrap_or_else(|p| p.into_inner());
-        let changed = !status.gateways_known || status.gateways != views;
+        let changed =
+            !status.gateways_known || status.gateways != views || status.device_role != device_role;
         status.gateways = views.clone();
         status.gateways_known = true;
+        status.device_role = device_role;
         changed
     };
     if changed {

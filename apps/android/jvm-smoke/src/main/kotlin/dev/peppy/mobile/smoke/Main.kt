@@ -5,7 +5,7 @@ import java.util.UUID
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
-import uniffi.peppy_mobile_bindings.createSmokeVaultMaterial
+import uniffi.peppy_mobile_bindings.createVaultMaterial
 import uniffi.peppy_mobile_bindings.openNativeClient
 
 fun main() {
@@ -13,7 +13,7 @@ fun main() {
     val vaultId = UUID.randomUUID().toString()
     val deviceId = UUID.randomUUID().toString()
     val database = File(System.getProperty("java.io.tmpdir"), "peppy-native-smoke-${UUID.randomUUID()}.db")
-    val material = createSmokeVaultMaterial(vaultId, passphrase)
+    val material = createVaultMaterial(vaultId, passphrase)
     val config = NativeOpenConfig(
         database.absolutePath,
         vaultId,

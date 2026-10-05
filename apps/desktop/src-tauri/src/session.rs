@@ -187,6 +187,7 @@ pub struct NetStatus {
     pub gateways: Vec<GatewayView>,
     pub gateways_known: bool,
     pub vault: Option<VaultSummary>,
+    pub device_role: Option<String>,
 }
 
 /// Local attachment ID -> server object ID, learned when this host uploads or downloads an
@@ -1208,6 +1209,7 @@ impl Session {
             draft,
             head,
             desktop: None,
+            device_role: status.device_role.clone(),
             pending_count: pending,
             quarantine_count: quarantine,
             contact_resolution: contacts.resolution,

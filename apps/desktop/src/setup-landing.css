@@ -1,0 +1,18 @@
+#setup-landing { color: var(--peppy-text); display: grid; gap: 12px; max-width: 560px; padding: 20px; }
+#setup-landing-header { align-items: center; display: flex; gap: 12px; }
+#setup-landing-header h1 { margin: 0; }
+#setup-mode-select { margin-left: auto; }
+#setup-landing-body > section, #setup-landing-body #hosted-signin-section { background: var(--peppy-surface-widget); border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius); display: grid; gap: 12px; padding: 16px; }
+#setup-landing-body #hosted-signin-section { margin-top: 12px; }
+#join-qr-hero { align-items: center; display: grid; justify-items: center; }
+#hosted-join-panel[data-join-state="claimed"] #join-qr-image { opacity: .3; }
+#hosted-join-panel[data-join-state="confirm"] #join-qr-image { display: none; }
+#join-qr-image { image-rendering: pixelated; max-width: 256px; }
+#join-sas-panel { display: grid; gap: 8px; }
+#join-sas-code { font-family: monospace; font-size: 24px; letter-spacing: .12em; }
+#join-confirm-actions { display: grid; gap: 8px; }
+#join-confirm-button { margin-top: 8px; }
+#join-cancel-button-confirm { margin-top: 0; }
+.join-retrying-hint { color: var(--peppy-text-secondary, var(--peppy-text)); font-size: 13px; margin: 4px 0 0 0; }
+#self-hosted-url-input { display: block; margin-top: 4px; width: 100%; }
+#self-hosted-advanced { margin-top: 8px; }

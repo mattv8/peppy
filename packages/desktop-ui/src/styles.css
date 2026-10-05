@@ -10,7 +10,7 @@
   --status-bad: var(--peppy-error);
   --focus: var(--peppy-focus);
   font-family: var(--peppy-font-body);
-  background: var(--peppy-surface-desk);
+  background: transparent;
   color: var(--peppy-text-primary);
 }
 button,
@@ -64,9 +64,16 @@ select:focus-visible {
   color: var(--peppy-text-strong);
   user-select: none;
 }
-.titlebar-product,
-.rail-mark {
-  color: var(--peppy-accent);
+.titlebar-product {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.titlebar-product img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .titlebar-wordmark {
   display: flex;
@@ -123,25 +130,22 @@ select:focus-visible {
 [data-platform="macos"] .window-controls-windows,
 [data-platform="windows"] .window-controls-macos,
 [data-platform="linux"] .window-controls-macos { display: none; }
-.window-controls-macos { display: flex; align-items: center; gap: 8px; height: 100%; padding: 0 12px; }
-.traffic-light { position: relative; width: 12px; height: 12px; padding: 0; border: 0; border-radius: 50%; cursor: default; }
-.traffic-light-close { background: #ff5f57; }
-.traffic-light-minimize { background: #febc2e; }
-.traffic-light-maximize { background: #28c840; }
-.traffic-light::after { content: ""; position: absolute; inset: 0; }
-.window-controls-macos .traffic-light:disabled { cursor: default; }
-[data-window-focused="false"] .traffic-light { background: #4d4d4d; }
-.theme-light[data-window-focused="false"] .traffic-light { background: #d1d1d1; }
-[data-composer="true"] .traffic-light-minimize,
-[data-composer="true"] .traffic-light-maximize { background: #4d4d4d; pointer-events: none; }
-.theme-light [data-composer="true"] .traffic-light-minimize,
-.theme-light [data-composer="true"] .traffic-light-maximize { background: #d1d1d1; border: 1px solid #c4c4c4; }
-@media (prefers-color-scheme: light) {
-  .theme-system [data-composer="true"] .traffic-light-minimize,
-  .theme-system [data-composer="true"] .traffic-light-maximize { background: #d1d1d1; border: 1px solid #c4c4c4; }
-}
+.window-controls-macos { display: flex; flex-shrink: 0; align-items: center; gap: 8px; height: 100%; padding: 0 16px 0 8px; }
+.traffic-light { display: grid; place-items: center; flex: 0 0 12px; width: 12px; height: 12px; padding: 0; border: 0; border-radius: 50%; background: var(--peppy-window-control-idle); color: rgba(0, 0, 0, 0.65); cursor: default; }
+.traffic-light svg { display: block; width: 10px; height: 10px; opacity: 0; pointer-events: none; }
+.traffic-light-close { --peppy-window-control-active: #ff5f57; }
+.traffic-light-minimize { --peppy-window-control-active: #febc2e; }
+.traffic-light-maximize { --peppy-window-control-active: #28c840; }
+.window-controls-macos:hover .traffic-light:not(:disabled),
+.traffic-light:focus-visible { background: var(--peppy-window-control-active); }
+.window-controls-macos:hover .traffic-light:not(:disabled) svg,
+.traffic-light:focus-visible svg { opacity: 1; }
 .traffic-light:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--peppy-focus); }
 [data-window-focused="false"] .window-controls-windows button { color: var(--peppy-text-muted); }
+#titlebar-actions { display: flex; align-items: center; gap: 2px; }
+#titlebar-actions button { display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); }
+#titlebar-actions button:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+#titlebar-actions svg { pointer-events: none; }
 #desktop-rail {
   width: var(--peppy-rail-width);
   flex: 0 0 var(--peppy-rail-width);

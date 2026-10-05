@@ -26,6 +26,8 @@ pub struct Snapshot {
     pub head: Head,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desktop: Option<Desktop>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_role: Option<String>,
     pub pending_count: u64,
     pub quarantine_count: u64,
     /// Display-only: phone address -> resolved contact name/avatar (see `contacts`). Stored

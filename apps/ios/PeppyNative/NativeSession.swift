@@ -24,6 +24,30 @@ public struct EnrollmentClaim: Equatable, Sendable {
     public let sas: String
 }
 
+/// A QR-safe owner-created invitation. It deliberately contains no bearer, private key or passphrase.
+public struct OwnerPairingIntent: Equatable, Sendable, CustomStringConvertible {
+    public let origin: String
+    public let intentToken: String
+    public let vaultId: String
+    public let deviceId: String
+    public let keyEpoch: UInt32
+    public let profileFingerprint: String
+    public let qrPayload: Data
+    public let expiresAt: Date
+
+    public var description: String {
+        "OwnerPairingIntent(origin: \(origin), intentToken: [REDACTED], vaultId: \(vaultId), deviceId: \(deviceId), keyEpoch: \(keyEpoch), expiresAt: \(expiresAt))"
+    }
+}
+
+/// The claimant facts the owner must compare over the out-of-band SAS channel.
+public struct OwnerPairingClaim: Equatable, Sendable {
+    public let deviceId: String
+    public let keyDigest: String
+    public let requestedRole: String
+    public let sas: String
+}
+
 public struct DeviceRosterItem: Identifiable, Equatable, Sendable {
     public let id: String
     public let role: String
@@ -83,6 +107,7 @@ public actor NativeSession {
             let verified = try await EnrollmentVerifier(transport: self.transport)
                 .verify(origin: credential.origin, token: credential.token, identity: credential.identity)
             // Re-checked after the await: another change may have completed meanwhile.
+            try Task.checkCancellation()
             try self.requireAdoptable(credential.identity)
             try self.store.activate(verified, token: credential.token)
             return try self.adopt(verified)
@@ -202,6 +227,78 @@ public actor NativeSession {
 
     public func cancelPairing(_ claim: EnrollmentClaim) {
         try? store.clearPairingSecrets(origin: claim.origin, intent: claim.intentToken)
+    }
+
+    /// Creates the server's short-lived pairing intent only for this unlocked owner identity.
+    public func createOwnerPairingIntent() async throws -> OwnerPairingIntent {
+        try Task.checkCancellation()
+        let (record, fingerprint) = try ownerPairingState()
+        let server = try authenticatedServer(record.identity)
+        var meter = RequestMeter(limit: 2)
+        let vault = try await server.get("/v1/vault", limit: ServerClient.maxVaultBytes, meter: &meter)
+        try Task.checkCancellation()
+        try validateOwnerVault(vault, record: record, fingerprint: fingerprint)
+        try requireCurrentOwnerPairingState(record, fingerprint: fingerprint)
+        let result = try await server.post("/v1/pairing/intents", json: try JSONSerialization.data(withJSONObject: [
+            "https_origin": record.identity.origin,
+        ], options: [.withoutEscapingSlashes]), meter: &meter)
+        try Task.checkCancellation()
+        guard try result.string("https_origin") == record.identity.origin,
+              let expires = UInt64(exactly: try result.integer("expires_in_seconds")), expires > 0,
+              let token = result["intent_token"] as? String, Self.validPairingToken(token)
+        else { throw ClientError.invalidResponse("pairing intent") }
+        let qrPayload = try JSONSerialization.data(withJSONObject: ["https_origin": record.identity.origin, "intent_token": token], options: [.withoutEscapingSlashes])
+        return OwnerPairingIntent(origin: record.identity.origin, intentToken: token, vaultId: record.identity.vaultId,
+                                  deviceId: record.identity.deviceId, keyEpoch: record.keyEpoch,
+                                  profileFingerprint: fingerprint, qrPayload: qrPayload,
+                                   expiresAt: Date().addingTimeInterval(TimeInterval(expires)))
+    }
+
+    /// Reads a current claim and derives its SAS locally. A pending intent has no claimant.
+    public func ownerPairingClaim(_ intent: OwnerPairingIntent) async throws -> OwnerPairingClaim? {
+        try Task.checkCancellation()
+        let (record, fingerprint) = try ownerPairingState()
+        try validate(intent, for: record, fingerprint: fingerprint)
+        var meter = RequestMeter(limit: 1)
+        let result = try await authenticatedServer(record.identity).get("/v1/pairing/intents/\(intent.intentToken)", limit: ServerClient.maxSmallBytes, meter: &meter)
+        try Task.checkCancellation()
+        try requireCurrentOwnerPairingState(record, fingerprint: fingerprint)
+        guard let expires = UInt64(exactly: try result.integer("expires_in_seconds")), expires > 0,
+              let claimed = result["claimed"] as? Bool, let approved = result["approved"] as? Bool else {
+            throw ClientError.invalidResponse("pairing intent status")
+        }
+        guard claimed else { return nil }
+        guard !approved,
+              let deviceId = result["device_id"] as? String,
+              UUID(uuidString: deviceId)?.uuidString.lowercased() == deviceId,
+              let digest = result["key_digest"] as? String, Self.validKeyDigest(digest),
+              let role = result["requested_role"] as? String, role == "device" || role == "gateway",
+              let serverSas = result["sas"] as? String
+        else { throw ClientError.invalidResponse("pairing intent claim") }
+        let sas = try pairingIntentSas(intentToken: intent.intentToken, keyDigest: digest, deviceId: deviceId)
+        guard sas == serverSas else { throw ClientError.invalidResponse("pairing SAS") }
+        return OwnerPairingClaim(deviceId: deviceId, keyDigest: digest, requestedRole: role, sas: sas)
+    }
+
+    /// Sends approval only after an explicit matching-code confirmation and a fresh claim/vault check.
+    public func approveOwnerPairing(_ intent: OwnerPairingIntent, claim: OwnerPairingClaim, codesMatch: Bool) async throws {
+        guard codesMatch else { throw ClientError.forbidden }
+        try Task.checkCancellation()
+        let (record, fingerprint) = try ownerPairingState()
+        try validate(intent, for: record, fingerprint: fingerprint)
+        var meter = RequestMeter(limit: 3)
+        let server = try authenticatedServer(record.identity)
+        let current = try await server.get("/v1/pairing/intents/\(intent.intentToken)", limit: ServerClient.maxSmallBytes, meter: &meter)
+        try Task.checkCancellation()
+        let actual = try pairingClaim(from: current, token: intent.intentToken)
+        guard actual == claim else { throw ClientError.identityMismatch }
+        let vault = try await server.get("/v1/vault", limit: ServerClient.maxVaultBytes, meter: &meter)
+        try Task.checkCancellation()
+        try validateOwnerVault(vault, record: record, fingerprint: fingerprint)
+        try requireCurrentOwnerPairingState(record, fingerprint: fingerprint)
+        _ = try await server.post("/v1/pairing/intents/\(intent.intentToken)/approve", json: try JSONSerialization.data(withJSONObject: [
+            "key_digest": claim.keyDigest, "profile_fingerprint": fingerprint, "key_epoch": Int(record.keyEpoch),
+        ], options: [.withoutEscapingSlashes]), meter: &meter)
     }
 
     private func completePairingAfterApproval(_ claim: EnrollmentClaim) async throws -> SessionStatus {
@@ -572,6 +669,61 @@ public actor NativeSession {
         )
     }
 
+    private func ownerPairingState() throws -> (EnrollmentRecord, String) {
+        guard let record, record.role == "owner", status.keysUnlocked, client != nil else { throw ClientError.forbidden }
+        let fingerprint = try vaultProfileFingerprint(profileJson: record.profileJson)
+        guard Self.validKeyDigest(fingerprint), record.keyEpoch > 0 else { throw ClientError.invalidResponse("local vault profile") }
+        return (record, fingerprint)
+    }
+
+    private func requireCurrentOwnerPairingState(_ expected: EnrollmentRecord, fingerprint: String) throws {
+        let (current, currentFingerprint) = try ownerPairingState()
+        guard current.identity == expected.identity, current.keyEpoch == expected.keyEpoch,
+              current.profileJson == expected.profileJson, currentFingerprint == fingerprint,
+              try store.activeIdentity() == expected.identity else { throw ClientError.identityMismatch }
+    }
+
+    private func validateOwnerVault(_ vault: [String: Any], record: EnrollmentRecord, fingerprint: String) throws {
+        guard try vault.string("vault_id") == record.identity.vaultId,
+              try vault.string("device_id") == record.identity.deviceId,
+              try vault.string("role") == "owner",
+              UInt32(exactly: try vault.integer("key_epoch")) == record.keyEpoch,
+              try vault.string("profile_fingerprint") == fingerprint
+        else { throw ClientError.identityMismatch }
+    }
+
+    private func validate(_ intent: OwnerPairingIntent, for record: EnrollmentRecord, fingerprint: String) throws {
+        guard intent.origin == record.identity.origin, intent.vaultId == record.identity.vaultId,
+              intent.deviceId == record.identity.deviceId, intent.keyEpoch == record.keyEpoch,
+              intent.profileFingerprint == fingerprint, Self.validPairingToken(intent.intentToken),
+              let qr = try? JSONSerialization.jsonObject(with: intent.qrPayload) as? [String: Any],
+              Set(qr.keys) == Set(["https_origin", "intent_token"]), qr["https_origin"] as? String == intent.origin,
+              qr["intent_token"] as? String == intent.intentToken
+        else { throw ClientError.identityMismatch }
+    }
+
+    private func pairingClaim(from result: [String: Any], token: String) throws -> OwnerPairingClaim {
+        guard let expires = UInt64(exactly: try result.integer("expires_in_seconds")), expires > 0,
+              result["claimed"] as? Bool == true, result["approved"] as? Bool == false,
+              let deviceId = result["device_id"] as? String,
+              UUID(uuidString: deviceId)?.uuidString.lowercased() == deviceId,
+              let digest = result["key_digest"] as? String, Self.validKeyDigest(digest),
+              let role = result["requested_role"] as? String, role == "device" || role == "gateway",
+              let serverSas = result["sas"] as? String
+        else { throw ClientError.invalidResponse("pairing intent claim") }
+        let sas = try pairingIntentSas(intentToken: token, keyDigest: digest, deviceId: deviceId)
+        guard sas == serverSas else { throw ClientError.invalidResponse("pairing SAS") }
+        return OwnerPairingClaim(deviceId: deviceId, keyDigest: digest, requestedRole: role, sas: sas)
+    }
+
+    private static func validPairingToken(_ token: String) -> Bool {
+        token.utf8.count == 43 && token.utf8.allSatisfy(\.isASCIIBase64URL)
+    }
+
+    private static func validKeyDigest(_ digest: String) -> Bool {
+        digest.utf8.count == 64 && digest.utf8.allSatisfy { $0.isASCIIHexDigit }
+    }
+
     private func anonymousJSON(origin: ServerOrigin, method: String, path: String, object: [String: Any]) async throws -> [String: Any] {
         let body = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
         let response = try await transport.send(HTTPRequest(method: method, url: origin.url(path), headers: ["Accept": "application/json", "Content-Type": "application/json"], body: body, maxResponseBytes: ServerClient.maxSmallBytes))
@@ -649,6 +801,38 @@ public actor NativeSession {
     }
 }
 
+public extension NativeSession {
+    /// Creates a normal owner pairing intent and offers it to a desktop's one-time join request.
+    /// The join key and both token forms stay opaque to callers and diagnostics.
+    func ownerOfferJoinRequest(qrData: Data) async throws -> OwnerPairingIntent {
+        try Task.checkCancellation()
+        guard qrData.count <= 4096, let payload = String(data: qrData, encoding: .utf8) else {
+            throw ClientError.invalidCredential("join request QR")
+        }
+        let join = try parseJoinRequestQr(payload: payload, allowLoopbackHttp: allowLoopbackHTTP)
+        let origin = try ServerOrigin(canonical: join.httpsOrigin, allowLoopbackHTTP: allowLoopbackHTTP)
+        guard let record, origin.serialized == record.identity.origin else { throw ClientError.originMismatch }
+
+        let intent = try await createOwnerPairingIntent()
+        try Task.checkCancellation()
+        let (current, fingerprint) = try ownerPairingState()
+        try validate(intent, for: current, fingerprint: fingerprint)
+        let sealedToken = try sealIntentToken(joinKeyB64url: join.joinKey, intentToken: intent.intentToken)
+        let digest = intentDigestHex(intentToken: intent.intentToken)
+        var meter = RequestMeter(limit: 1)
+        _ = try await authenticatedServer(current.identity).post(
+            "/v1/pairing/join-requests/\(join.joinRequestId)/offer",
+            json: try JSONSerialization.data(withJSONObject: [
+                "intent_digest": digest,
+                "sealed_intent_token": sealedToken,
+            ], options: [.withoutEscapingSlashes]),
+            meter: &meter
+        )
+        try Task.checkCancellation()
+        return intent
+    }
+}
+
 public struct SessionRelayWakeRoutePublisher: RelayWakeRoutePublisher {
     private let session: NativeSession
     public init(session: NativeSession) { self.session = session }
@@ -661,4 +845,5 @@ private extension UInt8 {
     var isASCIIBase64URL: Bool {
         (65...90).contains(self) || (97...122).contains(self) || (48...57).contains(self) || self == 45 || self == 95
     }
+
 }

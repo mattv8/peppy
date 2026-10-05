@@ -16,7 +16,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-mod hosted_onboarding;
+mod hosted;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CapabilityState {
@@ -94,29 +94,15 @@ pub fn pairing_proof_bytes(
     key_epoch: u32,
     approved_role: String,
 ) -> Result<Vec<u8>, MobileBindingsError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    let challenge: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(challenge_token)
-        .map_err(|_| MobileBindingsError::InvalidRequest)?
-        .try_into()
-        .map_err(|_| MobileBindingsError::InvalidRequest)?;
-    let vault_id =
-        VaultId(uuid::Uuid::parse_str(&vault_id).map_err(|_| MobileBindingsError::InvalidRequest)?);
-    let device_id = DeviceId(
-        uuid::Uuid::parse_str(&device_id).map_err(|_| MobileBindingsError::InvalidRequest)?,
-    );
-    if key_epoch == 0 || profile_fingerprint.len() != 64 || approved_role.is_empty() {
-        return Err(MobileBindingsError::InvalidRequest);
-    }
-    Ok(peppy_protocol::pairing_proof_message(
-        &challenge,
-        vault_id,
-        device_id,
+    peppy_hosted_client::claim::pairing_proof_bytes(
+        &challenge_token,
+        &vault_id,
+        &device_id,
         &profile_fingerprint,
         key_epoch,
         &approved_role,
-    ))
+    )
+    .map_err(|_| MobileBindingsError::InvalidRequest)
 }
 
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
@@ -554,24 +540,14 @@ pub struct NativePlaintextHandle {
 /// Android Keystore/Keychain caller; it is never included in a view DTO.
 #[derive(uniffi::Object)]
 pub struct NativeEnrollmentKey {
-    seed: zeroize::Zeroizing<[u8; 32]>,
-}
-
-fn enrollment_key(seed: &[u8]) -> Result<libsodium_rs::crypto_sign::KeyPair, MobileBindingsError> {
-    let seed: [u8; 32] = seed
-        .try_into()
-        .map_err(|_| MobileBindingsError::InvalidRequest)?;
-    libsodium_rs::ensure_init().map_err(|_| MobileBindingsError::Crypto)?;
-    libsodium_rs::crypto_sign::KeyPair::from_seed(&seed).map_err(|_| MobileBindingsError::Crypto)
+    key: peppy_hosted_client::claim::EnrollmentKey,
 }
 
 #[uniffi::export]
 pub fn generate_native_enrollment_key() -> Result<Arc<NativeEnrollmentKey>, MobileBindingsError> {
-    libsodium_rs::ensure_init().map_err(|_| MobileBindingsError::Crypto)?;
-    let mut seed = [0u8; 32];
-    libsodium_rs::random::fill_bytes(&mut seed);
     Ok(Arc::new(NativeEnrollmentKey {
-        seed: zeroize::Zeroizing::new(seed),
+        key: peppy_hosted_client::claim::EnrollmentKey::generate()
+            .map_err(|_| MobileBindingsError::Crypto)?,
     }))
 }
 
@@ -579,31 +555,26 @@ pub fn generate_native_enrollment_key() -> Result<Arc<NativeEnrollmentKey>, Mobi
 pub fn native_enrollment_key_from_native_secure_storage(
     seed: Vec<u8>,
 ) -> Result<Arc<NativeEnrollmentKey>, MobileBindingsError> {
-    let key = enrollment_key(&seed)?;
-    drop(key);
-    let seed: [u8; 32] = seed
-        .try_into()
-        .map_err(|_| MobileBindingsError::InvalidRequest)?;
     Ok(Arc::new(NativeEnrollmentKey {
-        seed: zeroize::Zeroizing::new(seed),
+        key: peppy_hosted_client::claim::EnrollmentKey::from_seed(&seed)
+            .map_err(|_| MobileBindingsError::InvalidRequest)?,
     }))
 }
 
 #[uniffi::export]
 impl NativeEnrollmentKey {
     pub fn export_seed_for_native_secure_storage(&self) -> Vec<u8> {
-        self.seed.to_vec()
+        self.key.export_seed_for_native_secure_storage()
     }
     pub fn public_key_base64url(&self) -> Result<String, MobileBindingsError> {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        Ok(URL_SAFE_NO_PAD.encode(enrollment_key(&self.seed[..])?.public_key.as_bytes()))
+        self.key
+            .public_key_base64url()
+            .map_err(|_| MobileBindingsError::Crypto)
     }
     pub fn sign_pairing_proof(&self, proof: Vec<u8>) -> Result<String, MobileBindingsError> {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let key = enrollment_key(&self.seed[..])?;
-        let signature = libsodium_rs::crypto_sign::sign_detached(&proof, &key.secret_key)
-            .map_err(|_| MobileBindingsError::Crypto)?;
-        Ok(URL_SAFE_NO_PAD.encode(signature))
+        self.key
+            .sign_pairing_proof(&proof)
+            .map_err(|_| MobileBindingsError::Crypto)
     }
     /// Computes the SAS only after the returned server digest matches this key.
     pub fn pairing_sas(
@@ -612,22 +583,9 @@ impl NativeEnrollmentKey {
         device_id: String,
         server_key_digest: String,
     ) -> Result<String, MobileBindingsError> {
-        if intent_token.is_empty() {
-            return Err(MobileBindingsError::InvalidRequest);
-        }
-        let device_id = DeviceId(
-            uuid::Uuid::parse_str(&device_id).map_err(|_| MobileBindingsError::InvalidRequest)?,
-        );
-        let key = enrollment_key(&self.seed[..])?;
-        let local_digest = peppy_protocol::pairing_key_digest(key.public_key.as_bytes());
-        if local_digest != server_key_digest {
-            return Err(MobileBindingsError::InvalidRequest);
-        }
-        Ok(peppy_protocol::pairing_sas(
-            &intent_token,
-            &local_digest,
-            device_id,
-        ))
+        self.key
+            .pairing_sas(&intent_token, &device_id, &server_key_digest)
+            .map_err(|_| MobileBindingsError::InvalidRequest)
     }
 }
 
@@ -1031,10 +989,10 @@ pub fn open_native_client(
     }))
 }
 
-/// Creates synthetic test enrollment material for host smoke tests only. Production
-/// enrollment supplies its already-authenticated profile/header through `unlock`.
+/// Creates a new vault key profile and encrypted check header from a passphrase.
+/// Hosts use this material to initialize a vault before opening a native client.
 #[uniffi::export]
-pub fn create_smoke_vault_material(
+pub fn create_vault_material(
     vault_id: String,
     passphrase: String,
 ) -> Result<NativeVaultMaterial, MobileBindingsError> {
@@ -1049,14 +1007,6 @@ pub fn create_smoke_vault_material(
         profile_json: serde_json::to_string(&profile).map_err(|_| MobileBindingsError::Database)?,
         header_json: serde_json::to_string(&header).map_err(|_| MobileBindingsError::Database)?,
     })
-}
-
-#[uniffi::export]
-pub fn android_companion_health() -> GatewayHealth {
-    GatewayHealth { enrollment_state: "Not enrolled — diagnostic shell only".into(), diagnostics: vec![
-        CapabilityDiagnostic { name: "SMS companion".into(), state: CapabilityState::PermissionRequired, detail: "Runtime SMS permissions are required; this app does not request the default SMS role.".into() },
-        CapabilityDiagnostic { name: "RCS gateway".into(), state: CapabilityState::Unsupported, detail: "Ordinary Android apps have no general RCS inbox or send API.".into() },
-    ] }
 }
 
 #[uniffi::export]
@@ -2258,8 +2208,7 @@ mod tests {
         use std::time::Duration;
 
         let vault_id = uuid::Uuid::new_v4().to_string();
-        let material =
-            create_smoke_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
         let path =
             std::env::temp_dir().join(format!("peppy-mobile-lifetime-{}.db", uuid::Uuid::new_v4()));
         let native = open_native_client(NativeOpenConfig {
@@ -2391,8 +2340,7 @@ mod tests {
         let vault_id = uuid::Uuid::new_v4().to_string();
         let root = std::env::temp_dir().join(format!("peppy-mobile-seal-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let material =
-            create_smoke_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
         let unlock = |client: &NativeClient| {
             client
                 .unlock(
@@ -2474,8 +2422,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let desktop_path = root.join("desktop.db");
         let gateway_path = root.join("gateway.db");
-        let material =
-            create_smoke_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
         let open = |path: &std::path::Path, device_id: String| {
             open_native_client(NativeOpenConfig {
                 database_path: path.to_string_lossy().into_owned(),

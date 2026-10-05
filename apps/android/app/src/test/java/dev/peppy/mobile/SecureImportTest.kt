@@ -19,6 +19,15 @@ class SecureImportTest : GatewayTestBase() {
     private fun secure() = context.getSharedPreferences("peppy-secure", Context.MODE_PRIVATE)
 
     @Test
+    fun canceledVerifiedImportDoesNotInitializeLocalEnrollment() {
+        assertEquals(ImportResult.IDENTITY_MISMATCH,
+            NativeGateway.persistVerified(context, parsed(), vaultMaterial()) { false })
+        assertTrue(secure().all.isEmpty())
+        assertFalse(NativeGateway.databaseFile(context).exists())
+        assertFalse(NativeGateway.status(context).enrolled)
+    }
+
+    @Test
     fun databaseOpenIsDistinctFromSharedKeyUnlock() {
         assertEquals(ImportResult.IMPORTED, enroll())
         val locked = NativeGateway.status(context)
@@ -125,7 +134,9 @@ class SecureImportTest : GatewayTestBase() {
             """{"vault_id":"$vault","device_id":"$device","role":"$role","key_epoch":$keyEpoch,"profile_fingerprint":"x",""" +
                 """"public_key_profile":${material.profileJson},"encrypted_vault_check_header":"$header"}"""
         assertTrue(NativeGateway.verifyVault(credential, body()) is NativeGateway.VaultCheck.Verified)
+        assertTrue(NativeGateway.verifyVault(credential, body(role = "owner")) is NativeGateway.VaultCheck.Verified)
         assertEquals(NativeGateway.VaultCheck.NotGateway, NativeGateway.verifyVault(credential, body(role = "device")))
+        assertEquals(NativeGateway.VaultCheck.NotGateway, NativeGateway.verifyVault(credential, body(role = "viewer")))
         assertEquals(NativeGateway.VaultCheck.Mismatch, NativeGateway.verifyVault(credential, body(vault = UUID.randomUUID().toString())))
         assertEquals(NativeGateway.VaultCheck.Mismatch, NativeGateway.verifyVault(credential, body(device = UUID.randomUUID().toString())))
         listOf("\"$epoch\"", "${epoch + 1}", "$epoch.5", "-1", "4294967296").forEach { bad ->
@@ -149,7 +160,7 @@ class SecureImportTest : GatewayTestBase() {
     @Test
     fun concurrentReimportWithNewVaultMaterialNeverLeavesAStaleKeyCache() {
         assertEquals(ImportResult.IMPORTED, enroll())
-        val rotated = uniffi.peppy_mobile_bindings.createSmokeVaultMaterial(vaultId, TEST_PASSPHRASE)
+        val rotated = uniffi.peppy_mobile_bindings.createVaultMaterial(vaultId, TEST_PASSPHRASE)
         var result: UnlockResult? = null
         val unlocking = Thread { result = NativeGateway.unlock(context, TEST_PASSPHRASE) }.apply { start() }
         Thread.sleep(50)

@@ -24,7 +24,6 @@ import {
   LockKeyhole,
   LockOpen,
   MessageSquare,
-  MessageSquarePlus,
   Panel,
   PairPhone,
   Radio,
@@ -44,6 +43,7 @@ import {
   type RecipientPosition,
   type RecipientSuggestion,
 } from "@peppy/desktop-ui";
+import { RiChatNewLine } from "@remixicon/react";
 import {
   bridge,
   type AttachmentView,
@@ -61,10 +61,7 @@ import {
 import { NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
-import { HostedOnboarding } from "./HostedOnboarding";
-
-/** Vite's DEV flag keeps this preview out of packaged debug builds. */
-export const hostedPreviewEnabled = () => (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV === true;
+import { SetupLanding, savedSetupMode } from "./SetupLanding";
 
 /**
  * Display-only names for phone addresses. Stored conversation names, addresses and draft
@@ -360,10 +357,10 @@ export class DraftStore {
     return [...this.slots.values()].filter((slot) => isLocalDraftKey(slot.key));
   }
 
-  /** Starts a draft for a recipient without a conversation; the host assigns both IDs on save. */
-  createNew(recipient: string): { key: string; saved: Promise<SaveOutcome> } {
+  /** Starts a draft; the host assigns both IDs on save. */
+  createNew(recipient?: string): { key: string; saved: Promise<SaveOutcome> } {
     const key = `${NEW_DRAFT_PREFIX}${++this.newCount}`;
-    return { key, saved: this.edit(key, { recipientIds: [recipient] }) };
+    return { key, saved: this.edit(key, { recipientIds: recipient ? [recipient] : [] }) };
   }
 
   edit(key: string, patch: Partial<DraftContent>): Promise<SaveOutcome> {
@@ -796,6 +793,11 @@ function MessageList({
   );
 }
 
+/** Only an enrolled owner can add a phone; joined devices keep the normal conversation view. */
+function ownerWithoutPhone(snapshot: DesktopSnapshot) {
+  return snapshot.connection.state === "connected" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
+}
+
 function OnboardingView({
   connected,
   canUnlock,
@@ -922,13 +924,8 @@ function SettingsView({
   canUnlock,
   theme,
   onTheme,
-  headStatus,
   desktop,
-  pinnedConversationIds,
-  conversations,
   onStartAtLogin,
-  onReopenHead,
-  onDismissHead,
   notifications,
   filters,
   sources,
@@ -947,13 +944,8 @@ function SettingsView({
   canUnlock: boolean;
   theme: Theme;
   onTheme(theme: Theme): void;
-  headStatus: string;
   desktop?: DesktopSnapshot["desktop"];
-  pinnedConversationIds: string[];
-  conversations: Conversation[];
   onStartAtLogin(enabled: boolean): Promise<void>;
-  onReopenHead(id: string): void;
-  onDismissHead(id: string): void;
   notifications: DesktopSnapshot["notifications"];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
@@ -1052,22 +1044,16 @@ function SettingsView({
           </label>
         </div>
       </section>
-      <section data-settings-section="heads">
-        <h2>Conversation heads</h2>
-        <p role="status">Floating heads: {headStatus}</p>
-        <p>Heads stay available while the main window is hidden. Pinned conversations can be reopened or removed here.</p>
-        {desktop?.startupSupported && <label className="settings-check"><input id="start-at-login" type="checkbox" checked={desktop.startAtLogin} disabled={savingStartup} onChange={async event => {
+      {desktop?.startupSupported && <section data-settings-section="startup">
+        <h2>Startup</h2>
+        <label className="settings-check"><input id="start-at-login" type="checkbox" checked={desktop.startAtLogin} disabled={savingStartup} onChange={async event => {
           setSavingStartup(true); setStartupError("");
           try { await onStartAtLogin(event.target.checked); }
           catch (error) { setStartupError(errorText(error)); }
           finally { setSavingStartup(false); }
-        }} /> Start at login</label>}
+        }} /> Start at login</label>
         {startupError && <p className="settings-error" role="alert">Start at login was not changed: {startupError}</p>}
-        {pinnedConversationIds.length > 0 && <ul id="pinned-head-list" aria-label="Pinned conversation heads">{pinnedConversationIds.map(id => {
-          const conversation = conversations.find(item => item.id === id);
-          return <li key={id} data-pinned-conversation-id={id}><span>{conversation?.name ?? "Conversation"}</span><button type="button" onClick={() => onReopenHead(id)}>Reopen</button><button type="button" onClick={() => onDismissHead(id)}>Remove</button></li>;
-        })}</ul>}
-      </section>
+      </section>}
     </section>
   );
 }
@@ -1116,7 +1102,7 @@ export function App() {
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
-  const [selfHostedChosen, setSelfHostedChosen] = useState(false);
+  const [mode, setMode] = useState<"hosted" | "self-hosted">(() => savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
   const [attachmentViews, setAttachmentViews] = useState<
@@ -1590,12 +1576,28 @@ export function App() {
     }
   };
 
-  const startNewMessage = (recipient: string) => {
+  const startNewMessage = (recipient?: string) => {
     const previous = selectedRef.current;
     if (previous) void store.flush(previous);
     const { key } = store.createNew(recipient);
     choose(store.resolve(key));
     setNotice("");
+  };
+  const showConversationList = () => {
+    if (activeView !== "conversations") setActiveView("conversations");
+    if (listCollapsed) resizeListTo(previousListWidth.current);
+  };
+  const toggleConversationList = () => {
+    if (activeView !== "conversations") {
+      setActiveView("conversations");
+      resizeListTo(previousListWidth.current);
+      return;
+    }
+    resizeListTo(listCollapsed ? previousListWidth.current : 0);
+  };
+  const startTitlebarMessage = () => {
+    showConversationList();
+    startNewMessage();
   };
 
   const retrySave = async () => {
@@ -2054,6 +2056,10 @@ export function App() {
         onClose={() => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
         status={snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}
+        onToggleSidebar={toggleConversationList}
+        sidebarExpanded={activeView === "conversations" && !listCollapsed}
+        sidebarControls="thread-list"
+        onNewMessage={startTitlebarMessage}
       />
       <div ref={desktopBodyRef} id="desktop-body" className="desktop-layout">
         <Panel
@@ -2103,7 +2109,7 @@ export function App() {
                 document.getElementById("recipient-search")?.focus()
               }
             >
-              <MessageSquarePlus size={18} aria-hidden />
+              <RiChatNewLine size={18} aria-hidden />
             </button>
           </div>
           <ConversationList
@@ -2190,16 +2196,11 @@ export function App() {
               canUnlock={canUnlock}
               theme={theme}
               onTheme={setTheme}
-              headStatus={snapshot?.head.note ?? "Normal main-window fallback"}
               desktop={snapshot?.desktop}
-              pinnedConversationIds={snapshot?.head.pinnedConversationIds ?? []}
-              conversations={conversations}
               onStartAtLogin={async enabled => {
                 try { await bridge.set_start_at_login(enabled); await refresh(); }
                 catch (error) { setNotice(`Start at login was not changed: ${errorText(error)}`); await refresh().catch(() => {}); throw error; }
               }}
-              onReopenHead={id => void popoutConversation(id)}
-              onDismissHead={id => void bridge.hide_head(id).then(() => refresh()).catch(report("Could not remove floating conversation. "))}
               notifications={snapshot?.notifications ?? []}
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
@@ -2228,18 +2229,34 @@ export function App() {
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot &&
-              snapshot.connection.state !== "connected" &&
-              !selected ? (
-                /* Hosted preview is tauri dev-only: debug builds still have import.meta.env.DEV false. */
-                hostedPreviewEnabled() && snapshot.connection.errorCode === "server-required" && !selfHostedChosen ? <HostedOnboarding onSelfHosted={() => setSelfHostedChosen(true)} /> : <OnboardingView
+              {snapshot && !selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot)) ? (
+                <SetupLanding
+                  mode={mode}
+                  onMode={setMode}
+                  enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
+                  pairPhone={<PairPhone
+                    createIntent={() => bridge.create_pairing_intent()}
+                    getStatus={intentToken => bridge.pairing_intent_status(intentToken)}
+                    approveIntent={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
+                  />}
+                  selfHostedFallback={<OnboardingView
+                    connected={false}
+                    canUnlock={canUnlock}
+                    origin={origin}
+                    onOrigin={setOrigin}
+                    onAction={(action) => void setup(action)}
+                    encryption={snapshot.encryption.state}
+                  />}
+                  onJoined={() => void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
+                />
+              ) : snapshot && snapshot.connection.state !== "connected" && !selected ? (
+                <OnboardingView
                   connected={false}
                   canUnlock={canUnlock}
                   origin={origin}
                   onOrigin={setOrigin}
                   onAction={(action) => void setup(action)}
                   encryption={snapshot.encryption.state}
-                  onBack={hostedPreviewEnabled() && snapshot.connection.errorCode === "server-required" ? () => setSelfHostedChosen(false) : undefined}
                 />
               ) : (
                 <>

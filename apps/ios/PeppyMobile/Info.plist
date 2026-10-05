@@ -15,6 +15,21 @@
 	<key>NSContactsUsageDescription</key>
 	<string>Peppy syncs contacts you choose to share with your Peppy server.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Peppy needs the camera to scan the pairing QR code shown on your desktop.</string>
+	<string>Peppy needs the camera to scan a pairing QR code from an enrolled device.</string>
+	<key>PEPPY_GOOGLE_IOS_CLIENT_ID</key>
+	<string>$(PEPPY_GOOGLE_IOS_CLIENT_ID)</string>
+	<key>PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID</key>
+	<string>$(PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID)</string>
+	<key>PEPPY_GOOGLE_REVERSED_CLIENT_ID</key>
+	<string>$(PEPPY_GOOGLE_REVERSED_CLIENT_ID)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(PEPPY_GOOGLE_REVERSED_CLIENT_ID)</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
