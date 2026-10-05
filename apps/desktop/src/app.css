@@ -601,6 +601,11 @@ body {
   width: 100%;
   font-family: var(--peppy-font-mono);
 }
+.settings-control-row input[type="checkbox"] {
+  width: auto;
+  flex-shrink: 0;
+  align-self: center;
+}
 .settings-sync-state {
   display: flex;
   align-items: center;
