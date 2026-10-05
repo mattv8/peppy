@@ -259,7 +259,8 @@ jobs:
   swift-bindings:
     needs: changes
     if: needs.changes.outputs.swift_bindings == 'true'
-    timeout-minutes: 30
+    # Serial native tests exercise the production 256 MiB KDF on hosted macOS runners.
+    timeout-minutes: 60
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
