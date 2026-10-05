@@ -10,9 +10,15 @@ reviews use `pnpm --dir packages/mobile-design check` for drift.
   `PeppyTokens.Dark` or `PeppyTokens.Light` from the system theme.
 - iOS uses `PeppyTokens.colors(for: colorScheme)`. Its generated symbols use
   PascalCase semantic names (for example `Accent`, `SurfacePanel`).
-- Android copy is `@string/peppy_<catalog_key>`; iOS copy is
-  `String(localized: "peppy.<catalog_key>")`. Add shared copy only to
-  `src/catalog.mjs`, never directly to platform output.
+- Android copy is `@string/peppy_<catalog_key>`. iOS strings live in the
+  **Peppy** table: use `String(localized: "peppy.<catalog_key>", table: "Peppy")`
+  or `Text("peppy.<catalog_key>", tableName: "Peppy")`. The default table does
+  not find these keys. Wrap computed SwiftUI keys in `LocalizedStringKey`;
+  accessibility labels also need a localized value or `Text` from this table.
+- Add shared copy only to `src/catalog.mjs`, never directly to platform output.
+  Native outputs use its filtered `nativeCatalog`; desktop uses
+  `desktopCatalog`. A key present in the shared source is not necessarily
+  shipped on mobile: preview/store-only keys are intentionally excluded.
 
 Use native typography and touch targets with a 4px spacing rhythm; do not copy
 desktop control dimensions. Use the coral graphic brand and semantic coral accents; coral is not normal-size text, follow the

@@ -1,7 +1,11 @@
 # Peppy domain guidance
 
-This reference records durable repository constraints. For desktop React work,
-also use [the frontend style guide](frontend-style-guide.md).
+This reference records non-obvious Peppy domain constraints. Related references:
+
+- [Infrastructure and release boundaries](infra.md): public/private images,
+  source pins, Harbor signing, deployment proof, and native build pitfalls.
+- [Desktop frontend](frontend-style-guide.md) and
+  [native mobile](mobile-style-guide.md): shared design APIs and platform rules.
 
 ## Ownership boundaries
 
@@ -59,6 +63,56 @@ also use [the frontend style guide](frontend-style-guide.md).
   strings, not JSON numbers or padded strings. Envelope header/ciphertext
   validation is a contract boundary.
 
+## Hosted enrollment and pairing
+
+- A hosted account session and an enrolled device credential are separate
+  authorities. Expiring or signing out of the account session must not erase
+  device credentials or stop device-authenticated sync. Native sign-in does not
+  create a browser cookie; website billing can require another sign-in to the
+  same account. See the native account clients for
+  [Android](../apps/android/app/src/main/java/dev/peppy/mobile/HostedAccountClient.kt)
+  and [iOS](../apps/ios/PeppyNative/HostedAccountClient.swift).
+- Hosted billing uses Stripe through Peppy's website. Subscription lapse means
+  indefinite read-only retention, not scheduled account deletion. Read-only
+  policy still permits reads, sync, export, revocation, and attachment deletion;
+  explicit account deletion owns billing and vault cleanup. See
+  `peppy-platform/src/policy.rs` and `src/deletion.rs` in the private repository.
+- Provisioning retries reuse the protected checkpoint's operation, vault,
+  device, encryption material, and grant. Cancellation or a lost completion
+  response can occur after the server commits. Keep the checkpoint through
+  session expiry and sign-out; acknowledge it only after importing the matching
+  device identity. The account response's `operation_id` does not identify a
+  unique pending operation: the hosted query can select among several. A
+  differing value alone is not grounds to discard the local checkpoint. See
+  [mobile provisioning](../crates/mobile-bindings/src/hosted.rs); the account
+  selection query is in `peppy-platform/src/service.rs`.
+- Before a checkpoint exists, the chosen passphrase is volatile presentation
+  state. Preserve it across password-manager hops and configuration changes,
+  with sensitive content concealed. Do not serialize it into Android saved
+  state or silently generate a replacement on return. After process death,
+  recover prepared material using the user's saved phrase; a checkpoint never
+  contains the plaintext passphrase.
+- A phone that creates the first vault is an `owner`. Capability registration
+  lets it execute work addressed to itself without changing its role to
+  `gateway`. Adding execution capability grants no owner authority; server
+  filtering must still prevent consuming another gateway's work. See
+  [server sync](../services/server/src/api/sync.rs) and
+  [desktop gateway selection](../apps/desktop/src-tauri/src/gateways.rs).
+- The two QR flows have different directions. A new phone scans an enrolled
+  owner's intent QR. In **Add a computer**, the owner phone scans the new
+  computer's join-request QR and offers an encrypted intent through the server.
+  That offer is not approval: both flows still require the locally computed
+  verification code and explicit owner confirmation. Computer claimants use
+  role `device`, not `gateway`. See
+  [pairing contracts](../crates/protocol/src/pairing.rs) and
+  [join cryptography](../crates/hosted-client/src/lib.rs).
+- Server-advertised providers and platform configuration both gate native
+  sign-in. Mobile Google SDKs use the server's nonce; browser OAuth clients and
+  native token audiences stay separate. Configuring an Apple audience alone
+  does not make native Apple usable: its authorization-code exchange and
+  revocation path must exist before it is advertised. Provider setup belongs
+  to the private platform; public self-hosting must remain usable without it.
+
 ## Notifications
 
 - While vault keys are locked, notification plaintext is dropped: there is no
@@ -109,9 +163,9 @@ also use [the frontend style guide](frontend-style-guide.md).
 
 ## Mobile gateway parity
 
-- Gateway hosts are native Android and iOS; the subscriber surface is the shared
-  webview. Follow the [mobile style guide](mobile-style-guide.md) for shared
-  generated tokens and copy.
+- Android and iOS own native enrollment and pairing UI; hosted billing opens
+  Peppy's website. Passphrase entry and generation stay native. Follow the
+  [mobile style guide](mobile-style-guide.md) for shared generated tokens and copy.
 - Rust owns shared mobile domain and policy. Generate bindings, tokens, and copy
   from their shared sources rather than duplicating platform models or catalogs.
 - When an affected mobile feature changes, update and test both native hosts and
