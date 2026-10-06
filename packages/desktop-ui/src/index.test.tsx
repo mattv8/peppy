@@ -275,6 +275,32 @@ describe("desktop UI controls", () => {
     expect(resizeTo).toHaveBeenCalledWith(0);
   });
 
+  it("renders main-window conversation controls and invokes their callbacks", () => {
+    const toggleSidebar = vi.fn();
+    const newMessage = vi.fn();
+    render(<AppTitlebar
+      onMinimize={() => {}}
+      onMaximize={() => {}}
+      onClose={() => {}}
+      onToggleSidebar={toggleSidebar}
+      sidebarExpanded
+      sidebarControls="thread-list"
+      onNewMessage={newMessage}
+    />);
+    const toggle = screen.getByRole("button", { name: "Toggle conversation list" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveAttribute("aria-controls", "thread-list");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(toggleSidebar).toHaveBeenCalledOnce();
+    expect(newMessage).toHaveBeenCalledOnce();
+  });
+
+  it("does not render main-window conversation controls in the composer", () => {
+    render(<AppTitlebar isComposer onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} onToggleSidebar={() => {}} onNewMessage={() => {}} />);
+    expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
+  });
+
   it("does not end a drag when its parent rerenders", () => {
     const ended = vi.fn();
     const resize = vi.fn();

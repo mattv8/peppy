@@ -554,10 +554,21 @@ pub(super) async fn pending_commands(
     let p = auth_with_mode(&s, &h).await?;
     authorize(&s, &p, Operation::Sync).await?;
     let after = parse_cursor(q.after.as_deref().unwrap_or("0"))?;
-    let gateway_filter = (p.role == "gateway").then_some(p.device);
     let mut tx = crate::scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "pending_commands_begin"))?;
+    let is_executor = p.role == "gateway"
+        || (p.role == "owner"
+            && sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM device_capabilities WHERE vault_id=$1 AND device_id=$2",
+            )
+            .bind(p.vault)
+            .bind(p.device)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "pending_commands_capability_lookup"))?
+            .is_some());
+    let gateway_filter = is_executor.then_some(p.device);
     let rows = sqlx::query("SELECT c.command_id,c.producer_device_id,c.gateway_device_id,c.cursor FROM commands c WHERE c.vault_id=$1 AND ($2::uuid IS NULL OR c.gateway_device_id=$2) AND c.cursor>$3 AND NOT EXISTS (SELECT 1 FROM command_receipts r WHERE r.vault_id=c.vault_id AND r.command_id=c.command_id AND r.gateway_device_id=c.gateway_device_id) ORDER BY c.cursor LIMIT $4")
         .bind(p.vault)
         .bind(gateway_filter)

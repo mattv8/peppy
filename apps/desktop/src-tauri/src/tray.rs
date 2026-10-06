@@ -208,10 +208,11 @@ pub fn open_composer_mode(
     } else {
         builder
     };
-    builder
+    let window = builder
         .build()
-        .map(|_| ())
-        .map_err(|_| BridgeError::new("window", "Could not open the composer window."))
+        .map_err(|_| BridgeError::new("window", "Could not open the composer window."))?;
+    crate::window_chrome::sync_webview_window(&window, effective_panel);
+    Ok(())
 }
 
 pub fn open_composer(app: &AppHandle, conversation: ConversationId) -> BridgeResult<()> {
@@ -257,6 +258,7 @@ fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
     }
     let _ = window.set_always_on_top(head_panel);
+    crate::window_chrome::sync_webview_window(window, head_panel);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

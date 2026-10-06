@@ -17,7 +17,12 @@ struct PeppyMobileApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { DeviceView(model: model) }
+        WindowGroup {
+            DeviceView(model: model)
+                .onOpenURL { url in
+                    _ = GoogleHostedSignIn.handle(url)
+                }
+        }
     }
 }
 
@@ -36,6 +41,9 @@ struct DeviceView: View {
     @State private var vaultDeleteText = ""
     @State private var showingVaultDelete = false
     @State private var showingSelfHosted = false
+    @State private var showingHostedEnrollment = false
+    @State private var presentPairingAfterHostedEnrollment = false
+    @State private var showingOwnerPairing = false
     @State private var enrollmentLoaded = false
 
     var body: some View {
@@ -63,47 +71,48 @@ struct DeviceView: View {
             Task { await model.importCredential(from: result) }
         }
         .sheet(isPresented: $showingPairing) { PairingView(model: model, isPresented: $showingPairing) }
+        .sheet(isPresented: $showingOwnerPairing) { OwnerPairingView(model: model, isPresented: $showingOwnerPairing) }
+        .fullScreenCover(isPresented: $showingHostedEnrollment, onDismiss: {
+            if presentPairingAfterHostedEnrollment {
+                presentPairingAfterHostedEnrollment = false
+                showingPairing = true
+            }
+        }) {
+            HostedEnrollmentView(model: model) { presentPairingAfterHostedEnrollment = true }
+        }
     }
 
     private var colors: PeppyColorScheme { PeppyTokens.colors(for: colorScheme) }
 
     @ViewBuilder private var welcome: some View {
-        #if DEBUG
-        if !showingSelfHosted {
-            HostedOnboardingView { showingSelfHosted = true }
-                .accessibilityIdentifier("hosted-preview-root")
-        } else {
-            selfHostedWelcome
-        }
-        #else
-        selfHostedWelcome
-        #endif
-    }
-
-    private var selfHostedWelcome: some View {
         PeppyGlassSurface(colors: colors) {
             VStack(spacing: 16) {
                 Image(decorative: "PeppyLogo").resizable().scaledToFit().frame(width: 72, height: 72)
                     .font(.system(size: 48)).foregroundStyle(colors.Accent)
-                Text("peppy.self_hosted_headline", tableName: "Peppy").font(.title2).bold()
-                Text("peppy.self_hosted_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
-                #if DEBUG
-                Button { showingSelfHosted = false } label: { Text("peppy.back", tableName: "Peppy") }
-                    .accessibilityIdentifier("self-hosted-back-button")
-                #endif
+                Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
+                Text("peppy.onboarding_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+
+                Button { showingHostedEnrollment = true } label: { Text("peppy.production_hosted_cta", tableName: "Peppy") }
+                    .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText).accessibilityIdentifier("welcome-hosted-button")
+
                 Button { showingPairing = true } label: { Text("peppy.scan_qr", tableName: "Peppy") }
-                    .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText).accessibilityIdentifier("pair-qr-button")
+                    .accessibilityIdentifier("welcome-pair-qr-button")
+
                 Button { choosingFile = true } label: { Text("peppy.use_credential_file", tableName: "Peppy") }
-                    .accessibilityIdentifier("import-credential-button")
+                    .accessibilityIdentifier("welcome-import-credential-button")
+
                 Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) { Text("peppy.self_hosted_docs_link", tableName: "Peppy") }
-                    .accessibilityIdentifier("self-hosted-docs-link")
+                    .accessibilityIdentifier("welcome-self-hosted-docs-link")
+
                 activityAndError
             }
             .padding(24)
         }
         .frame(maxWidth: 460)
-        .accessibilityIdentifier("self-hosted-screen")
+        .accessibilityIdentifier("welcome-screen")
     }
+
+
 
     private var lockScreen: some View {
         PeppyGlassSurface(colors: colors) {
@@ -229,7 +238,22 @@ struct DeviceView: View {
                 }
                 devicesSection
                 relaySection
-                if model.status.role == "owner" { vaultSection }
+                if model.status.role == "owner" {
+                    Section {
+                        Button { showingOwnerPairing = true } label: {
+                            Text("peppy.production_add_device", tableName: "Peppy")
+                        }
+                        .disabled(!model.status.keysUnlocked || model.activity != .idle).accessibilityIdentifier("add-device-button")
+                    }
+                    vaultSection
+                }
+                if let identity = model.status.identity, identity.origin == "https://peppy.pro" {
+                    Section {
+                        Link(destination: URL(string: "https://peppy.pro/account")!) {
+                            Text("peppy.production_manage_account", tableName: "Peppy")
+                        }.accessibilityIdentifier("account-management-link")
+                    }
+                }
                 if let error = model.lastError { Text(error).foregroundStyle(colors.Error).accessibilityIdentifier("status-error") }
             }
             .formStyle(.grouped).navigationTitle(Text("peppy.account", tableName: "Peppy")).toolbar { settingsButton }

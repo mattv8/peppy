@@ -1,5 +1,7 @@
 package dev.peppy.mobile
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,6 +35,7 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
     var deleteOpen by remember { mutableStateOf(false) }
     var erase by remember { mutableStateOf("") }
     var revokeTarget by remember { mutableStateOf<GatewayAccountDevice?>(null) }
+    var ownerPairingOpen by remember { mutableStateOf(false) }
     val relayPrefs = remember { context.getSharedPreferences("peppy-relay", 0) }
     var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
     var relayOrigin by remember { mutableStateOf(relayPrefs.getString("relay-origin.v1", "") ?: "") }
@@ -45,7 +48,14 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
             Section("identity-section", stringResource(R.string.peppy_account)) {
                 StatusRow("identity-role", "Role", account.self.role)
                 StatusRow("identity-device-id", "This device", account.self.id)
-                OutlinedButton(onClick = { failure = null; onChanged() }, modifier = Modifier.testTag("refresh-enrollment-button")) { Text("Refresh from server") }
+                if (NativeGateway.status(context).origin == "https://peppy.pro") {
+                    OutlinedButton(onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account")))
+                    }, modifier = Modifier.testTag("hosted-manage-account-button")) {
+                        Text(stringResource(R.string.peppy_production_manage_account))
+                    }
+                }
+                OutlinedButton(onClick = { scope.launch { failure = null; refresh(); onChanged() } }, modifier = Modifier.testTag("refresh-enrollment-button")) { Text("Refresh from server") }
             }
             Section("devices-section", stringResource(R.string.peppy_devices)) {
                 account.devices.forEach { device ->
@@ -55,6 +65,11 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                             onClick = { revokeTarget = device },
                             modifier = Modifier.testTag("device-remove-${device.id}"),
                         ) { Text(if (device.id == account.self.id) "Disconnect" else "Remove") }
+                    }
+                }
+                if (account.self.role == "owner" && NativeGateway.status(context).sharedKeysReady) {
+                    OutlinedButton(onClick = { ownerPairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("add-device-button")) {
+                        Text(stringResource(R.string.peppy_production_add_device))
                     }
                 }
             }
@@ -106,4 +121,10 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
             dismissButton = { OutlinedButton(onClick = { revokeTarget = null }) { Text("Cancel") } },
         )
     }
+    if (ownerPairingOpen) AlertDialog(
+        onDismissRequest = { ownerPairingOpen = false },
+        title = { Text(stringResource(R.string.peppy_production_add_device)) },
+        text = { OwnerPairingSheet(onDismiss = { ownerPairingOpen = false }) },
+        confirmButton = {},
+    )
 }

@@ -85,6 +85,14 @@
       ],
       "type": "string"
     },
+    "IdentityProvider": {
+      "description": "Identity provider for authentication.",
+      "enum": [
+        "apple",
+        "google"
+      ],
+      "type": "string"
+    },
     "InvoiceSummary": {
       "additionalProperties": false,
       "properties": {
@@ -306,12 +314,19 @@
     "WebConfigResponse": {
       "additionalProperties": false,
       "properties": {
+        "available_providers": {
+          "items": {
+            "$ref": "#/$defs/IdentityProvider"
+          },
+          "type": "array"
+        },
         "stripe_publishable_key": {
           "type": "string"
         }
       },
       "required": [
-        "stripe_publishable_key"
+        "stripe_publishable_key",
+        "available_providers"
       ],
       "type": "object"
     },

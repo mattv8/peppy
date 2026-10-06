@@ -261,72 +261,362 @@
         }
       }
     },
-    "peppy.preview_label": {
+    "peppy.production_hosted_cta": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hosted setup preview — no account is created or payment taken."
+            "value": "Use Peppy Hosted"
           }
         }
       }
     },
-    "peppy.preview_scenarios": {
+    "peppy.production_join_cta": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Preview scenarios"
+            "value": "Join an existing vault"
           }
         }
       }
     },
-    "peppy.preview_reset": {
+    "peppy.production_hosted_unavailable": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Reset preview"
+            "value": "Peppy sign-in is unavailable. Try again, or pair with an existing device."
           }
         }
       }
     },
-    "peppy.preview_error": {
+    "peppy.production_provider_unconfigured": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This preview step could not be completed. Try again."
+            "value": "Sign-in is not configured for this build."
           }
         }
       }
     },
-    "peppy.preview_complete": {
+    "peppy.production_signin_failed": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Your server preview is ready"
+            "value": "Sign-in could not finish. Try again."
           }
         }
       }
     },
-    "peppy.preview_approval": {
+    "peppy.production_no_google_account": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Preview another device’s approval"
+            "value": "Add a Google account in your phone's Settings, then try again."
           }
         }
       }
     },
-    "peppy.preview_continue": {
+    "peppy.production_session_expired": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Continue preview"
+            "value": "Sign in again to manage your Peppy account. Your enrolled device and local data are unchanged."
+          }
+        }
+      }
+    },
+    "peppy.production_billing_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subscribe at peppy.pro"
+          }
+        }
+      }
+    },
+    "peppy.production_billing_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose your plan on Peppy's website. Sign in there with the same account, then return here to continue."
+          }
+        }
+      }
+    },
+    "peppy.production_billing_check": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check subscription"
+          }
+        }
+      }
+    },
+    "peppy.production_billing_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your subscription is not active yet. Complete setup at peppy.pro, then check again."
+          }
+        }
+      }
+    },
+    "peppy.production_account_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This setup belongs to a different Peppy account. Sign in with the original account to resume."
+          }
+        }
+      }
+    },
+    "peppy.production_provision_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setup could not finish. Try again to resume the same vault safely."
+          }
+        }
+      }
+    },
+    "peppy.production_provision_resume": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume vault setup"
+          }
+        }
+      }
+    },
+    "peppy.production_create_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create my vault"
+          }
+        }
+      }
+    },
+    "peppy.production_vault_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your vault is ready"
+          }
+        }
+      }
+    },
+    "peppy.production_owner_sas_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compare verification codes"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_accessibility": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing QR code"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_role_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requested access"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_role_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linked device"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_role_gateway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gateway device"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create a new pairing code"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing paused. Create a new code to continue."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not complete pairing. Try a new code."
+          }
+        }
+      }
+    },
+    "peppy.production_existing_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account already has a vault. Pair with an enrolled owner device and enter your existing encryption passphrase."
+          }
+        }
+      }
+    },
+    "peppy.production_read_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your hosted vault is read-only. Your saved data is retained; manage your subscription to enable new changes."
+          }
+        }
+      }
+    },
+    "peppy.production_manage_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage account at peppy.pro"
+          }
+        }
+      }
+    },
+    "peppy.production_add_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add another device"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan this code with the device you want to add. Compare the verification code on both devices before approving."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the new device…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_expired": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This pairing request expired. Create a new one to try again."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_verify": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I checked that the verification codes match"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_unlocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock this owner device before adding another device."
+          }
+        }
+      }
+    },
+    "peppy.production_secure_storage_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Secure storage is unavailable. Setup has stopped to protect your keys and existing data."
+          }
+        }
+      }
+    },
+    "peppy.production_retry_sync": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry sync"
+          }
+        }
+      }
+    },
+    "peppy.production_network_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not reach Peppy. Check your connection and try again."
           }
         }
       }
@@ -441,16 +731,6 @@
         }
       }
     },
-    "peppy.hosted_subscribe_restore": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Restore purchases"
-          }
-        }
-      }
-    },
     "peppy.hosted_subscribe_terms": {
       "localizations": {
         "en": {
@@ -471,16 +751,6 @@
         }
       }
     },
-    "peppy.hosted_subscribe_legal": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Subscription pricing and renewal details are provided by the store."
-          }
-        }
-      }
-    },
     "peppy.hosted_subscribe_store_unavailable": {
       "localizations": {
         "en": {
@@ -497,16 +767,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Waiting for purchase approval"
-          }
-        }
-      }
-    },
-    "peppy.hosted_purchase_pending_body": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You can return to setup after the store approves the purchase."
           }
         }
       }
@@ -1006,7 +1266,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scan the pairing QR code from your desktop, or import a credential file."
+            "value": "Scan a pairing QR code from an enrolled owner device, or import a credential file."
           }
         }
       }
@@ -1111,16 +1371,6 @@
         }
       }
     },
-    "peppy.settings_server_delete_body": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Account deletion and subscription cancellation are separate actions. This preview only clears its simulated account."
-          }
-        }
-      }
-    },
     "peppy.settings_server_active": {
       "localizations": {
         "en": {
@@ -1177,16 +1427,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "No subscription"
-          }
-        }
-      }
-    },
-    "peppy.settings_server_manage_preview": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Subscription management will open the store when Peppy Hosted launches."
           }
         }
       }
@@ -1257,6 +1497,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "Locked"
+          }
+        }
+      }
+    },
+    "peppy.setup_provisioning_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Creating your vault. This may take a moment."
+          }
+        }
+      }
+    },
+    "peppy.production_add_computer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a computer"
+          }
+        }
+      }
+    },
+    "peppy.production_add_computer_scan_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan the QR code shown on the computer."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_role_computer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Computer"
+          }
+        }
+      }
+    },
+    "peppy.production_add_computer_origin_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This QR code is for a different Peppy server."
+          }
+        }
+      }
+    },
+    "peppy.production_add_computer_already_linked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This pairing code has already been used. Start pairing again on your computer."
+          }
+        }
+      }
+    },
+    "peppy.production_add_computer_allow_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connects the computer to your vault."
+          }
+        }
+      }
+    },
+    "peppy.production_add_computer_deny_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rejects this computer."
           }
         }
       }

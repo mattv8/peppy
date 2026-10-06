@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { catalog, desktopCatalog, desktopOnlyKeys } from "../src/catalog.mjs";
+import { catalog, nativeCatalog, desktopCatalog, desktopOnlyKeys } from "../src/catalog.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
 const run = (...args) => execFileSync("node", ["packages/mobile-design/scripts/generate.mjs", ...args], { cwd: root, encoding: "utf8" });
@@ -161,6 +161,49 @@ test("native copy is generated from the shared catalog only", () => {
   assert.match(ios, new RegExp(catalog.hosted_join_headline));
 });
 
+test("native catalog excludes preview and store-only keys", () => {
+  // Verify preview keys are excluded from nativeCatalog
+  assert.ok("preview_label" in catalog);
+  assert.ok(!("preview_label" in nativeCatalog));
+  assert.ok("preview_scenarios" in catalog);
+  assert.ok(!("preview_scenarios" in nativeCatalog));
+  assert.ok("preview_reset" in catalog);
+  assert.ok(!("preview_reset" in nativeCatalog));
+
+  // Verify obsolete mobile store/preview-only keys are excluded
+  assert.ok("settings_server_delete_body" in catalog);
+  assert.ok(!("settings_server_delete_body" in nativeCatalog));
+  assert.ok("hosted_subscribe_legal" in catalog);
+  assert.ok(!("hosted_subscribe_legal" in nativeCatalog));
+  assert.ok("hosted_purchase_pending_body" in catalog);
+  assert.ok(!("hosted_purchase_pending_body" in nativeCatalog));
+  assert.ok("hosted_subscribe_restore" in catalog);
+  assert.ok(!("hosted_subscribe_restore" in nativeCatalog));
+
+  // Verify production keys are still present
+  assert.ok("production_hosted_cta" in nativeCatalog);
+  assert.ok("hosted_join_headline" in nativeCatalog);
+});
+
+test("native output excludes preview and store-only copy", () => {
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8");
+
+  // Verify preview keys are not in native outputs
+  assert.doesNotMatch(android, /peppy_preview_/);
+  assert.doesNotMatch(ios, /peppy\.preview_/);
+
+  // Verify obsolete store-only keys are not in native outputs
+  assert.doesNotMatch(android, /peppy_settings_server_delete_body/);
+  assert.doesNotMatch(ios, /peppy\.settings_server_delete_body/);
+  assert.doesNotMatch(android, /Subscription pricing and renewal details are provided by the store/);
+  assert.doesNotMatch(ios, /Subscription pricing and renewal details are provided by the store/);
+
+  // Verify the native catalog size matches the output
+  const androidCount = (android.match(/<string name="peppy_/g) || []).length;
+  assert.equal(androidCount, Object.keys(nativeCatalog).length, "Android strings count should match nativeCatalog size");
+});
+
 test("generated icons include default, dark, and tinted variants", () => {
   assert.deepEqual(pngDimensions("apps/desktop/src-tauri/icons/icon.png"), [512, 512]);
   for (const file of ["AppIcon-512@2x.png", "AppIcon-512@2x-dark.png", "AppIcon-512@2x-tinted.png"]) {
@@ -179,4 +222,28 @@ test("desktop logo and favicon are direct generated copies of the canonical mark
   const mark = readFileSync(path("packages/mobile-design/assets/peppy-mark.svg"), "utf8");
   assert.equal(readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8"), mark);
   assert.equal(readFileSync(path("apps/desktop/public/favicon.svg"), "utf8"), mark);
+});
+
+test("android strings properly escape apostrophes and special characters", () => {
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  
+  // Verify production_no_google_account has escaped apostrophe for "phone's"
+  assert.match(android, /peppy_production_no_google_account.*phone\\'s/);
+  
+  // Verify production_billing_body has escaped apostrophe for "Peppy's"
+  assert.match(android, /peppy_production_billing_body.*Peppy\\'s/);
+  
+  // Ensure no unescaped ASCII apostrophes remain in string values
+  const stringLines = android.split("\n").filter(line => line.includes('<string name="peppy_'));
+  for (const line of stringLines) {
+    // Extract the string value content (between > and <)
+    const match = line.match(/<string[^>]*>([^<]*)<\/string>/);
+    if (match) {
+      const content = match[1];
+      // Check that there are no unescaped ASCII apostrophes (') that aren't already part of entities
+      // A proper apostrophe in Android resources is either \' or within a surrounding quote
+      const unescapedApostrophes = content.match(/[^\\]'|^'/g);
+      assert.ok(!unescapedApostrophes, `Found unescaped apostrophe in: ${line}`);
+    }
+  }
 });

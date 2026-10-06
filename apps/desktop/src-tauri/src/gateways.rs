@@ -160,15 +160,45 @@ fn sims(value: &serde_json::Value) -> Option<Vec<SimReport>> {
         .then_some(sims)
 }
 
+/// Extract this desktop's own device role from the roster (match on device_id).
+/// Returns None if the device is not found or revoked.
+pub fn extract_device_role(devices: &DevicesResponse, device_id: &str) -> Option<String> {
+    devices
+        .devices
+        .iter()
+        .find(|d| d.device_id == device_id && !d.revoked)
+        .map(|d| d.role.clone())
+}
+
 pub fn gateway_views(
     devices: &DevicesResponse,
     capabilities: &CapabilitiesResponse,
 ) -> Vec<GatewayView> {
     let mut views = Vec::new();
+
+    // Build a set of device_ids that have capability registrations
+    let capable_device_ids: std::collections::HashSet<String> = capabilities
+        .capabilities
+        .iter()
+        .map(|row| row.device_id.clone())
+        .collect();
+
     for device in devices
         .devices
         .iter()
-        .filter(|d| d.role == "gateway" && !d.revoked)
+        .filter(|d| {
+            // Include gateways and owner devices that have registered capabilities
+            if d.revoked {
+                return false;
+            }
+            if d.role == "gateway" {
+                return true;
+            }
+            if d.role == "owner" && capable_device_ids.contains(&d.device_id) {
+                return true;
+            }
+            false
+        })
         .take(MAX_GATEWAYS)
     {
         let Ok(id) = uuid::Uuid::parse_str(&device.device_id) else {
@@ -325,6 +355,176 @@ mod tests {
             let view = gateway_views(&devices, &capabilities).remove(0);
             assert!(view.supports_sms);
             assert!(!view.supports_mms);
+        }
+    }
+
+    #[test]
+    fn registered_owner_device_with_capabilities_appears_as_gateway() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":owner,"role":"owner","revoked":false}]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[
+            {"device_id":owner,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"sim-1","label":"Owner SIM","sms":"available","mms":"available","mms_content_version":2,"mms_max_bytes":307200,"mms_limit_source":"carrier","mms_max_recipients":20}]}}]}))
+        .unwrap();
+        let views = gateway_views(&devices, &capabilities);
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].name, "Owner SIM");
+        assert!(views[0].supports_sms && views[0].supports_mms && !views[0].simulated);
+        assert_eq!(views[0].sim_id, "sim-1");
+        assert!(find_route(&views, &owner, "sim-1").is_some());
+    }
+
+    #[test]
+    fn unregistered_owner_device_without_capabilities_is_excluded() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let gateway = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":owner,"role":"owner","revoked":false},
+            {"device_id":gateway,"role":"gateway","revoked":false}]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[
+            {"device_id":gateway,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}]}))
+        .unwrap();
+        let views = gateway_views(&devices, &capabilities);
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, gateway);
+        assert!(!views.iter().any(|v| v.id == owner));
+    }
+
+    #[test]
+    fn revoked_owner_device_with_prior_capabilities_is_excluded() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":owner,"role":"owner","revoked":true}]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[
+            {"device_id":owner,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}]}))
+        .unwrap();
+        let views = gateway_views(&devices, &capabilities);
+        assert_eq!(views.len(), 0);
+    }
+
+    #[test]
+    fn ordinary_device_is_never_included_even_with_capability_report() {
+        let device = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":device,"role":"device","revoked":false}]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[
+            {"device_id":device,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}]}))
+        .unwrap();
+        let views = gateway_views(&devices, &capabilities);
+        assert_eq!(views.len(), 0);
+        assert!(!views.iter().any(|v| v.id == device));
+    }
+
+    #[test]
+    fn gateway_fallback_works_when_report_is_invalid_or_missing() {
+        let gateway = uuid::Uuid::new_v4().to_string();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":gateway,"role":"gateway","revoked":false},
+            {"device_id":owner,"role":"owner","revoked":false}]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse =
+            serde_json::from_value(serde_json::json!({"capabilities":[
+            {"device_id":owner,"simulator":false,"capabilities":{"sims":[]}}]}))
+            .unwrap();
+        let views = gateway_views(&devices, &capabilities);
+        let owner_view = views.iter().find(|v| v.id == owner).unwrap();
+        assert!(!owner_view.supports_sms);
+        assert!(!owner_view.supports_mms);
+        assert!(owner_view.sim_id.is_empty());
+        assert!(owner_view
+            .capability_note
+            .as_deref()
+            .unwrap()
+            .contains("not reported"));
+    }
+
+    #[test]
+    fn registered_owner_preserves_gateway_fallback_and_revoked_exclusion() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let revoked_gateway = uuid::Uuid::new_v4().to_string();
+        let active_gateway = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":owner,"role":"owner","revoked":false},
+            {"device_id":revoked_gateway,"role":"gateway","revoked":true},
+            {"device_id":active_gateway,"role":"gateway","revoked":false}]}))
+        .unwrap();
+        let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[
+            {"device_id":owner,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"owner-sim","sms":"available","mms":"available","mms_content_version":2}]}},
+            {"device_id":revoked_gateway,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"revoked-sim","sms":"available","mms":"available"}]}},
+            {"device_id":active_gateway,"simulator":false,"capabilities":{"sims":[
+                {"subscription_id":"active-sim","sms":"available","mms":"available","mms_content_version":2}]}}]}))
+        .unwrap();
+        let views = gateway_views(&devices, &capabilities);
+        assert_eq!(views.len(), 2);
+        assert!(views
+            .iter()
+            .any(|v| v.id == owner && v.sim_id == "owner-sim"));
+        assert!(views
+            .iter()
+            .any(|v| v.id == active_gateway && v.sim_id == "active-sim"));
+        assert!(!views.iter().any(|v| v.id == revoked_gateway));
+    }
+
+    #[test]
+    fn extract_device_role_returns_the_desktop_role() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let device = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":owner,"role":"owner","revoked":false},
+            {"device_id":device,"role":"device","revoked":false}]}))
+        .unwrap();
+        assert_eq!(extract_device_role(&devices, &owner), Some("owner".into()));
+        assert_eq!(
+            extract_device_role(&devices, &device),
+            Some("device".into())
+        );
+        assert_eq!(
+            extract_device_role(&devices, &uuid::Uuid::new_v4().to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_device_role_excludes_revoked() {
+        let revoked = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(
+            serde_json::json!({"devices":[{"device_id":revoked,"role":"owner","revoked":true}]}),
+        )
+        .unwrap();
+        assert_eq!(extract_device_role(&devices, &revoked), None);
+    }
+
+    #[test]
+    fn mms_validation_applies_equally_to_owner_and_gateway() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let gateway = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":owner,"role":"owner","revoked":false},
+            {"device_id":gateway,"role":"gateway","revoked":false}]}))
+        .unwrap();
+        for device_id in [owner.clone(), gateway.clone()] {
+            let capabilities: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[
+                {"device_id":device_id,"simulator":false,"capabilities":{"sims":[
+                    {"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":1}]}}]}))
+            .unwrap();
+            let views = gateway_views(&devices, &capabilities);
+            let view = views.iter().find(|v| v.id == device_id).unwrap();
+            assert!(view.supports_sms);
+            assert!(
+                !view.supports_mms,
+                "v1 MMS should be rejected for {device_id}"
+            );
         }
     }
 }

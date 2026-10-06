@@ -1,4 +1,7 @@
-use crate::{Envelope, PairingQrRecord};
+use crate::{
+    Envelope, JoinRequestCreated, JoinRequestOffer, JoinRequestQr, JoinRequestStatus,
+    PairingQrRecord,
+};
 use schemars::schema_for;
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, fs, io, path::Path};
@@ -13,9 +16,21 @@ pub fn generate_contracts() -> GeneratedContracts {
     let envelope = serde_json::to_value(schema_for!(Envelope)).expect("Envelope schema serializes");
     let pairing =
         serde_json::to_value(schema_for!(PairingQrRecord)).expect("Pairing schema serializes");
+    let join_created = serde_json::to_value(schema_for!(JoinRequestCreated))
+        .expect("Join request created schema serializes");
+    let join_qr = serde_json::to_value(schema_for!(JoinRequestQr))
+        .expect("Join request QR schema serializes");
+    let join_offer = serde_json::to_value(schema_for!(JoinRequestOffer))
+        .expect("Join request offer schema serializes");
+    let join_status = serde_json::to_value(schema_for!(JoinRequestStatus))
+        .expect("Join request status schema serializes");
     let mut components = BTreeMap::new();
     components.extend(extract_components("Envelope", envelope));
     components.extend(extract_components("PairingQrRecord", pairing));
+    components.extend(extract_components("JoinRequestCreated", join_created));
+    components.extend(extract_components("JoinRequestQr", join_qr));
+    components.extend(extract_components("JoinRequestOffer", join_offer));
+    components.extend(extract_components("JoinRequestStatus", join_status));
     let mut component_value = serde_json::to_value(&components).expect("components serialize");
     rewrite_refs(&mut component_value);
     let openapi = pretty(

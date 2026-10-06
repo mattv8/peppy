@@ -1,5 +1,57 @@
 use peppy_domain::{DeviceId, VaultId};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JoinRequestCreated {
+    pub join_request_id: Uuid,
+    pub poll_secret: String,
+    pub expires_in_seconds: i64,
+}
+
+impl std::fmt::Debug for JoinRequestCreated {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JoinRequestCreated")
+            .field("join_request_id", &self.join_request_id)
+            .field("poll_secret", &"[REDACTED]")
+            .field("expires_in_seconds", &self.expires_in_seconds)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRequestQr {
+    pub https_origin: String,
+    pub join_request_id: Uuid,
+    pub join_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRequestOffer {
+    pub intent_digest: String,
+    pub sealed_intent_token: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinRequestState {
+    Waiting,
+    Offered,
+    Expired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JoinRequestStatus {
+    pub state: JoinRequestState,
+    pub sealed_intent_token: Option<String>,
+    pub intent_digest: Option<String>,
+    pub expires_in_seconds: i64,
+}
 
 /// Lowercase SHA-256 digest of the 32-byte Ed25519 public key pinned by an intent.
 pub fn pairing_key_digest(public_key: &[u8; 32]) -> String {
@@ -62,6 +114,19 @@ mod tests {
         let prefix = b"peppy-pairing-proof-v1\0";
         assert!(bytes.starts_with(prefix));
         assert_eq!(bytes.len(), prefix.len() + 32 + 16 + 16 + 64 + 4 + 7);
+    }
+
+    #[test]
+    fn join_request_created_debug_redacts_poll_secret() {
+        let created = JoinRequestCreated {
+            join_request_id: Uuid::nil(),
+            poll_secret: "sensitive-poll-secret".into(),
+            expires_in_seconds: 300,
+        };
+
+        let debug = format!("{created:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&created.poll_secret));
     }
 
     #[test]

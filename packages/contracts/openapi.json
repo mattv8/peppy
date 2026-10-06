@@ -153,6 +153,104 @@
         ],
         "type": "object"
       },
+      "JoinRequestCreated": {
+        "properties": {
+          "expires_in_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "join_request_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "poll_secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "join_request_id",
+          "poll_secret",
+          "expires_in_seconds"
+        ],
+        "title": "JoinRequestCreated",
+        "type": "object"
+      },
+      "JoinRequestOffer": {
+        "additionalProperties": false,
+        "properties": {
+          "intent_digest": {
+            "type": "string"
+          },
+          "sealed_intent_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "intent_digest",
+          "sealed_intent_token"
+        ],
+        "title": "JoinRequestOffer",
+        "type": "object"
+      },
+      "JoinRequestQr": {
+        "additionalProperties": false,
+        "properties": {
+          "https_origin": {
+            "type": "string"
+          },
+          "join_key": {
+            "type": "string"
+          },
+          "join_request_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "https_origin",
+          "join_request_id",
+          "join_key"
+        ],
+        "title": "JoinRequestQr",
+        "type": "object"
+      },
+      "JoinRequestState": {
+        "enum": [
+          "waiting",
+          "offered",
+          "expired"
+        ],
+        "type": "string"
+      },
+      "JoinRequestStatus": {
+        "properties": {
+          "expires_in_seconds": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "intent_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sealed_intent_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/JoinRequestState"
+          }
+        },
+        "required": [
+          "state",
+          "expires_in_seconds"
+        ],
+        "title": "JoinRequestStatus",
+        "type": "object"
+      },
       "PairingQrRecord": {
         "properties": {
           "challenge_token": {

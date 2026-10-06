@@ -13,7 +13,7 @@ use uuid::Uuid;
 // ============================================================================
 
 /// Identity provider for authentication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityProvider {
     Apple,
@@ -143,6 +143,13 @@ pub struct LoginAttemptResponse {
     pub expires_in_seconds: u32,
 }
 
+/// Providers that are currently available for native sign-in.
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAuthConfigResponse {
+    pub available_providers: Vec<IdentityProvider>,
+}
+
 // Intentionally no Debug for LoginAttemptResponse (sensitive)
 
 /// Request to exchange an identity token for a session.
@@ -258,6 +265,7 @@ pub struct CompleteProvisioningResponse {
 // ============================================================================
 
 pub mod routes {
+    pub const AUTH_CONFIG: &str = "/hosted/v1/auth/config";
     pub const AUTH_ATTEMPTS: &str = "/hosted/v1/auth/attempts";
     pub const AUTH_SESSION: &str = "/hosted/v1/auth/session";
     pub const ACCOUNT: &str = "/hosted/v1/account";

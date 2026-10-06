@@ -25,6 +25,10 @@ android {
             )
         versionName = providers.gradleProperty("peppyVersionName").orNull ?: "0.0.0-dev"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        val googleServerClientId = providers.gradleProperty("peppyGoogleServerClientId").orElse(
+            providers.environmentVariable("PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID"),
+        ).orNull.orEmpty()
+        buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
         ndk { abiFilters += setOf("arm64-v8a", "x86_64") }
     }
@@ -67,6 +71,10 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
+    implementation("com.google.zxing:core:3.5.3")
     // Offline, on-device QR decoding. CameraX 1.4.2 supports minSdk 21/compileSdk 36;
     // ML Kit barcode-scanning 17.3.0 bundles the decoder and makes no cloud request.
     implementation("androidx.camera:camera-camera2:1.4.2")

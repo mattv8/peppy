@@ -44,11 +44,14 @@
     "allow-hide-head",
     "allow-popout-conversation",
     "allow-acknowledge-lifecycle",
-    "allow-hosted-preview-state",
-    "allow-hosted-preview-start",
-    "allow-hosted-preview-advance",
-    "allow-hosted-preview-create-passphrase",
-    "allow-hosted-preview-unlock",
-    "allow-hosted-preview-reset"
+    "allow-hosted-account",
+    "allow-hosted-sign-in",
+    "allow-hosted-sign-out",
+    "allow-hosted-open-billing",
+    "allow-hosted-provision",
+    "allow-join-start",
+    "allow-join-status",
+    "allow-join-cancel",
+    "allow-join-confirm"
   ]
 }

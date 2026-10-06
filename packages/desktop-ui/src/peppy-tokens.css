@@ -20,6 +20,7 @@
   --peppy-surface-widget: #202020;
   --peppy-surface-hover: #2a2d2e;
   --peppy-surface-active: #313131;
+  --peppy-window-control-idle: #4d4d4d;
   --peppy-border: #2b2b2b;
   --peppy-border-strong: #3c3c3c;
   --peppy-text-primary: #ccc;
@@ -47,6 +48,7 @@
   --peppy-scrollbar-thumb-active: rgba(255, 255, 255, 0.35);
   --peppy-shadow-floating: 0 4px 16px rgba(0, 0, 0, 0.28);
   --peppy-titlebar-height: 35px;
+  --peppy-window-radius: 12px;
   --peppy-toolbar-height: 32px;
   --peppy-control-height: 28px;
   --peppy-control-radius: 4px;
@@ -64,6 +66,7 @@
   --peppy-surface-widget: #fff;
   --peppy-surface-hover: #f3f3f3;
   --peppy-surface-active: #ececec;
+  --peppy-window-control-idle: #d1d1d1;
   --peppy-border: #e5e5e5;
   --peppy-border-strong: #cecece;
   --peppy-text-primary: #3b3b3b;
@@ -101,6 +104,7 @@
     --peppy-surface-widget: #fff;
     --peppy-surface-hover: #f3f3f3;
     --peppy-surface-active: #ececec;
+    --peppy-window-control-idle: #d1d1d1;
     --peppy-border: #e5e5e5;
     --peppy-border-strong: #cecece;
     --peppy-text-primary: #3b3b3b;

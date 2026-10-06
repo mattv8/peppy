@@ -9,14 +9,19 @@ import {
   Loader,
   MessageCircle,
   MessageSquarePlus,
-  Minus,
   Paperclip,
   SendHorizontal,
   Settings,
-  Square,
   Users,
   X,
 } from "lucide-react";
+import {
+  RiAddLine,
+  RiChatNewLine,
+  RiCloseLine,
+  RiLayoutLeftLine,
+  RiSubtractLine,
+} from "@remixicon/react";
 import {
   formatPhoneInput,
   formatPhoneNumber,
@@ -535,6 +540,8 @@ export function detectPlatform(): "macos" | "windows" | "linux" {
   return /Mac/.test(source) ? "macos" : /Win/.test(source) ? "windows" : "linux";
 }
 
+const logoUrl = new URL("../../../public/peppy-logo-coral.svg", import.meta.url).href;
+
 export function AppTitlebar({
   onMinimize,
   onMaximize,
@@ -543,6 +550,10 @@ export function AppTitlebar({
   isComposer = false,
   title,
   status,
+  onToggleSidebar,
+  sidebarExpanded,
+  sidebarControls,
+  onNewMessage,
 }: {
   onMinimize(): void;
   onMaximize(): void;
@@ -552,6 +563,10 @@ export function AppTitlebar({
   isComposer?: boolean;
   title?: string;
   status?: ReactNode;
+  onToggleSidebar?(): void;
+  sidebarExpanded?: boolean;
+  sidebarControls?: string;
+  onNewMessage?(): void;
 }) {
   const macos = (platform ?? detectPlatform()) === "macos";
   return (
@@ -574,7 +589,7 @@ export function AppTitlebar({
           aria-label={isComposer ? "Close composer" : "Close window"}
           title={isComposer ? "Close composer" : "Close window"}
           onClick={onClose}
-        />
+        ><RiCloseLine size={10} aria-hidden /></button>
         <button
           className="traffic-light traffic-light-minimize"
           aria-label="Minimize window"
@@ -583,7 +598,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        />
+        ><RiSubtractLine size={10} aria-hidden /></button>
         <button
           className="traffic-light traffic-light-maximize"
           aria-label="Maximize window"
@@ -592,10 +607,28 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        />
+        ><RiAddLine size={10} aria-hidden /></button>
+      </div>}
+      {!isComposer && (onToggleSidebar || onNewMessage) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
+        {onToggleSidebar && <button
+          type="button"
+          data-action="toggle-sidebar"
+          aria-label="Toggle conversation list"
+          title="Toggle conversation list"
+          aria-expanded={sidebarExpanded}
+          aria-controls={sidebarControls}
+          onClick={onToggleSidebar}
+        ><RiLayoutLeftLine size={16} aria-hidden /></button>}
+        {onNewMessage && <button
+          type="button"
+          data-action="new-message"
+          aria-label="New conversation"
+          title="New conversation"
+          onClick={onNewMessage}
+        ><RiChatNewLine size={16} aria-hidden /></button>}
       </div>}
       <span className="titlebar-product" aria-hidden>
-        ◈
+        <img src={logoUrl} alt="" draggable={false} />
       </span>
       <strong className="titlebar-wordmark" data-tauri-drag-region>
         {isComposer ? (
@@ -619,14 +652,14 @@ export function AppTitlebar({
               title="Minimize window"
               onClick={onMinimize}
             >
-              <Minus size={10} aria-hidden />
+              <RiSubtractLine size={10} aria-hidden />
             </button>
             <button
               aria-label="Maximize window"
               title="Maximize window"
               onClick={onMaximize}
             >
-              <Square size={10} aria-hidden />
+              <RiAddLine size={10} aria-hidden />
             </button>
           </>
         )}
@@ -636,7 +669,7 @@ export function AppTitlebar({
           onClick={onClose}
           className="close-button"
         >
-          <X size={10} aria-hidden />
+          <RiCloseLine size={10} aria-hidden />
         </button>
       </div>}
     </header>
@@ -1097,9 +1130,6 @@ export function Panel({
 }) {
   return (
     <aside id="desktop-rail" aria-label="Navigation rail">
-      <span className="rail-mark" aria-hidden>
-        ◈
-      </span>
       <nav aria-label="Main navigation">
         <button
           data-rail-item="conversations"
