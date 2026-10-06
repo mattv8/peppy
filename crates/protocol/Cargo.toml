@@ -6,12 +6,12 @@ publish = false
 default-run = "generate-contracts"
 
 [dependencies]
-base64 = "0.22"
-peppy-domain = { path = "../domain", version = "0.1.0" }
+base64.workspace = true
+peppy-domain.workspace = true
 schemars = { workspace = true, features = ["uuid1"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 

@@ -7,16 +7,16 @@ publish = false
 license = "MPL-2.0"
 
 [dependencies]
-base64 = "=0.22.1"
-libsodium-rs = "=0.2.5"
-peppy-client-core = { path = "../client-core", version = "0.1.0" }
-peppy-crypto = { path = "../crypto", version = "0.1.0" }
-peppy-hosted-api = { path = "../hosted-api", version = "0.1.0" }
-peppy-protocol = { path = "../protocol", version = "0.1.0" }
+base64.workspace = true
+libsodium-rs.workspace = true
+peppy-client-core.workspace = true
+peppy-crypto.workspace = true
+peppy-hosted-api.workspace = true
+peppy-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2.workspace = true
 thiserror.workspace = true
-url = "2"
+url.workspace = true
 uuid.workspace = true
-zeroize = "=1.9.0"
+zeroize.workspace = true

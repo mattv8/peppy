@@ -1,0 +1,20 @@
+{
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/target": true,
+    "**/dist": true,
+    "**/.build": true,
+    "build": true,
+    "apps/**/build": true,
+    "packages/**/build": true,
+    "**/.gradle": true,
+    "**/.kotlin": true,
+    "**/.pytest_cache": true,
+    "**/__pycache__": true,
+    ".opencode": true,
+    ".openchamber": true,
+    ".playwright-mcp": true,
+    ".superpowers": true,
+    "**/.DS_Store": true
+  }
+}

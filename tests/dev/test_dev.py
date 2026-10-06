@@ -380,12 +380,12 @@ class DevScriptTests(unittest.TestCase):
                 holder.wait(timeout=2)
 
     def test_development_image_preserves_rustup_path_and_numeric_user(self):
-        image = (ROOT / "docker/development.Dockerfile").read_text()
+        image = (ROOT / "infra/docker/development.Dockerfile").read_text()
         self.assertIn("/usr/local/cargo/bin", image)
         self.assertIn("USER ${DEV_UID}:${DEV_GID}", image)
         self.assertIn("getent group", image)
 
     def test_development_image_warms_corepack_as_runtime_user(self):
-        image = (ROOT / "docker/development.Dockerfile").read_text()
+        image = (ROOT / "infra/docker/development.Dockerfile").read_text()
         self.assertGreater(image.rfind('chown -R "${DEV_UID}:${DEV_GID}" /home/developer'), image.find("corepack prepare"))
         self.assertGreater(image.find("RUN pnpm --version"), image.find("USER ${DEV_UID}:${DEV_GID}"))

@@ -345,7 +345,7 @@ jobs:
     with:
       image: hub.docker.visnovsky.us/library/peppy-server
       context: .
-      dockerfile: docker/server.Dockerfile
+      dockerfile: infra/docker/server.Dockerfile
       tag: staging
       environment: staging
       sha: ${{ github.sha }}
@@ -357,7 +357,7 @@ jobs:
     with:
       image: hub.docker.visnovsky.us/library/peppy-push-relay
       context: .
-      dockerfile: docker/push-relay.Dockerfile
+      dockerfile: infra/docker/push-relay.Dockerfile
       tag: staging
       environment: staging
       sha: ${{ github.sha }}
@@ -369,7 +369,7 @@ jobs:
     with:
       image: hub.docker.visnovsky.us/library/peppy-server
       context: .
-      dockerfile: docker/server.Dockerfile
+      dockerfile: infra/docker/server.Dockerfile
       tag: edge
       environment: production
       sha: ${{ github.sha }}
@@ -381,7 +381,7 @@ jobs:
     with:
       image: hub.docker.visnovsky.us/library/peppy-push-relay
       context: .
-      dockerfile: docker/push-relay.Dockerfile
+      dockerfile: infra/docker/push-relay.Dockerfile
       tag: edge
       environment: production
       sha: ${{ github.sha }}

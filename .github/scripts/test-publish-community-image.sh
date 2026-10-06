@@ -31,7 +31,7 @@ MOCK
 chmod +x "$root/bin/docker" "$root/bin/cosign"
 reset_case() { : > "$root/log"; : > "$root/output"; rm -f "$root/build_state"; }
 run_publisher() {
-  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=docker/server.Dockerfile TAG=staging SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
+  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG=staging SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
 }
 assert_no_mutation() {
   if grep -Eq 'docker buildx build|docker buildx imagetools create|cosign sign' "$root/log"; then echo 'unexpected registry mutation' >&2; cat "$root/log" >&2; exit 1; fi

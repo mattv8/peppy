@@ -41,7 +41,7 @@ services:
   migrate:
     build:
       context: .
-      dockerfile: docker/server.Dockerfile
+      dockerfile: infra/docker/server.Dockerfile
     command: ["migrate"]
     environment: &server-environment
       PEPPY_ENV: ${PEPPY_ENV:-development}
@@ -64,7 +64,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: docker/server.Dockerfile
+      dockerfile: infra/docker/server.Dockerfile
     environment:
       <<: *server-environment
       BIND_ADDR: 0.0.0.0:8080

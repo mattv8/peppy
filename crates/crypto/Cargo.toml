@@ -5,11 +5,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hmac = "=0.12.1"
-libsodium-rs = "=0.2.5"
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
-thiserror = "2"
+hmac.workspace = true
+libsodium-rs.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 unicode-normalization = "0.1"
-uuid = { version = "1", features = ["serde", "v4"] }
-zeroize = "1"
+uuid.workspace = true
+zeroize.workspace = true

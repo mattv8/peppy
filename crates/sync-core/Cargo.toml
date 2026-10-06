@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-peppy-domain = { path = "../domain", version = "0.1.0" }
+peppy-domain.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
