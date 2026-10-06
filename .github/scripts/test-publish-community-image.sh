@@ -7,17 +7,19 @@ cat > "$root/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 printf 'docker' >> "$LOG"; printf ' %q' "$@" >> "$LOG"; printf '\n' >> "$LOG"
 if [[ ${1:-} == buildx && ${2:-} == imagetools && ${3:-} == inspect ]]; then
-  if [[ ${4:-} != --format || ${5:-} != '{{.Manifest.Digest}}' || $# -ne 6 ]]; then
+  if [[ ${4:-} != --format || ${5:-} != '{{json .Manifest.Digest}}' || $# -ne 6 ]]; then
     printf 'unexpected inspect arguments:' >&2; printf ' %q' "$@" >&2; printf '\n' >&2; exit 64
   fi
   if [[ -f "$BUILD_STATE_FILE" ]]; then
-    echo sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; exit 0
+    echo '"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'; exit 0
   fi
   case ${INSPECT_MODE:-exists} in
-    exists) echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    exists) echo '"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' ;;
     missing) echo 'ERROR: image not found: manifest unknown' >&2; exit 1 ;;
     uncertain) echo 'ERROR: failed to do request: i/o timeout' >&2; exit 1 ;;
-    invalid) echo sha256:existing ;;
+    invalid) echo '"sha256:existing"' ;;
+    unquoted) echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    summary) printf 'Name:      %s\nMediaType: application/vnd.oci.image.index.v1+json\nDigest:    sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' "$6" ;;
   esac
   exit 0
 fi
@@ -38,7 +40,7 @@ assert_no_mutation() {
 }
 reset_case
 INSPECT_MODE=exists run_publisher
-grep -Fq 'docker buildx imagetools inspect --format \{\{.Manifest.Digest\}\}' "$root/log"
+grep -Fq 'docker buildx imagetools inspect --format \{\{json\ .Manifest.Digest\}\}' "$root/log"
 grep -Fq 'cosign verify --key env://COSIGN_PUBLIC_KEY hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
 grep -Fq 'docker buildx imagetools create --tag hub.docker.visnovsky.us/library/peppy-server:staging hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
 if grep -Fq 'docker buildx build' "$root/log"; then echo 'unexpected docker buildx build in log' >&2; exit 1; fi
@@ -57,6 +59,12 @@ assert_no_mutation
 reset_case
 if INSPECT_MODE=invalid run_publisher >/dev/null 2>"$root/stderr"; then echo 'invalid digest should fail' >&2; exit 1; fi
 assert_no_mutation; if grep -Fq 'cosign verify' "$root/log"; then echo 'unexpected cosign verify in log' >&2; exit 1; fi
+for mode in summary unquoted; do
+  reset_case
+  if INSPECT_MODE=$mode run_publisher >/dev/null 2>"$root/stderr"; then echo "$mode inspect output should fail" >&2; exit 1; fi
+  grep -Fq 'invalid digest' "$root/stderr"; assert_no_mutation
+  if grep -Fq 'cosign verify' "$root/log"; then echo "unexpected cosign verify after $mode output" >&2; exit 1; fi
+done
 reset_case
 if IMAGE=hub.docker.visnovsky.us/private-library/peppy-server INSPECT_MODE=exists run_publisher >/dev/null 2>"$root/stderr"; then echo 'private namespace should fail' >&2; exit 1; fi
 assert_no_mutation
