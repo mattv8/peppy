@@ -1,4 +1,5 @@
 # Compose v2.24+ overlay: use the public prebuilt image with the shared stack.
+# Pass root docker-compose.yml first with -f to resolve relative paths from the repository root.
 services:
   migrate:
     image: ${PEPPY_SERVER_IMAGE:?set an immutable public Harbor image digest}

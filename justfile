@@ -4,7 +4,7 @@ set dotenv-path := ".opencode/dev/android.env"
 set dotenv-required := false
 
 compose := "docker compose --env-file .env -f docker-compose.yml"
-dev_compose := "DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml"
+dev_compose := "DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml"
 dev_prepare := "mkdir -p .opencode/dev/artifacts && chmod 700 .opencode/dev/artifacts && for cache in cargo pnpm target; do docker volume create peppy-dev-${cache}-$(id -u)-$(id -g) >/dev/null; done"
 dev_prereq := "command -v docker >/dev/null || { echo 'docker is required for container development' >&2; exit 1; }; docker compose version >/dev/null || { echo 'docker compose is required for container development' >&2; exit 1; }; test -f .env || { echo '.env is required; run bash infra/dev/dev.sh dev-setup' >&2; exit 1; }"
 

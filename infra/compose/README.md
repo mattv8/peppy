@@ -49,8 +49,8 @@ Set `PEPPY_SERVER_IMAGE` to the release's immutable `@sha256:…` reference and
 configure the normal root Compose environment. With Docker Compose v2.24+:
 
 ```sh
-docker compose -f docker-compose.yml -f docker/compose.community.yml pull
-docker compose -f docker-compose.yml -f docker/compose.community.yml up -d --no-build
+docker compose -f docker-compose.yml -f infra/compose/compose.community.yml pull
+docker compose -f docker-compose.yml -f infra/compose/compose.community.yml up -d --no-build
 ```
 
 This overlay reuses the shared PostgreSQL, authenticated SeaweedFS, migration,

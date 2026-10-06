@@ -79,7 +79,7 @@ container_build() {
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
-    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/docker/compose.dev.yml" --profile android run --build --rm android run build
+    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run build
 }
 accept_licenses() {
     local status
