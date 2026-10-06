@@ -119,6 +119,9 @@ class ComposeDevelopmentTests(unittest.TestCase):
         migrate = config["services"]["migrate"]
         self.assertEqual(migrate["image"], server_image)
         self.assertNotIn("build", migrate)
+        self.assertEqual(migrate["restart"], "no")
+        for name in ("postgres", "seaweedfs", "api"):
+            self.assertEqual(config["services"][name].get("restart"), "unless-stopped", name)
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_caddy_overlay_mount_and_public_host(self):

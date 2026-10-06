@@ -1,11 +1,16 @@
 # Compose v2.24+ overlay: use the public prebuilt image with the shared stack.
 # Pass root docker-compose.yml first with -f to resolve relative paths from the repository root.
 services:
+  postgres:
+    restart: unless-stopped
+  seaweedfs:
+    restart: unless-stopped
   migrate:
     image: ${PEPPY_SERVER_IMAGE:?set an immutable public Harbor image digest}
     build: !reset null
   api:
     image: ${PEPPY_SERVER_IMAGE:?set an immutable public Harbor image digest}
     build: !reset null
+    restart: unless-stopped
     ports: !override
       - "${API_BIND_IP:-127.0.0.1}:${API_HOST_PORT:-7000}:8080"

@@ -11,9 +11,17 @@ inspect_error=$(mktemp)
 trap 'rm -f "$inspect_error"' EXIT
 immutable="$IMAGE:sha-$SHA"
 digest=
+digest_format='{{json .Manifest.Digest}}'
 
-valid_digest() {
-    [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]]
+# Buildx prints a human-readable summary for a bare nested template; its JSON
+# form is a quoted string that must contain exactly one sha256 digest.
+decode_digest() {
+    [[ "$1" =~ ^\"(sha256:[0-9a-f]{64})\"$ ]] && printf '%s' "${BASH_REMATCH[1]}"
+}
+
+report_invalid_digest() {
+    echo "Registry returned an invalid digest for $immutable" >&2
+    exit 1
 }
 
 report_inspect_error() {
@@ -22,11 +30,8 @@ report_inspect_error() {
     echo >&2
 }
 
-if digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$immutable" 2>"$inspect_error"); then
-    if ! valid_digest "$digest"; then
-        echo "Registry returned an invalid digest for $immutable" >&2
-        exit 1
-    fi
+if inspected=$(docker buildx imagetools inspect --format "$digest_format" "$immutable" 2>"$inspect_error"); then
+    digest=$(decode_digest "$inspected") || report_invalid_digest
     # An immutable SHA tag may only be promoted after its existing signature
     # verifies; never rebuild or overwrite it during staging/promotion/stable.
     cosign verify --key env://COSIGN_PUBLIC_KEY "$IMAGE@$digest" >/dev/null
@@ -40,11 +45,8 @@ else
         --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
         --label "org.opencontainers.image.revision=$SHA" \
         --tag "$immutable" "$CONTEXT"
-    digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$immutable")
-    if ! valid_digest "$digest"; then
-        echo "Registry returned an invalid digest for $immutable" >&2
-        exit 1
-    fi
+    inspected=$(docker buildx imagetools inspect --format "$digest_format" "$immutable")
+    digest=$(decode_digest "$inspected") || report_invalid_digest
     cosign sign --yes --key env://COSIGN_PRIVATE_KEY "$IMAGE@$digest"
 fi
 
