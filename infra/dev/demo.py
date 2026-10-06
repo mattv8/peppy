@@ -316,7 +316,7 @@ def run_host_demo() -> None:
     values = synthetic_values(port)
     env_file = private_file(run / "demo.env", "".join(f"{key}={value}\n" for key, value in values.items()))
     project = "peppy-demo-" + uuid.uuid4().hex[:12]
-    compose = ["docker", "compose", "--project-name", project, "--env-file", str(env_file), "-f", "docker-compose.yml", "-f", "docker/compose.dev.yml"]
+    compose = ["docker", "compose", "--project-name", project, "--env-file", str(env_file), "-f", "docker-compose.yml", "-f", "infra/compose/compose.dev.yml"]
     environment = sanitized_environment(os.environ, values)
     environment.update({"DEV_UID": str(os.getuid()), "DEV_GID": str(os.getgid()), "PEPPY_DEMO_RUN": "/artifacts/" + run.name, "PEPPY_SIMULATOR_PASSPHRASE": secrets.token_urlsafe(32)})
     def interrupted(_signum, _frame):

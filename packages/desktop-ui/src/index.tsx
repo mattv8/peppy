@@ -540,7 +540,7 @@ export function detectPlatform(): "macos" | "windows" | "linux" {
   return /Mac/.test(source) ? "macos" : /Win/.test(source) ? "windows" : "linux";
 }
 
-const logoUrl = new URL("../../../public/peppy-logo-coral.svg", import.meta.url).href;
+const logoUrl = new URL("./assets/peppy-logo-coral.svg", import.meta.url).href;
 
 export function AppTitlebar({
   onMinimize,

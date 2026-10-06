@@ -29,9 +29,9 @@ ios:
   - 'packages/mobile-design/**'
 
 server:
-  - 'docker/**'
   - 'docker-compose*.yml'
   - '.dockerignore'
+  - 'infra/docker/**'
   - 'infra/compose/**'
 
 build:
@@ -62,9 +62,9 @@ unclassified:
   - '!apps/android/**'
   - '!infra/compose/verify-android-native.sh'
   - '!apps/ios/**'
-  - '!docker/**'
   - '!docker-compose*.yml'
   - '!.dockerignore'
+  - '!infra/docker/**'
   - '!infra/compose/**'
   - '!infra/build/**'
   - '!.github/**'

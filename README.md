@@ -129,7 +129,7 @@ export PUBLIC_ATTACHMENT_URL=http://127.0.0.1:18080
 docker compose --env-file .env -f docker-compose.yml up
 ```
 
-For a public TLS experiment, set `PUBLIC_HOST` and add `-f docker-compose.caddy.yml` to the Compose command. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
+For a public TLS experiment, set `PUBLIC_HOST` and add `-f infra/compose/compose.caddy.yml` to the Compose command. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
 
 ## Develop and contribute
 

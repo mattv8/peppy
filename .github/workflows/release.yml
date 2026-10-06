@@ -140,7 +140,7 @@ jobs:
     with:
       image: hub.docker.visnovsky.us/library/peppy-server
       context: .
-      dockerfile: docker/server.Dockerfile
+      dockerfile: infra/docker/server.Dockerfile
       tag: ${{ needs.prepare.outputs.version }}
       environment: production
       sha: ${{ needs.prepare.outputs.sha }}
@@ -152,7 +152,7 @@ jobs:
     with:
       image: hub.docker.visnovsky.us/library/peppy-push-relay
       context: .
-      dockerfile: docker/push-relay.Dockerfile
+      dockerfile: infra/docker/push-relay.Dockerfile
       tag: ${{ needs.prepare.outputs.version }}
       environment: production
       sha: ${{ needs.prepare.outputs.sha }}

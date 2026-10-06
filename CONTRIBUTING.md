@@ -37,8 +37,8 @@ The API listens on `127.0.0.1:7000` by default; `API_HOST_PORT` changes that hos
 `just dev-up`, `just dev-build`, and `just dev-test` create the private artifact directory and the externally named, UID/GID-keyed Docker cache volumes before use. The volumes persist across container removal. After `just dev-up`, you can invoke the container PATH helper directly while the `dev` service is running:
 
 ```sh
-DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec dev run build server
-DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec dev run test rust
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run build server
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run test rust
 ```
 
 The running `dev` service runs a container-local copy of the API binary, independent of helper rebuilds. Helper `exec dev run build server` commands rebuild Cargo output but do not replace the serving binary; restart with `just dev-down` followed by `just dev-up` to apply source changes, which reruns pending migrations without deleting data. Source changes do not reload the running API without an explicit restart.
@@ -46,20 +46,20 @@ The running `dev` service runs a container-local copy of the API binary, indepen
 `just dev-build` and `just dev-test` use one-off `compose run --rm --no-deps dev run ...` commands and work with the `dev` service stopped. They use the last-built image (rebuild the image by running `just dev-up`) and create fresh workspaces with a shared Cargo cache. They do not publish a service port or start PostgreSQL and SeaweedFS. To override `PEPPY_WORKSPACE_LOCK_TIMEOUT` in a one-off command, pass it through Compose:
 
 ```sh
-DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml run --rm --no-deps -e PEPPY_WORKSPACE_LOCK_TIMEOUT=1800 dev run build server
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml run --rm --no-deps -e PEPPY_WORKSPACE_LOCK_TIMEOUT=1800 dev run build server
 ```
 
 Or with direct `exec`:
 
 ```sh
-DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec -e PEPPY_WORKSPACE_LOCK_TIMEOUT=1800 dev run build server
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec -e PEPPY_WORKSPACE_LOCK_TIMEOUT=1800 dev run build server
 ```
 
 Queued container `run` commands, including demo and development tests, share a target-volume lock. `PEPPY_WORKSPACE_LOCK_TIMEOUT` defaults to `600` seconds and accepts at most `86400`. A cold build or stalled migration holds the lock through the 1800-second startup allowance; startup itself can fail its 600-second lock timeout if another helper holds the shared lock, and queued helpers may also time out before startup completes. A timeout does not clear or reset any cache or user data. If `--wait` times out, containers remain running; inspect logs and service status before assuming startup failed:
 
 ```sh
-DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml logs dev
-DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml ps
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml logs dev
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml ps
 ```
 
 Retry after startup completes, or override the timeout via `-e PEPPY_WORKSPACE_LOCK_TIMEOUT=<seconds>` in `run` or `exec` commands (see one-off build/test examples above).
@@ -69,7 +69,7 @@ Retry after startup completes, or override the timeout via `-e PEPPY_WORKSPACE_L
 | Surface | Prerequisites | Commands |
 | --- | --- | --- |
 | Server Rust checks | Bash, Docker Compose, Python 3, just | `just dev-build`, `just dev-test` |
-| Web PATH-helper checks | Running `dev` service | `docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec dev run build web`; `docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec dev run test web` |
+| Web PATH-helper checks | Running `dev` service | `docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run build web`; `docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run test web` |
 | Native macOS desktop | Node from `.node-version`, pnpm 12.8.1, Rust from `rust-toolchain.toml` | `just desktop-dev`, `just desktop-bundle`, `just desktop-run`, `just desktop-open` |
 | Native Windows desktop from WSL | Current NTFS checkout plus native Windows Node, pnpm, Rust, MSVC/Windows SDK, WebView2, and native Perl | `just desktop-dev`, `just desktop-bundle`, `just desktop-run`, `just desktop-open` |
 | Android builder | Docker Compose; explicit SDK license approval in shell environment or `.opencode/dev/android.env`; optional linux/amd64 image on Apple Silicon may run slowly under emulation | `just android-build` |
@@ -142,6 +142,12 @@ just audit-secrets
 Use `just integration-test` for Compose-backed persistence coverage. `just audit-dependencies` runs `cargo deny check licenses bans sources`, `cargo deny check advisories`, and validates upstream audit coverage for vendored crates via `infra/audit/check-vendored.py`. The vendored audit script invokes `cargo audit --deny warnings --file <lock>`, which fails on vulnerabilities, unmaintained packages, unsound packages, and yanked packages. Ensure `cargo-audit` version 0.22.2 is installed (`cargo install cargo-audit --version 0.22.2 --locked`); `just audit-dependencies` requires it. `just audit-secrets` uses `gitleaks` against current source, including untracked source while excluding ignored local credentials. Generated contracts cover envelope/domain schemas and UniFFI bindings, not every REST adapter. Route changes need matching client changes and real-server integration checks.
 
 Run final checks with `--locked`. Do not hand-edit `Cargo.lock`; only Cargo may resolve it. The root Cargo manifest and lockfile are shared integration files, so do not regenerate the root lockfile concurrently with another package change. Document verification precisely: name the command and platform, and mark unrun hardware, carrier, simulator, or native click-through steps. Keep reusable instructions in tracked documentation rather than session scratch files.
+
+## Dependency management
+
+Declare shared JavaScript versions in the `catalog` in `pnpm-workspace.yaml` and use `catalog:` in package dependency declarations. Keep package-specific dependencies in their owning manifest and retain the root `pnpm-lock.yaml`. Catalog updates to React and react-dom change peer contracts; verify that `packages/desktop-ui/package.json` peer ranges remain compatible after catalog updates.
+
+Declare shared Rust versions and paths in the root `[workspace.dependencies]` and inherit them with `workspace = true`. Keep package and target-specific feature flags local. The excluded Tauri workspace in `apps/desktop/src-tauri/` retains its separate manifest and `Cargo.lock`; Android and iOS retain their native dependency files. Shared Rust pins affect both the public-workspace consumers and the separate Tauri workspace and private peppy-platform repository; verify and refresh their lockfiles when core workspace dependency versions change.
 
 ## Security and recovery limits
 
