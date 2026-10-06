@@ -10,6 +10,8 @@ import {
   RecipientPanel,
   RecipientPicker,
   ResizeHandle,
+  StatusPopover,
+  ConnectionDot,
   PairPhone,
   pairingQrPayload,
 } from "./index";
@@ -17,7 +19,122 @@ import {
 const people = [{ id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 }];
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("StatusPopover", () => {
+  it("opens after pointer entry and closes after pointer departure", () => {
+    vi.useFakeTimers();
+    render(<StatusPopover tone="warning" summary="Connection: offline"><p>Status detail</p></StatusPopover>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: offline" });
+    fireEvent.pointerEnter(trigger);
+    act(() => vi.advanceTimersByTime(120));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.pointerLeave(trigger);
+    act(() => vi.advanceTimersByTime(200));
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opens on focus, pins on click, and dismisses on Escape without stale reopening", () => {
+    render(<StatusPopover tone="error" summary="Connection: unavailable"><p>Status detail</p></StatusPopover>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: unavailable" });
+    act(() => trigger.focus());
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(trigger);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("reopens when focus re-enters after Escape dismissal", () => {
+    render(<><StatusPopover tone="error" summary="Connection: unavailable"><p>Status detail</p></StatusPopover><button type="button">Elsewhere</button></>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: unavailable" });
+    fireEvent.focus(trigger);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    fireEvent.focus(screen.getByRole("button", { name: "Elsewhere" }));
+    fireEvent.focus(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("retains a click-pinned card after its scheduled hover close elapses", () => {
+    vi.useFakeTimers();
+    render(<StatusPopover tone="neutral" summary="Connection: offline"><p>Status detail</p></StatusPopover>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: offline" });
+    fireEvent.pointerEnter(trigger);
+    act(() => vi.advanceTimersByTime(120));
+    fireEvent.pointerLeave(trigger);
+    fireEvent.click(trigger);
+    act(() => vi.advanceTimersByTime(200));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("pins open after dismissing a pending hover open", () => {
+    vi.useFakeTimers();
+    render(<StatusPopover tone="neutral" summary="Connection: offline"><p>Status detail</p></StatusPopover>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: offline" });
+    fireEvent.pointerEnter(trigger);
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.click(trigger);
+    act(() => vi.advanceTimersByTime(120));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps the card open while crossing from the trigger and dismisses pinned state outside", () => {
+    vi.useFakeTimers();
+    render(<StatusPopover tone="neutral" summary="Connection: offline"><p>Status detail</p></StatusPopover>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: offline" });
+    const wrapper = trigger.closest("[data-status-popover]")!;
+    fireEvent.pointerEnter(wrapper);
+    act(() => vi.advanceTimersByTime(120));
+    fireEvent.click(trigger);
+    fireEvent.pointerLeave(trigger, { relatedTarget: document.querySelector("[data-status-panel]") });
+    act(() => vi.advanceTimersByTime(200));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.pointerDown(document.body);
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("unpins on a second click and closes on blur outside", () => {
+    render(<><StatusPopover tone="neutral" summary="Connection: offline"><p>Status detail</p></StatusPopover><button type="button">Elsewhere</button></>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: offline" });
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    act(() => trigger.focus());
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.blur(trigger, { relatedTarget: screen.getByRole("button", { name: "Elsewhere" }) });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("cancels a pending hover open during unmount", () => {
+    vi.useFakeTimers();
+    const { unmount } = render(<StatusPopover tone="neutral" summary="Connection: offline"><p>Status detail</p></StatusPopover>);
+    fireEvent.pointerEnter(screen.getByRole("button", { name: "Status: Connection: offline" }));
+    unmount();
+    expect(() => act(() => vi.advanceTimersByTime(120))).not.toThrow();
+  });
+
+  it("keeps accessible details mounted and binds generic tone without connection selectors", () => {
+    render(<StatusPopover tone="ok" summary="Connection: connected"><p>Status detail</p></StatusPopover>);
+    const trigger = screen.getByRole("button", { name: "Status: Connection: connected" });
+    const panel = document.querySelector("[data-status-panel]");
+    expect(panel).toHaveAttribute("id", trigger.getAttribute("aria-controls"));
+    expect(panel).toHaveAttribute("hidden");
+    expect(trigger).toHaveAttribute("data-status-tone", "ok");
+    expect(trigger).not.toHaveAttribute("data-connection-state");
+  });
+});
+
+describe("ConnectionDot", () => {
+  it("uses the supplied accessible label verbatim and exposes its state", () => {
+    render(<ConnectionDot state="missing-native-host" label="Connection: Native host unavailable" />);
+    const dot = screen.getByRole("status", { name: "Connection: Native host unavailable" });
+    expect(dot).toHaveAttribute("title", "Connection: Native host unavailable");
+    expect(dot).toHaveAttribute("data-connection-state", "missing-native-host");
+  });
 });
 
 function renderRecipientPanel(props: Partial<ComponentProps<typeof RecipientPanel>> = {}, withLayer = false) {

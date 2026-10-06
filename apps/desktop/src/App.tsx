@@ -15,6 +15,7 @@ import {
   CheckCircle,
   Clock,
   Composer,
+  ConnectionDot,
   ContactAvatar,
   ConversationList,
   ExternalLink,
@@ -62,6 +63,7 @@ import { NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
+import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
 
 /**
  * Display-only names for phone addresses. Stored conversation names, addresses and draft
@@ -110,27 +112,6 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   unknown: "Unknown delivery state — not retried",
 };
 
-const CONNECTION_STATE_LABEL: Record<
-  DesktopSnapshot["connection"]["state"],
-  string
-> = {
-  connected: "Connected",
-  offline: "Offline",
-  "missing-native-host": "Native host unavailable",
-  error: "Connection error",
-};
-
-/** Known native connection codes; unknown codes are shown verbatim (they are static identifiers). */
-const CONNECTION_CODE_LABEL: Record<string, string> = {
-  "server-required": "configure a server URL",
-  "credentials-required": "import device credentials",
-  connecting: "connecting…",
-  revoked: "this device was revoked; local data is kept",
-  "outbox-rejected":
-    "the server rejected queued messages; they stay queued locally",
-  "live-timeout": "live connection timed out; reconnecting",
-};
-
 const FALLBACK_ERROR =
   "The native operation failed. Your edits remain in this window.";
 const COMPOSER_MIN_HEIGHT = 96;
@@ -159,12 +140,6 @@ const errorCode = (error: unknown): string | undefined =>
   typeof error.code === "string"
     ? error.code
     : undefined;
-
-function connectionText(connection: DesktopSnapshot["connection"]): string {
-  const state = CONNECTION_STATE_LABEL[connection.state];
-  if (!connection.errorCode || connection.errorCode === connection.state) return state;
-  return `${state} — ${CONNECTION_CODE_LABEL[connection.errorCode] ?? connection.errorCode}`;
-}
 
 function expiryText(seconds: number): string {
   if (seconds <= 0)
@@ -1058,34 +1033,36 @@ function SettingsView({
   );
 }
 
-function TitlebarStatus({
+function StatusDetails({
   connection,
   encryption,
 }: {
-  connection: DesktopSnapshot["connection"];
-  encryption: DesktopSnapshot["encryption"]["state"];
+  connection?: DesktopSnapshot["connection"];
+  encryption?: DesktopSnapshot["encryption"]["state"];
 }) {
-  const [icon, text] =
-    encryption === "unlocked"
-      ? [<LockOpen size={12} aria-hidden />, "Device sync encrypted"]
-      : encryption === "mismatch"
-        ? [<LockKeyhole size={12} aria-hidden />, "Device sync key mismatch"]
-        : [<Lock size={12} aria-hidden />, "Device sync not unlocked"];
+  if (!connection || !encryption)
+    return <div className="status-details" data-status-details><div className="status-details-row">Loading status…</div></div>;
+  const text = syncStatusText(encryption);
+  const icon = encryption === "unlocked"
+    ? <LockOpen size={14} aria-hidden />
+    : encryption === "mismatch"
+      ? <LockKeyhole size={14} aria-hidden />
+      : <Lock size={14} aria-hidden />;
   const label = connectionText(connection);
   return (
-    <>
-      <span className="titlebar-pill" data-disclosure="sync-state" data-sync-state={encryption} role="status" aria-label={text} title={text}>
-        {icon}<span className="titlebar-pill-label">{text}</span>
-      </span>
-      <span className="titlebar-pill" data-disclosure="carrier-sms" role="status" aria-label="Carrier SMS/MMS not end-to-end encrypted" title="Carrier SMS/MMS not end-to-end encrypted">
-        <ShieldAlert size={12} aria-hidden />
-        <span className="titlebar-pill-label">Carrier SMS/MMS not end-to-end encrypted</span>
-      </span>
-      <span id="connection-status" className="titlebar-pill" role="status" data-connection-state={connection.state} data-error-code={connection.errorCode} aria-label={`Connection: ${label}`} title={label}>
+    <div className="status-details" data-status-details>
+      <div className="status-details-row" data-disclosure="sync-state" data-sync-state={encryption} title={text}>
+        {icon}<span>{text}</span>
+      </div>
+      <div className="status-details-row" data-disclosure="carrier-sms" title="Carrier SMS/MMS not end-to-end encrypted">
+        <ShieldAlert size={14} aria-hidden />
+        <span>Carrier SMS/MMS not end-to-end encrypted</span>
+      </div>
+      <div id="connection-status" className="status-details-row" data-connection-state={connection.state} data-error-code={connection.errorCode} title={label}>
         <span className="connection-dot" aria-hidden />
-        <span className="titlebar-pill-label">{label}</span>
-      </span>
-    </>
+        <span>{label}</span>
+      </div>
+    </div>
   );
 }
 
@@ -1846,17 +1823,8 @@ export function App() {
     })),
   ];
 
-  if (loading)
-    return (
-      <main
-        ref={mainRef}
-        id="desktop-shell"
-        aria-busy="true"
-        data-platform={platform}
-      >
-        Loading messaging state…
-      </main>
-    );
+  if (loading && composerConversation)
+    return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
 
   const setupCode = snapshot?.connection.errorCode;
   const canUnlock =
@@ -1999,6 +1967,20 @@ export function App() {
       onScroll={onMessageScroll}
     />
   );
+  const panelStatus = snapshot
+    ? {
+        tone: statusTone(snapshot.connection, snapshot.encryption.state),
+        summary: statusSummary(snapshot.connection, snapshot.encryption.state),
+        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} />,
+      }
+    : {
+        tone: "neutral" as const,
+        summary: "Loading status",
+        details: <StatusDetails />,
+      };
+  const composerConnectionDot = snapshot
+    ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />
+    : null;
   if (composerConversation) {
     return (
       <main
@@ -2018,12 +2000,12 @@ export function App() {
         >
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
-            status={snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}
+            status={composerConnectionDot}
             onMinimize={() => {}} onMaximize={() => {}} onClose={handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
-            <span className="head-panel-status">{snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}</span>
+            <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}>−</button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} aria-hidden /></button>
           </header>}
@@ -2048,14 +2030,13 @@ export function App() {
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
       inert={lifecyclePending ? true : undefined}
-      aria-busy={lifecyclePending ? "true" : undefined}
+      aria-busy={loading || lifecyclePending ? "true" : undefined}
     >
       <AppTitlebar
         onMinimize={() => void bridge.window("minimize")}
         onMaximize={() => void bridge.window("maximize")}
         onClose={() => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
-        status={snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
@@ -2070,13 +2051,13 @@ export function App() {
           }
           listCollapsed={listCollapsed}
           threadListId="thread-list"
-          connectionLabel={
-            snapshot ? connectionText(snapshot.connection) : "Loading"
-          }
-          connectionState={snapshot?.connection.state ?? "offline"}
+          status={panelStatus}
           notificationUnread={snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0}
           contactsPending={snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0}
         />
+        {loading ? (
+          <section id="desktop-loading-state">Loading messaging state…</section>
+        ) : <>
         <aside
           id="thread-list"
           aria-label="Thread list"
@@ -2273,6 +2254,7 @@ export function App() {
             </>
           )}
         </section>
+        </>}
       </div>
     </main>
   );

@@ -1,4 +1,4 @@
-import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
+import type { KeyboardEvent, PointerEvent, ReactElement, ReactNode } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   Check,
@@ -88,6 +88,104 @@ export type Attachment = {
   error?: string;
   previewUrl?: string;
 };
+
+export type StatusTone = "neutral" | "ok" | "warning" | "error";
+export type PanelStatus = { tone: StatusTone; summary: string; details: ReactNode };
+
+export function StatusPopover({ tone, summary, children }: { tone: StatusTone; summary: string; children?: ReactNode }): ReactElement {
+  const panelId = `status-panel-${useId()}`;
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressReopenRef = useRef(false);
+  const announcedSummaryRef = useRef(summary);
+  const [open, setOpen] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [announcedSummary, setAnnouncedSummary] = useState(summary);
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current !== null) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = null;
+  };
+  const dismiss = () => {
+    clearHoverTimer();
+    suppressReopenRef.current = true;
+    setPinned(false);
+    setOpen(false);
+  };
+  useEffect(() => () => clearHoverTimer(), []);
+  useEffect(() => {
+    if (!open && summary !== announcedSummaryRef.current) {
+      announcedSummaryRef.current = summary;
+      setAnnouncedSummary(summary);
+    }
+  }, [open, summary]);
+  useEffect(() => {
+    if (!open) return;
+    const onDocumentPointerDown = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof Node && !wrapperRef.current?.contains(event.target)) dismiss();
+    };
+    const onDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
+    };
+    document.addEventListener("pointerdown", onDocumentPointerDown);
+    document.addEventListener("keydown", onDocumentKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onDocumentPointerDown);
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    };
+  }, [open]);
+  const openAfterHoverDelay = () => {
+    clearHoverTimer();
+    suppressReopenRef.current = false;
+    hoverTimerRef.current = setTimeout(() => {
+      hoverTimerRef.current = null;
+      if (!suppressReopenRef.current) setOpen(true);
+    }, 120);
+  };
+  const closeAfterHoverDelay = () => {
+    if (pinned) return;
+    clearHoverTimer();
+    hoverTimerRef.current = setTimeout(() => {
+      hoverTimerRef.current = null;
+      if (!pinned) setOpen(false);
+    }, 200);
+  };
+  return <div
+    ref={wrapperRef}
+    data-status-popover
+    onPointerEnter={openAfterHoverDelay}
+    onPointerLeave={closeAfterHoverDelay}
+    onFocusCapture={(event) => {
+      if (event.relatedTarget instanceof Node && wrapperRef.current?.contains(event.relatedTarget)) return;
+      clearHoverTimer();
+      suppressReopenRef.current = false;
+      setOpen(true);
+    }}
+    onBlurCapture={(event) => {
+      if (pinned || (event.relatedTarget instanceof Node && wrapperRef.current?.contains(event.relatedTarget))) return;
+      dismiss();
+    }}
+  >
+    <button type="button" data-status-trigger data-status-tone={tone} aria-label={`Status: ${summary}`} aria-controls={panelId} aria-expanded={open} onClick={() => {
+      clearHoverTimer();
+      if (pinned) dismiss();
+      else {
+        suppressReopenRef.current = false;
+        setPinned(true);
+        setOpen(true);
+      }
+    }}>
+      <span className="connection-dot" aria-hidden />
+    </button>
+    <div id={panelId} data-status-panel role="region" aria-label="Status details" hidden={!open}>{children}</div>
+    <span data-status-announcement className="sr-only" role="status">{announcedSummary}</span>
+  </div>;
+}
+
+export function ConnectionDot({ state, label }: { state: string; label: string }): ReactElement {
+  return <span role="status" aria-label={label} title={label} data-connection-state={state}>
+    <span className="connection-dot" aria-hidden />
+  </span>;
+}
 
 export type RecipientChip = { id: string; label: string; avatarUrl?: string };
 /** A contact phone offered while typing; `id` is the phone address that becomes the recipient. */
@@ -1109,8 +1207,7 @@ export function Panel({
   children,
   activeView,
   onView,
-  connectionLabel,
-  connectionState,
+  status,
   onToggleList,
   listCollapsed,
   threadListId,
@@ -1120,8 +1217,7 @@ export function Panel({
   children?: ReactNode;
   activeView: "conversations" | "notifications" | "settings" | "contacts";
   onView(view: "conversations" | "notifications" | "settings" | "contacts"): void;
-  connectionLabel: string;
-  connectionState: string;
+  status?: PanelStatus;
   onToggleList?(): void;
   listCollapsed?: boolean;
   threadListId?: string;
@@ -1167,15 +1263,7 @@ export function Panel({
         </button>
       </nav>
       <div className="rail-spacer" />
-      <div
-        role="status"
-        aria-label={`Connection: ${connectionLabel}`}
-        className="rail-connection-dot"
-        data-connection-state={connectionState}
-        title={`Connection: ${connectionLabel}`}
-      >
-        <span className="connection-dot" aria-hidden />
-      </div>
+      {status && <StatusPopover tone={status.tone} summary={status.summary}>{status.details}</StatusPopover>}
       {children}
     </aside>
   );
