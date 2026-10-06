@@ -86,12 +86,15 @@ describe("setup landing routing", () => {
   };
   afterEach(() => localStorage.removeItem("peppy.setup.mode"));
 
-  it("opens a fresh server-required desktop on the hosted QR join", async () => {
+  it("offers a fresh server-required desktop's hosted pairing only after the existing-phone choice", async () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
     render(<App />);
     await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
     expect(screen.getByRole("combobox", { name: /server mode/i })).toHaveValue("hosted");
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalled());
+    const existingPhone = await screen.findByRole("button", { name: /already use peppy/i });
+    expect(bridge.join_start).not.toHaveBeenCalled();
+    fireEvent.click(existingPhone);
+    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
   });
 
   it("offers the self-hosted mode with URL input", async () => {
@@ -333,6 +336,16 @@ let lifecycleFinished: ((result: { id: string; ok: boolean }) => void) | undefin
 let lifecycleFinishedDispose: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+      clear: () => values.clear(),
+    },
+  });
   vi.restoreAllMocks();
   host = createHost();
   hint = undefined;
