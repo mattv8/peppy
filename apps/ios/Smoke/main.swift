@@ -6,7 +6,7 @@ let vaultID = UUID().uuidString
 let deviceID = UUID().uuidString
 let databaseURL = FileManager.default.temporaryDirectory
     .appendingPathComponent("peppy-native-smoke-\(UUID().uuidString).db")
-let material = try createSmokeVaultMaterial(vaultId: vaultID, passphrase: passphrase)
+let material = try createVaultMaterial(vaultId: vaultID, passphrase: passphrase)
 let config = NativeOpenConfig(
     databasePath: databaseURL.path,
     vaultId: vaultID,

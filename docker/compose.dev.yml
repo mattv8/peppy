@@ -1,4 +1,7 @@
 services:
+  api: !reset null
+  migrate: !reset null
+
   dev:
     image: peppy-dev:${DEV_UID:-1000}-${DEV_GID:-1000}
     build:
@@ -10,6 +13,7 @@ services:
     init: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    command: [run, serve]
     environment:
       PEPPY_ENV: ${PEPPY_ENV:-development}
       RUNNING_IN_CONTAINER: "1"
@@ -20,8 +24,23 @@ services:
       S3_BUCKET: ${S3_BUCKET:-peppy-private}
       PUBLIC_API_URL: ${PUBLIC_API_URL:?set in synthetic environment}
       PUBLIC_ATTACHMENT_URL: ${PUBLIC_ATTACHMENT_URL:?set in synthetic environment}
-      BIND_ADDR: ${BIND_ADDR:-127.0.0.1:8080}
+      BIND_ADDR: ${BIND_ADDR:-0.0.0.0:8080}
+      PEPPY_REPLAY_RETENTION_DAYS: ${PEPPY_REPLAY_RETENTION_DAYS:-30}
+      VAULT_ATTACHMENT_QUOTA_BYTES: ${VAULT_ATTACHMENT_QUOTA_BYTES:-536870912}
       PEPPY_SIMULATOR_PASSPHRASE: ${PEPPY_SIMULATOR_PASSPHRASE:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-7000}:8080"
+    healthcheck:
+      test: ["CMD", "/home/developer/.local/lib/peppy/peppy-server", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30m
     volumes:
       - ./:/source:ro
       - ./.opencode/dev/artifacts:/artifacts

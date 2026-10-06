@@ -65,11 +65,15 @@ fn allow(command: &str) -> String {
 fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let commands = declared_commands();
     let registered = include_str!("lib.rs");
-    let hosted_preview = include_str!("hosted_preview.rs");
+    let hosted = include_str!("hosted/mod.rs");
+    let join = include_str!("join.rs");
     for command in &commands {
         assert!(
             registered.contains(&format!("fn {command}("))
-                || hosted_preview.contains(&format!("fn {command}(")),
+                || [hosted, join].iter().any(|source| {
+                    source.contains(&format!("pub async fn {command}("))
+                        || source.contains(&format!("pub fn {command}("))
+                }),
             "{command} declared in the app manifest but not defined"
         );
     }
@@ -93,6 +97,15 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "set_start_at_login",
         "popout_conversation",
         "hide_head",
+        "hosted_account",
+        "hosted_sign_in",
+        "hosted_sign_out",
+        "hosted_open_billing",
+        "hosted_provision",
+        "join_start",
+        "join_status",
+        "join_cancel",
+        "join_confirm",
     ] {
         assert!(
             !composer.contains(&allow(main_only)),

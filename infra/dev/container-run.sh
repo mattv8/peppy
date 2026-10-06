@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: run build [server|web] | test [rust|web] | demo" >&2
+  echo "usage: run serve | build [server|web] | test [rust|web] | demo" >&2
   exit 64
 }
 
@@ -46,6 +46,19 @@ run_with_workspace_lock() {
 }
 
 case "${1:-}" in
+  serve)
+    run_with_workspace_lock
+    cargo build --locked -p peppy-server
+    target_dir=${CARGO_TARGET_DIR:-target}
+    if [[ "$target_dir" != /* ]]; then
+      target_dir="$PWD/$target_dir"
+    fi
+    runtime_dir="$HOME/.local/lib/peppy"
+    mkdir -p "$runtime_dir"
+    install -m 755 "$target_dir/debug/peppy-server" "$runtime_dir/peppy-server"
+    "$runtime_dir/peppy-server" migrate
+    exec 9>&-
+    exec "$runtime_dir/peppy-server" serve ;;
   demo)
     if [[ "${PEPPY_ISOLATED_DEMO:-}" != "1" ]]; then
       echo "run demo is restricted to dev-demo; use 'bash infra/dev/dev.sh dev-demo'" >&2

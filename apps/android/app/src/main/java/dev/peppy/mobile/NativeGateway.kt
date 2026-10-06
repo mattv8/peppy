@@ -55,7 +55,19 @@ data class GatewayStatus(
 
 /** Only produced when the database is open and the shared vault purpose keys are installed. */
 class GatewaySession(val client: NativeClient, val origin: String, val deviceId: String, internal val bearerToken: String)
-internal data class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String)
+/** Bearer credentials must not gain a generated `toString`, `copy`, or component API. */
+internal class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String) {
+    override fun toString() = "GatewayAccountCredential(redacted)"
+}
+
+/** Public sealed-store material exposed only after the vault's shared keys are ready. */
+internal class OwnerPairingLocalMaterial(
+    val origin: String,
+    val vaultId: String,
+    val deviceId: String,
+    val profileJson: String,
+    val headerJson: String,
+)
 
 /**
  * The one process-wide owner of the generated [NativeClient]. Rust remains the sole owner of
@@ -168,6 +180,22 @@ object NativeGateway {
     }
 
     /**
+     * The owner-pairing flow needs the exact unlocked local profile, not a fresh server profile.
+     * This deliberately returns no bearer, passphrase, purpose key, or database key.
+     */
+    internal fun ownerPairingLocalMaterial(context: Context): OwnerPairingLocalMaterial? {
+        open(context) ?: return null
+        return synchronized(lock) {
+            if (!sharedKeysReady) return null
+            val prefs = prefs(context)
+            val identity = identity(prefs) ?: return null
+            val profile = openString(prefs, P_PROFILE) ?: return null
+            val header = openString(prefs, P_HEADER) ?: return null
+            OwnerPairingLocalMaterial(identity.origin, identity.vaultId, identity.deviceId, profile, header)
+        }
+    }
+
+    /**
      * Archives a revoked enrollment before removing its active binding.  The archive is deliberately
      * private app storage: it prevents a new pairing from ever opening the old device database,
      * while retaining the ciphertext and its Keystore-wrapped key for support/recovery.
@@ -221,7 +249,7 @@ object NativeGateway {
     }
 
     /** Bounded file bytes → strict parse → authenticated `/v1/vault` binding → persistence. */
-    fun importCredential(context: Context, credentialBytes: ByteArray): ImportResult {
+    fun importCredential(context: Context, credentialBytes: ByteArray, beforeCommit: () -> Boolean = { true }): ImportResult {
         val credential = CredentialParser.parse(credentialBytes) ?: return ImportResult.INVALID_CREDENTIAL
         val response = try {
             GatewayHttp(credential.origin, credential.deviceToken).get("/v1/vault")
@@ -237,7 +265,7 @@ object NativeGateway {
             VaultCheck.NotGateway -> return ImportResult.NOT_A_GATEWAY
             VaultCheck.Mismatch -> return ImportResult.SERVER_REJECTED
         }
-        return persistVerified(context, credential, material)
+        return persistVerified(context, credential, material, beforeCommit)
     }
 
     internal sealed interface VaultCheck {
@@ -256,7 +284,7 @@ object NativeGateway {
                 vault.getString("device_id") != credential.deviceId ||
                 profile.getString("vault_id") != credential.vaultId -> VaultCheck.Mismatch
             epoch == null || profile.strictUInt("key_epoch") != epoch -> VaultCheck.Mismatch
-            vault.getString("role") != "gateway" -> VaultCheck.NotGateway
+            vault.getString("role") !in setOf("gateway", "owner") -> VaultCheck.NotGateway
             else -> {
                 val header = String(Base64.getMimeDecoder().decode(vault.getString("encrypted_vault_check_header")), Charsets.UTF_8)
                 JSONObject(header) // must itself be JSON; Rust parses it strictly at unlock.
@@ -274,8 +302,9 @@ object NativeGateway {
      * different binding is refused, and a re-import of the same binding never touches the
      * database key. A first import refuses if any database file or key record already exists.
      */
-    internal fun persistVerified(context: Context, credential: DeviceCredential, material: VaultMaterial): ImportResult =
+    internal fun persistVerified(context: Context, credential: DeviceCredential, material: VaultMaterial, beforeCommit: () -> Boolean = { true }): ImportResult =
         synchronized(lock) {
+            if (!beforeCommit()) return ImportResult.IDENTITY_MISMATCH
             val prefs = prefs(context)
             val requested = Identity(credential.origin, credential.vaultId, credential.deviceId)
             val existing = identity(prefs)

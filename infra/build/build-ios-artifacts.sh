@@ -76,16 +76,26 @@ dist="$root/dist/ios"
 rm -rf "$dist"
 mkdir -p "$dist"
 
+# Build settings for OAuth variables; empty values produce self-hosting-capable builds
+# with hosted sign-in unavailable.
+oauth_settings=(
+  "PEPPY_GOOGLE_IOS_CLIENT_ID=${PEPPY_GOOGLE_IOS_CLIENT_ID:-}"
+  "PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID=${PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID:-}"
+  "PEPPY_GOOGLE_REVERSED_CLIENT_ID=${PEPPY_GOOGLE_REVERSED_CLIENT_ID:-}"
+)
+
 xcodebuild -project apps/ios/PeppyMobile.xcodeproj -scheme PeppyMobile \
   -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath "$root/.build/ios-simulator" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
+  -derivedDataPath "$root/.build/ios-simulator" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO \
+  "${oauth_settings[@]}" build
 tar -C "$root/.build/ios-simulator/Build/Products/Release-iphonesimulator" \
   -czf "$dist/PeppyMobile-simulator.app.tar.gz" PeppyMobile.app
 
 xcodebuild -project apps/ios/PeppyMobile.xcodeproj -scheme PeppyMobile \
   -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
   -archivePath "$root/.build/PeppyMobile-unsigned-device.xcarchive" \
-  ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' archive
+  ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
+  "${oauth_settings[@]}" archive
 tar -C "$root/.build" -czf "$dist/PeppyMobile-unsigned-device.xcarchive.tar.gz" \
   PeppyMobile-unsigned-device.xcarchive
 

@@ -3800,13 +3800,15 @@ dependencies = [
  "objc",
  "peppy-client-core",
  "peppy-crypto",
- "peppy-hosted-onboarding",
+ "peppy-hosted-api",
+ "peppy-hosted-client",
  "peppy-protocol",
  "peppy-server",
  "reqwest 0.13.5",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tauri",
  "tauri-build",
@@ -3835,11 +3837,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "peppy-hosted-onboarding"
+name = "peppy-hosted-api"
 version = "0.1.0"
 dependencies = [
- "libsodium-rs",
+ "schemars 1.0.4",
+ "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "peppy-hosted-client"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "libsodium-rs",
+ "peppy-client-core",
+ "peppy-crypto",
+ "peppy-hosted-api",
+ "peppy-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.17",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -3853,6 +3876,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.17",
+ "uuid",
 ]
 
 [[package]]

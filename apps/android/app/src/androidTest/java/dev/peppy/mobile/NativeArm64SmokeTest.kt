@@ -14,7 +14,7 @@ import uniffi.peppy_mobile_bindings.NativeMmsSource
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.NativeNotificationCapture
 import uniffi.peppy_mobile_bindings.NativeNotificationCaptureOutcome
-import uniffi.peppy_mobile_bindings.createSmokeVaultMaterial
+import uniffi.peppy_mobile_bindings.createVaultMaterial
 import uniffi.peppy_mobile_bindings.openNativeClient
 import java.util.UUID
 
@@ -28,7 +28,7 @@ class NativeArm64SmokeTest {
         val device = UUID.randomUUID().toString()
         val database = context.noBackupFilesDir.resolve("mms-smoke-${UUID.randomUUID()}.sqlcipher")
         val config = NativeOpenConfig(database.absolutePath, vault, device, ByteArray(32) { 0x37 })
-        val material = createSmokeVaultMaterial(vault, phrase)
+        val material = createVaultMaterial(vault, phrase)
         val own = "+15550135000"
         val sender = "+15550135001"
         val peer = "+15550135002"
@@ -69,7 +69,7 @@ class NativeArm64SmokeTest {
         val vault = UUID.randomUUID().toString()
         val source = UUID.randomUUID().toString()
         val database = context.noBackupFilesDir.resolve("notification-smoke-${UUID.randomUUID()}.sqlcipher")
-        val material = createSmokeVaultMaterial(vault, phrase)
+        val material = createVaultMaterial(vault, phrase)
         val client = openNativeClient(NativeOpenConfig(database.absolutePath, vault, source, ByteArray(32) { 0x36 }))
         try {
             val input = NativeNotificationCapture("smoke-key", "first", "example.smoke", "Smoke", "Title", "Body", null, 42L, true)
@@ -102,7 +102,7 @@ class NativeArm64SmokeTest {
         val vaultId = UUID.randomUUID().toString()
         val deviceId = UUID.randomUUID().toString()
         val database = context.noBackupFilesDir.resolve("native-arm64-${UUID.randomUUID()}.sqlcipher")
-        val material = createSmokeVaultMaterial(vaultId, passphrase)
+        val material = createVaultMaterial(vaultId, passphrase)
         val config = NativeOpenConfig(database.absolutePath, vaultId, deviceId, ByteArray(32) { 0x35 })
 
         val wrongPassphrase = openNativeClient(config)

@@ -32,11 +32,11 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
     var debugDescription: String { description }
     var customMirror: Mirror { Mirror(self, children: ["origin": origin, "token": "<redacted>"]) }
 
-    func get(_ path: String, query: [URLQueryItem] = [], limit: Int, meter: inout RequestMeter) async throws -> [String: Any] {
+    func get(_ path: String, query: [URLQueryItem] = [], limit: Int, meter: inout RequestMeter) async throws -> sending [String: Any] {
         try await call("GET", path, query: query, body: nil, limit: limit, meter: &meter)
     }
 
-    func post(_ path: String, json: Data, limit: Int = maxSmallBytes, meter: inout RequestMeter) async throws -> [String: Any] {
+    func post(_ path: String, json: Data, limit: Int = maxSmallBytes, meter: inout RequestMeter) async throws -> sending [String: Any] {
         guard json.count <= Self.maxEnvelopeBytes else { throw ClientError.requestTooLarge(limit: Self.maxEnvelopeBytes) }
         return try await call("POST", path, query: [], body: json, limit: limit, meter: &meter)
     }
@@ -82,7 +82,7 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
 
     private func call(
         _ method: String, _ path: String, query: [URLQueryItem], body: Data?, limit: Int, meter: inout RequestMeter
-    ) async throws -> [String: Any] {
+    ) async throws -> sending [String: Any] {
         try Task.checkCancellation()
         try meter.spend()
         var headers = ["Authorization": "Bearer \(token)", "Accept": "application/json"]

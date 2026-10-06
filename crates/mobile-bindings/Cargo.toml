@@ -13,7 +13,9 @@ crate-type = ["lib", "cdylib", "staticlib"]
 peppy-client-core = { path = "../client-core", version = "0.1.0" }
 peppy-crypto = { path = "../crypto", version = "0.1.0" }
 peppy-protocol = { path = "../protocol", version = "0.1.0" }
-peppy-hosted-onboarding = { path = "../hosted-onboarding", version = "0.1.0" }
+peppy-hosted-api = { path = "../hosted-api", version = "0.1.0" }
+peppy-hosted-client = { path = "../hosted-client", version = "0.1.0" }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uniffi = "=0.32.2"
@@ -21,6 +23,8 @@ base64 = "=0.22.1"
 libsodium-rs = "=0.2.5"
 uuid.workspace = true
 zeroize = "=1.9.0"
+sha2 = "0.10"
+url = "2"
 
 [features]
 cli = ["uniffi/cli"]

@@ -4,7 +4,7 @@ Peppy is an in-progress developer foundation. Keep simulator evidence, native bu
 
 ## First run
 
-Use Bash, Docker with Compose, Python 3.11+, and `just`. Container-only server work does not require host Rust, Node, or pnpm.
+Use Bash, Docker with Compose (version ≥2.24.4), Python 3.11+, and `just`. Container-only server work does not require host Rust, Node, or pnpm.
 
 From WSL, keep the **current checkout** on a drive-letter NTFS path. Native Windows desktop actions reject ext4 and UNC paths. Install native Windows Node, pnpm, Rust, MSVC with the Windows SDK, and native Perl with `IPC::Cmd`; do not use Git/MSYS Perl. The desktop helper changes no global PATH or PowerShell profile.
 
@@ -18,6 +18,8 @@ just dev-down
 
 `dev-setup` creates a mode-`0600` `.env` with random synthetic local credentials only when `.env` is absent. It refuses a symlinked `.env` and preserves an existing file. It also installs or merges the tracked OpenChamber action template into ignored `.openchamber/project.json`, preserving existing local configuration. Run `just dev-actions` (or `bash infra/dev/dev.sh dev-actions`) to refresh actions without creating or changing `.env`. OpenChamber still asks you to trust shared commands; after refreshing, reopen or reselect the project if the actions do not appear. The action template and installer are `infra/dev/openchamber-project.json` and `infra/dev/install-actions.py`; use VS Code tasks from `.vscode/tasks.json`.
 
+`just dev-up` stops and removes obsolete `api` and `migrate` containers from the former development topology (without removing volumes), then merges the development overlay with Compose, builds the tooling image, starts PostgreSQL and SeaweedFS, and runs the `dev` service. The `dev` service synchronizes the source, builds `cargo build --locked -p peppy-server`, runs pending migrations against PostgreSQL, and serves the API published to `127.0.0.1:7000` (internal binding `0.0.0.0:8080`). It waits for PostgreSQL and SeaweedFS to be healthy before starting, with a cold-startup timeout of 1800 seconds; cold-build compilation may take several minutes. Build or migration failure exits nonzero and never serves. `just dev-down` stops and removes the `dev`, PostgreSQL, and SeaweedFS containers and cleans up obsolete `api` and `migrate` containers without removing any database or cache volumes. Run it before base-stack checks such as `just smoke-infra` or `just storage-contract`, which share this project and host port. Production deployments retain a separate small release image with independent `api` and `migrate` services.
+
 After first-run setup, OpenChamber and VS Code offer these five everyday shortcuts:
 
 | Shortcut | What it does |
@@ -28,18 +30,39 @@ After first-run setup, OpenChamber and VS Code offer these five everyday shortcu
 | iOS: Rebuild and open | macOS only: starts the backend, boots an iPhone simulator, rebuilds the Debug Rust library and iOS app, then installs and launches it. Requires full Xcode and an iOS 26+ simulator runtime. |
 | Dev: Stop backend | Stops backend containers while preserving data and caches; native apps and the emulator remain running. |
 
-The shortcuts require a running Docker daemon, installed native desktop tools, and a configured Android SDK/AVD where applicable. SDK license approval is always explicit. Granular `just` commands remain available, including `just dev-actions`, `just dev-setup`, `just dev-demo`, testing commands, and `just android-sms`; SMS is CLI-only. Retired editor actions are removed only when their original released command is unchanged, so customized actions are preserved. Reselect the project to review OpenChamber trust prompts after refreshing actions.
+The shortcuts require a running Docker daemon, installed native desktop tools, and a configured Android SDK/AVD where applicable. They do not reload a healthy backend; restart it to apply backend source changes. SDK license approval is always explicit. Granular `just` commands remain available, including `just dev-actions`, `just dev-setup`, `just dev-demo`, testing commands, and `just android-sms`; SMS is CLI-only. Retired editor actions are removed only when their original released command is unchanged, so customized actions are preserved. Reselect the project to review OpenChamber trust prompts after refreshing actions.
 
-The API listens on `127.0.0.1:7000`; PostgreSQL and SeaweedFS do not publish host ports. `just dev-down` removes containers without removing data or cache volumes. Run `bash infra/dev/dev.sh dev-demo` for an isolated synthetic gateway exercise. A successful run exercises private synthetic state, normal replay/sync of a new simulated message, and SQLCipher reopening. It is not carrier, keychain, password-dialog, store, or production evidence. The controller retains private synthetic credentials and logs under `.opencode/dev/artifacts/gateway-demo-*` for failure diagnosis; it does not retain the simulated vault passphrase on disk.
+The API listens on `127.0.0.1:7000` by default; `API_HOST_PORT` changes that host port, while normal backend `BIND_ADDR` remains `0.0.0.0:8080` internally. PostgreSQL and SeaweedFS do not publish host ports. Run `bash infra/dev/dev.sh dev-demo` for an isolated synthetic gateway exercise. A successful run exercises private synthetic state, normal replay/sync of a new simulated message, and SQLCipher reopening. It is not carrier, keychain, password-dialog, store, or production evidence. The controller retains private synthetic credentials and logs under `.opencode/dev/artifacts/gateway-demo-*` for failure diagnosis; it does not retain the simulated vault passphrase on disk.
 
-`just dev-up`, `just dev-build`, and `just dev-test` create the private artifact directory and the externally named, UID/GID-keyed Docker cache volumes before use. The volumes persist across container removal. After `just dev-up`, you can invoke the container PATH helper directly:
+`just dev-up`, `just dev-build`, and `just dev-test` create the private artifact directory and the externally named, UID/GID-keyed Docker cache volumes before use. The volumes persist across container removal. After `just dev-up`, you can invoke the container PATH helper directly while the `dev` service is running:
 
 ```sh
 DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec dev run build server
 DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec dev run test rust
 ```
 
-Queued container `run` commands, including demo and development tests, share a target-volume lock. `PEPPY_WORKSPACE_LOCK_TIMEOUT` defaults to `600` seconds and accepts at most `86400`. A timeout does not clear or reset any cache or user data.
+The running `dev` service runs a container-local copy of the API binary, independent of helper rebuilds. Helper `exec dev run build server` commands rebuild Cargo output but do not replace the serving binary; restart with `just dev-down` followed by `just dev-up` to apply source changes, which reruns pending migrations without deleting data. Source changes do not reload the running API without an explicit restart.
+
+`just dev-build` and `just dev-test` use one-off `compose run --rm --no-deps dev run ...` commands and work with the `dev` service stopped. They use the last-built image (rebuild the image by running `just dev-up`) and create fresh workspaces with a shared Cargo cache. They do not publish a service port or start PostgreSQL and SeaweedFS. To override `PEPPY_WORKSPACE_LOCK_TIMEOUT` in a one-off command, pass it through Compose:
+
+```sh
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml run --rm --no-deps -e PEPPY_WORKSPACE_LOCK_TIMEOUT=1800 dev run build server
+```
+
+Or with direct `exec`:
+
+```sh
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml exec -e PEPPY_WORKSPACE_LOCK_TIMEOUT=1800 dev run build server
+```
+
+Queued container `run` commands, including demo and development tests, share a target-volume lock. `PEPPY_WORKSPACE_LOCK_TIMEOUT` defaults to `600` seconds and accepts at most `86400`. A cold build or stalled migration holds the lock through the 1800-second startup allowance; startup itself can fail its 600-second lock timeout if another helper holds the shared lock, and queued helpers may also time out before startup completes. A timeout does not clear or reset any cache or user data. If `--wait` times out, containers remain running; inspect logs and service status before assuming startup failed:
+
+```sh
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml logs dev
+DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f docker/compose.dev.yml ps
+```
+
+Retry after startup completes, or override the timeout via `-e PEPPY_WORKSPACE_LOCK_TIMEOUT=<seconds>` in `run` or `exec` commands (see one-off build/test examples above).
 
 ## Choose a development surface
 

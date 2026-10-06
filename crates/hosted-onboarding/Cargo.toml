@@ -9,5 +9,5 @@ license = "MPL-2.0"
 [lib]
 
 [dependencies]
-libsodium-rs = "=0.2.5"
+peppy-crypto = { path = "../crypto", version = "0.1.0" }
 serde_json.workspace = true

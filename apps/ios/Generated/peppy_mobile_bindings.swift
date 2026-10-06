@@ -2168,6 +2168,480 @@ public func FfiConverterTypeNativeEnrollmentKey_lower(_ value: NativeEnrollmentK
 
 
 
+public protocol NativeHostedLoginAttemptProtocol: AnyObject, Sendable {
+    
+    func attemptId()  -> String
+    
+    func expiresInSeconds()  -> UInt32
+    
+    func nonce()  -> String
+    
+}
+open class NativeHostedLoginAttempt: NativeHostedLoginAttemptProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativehostedloginattempt(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativehostedloginattempt(handle, $0) }
+    }
+
+    
+
+    
+open func attemptId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_attempt_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func expiresInSeconds() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_expires_in_seconds(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func nonce() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_nonce(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHostedLoginAttempt: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeHostedLoginAttempt
+
+    public static func lift(_ handle: UInt64) throws -> NativeHostedLoginAttempt {
+        return NativeHostedLoginAttempt(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeHostedLoginAttempt) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedLoginAttempt {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeHostedLoginAttempt, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedLoginAttempt_lift(_ handle: UInt64) throws -> NativeHostedLoginAttempt {
+    return try FfiConverterTypeNativeHostedLoginAttempt.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedLoginAttempt_lower(_ value: NativeHostedLoginAttempt) -> UInt64 {
+    return FfiConverterTypeNativeHostedLoginAttempt.lower(value)
+}
+
+
+
+
+
+
+public protocol NativeHostedProvisioningProtocol: AnyObject, Sendable {
+    
+    func acceptGrant(responseJson: String) throws 
+    
+    func checkpoint() throws  -> Data
+    
+    func completeRequest() throws  -> String
+    
+    func credentialJson(completeResponseJson: String) throws  -> String
+    
+    func grantRequest() throws  -> String
+    
+    func hasGrant()  -> Bool
+    
+    func passphraseMatches(passphrase: String) throws  -> Bool
+    
+    func view()  -> NativeHostedProvisioningView
+    
+}
+open class NativeHostedProvisioning: NativeHostedProvisioningProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativehostedprovisioning(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativehostedprovisioning(handle, $0) }
+    }
+
+    
+
+    
+open func acceptGrant(responseJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_accept_grant(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(responseJson),uniffiCallStatus
+    )
+}
+}
+    
+open func checkpoint()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_checkpoint(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func completeRequest()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_complete_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func credentialJson(completeResponseJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_credential_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(completeResponseJson),uniffiCallStatus
+    )
+})
+}
+    
+open func grantRequest()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_grant_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func hasGrant() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_has_grant(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func passphraseMatches(passphrase: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_passphrase_matches(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+    
+open func view() -> NativeHostedProvisioningView  {
+    return try!  FfiConverterTypeNativeHostedProvisioningView_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_view(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHostedProvisioning: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeHostedProvisioning
+
+    public static func lift(_ handle: UInt64) throws -> NativeHostedProvisioning {
+        return NativeHostedProvisioning(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeHostedProvisioning) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedProvisioning {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeHostedProvisioning, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedProvisioning_lift(_ handle: UInt64) throws -> NativeHostedProvisioning {
+    return try FfiConverterTypeNativeHostedProvisioning.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedProvisioning_lower(_ value: NativeHostedProvisioning) -> UInt64 {
+    return FfiConverterTypeNativeHostedProvisioning.lower(value)
+}
+
+
+
+
+
+
+public protocol NativeHostedSessionProtocol: AnyObject, Sendable {
+    
+    func accountId()  -> String
+    
+    func bearerToken()  -> String
+    
+    func expiresInSeconds()  -> UInt32
+    
+}
+open class NativeHostedSession: NativeHostedSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativehostedsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativehostedsession(handle, $0) }
+    }
+
+    
+
+    
+open func accountId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_account_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func bearerToken() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_bearer_token(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func expiresInSeconds() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_expires_in_seconds(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHostedSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeHostedSession
+
+    public static func lift(_ handle: UInt64) throws -> NativeHostedSession {
+        return NativeHostedSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeHostedSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeHostedSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedSession_lift(_ handle: UInt64) throws -> NativeHostedSession {
+    return try FfiConverterTypeNativeHostedSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedSession_lower(_ value: NativeHostedSession) -> UInt64 {
+    return FfiConverterTypeNativeHostedSession.lower(value)
+}
+
+
+
+
+
+
 /**
  * Owns a core-created temporary plaintext file. It is deleted when this handle
  * is disposed or dropped; callers must never forward its path to a web view.
@@ -3268,6 +3742,142 @@ public func FfiConverterTypeNativeGatewaySettings_lower(_ value: NativeGatewaySe
 }
 
 
+public struct NativeHostedAccount: Equatable, Hashable {
+    public var accountId: String
+    public var classification: String
+    public var entitlement: String
+    public var access: String
+    public var vaultId: String?
+    public var operationId: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accountId: String, classification: String, entitlement: String, access: String, vaultId: String?, operationId: String?) {
+        self.accountId = accountId
+        self.classification = classification
+        self.entitlement = entitlement
+        self.access = access
+        self.vaultId = vaultId
+        self.operationId = operationId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeHostedAccount: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHostedAccount: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedAccount {
+        return
+            try NativeHostedAccount(
+                accountId: FfiConverterString.read(from: &buf), 
+                classification: FfiConverterString.read(from: &buf), 
+                entitlement: FfiConverterString.read(from: &buf), 
+                access: FfiConverterString.read(from: &buf), 
+                vaultId: FfiConverterOptionString.read(from: &buf), 
+                operationId: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeHostedAccount, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterString.write(value.classification, into: &buf)
+        FfiConverterString.write(value.entitlement, into: &buf)
+        FfiConverterString.write(value.access, into: &buf)
+        FfiConverterOptionString.write(value.vaultId, into: &buf)
+        FfiConverterOptionString.write(value.operationId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedAccount_lift(_ buf: RustBuffer) throws -> NativeHostedAccount {
+    return try FfiConverterTypeNativeHostedAccount.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedAccount_lower(_ value: NativeHostedAccount) -> RustBuffer {
+    return FfiConverterTypeNativeHostedAccount.lower(value)
+}
+
+
+public struct NativeHostedProvisioningView: Equatable, Hashable {
+    public var origin: String
+    public var accountId: String
+    public var operationId: String
+    public var vaultId: String
+    public var deviceId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(origin: String, accountId: String, operationId: String, vaultId: String, deviceId: String) {
+        self.origin = origin
+        self.accountId = accountId
+        self.operationId = operationId
+        self.vaultId = vaultId
+        self.deviceId = deviceId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeHostedProvisioningView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHostedProvisioningView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedProvisioningView {
+        return
+            try NativeHostedProvisioningView(
+                origin: FfiConverterString.read(from: &buf), 
+                accountId: FfiConverterString.read(from: &buf), 
+                operationId: FfiConverterString.read(from: &buf), 
+                vaultId: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeHostedProvisioningView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterString.write(value.operationId, into: &buf)
+        FfiConverterString.write(value.vaultId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedProvisioningView_lift(_ buf: RustBuffer) throws -> NativeHostedProvisioningView {
+    return try FfiConverterTypeNativeHostedProvisioningView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedProvisioningView_lower(_ value: NativeHostedProvisioningView) -> RustBuffer {
+    return FfiConverterTypeNativeHostedProvisioningView.lower(value)
+}
+
+
 public struct NativeIncomingSms: Equatable, Hashable {
     public var conversationId: String?
     public var senderAddress: String
@@ -3385,6 +3995,64 @@ public func FfiConverterTypeNativeIngestResult_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeNativeIngestResult_lower(_ value: NativeIngestResult) -> RustBuffer {
     return FfiConverterTypeNativeIngestResult.lower(value)
+}
+
+
+public struct NativeJoinRequestQr: Equatable, Hashable {
+    public var httpsOrigin: String
+    public var joinRequestId: String
+    public var joinKey: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(httpsOrigin: String, joinRequestId: String, joinKey: String) {
+        self.httpsOrigin = httpsOrigin
+        self.joinRequestId = joinRequestId
+        self.joinKey = joinKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeJoinRequestQr: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeJoinRequestQr: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeJoinRequestQr {
+        return
+            try NativeJoinRequestQr(
+                httpsOrigin: FfiConverterString.read(from: &buf), 
+                joinRequestId: FfiConverterString.read(from: &buf), 
+                joinKey: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeJoinRequestQr, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.httpsOrigin, into: &buf)
+        FfiConverterString.write(value.joinRequestId, into: &buf)
+        FfiConverterString.write(value.joinKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeJoinRequestQr_lift(_ buf: RustBuffer) throws -> NativeJoinRequestQr {
+    return try FfiConverterTypeNativeJoinRequestQr.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeJoinRequestQr_lower(_ value: NativeJoinRequestQr) -> RustBuffer {
+    return FfiConverterTypeNativeJoinRequestQr.lower(value)
 }
 
 
@@ -6201,21 +6869,14 @@ fileprivate struct FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverter
         return seq
     }
 }
-public func androidCompanionHealth() -> GatewayHealth  {
-    return try!  FfiConverterTypeGatewayHealth_lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_android_companion_health(uniffiCallStatus
-    )
-})
-}
 /**
- * Creates synthetic test enrollment material for host smoke tests only. Production
- * enrollment supplies its already-authenticated profile/header through `unlock`.
+ * Creates a new vault key profile and encrypted check header from a passphrase.
+ * Hosts use this material to initialize a vault before opening a native client.
  */
-public func createSmokeVaultMaterial(vaultId: String, passphrase: String)throws  -> NativeVaultMaterial  {
+public func createVaultMaterial(vaultId: String, passphrase: String)throws  -> NativeVaultMaterial  {
     return try  FfiConverterTypeNativeVaultMaterial_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_create_smoke_vault_material(
+    uniffi_peppy_mobile_bindings_fn_func_create_vault_material(
         FfiConverterString.lower(vaultId),
         FfiConverterString.lower(passphrase),uniffiCallStatus
     )
@@ -6261,71 +6922,124 @@ public func pairingProofBytes(challengeToken: String, vaultId: String, deviceId:
     )
 })
 }
-public func hostedPreviewAdvance(snapshot: String, event: String) -> String  {
+public func generateHostedPassphrase() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_advance(
-        FfiConverterString.lower(snapshot),
-        FfiConverterString.lower(event),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_generate_hosted_passphrase(uniffiCallStatus
     )
 })
 }
-/**
- * Resamples six EFF large-list words until they pass the conservative local UI gate.
- */
-public func hostedPreviewPassphrase() -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func hostedLoginRequest(provider: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_passphrase(uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_hosted_login_request(
+        FfiConverterString.lower(provider),uniffiCallStatus
     )
 })
 }
-public func hostedPreviewPassphraseAcceptable(passphrase: String) -> Bool  {
+public func hostedPassphraseAcceptable(passphrase: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_passphrase_acceptable(
+    uniffi_peppy_mobile_bindings_fn_func_hosted_passphrase_acceptable(
         FfiConverterString.lower(passphrase),uniffiCallStatus
     )
 })
 }
-public func hostedPreviewResume(snapshot: String) -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func hostedSessionRequest(attemptId: String, idToken: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_resume(
-        FfiConverterString.lower(snapshot),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_hosted_session_request(
+        FfiConverterString.lower(attemptId),
+        FfiConverterString.lower(idToken),uniffiCallStatus
     )
 })
 }
-public func hostedPreviewStart(scenario: String) -> String  {
+public func intentDigestHex(intentToken: String) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_start(
-        FfiConverterString.lower(scenario),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_intent_digest_hex(
+        FfiConverterString.lower(intentToken),uniffiCallStatus
     )
 })
 }
-public func hostedPreviewV2Advance(snapshot: String, event: String) -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func pairingIntentSas(intentToken: String, keyDigest: String, deviceId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_advance(
-        FfiConverterString.lower(snapshot),
-        FfiConverterString.lower(event),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_pairing_intent_sas(
+        FfiConverterString.lower(intentToken),
+        FfiConverterString.lower(keyDigest),
+        FfiConverterString.lower(deviceId),uniffiCallStatus
     )
 })
 }
-public func hostedPreviewV2Resume(snapshot: String) -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func parseHostedAccount(json: String, expectedAccountId: String)throws  -> NativeHostedAccount  {
+    return try  FfiConverterTypeNativeHostedAccount_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_resume(
-        FfiConverterString.lower(snapshot),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_parse_hosted_account(
+        FfiConverterString.lower(json),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
     )
 })
 }
-public func hostedPreviewV2Start(scenario: String) -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
+public func parseHostedLoginAttempt(json: String)throws  -> NativeHostedLoginAttempt  {
+    return try  FfiConverterTypeNativeHostedLoginAttempt_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_start(
-        FfiConverterString.lower(scenario),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_func_parse_hosted_login_attempt(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+public func parseHostedSession(json: String)throws  -> NativeHostedSession  {
+    return try  FfiConverterTypeNativeHostedSession_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+public func parseJoinRequestQr(payload: String, allowLoopbackHttp: Bool)throws  -> NativeJoinRequestQr  {
+    return try  FfiConverterTypeNativeJoinRequestQr_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_join_request_qr(
+        FfiConverterString.lower(payload),
+        FfiConverterBool.lower(allowLoopbackHttp),uniffiCallStatus
+    )
+})
+}
+public func prepareHostedProvisioning(origin: String, accountId: String, passphrase: String)throws  -> NativeHostedProvisioning  {
+    return try  FfiConverterTypeNativeHostedProvisioning_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(
+        FfiConverterString.lower(origin),
+        FfiConverterString.lower(accountId),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+public func restoreHostedProvisioning(checkpointBytes: Data, expectedOrigin: String, expectedAccountId: String)throws  -> NativeHostedProvisioning  {
+    return try  FfiConverterTypeNativeHostedProvisioning_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning(
+        FfiConverterData.lower(checkpointBytes),
+        FfiConverterString.lower(expectedOrigin),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
+    )
+})
+}
+public func sealIntentToken(joinKeyB64url: String, intentToken: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_seal_intent_token(
+        FfiConverterString.lower(joinKeyB64url),
+        FfiConverterString.lower(intentToken),uniffiCallStatus
+    )
+})
+}
+public func vaultProfileFingerprint(profileJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_vault_profile_fingerprint(
+        FfiConverterString.lower(profileJson),uniffiCallStatus
     )
 })
 }
@@ -6345,10 +7059,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_android_companion_health() != 39709) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_create_smoke_vault_material() != 65471) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_create_vault_material() != 14347) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_generate_native_enrollment_key() != 6734) {
@@ -6363,28 +7074,46 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_pairing_proof_bytes() != 9385) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_advance() != 61255) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase() != 10342) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_passphrase() != 59394) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_login_request() != 15096) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_passphrase_acceptable() != 41362) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_passphrase_acceptable() != 65355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_resume() != 12546) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request() != 59693) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_start() != 48198) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_intent_digest_hex() != 10067) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_advance() != 23477) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_pairing_intent_sas() != 60670) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_resume() != 14632) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account() != 35553) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_start() != 44510) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_login_attempt() != 63378) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() != 62352) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_join_request_qr() != 41586) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() != 1953) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning() != 44262) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_seal_intent_token() != 6010) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint() != 3664) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
@@ -6685,6 +7414,48 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_native_plaintext_path() != 10080) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_attempt_id() != 52594) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_expires_in_seconds() != 62050) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_nonce() != 25914) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_accept_grant() != 15178) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_checkpoint() != 36471) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_complete_request() != 32126) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_credential_json() != 12476) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_grant_request() != 30937) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_has_grant() != 46980) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_passphrase_matches() != 59165) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view() != 36610) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_account_id() != 62329) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_bearer_token() != 39287) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds() != 15882) {
         return InitializationResult.apiChecksumMismatch
     }
 

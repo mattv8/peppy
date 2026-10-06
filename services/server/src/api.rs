@@ -63,7 +63,8 @@ use base64::{
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use peppy_domain::{DeviceId, VaultId};
 use peppy_protocol::{
-    Envelope, EnvelopePurpose, pairing_key_digest, pairing_proof_message, pairing_sas,
+    Envelope, EnvelopePurpose, JoinRequestCreated, JoinRequestOffer, JoinRequestState,
+    JoinRequestStatus, pairing_key_digest, pairing_proof_message, pairing_sas,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,6 +90,7 @@ pub(super) struct ApiState {
     upload_slots: Arc<tokio::sync::Semaphore>,
     options: Arc<TransportOptions>,
     pairing_admissions: Arc<tokio::sync::Mutex<HashMap<[u8; 32], PairingAdmission>>>,
+    join_request_create_admission: Arc<tokio::sync::Mutex<PairingAdmission>>,
     policy: Arc<dyn AccessPolicy>,
     row_security: bool,
 }
@@ -198,6 +200,15 @@ pub(crate) fn build_router(
         .route("/v1/vault", get(vault_header))
         .route("/v1/pairing", post(create_pairing))
         .route("/v1/pairing/intents", post(create_pairing_intent))
+        .route("/v1/pairing/join-requests", post(create_join_request))
+        .route(
+            "/v1/pairing/join-requests/{join_request_id}/offer",
+            post(offer_join_request),
+        )
+        .route(
+            "/v1/pairing/join-requests/{join_request_id}",
+            get(join_request_status),
+        )
         .route(
             "/v1/pairing/intents/{intent_token}/claim",
             post(claim_pairing_intent),
@@ -283,6 +294,10 @@ pub(crate) fn build_router(
             upload_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             options: Arc::new(options.clone()),
             pairing_admissions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            join_request_create_admission: Arc::new(tokio::sync::Mutex::new(PairingAdmission {
+                window: SystemTime::now(),
+                count: 0,
+            })),
             policy,
             row_security,
         });
@@ -715,8 +730,17 @@ const PAIRING_INTENT_TTL_SECONDS: i64 = 300;
 const PAIRING_ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const PAIRING_ADMISSION_LIMIT: u8 = 20;
 const PAIRING_ADMISSION_CAP: usize = 4096;
+const JOIN_REQUEST_TTL_SECONDS: i64 = 300;
+const JOIN_REQUEST_CREATE_ADMISSION_LIMIT: u8 = 60;
+const JOIN_REQUEST_POLL_ADMISSION_LIMIT: u8 = 120;
+const JOIN_REQUEST_OFFER_ADMISSION_LIMIT: u8 = 20;
+const JOIN_REQUEST_CAP: i64 = 10_000;
 
 async fn pairing_admission(s: &ApiState, token: &[u8; 32]) -> ApiResult<()> {
+    pairing_admission_with_limit(s, token, PAIRING_ADMISSION_LIMIT).await
+}
+
+async fn pairing_admission_with_limit(s: &ApiState, token: &[u8; 32], limit: u8) -> ApiResult<()> {
     let now = SystemTime::now();
     let mut admissions = s.pairing_admissions.lock().await;
     admissions.retain(|_, admission| {
@@ -744,7 +768,7 @@ async fn pairing_admission(s: &ApiState, token: &[u8; 32]) -> ApiResult<()> {
             count: 0,
         };
     }
-    if admission.count >= PAIRING_ADMISSION_LIMIT {
+    if admission.count >= limit {
         return Err(ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             "pairing_admission_limited",
@@ -752,6 +776,32 @@ async fn pairing_admission(s: &ApiState, token: &[u8; 32]) -> ApiResult<()> {
     }
     admission.count += 1;
     Ok(())
+}
+
+async fn join_request_create_admission(s: &ApiState) -> ApiResult<()> {
+    let now = SystemTime::now();
+    let mut admission = s.join_request_create_admission.lock().await;
+    if now.duration_since(admission.window).unwrap_or_default() >= PAIRING_ADMISSION_WINDOW {
+        *admission = PairingAdmission {
+            window: now,
+            count: 0,
+        };
+    }
+    if admission.count >= JOIN_REQUEST_CREATE_ADMISSION_LIMIT {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "pairing_admission_limited",
+        ));
+    }
+    admission.count += 1;
+    Ok(())
+}
+
+fn join_request_admission_key(prefix: &[u8], join_request_id: Uuid) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(prefix);
+    hasher.update(join_request_id.as_bytes());
+    hasher.finalize().into()
 }
 
 fn pairing_origin(value: &str) -> bool {
@@ -806,6 +856,221 @@ async fn create_pairing_intent(
         https_origin: x.https_origin,
         intent_token: token,
         expires_in_seconds: PAIRING_INTENT_TTL_SECONDS,
+    }))
+}
+
+async fn create_join_request(State(s): State<ApiState>) -> ApiResult<Json<JoinRequestCreated>> {
+    join_request_create_admission(&s).await?;
+    let join_request_id = Uuid::new_v4();
+    let poll_secret = challenge_token();
+    let poll_secret_digest = Sha256::digest(poll_secret.as_bytes());
+    let available = if s.row_security {
+        sqlx::query_scalar::<_, bool>("SELECT peppy.create_pairing_join_request($1,$2,$3)")
+            .bind(join_request_id)
+            .bind(poll_secret_digest.as_slice())
+            .bind(JOIN_REQUEST_TTL_SECONDS as i32)
+            .fetch_one(&s.db)
+            .await
+            .map_err(|error| database_unavailable(&error, "pairing_join_create"))?
+    } else {
+        let mut tx =
+            s.db.begin()
+                .await
+                .map_err(|error| database_unavailable(&error, "pairing_join_create_begin"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pairing_join_requests_cap'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "pairing_join_create_lock"))?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pairing_join_requests WHERE expires_at > now()",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "pairing_join_create_count"))?;
+        let available = if count >= JOIN_REQUEST_CAP {
+            false
+        } else {
+            sqlx::query("INSERT INTO pairing_join_requests(join_request_id,poll_secret_digest,expires_at) VALUES($1,$2,now()+($3 * interval '1 second'))")
+                .bind(join_request_id)
+                .bind(poll_secret_digest.as_slice())
+                .bind(JOIN_REQUEST_TTL_SECONDS)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| database_unavailable(&error, "pairing_join_create_insert"))?;
+            true
+        };
+        tx.commit()
+            .await
+            .map_err(|error| database_unavailable(&error, "pairing_join_create_commit"))?;
+        available
+    };
+    if !available {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "join_requests_unavailable",
+        ));
+    }
+    Ok(Json(JoinRequestCreated {
+        join_request_id,
+        poll_secret,
+        expires_in_seconds: JOIN_REQUEST_TTL_SECONDS,
+    }))
+}
+
+fn parse_join_request_id(path: &str) -> ApiResult<Uuid> {
+    path.parse()
+        .map_err(|_| ApiError(StatusCode::NOT_FOUND, "join_request_not_found"))
+}
+
+async fn offer_join_request(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Path(join_request_id): Path<String>,
+    Json(x): Json<JoinRequestOffer>,
+) -> ApiResult<()> {
+    let p = authenticated(&s, &h, Operation::Pair).await?;
+    let join_request_id = parse_join_request_id(&join_request_id)?;
+    let admission_key = join_request_admission_key(b"join-offer:", join_request_id);
+    pairing_admission_with_limit(&s, &admission_key, JOIN_REQUEST_OFFER_ADMISSION_LIMIT).await?;
+    if !s.row_security {
+        owner(&p)?;
+    }
+    if x.intent_digest.len() != 64
+        || !x
+            .intent_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_join_offer",
+        ));
+    }
+    let intent_digest = hex::decode(&x.intent_digest)
+        .ok()
+        .filter(|digest| digest.len() == 32)
+        .ok_or(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_join_offer",
+        ))?;
+    let sealed = URL_SAFE_NO_PAD
+        .decode(&x.sealed_intent_token)
+        .ok()
+        .filter(|sealed| sealed.len() <= 256)
+        .ok_or(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_join_offer",
+        ))?;
+    let outcome = if s.row_security {
+        sqlx::query_scalar::<_, String>(
+            "SELECT peppy.offer_pairing_join_request($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(join_request_id)
+        .bind(p.vault)
+        .bind(p.device)
+        .bind(&p.token_digest)
+        .bind(&intent_digest)
+        .bind(&sealed)
+        .fetch_one(&s.db)
+        .await
+        .map_err(|error| database_unavailable(&error, "pairing_join_offer"))?
+    } else {
+        let mut tx = scope::begin(&s.db, p.vault)
+            .await
+            .map_err(|error| database_unavailable(&error, "pairing_join_offer_begin"))?;
+        sqlx::query("SELECT vault_id FROM vaults WHERE vault_id=$1 FOR UPDATE")
+            .bind(p.vault)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| database_unavailable(&error, "pairing_join_vault_lock"))?;
+        if revalidate_principal(&mut tx, &p).await? != "owner" {
+            return Err(ApiError(StatusCode::FORBIDDEN, "owner_required"));
+        }
+        let offerable = sqlx::query("SELECT intent_digest FROM pairing_intents WHERE intent_digest=$1 AND vault_id=$2 AND created_by_device_id=$3 AND claimed_device_id IS NULL AND expires_at>now() FOR UPDATE")
+            .bind(&intent_digest).bind(p.vault).bind(p.device).fetch_optional(&mut *tx).await
+            .map_err(|error| database_unavailable(&error, "pairing_join_intent_lock"))?.is_some();
+        let row = sqlx::query("SELECT expires_at>now() valid,sealed_intent_token IS NOT NULL offered FROM pairing_join_requests WHERE join_request_id=$1 FOR UPDATE")
+            .bind(join_request_id).fetch_optional(&mut *tx).await
+            .map_err(|error| database_unavailable(&error, "pairing_join_lookup"))?;
+        let outcome = match row {
+            None => "missing",
+            Some(row) if !row.get::<bool, _>("valid") => "expired",
+            Some(row) if row.get::<bool, _>("offered") => "already_offered",
+            Some(_) if !offerable => "intent_not_offerable",
+            Some(_) => {
+                sqlx::query("UPDATE pairing_join_requests SET vault_id=$2,offered_by_device_id=$3,sealed_intent_token=$4,intent_digest=$5,offered_at=now() WHERE join_request_id=$1")
+                    .bind(join_request_id).bind(p.vault).bind(p.device).bind(&sealed).bind(&intent_digest)
+                    .execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "pairing_join_offer_update"))?;
+                "offered"
+            }
+        };
+        tx.commit()
+            .await
+            .map_err(|error| database_unavailable(&error, "pairing_join_offer_commit"))?;
+        outcome.to_owned()
+    };
+    match outcome.as_str() {
+        "offered" => Ok(()),
+        "already_offered" => Err(ApiError(
+            StatusCode::CONFLICT,
+            "join_request_already_offered",
+        )),
+        "expired" => Err(ApiError(StatusCode::GONE, "join_request_expired")),
+        "missing" => Err(ApiError(StatusCode::NOT_FOUND, "join_request_not_found")),
+        "intent_not_offerable" => Err(ApiError(
+            StatusCode::CONFLICT,
+            "pairing_intent_not_offerable",
+        )),
+        "principal_invalid" => Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_bearer")),
+        "owner_required" => Err(ApiError(StatusCode::FORBIDDEN, "owner_required")),
+        _ => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database_unavailable",
+        )),
+    }
+}
+
+async fn join_request_status(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Path(join_request_id): Path<String>,
+) -> ApiResult<Json<JoinRequestStatus>> {
+    let join_request_id = parse_join_request_id(&join_request_id)?;
+    let poll_secret = h
+        .get("Peppy-Join-Secret")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "join_request_not_found"))?;
+    let admission_key = join_request_admission_key(b"join-poll:", join_request_id);
+    pairing_admission_with_limit(&s, &admission_key, JOIN_REQUEST_POLL_ADMISSION_LIMIT).await?;
+    let secret_digest = Sha256::digest(poll_secret.as_bytes());
+    let row = if s.row_security {
+        sqlx::query("SELECT sealed_intent_token,intent_digest,expired,remaining FROM peppy.poll_pairing_join_request($1,$2)")
+            .bind(join_request_id).bind(secret_digest.as_slice()).fetch_optional(&s.db).await
+            .map_err(|error| database_unavailable(&error, "pairing_join_poll"))?
+    } else {
+        sqlx::query("SELECT sealed_intent_token,intent_digest,expires_at<=now() expired,GREATEST(0,floor(extract(epoch FROM expires_at-now())))::bigint remaining FROM pairing_join_requests WHERE join_request_id=$1 AND poll_secret_digest=$2")
+            .bind(join_request_id).bind(secret_digest.as_slice()).fetch_optional(&s.db).await
+            .map_err(|error| database_unavailable(&error, "pairing_join_poll"))?
+    }
+    .ok_or(ApiError(StatusCode::NOT_FOUND, "join_request_not_found"))?;
+    let expired: bool = row.get("expired");
+    let sealed = (!expired)
+        .then(|| row.get::<Option<Vec<u8>>, _>("sealed_intent_token"))
+        .flatten();
+    let intent_digest = (!expired)
+        .then(|| row.get::<Option<Vec<u8>>, _>("intent_digest"))
+        .flatten();
+    Ok(Json(JoinRequestStatus {
+        state: if expired {
+            JoinRequestState::Expired
+        } else if sealed.is_some() {
+            JoinRequestState::Offered
+        } else {
+            JoinRequestState::Waiting
+        },
+        sealed_intent_token: sealed.map(|value| URL_SAFE_NO_PAD.encode(value)),
+        intent_digest: intent_digest.map(hex::encode),
+        expires_in_seconds: row.get("remaining"),
     }))
 }
 
@@ -1449,7 +1714,7 @@ async fn update_capabilities(
     Json(x): Json<CapabilityUpdate>,
 ) -> ApiResult<StatusCode> {
     let p = authenticated(&s, &h, Operation::Publish).await?;
-    if p.role != "gateway" {
+    if p.role != "owner" && p.role != "gateway" {
         return Err(ApiError(StatusCode::FORBIDDEN, "gateway_required"));
     }
     let mut tx = scope::begin(&s.db, p.vault)
@@ -1560,7 +1825,7 @@ async fn ingest(
         }
     }
     if let Some(route) = &e.route {
-        let gateway:Option<i32>=sqlx::query_scalar("SELECT 1 FROM devices WHERE vault_id=$1 AND device_id=$2 AND role='gateway' AND revoked_at IS NULL").bind(p.vault).bind(route.gateway_device_id.0).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_route_lookup"))?;
+        let gateway:Option<i32>=sqlx::query_scalar("SELECT 1 FROM devices d WHERE d.vault_id=$1 AND d.device_id=$2 AND d.revoked_at IS NULL AND (d.role='gateway' OR (d.role='owner' AND EXISTS (SELECT 1 FROM device_capabilities c WHERE c.vault_id=d.vault_id AND c.device_id=d.device_id)))").bind(p.vault).bind(route.gateway_device_id.0).fetch_optional(&mut *tx).await.map_err(|error| database_unavailable(&error, "ingest_route_lookup"))?;
         if gateway.is_none() {
             return Err(ApiError(StatusCode::FORBIDDEN, "gateway_not_authorized"));
         }
@@ -1662,6 +1927,11 @@ pub async fn prune_expired_pairing_intents(db: &PgPool) -> Result<u64, sqlx::Err
         .execute(&mut *tx)
         .await?
         .rows_affected();
+    let deleted = deleted
+        + sqlx::query("DELETE FROM pairing_join_requests WHERE expires_at <= now()")
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
     tx.commit().await?;
     Ok(deleted)
 }
@@ -1773,7 +2043,7 @@ async fn receipt(
     // Reporting an already-authorized command's outcome is sync bookkeeping,
     // not permission to send a new command. Keep it available in read-only mode.
     let p = authenticated(&s, &h, Operation::Sync).await?;
-    if p.role != "gateway" {
+    if p.role != "owner" && p.role != "gateway" {
         return Err(ApiError(StatusCode::FORBIDDEN, "gateway_required"));
     }
     let mut tx = scope::begin(&s.db, p.vault)
@@ -2063,11 +2333,49 @@ async fn send_replay(
 mod tests {
     use super::*;
 
+    fn admission_test_state() -> ApiState {
+        let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
+        ApiState {
+            db: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/peppy")
+                .expect("valid lazy database URL"),
+            committed,
+            storage: None,
+            vault_attachment_quota_bytes: 0,
+            upload_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            options: Arc::new(TransportOptions::default()),
+            pairing_admissions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            join_request_create_admission: Arc::new(tokio::sync::Mutex::new(PairingAdmission {
+                window: SystemTime::now(),
+                count: 0,
+            })),
+            policy: Arc::new(CommunityAccessPolicy),
+            row_security: false,
+        }
+    }
+
     #[test]
     fn challenge_tokens_are_canonical_256_bit_base64url() {
         let token = challenge_token();
         assert_eq!(token.len(), 43);
         assert!(decode_challenge(&token).is_some());
+    }
+
+    #[tokio::test]
+    async fn join_request_create_admission_survives_poll_bucket_eviction() {
+        let state = admission_test_state();
+        for _ in 0..JOIN_REQUEST_CREATE_ADMISSION_LIMIT {
+            assert!(join_request_create_admission(&state).await.is_ok());
+        }
+        for _ in 0..=PAIRING_ADMISSION_CAP {
+            let poll_key = join_request_admission_key(b"join-poll:", Uuid::new_v4());
+            assert!(
+                pairing_admission_with_limit(&state, &poll_key, JOIN_REQUEST_POLL_ADMISSION_LIMIT)
+                    .await
+                    .is_ok()
+            );
+        }
+        assert!(join_request_create_admission(&state).await.is_err());
     }
 
     #[test]

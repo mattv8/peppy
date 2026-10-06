@@ -26,6 +26,42 @@ export const catalog = Object.freeze({
   onboarding_hosted_cta: "Get started",
   onboarding_hosted_sub: "Peppy Hosted — we run the server for you",
   onboarding_self_hosted_cta: "Use my own server",
+  production_hosted_cta: "Use Peppy Hosted",
+  production_join_cta: "Join an existing vault",
+  production_hosted_unavailable: "Peppy sign-in is unavailable. Try again, or pair with an existing device.",
+  production_provider_unconfigured: "Sign-in is not configured for this build.",
+  production_signin_failed: "Sign-in could not finish. Try again.",
+  production_no_google_account: "Add a Google account in your phone's Settings, then try again.",
+  production_session_expired: "Sign in again to manage your Peppy account. Your enrolled device and local data are unchanged.",
+  production_billing_open: "Subscribe at peppy.pro",
+  production_billing_body: "Choose your plan on Peppy's website. Sign in there with the same account, then return here to continue.",
+  production_billing_check: "Check subscription",
+  production_billing_pending: "Your subscription is not active yet. Complete setup at peppy.pro, then check again.",
+  production_account_mismatch: "This setup belongs to a different Peppy account. Sign in with the original account to resume.",
+  production_provision_retry: "Setup could not finish. Try again to resume the same vault safely.",
+  production_provision_resume: "Resume vault setup",
+  production_create_vault: "Create my vault",
+  production_vault_ready: "Your vault is ready",
+  production_owner_sas_heading: "Compare verification codes",
+  production_pairing_qr_accessibility: "Pairing QR code",
+  production_pairing_role_label: "Requested access",
+  production_pairing_role_device: "Linked device",
+  production_pairing_role_gateway: "Gateway device",
+  production_pairing_retry: "Create a new pairing code",
+  production_pairing_paused: "Pairing paused. Create a new code to continue.",
+  production_pairing_error: "Could not complete pairing. Try a new code.",
+  production_existing_vault: "Your account already has a vault. Pair with an enrolled owner device and enter your existing encryption passphrase.",
+  production_read_only: "Your hosted vault is read-only. Your saved data is retained; manage your subscription to enable new changes.",
+  production_manage_account: "Manage account at peppy.pro",
+  production_add_device: "Add another device",
+  production_pairing_qr_body: "Scan this code with the device you want to add. Compare the verification code on both devices before approving.",
+  production_pairing_waiting: "Waiting for the new device…",
+  production_pairing_expired: "This pairing request expired. Create a new one to try again.",
+  production_pairing_verify: "I checked that the verification codes match",
+  production_pairing_unlocked: "Unlock this owner device before adding another device.",
+  production_secure_storage_failed: "Secure storage is unavailable. Setup has stopped to protect your keys and existing data.",
+  production_retry_sync: "Retry sync",
+  production_network_failed: "Could not reach Peppy. Check your connection and try again.",
   preview_label: "Hosted setup preview — no account is created or payment taken.",
   preview_scenarios: "Preview scenarios",
   preview_reset: "Reset preview",
@@ -100,7 +136,7 @@ export const catalog = Object.freeze({
   permissions_skip: "Set up later",
   permissions_done: "Done",
   self_hosted_headline: "Connect to your own server",
-  self_hosted_body: "Scan the pairing QR code from your desktop, or import a credential file.",
+  self_hosted_body: "Scan a pairing QR code from an enrolled owner device, or import a credential file.",
   self_hosted_docs_link: "Self-hosting guide",
   settings_server_section: "Server",
   settings_server_hosted: "Peppy Hosted",
@@ -125,8 +161,32 @@ export const catalog = Object.freeze({
   continue: "Continue",
   back: "Back",
   try_again: "Try again",
-  locked: "Locked"
+  locked: "Locked",
+  setup_provisioning_body: "Creating your vault. This may take a moment.",
+  production_add_computer: "Add a computer",
+  production_add_computer_scan_body: "Scan the QR code shown on the computer.",
+  production_pairing_role_computer: "Computer",
+  production_add_computer_origin_mismatch: "This QR code is for a different Peppy server.",
+  production_add_computer_already_linked: "This pairing code has already been used. Start pairing again on your computer.",
+  production_add_computer_allow_hint: "Connects the computer to your vault.",
+  production_add_computer_deny_hint: "Rejects this computer."
 });
+
+/** Native catalog: shared catalog excluding preview-only and mobile store keys. */
+export const nativeCatalog = Object.freeze(
+  Object.fromEntries(
+    Object.entries(catalog).filter(([key]) => {
+      // Exclude keys prefixed with preview_
+      if (key.startsWith("preview_")) return false;
+      // Exclude keys suffixed with _preview
+      if (key.endsWith("_preview")) return false;
+      // Exclude obsolete mobile store/preview-only keys
+      const obsoleteKeys = ["settings_server_delete_body", "hosted_subscribe_legal", "hosted_purchase_pending_body", "hosted_subscribe_restore", "settings_server_manage_preview"];
+      if (obsoleteKeys.includes(key)) return false;
+      return true;
+    })
+  )
+);
 
 /** Desktop wording overrides and desktop-only keys. Mobile outputs use `catalog` only. */
 export const desktopOverrides = Object.freeze({
@@ -148,6 +208,16 @@ export const desktopOverrides = Object.freeze({
   permissions_login: "Open Peppy at login",
   permissions_desktop_note: "These choices are simulated in this preview.",
   hosted_preview_native_only: "This step uses a secure system dialog.",
+  setup_mode_hosted: "Peppy Hosted",
+  setup_mode_self_hosted: "Self-hosted",
+  setup_join_claimed: "A device scanned the code — approve on your phone, then confirm here. If your phone says this computer was already claimed, cancel here.",
+  setup_join_confirm: "Continue only if your phone shows this same code.",
+  setup_join_approved: "Approved — unlocking…",
+  setup_join_continue: "Continue",
+  setup_join_retrying: "Reconnecting…",
+  setup_self_hosted_join_body: "Enter your server address to scan a QR code from an enrolled owner device.",
+  setup_self_hosted_url_hint: "Must start with https://",
+  setup_self_hosted_advanced: "Advanced: import credentials",
 });
-export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only"]);
+export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_join_claimed", "setup_join_confirm", "setup_join_approved", "setup_join_continue", "setup_join_retrying", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_advanced"]);
 export const desktopCatalog = Object.freeze({ ...catalog, ...desktopOverrides });

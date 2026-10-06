@@ -13,6 +13,25 @@
       ],
       "type": "object"
     },
+    "BillingPlans": {
+      "additionalProperties": false,
+      "properties": {
+        "default_price_id": {
+          "type": "string"
+        },
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/PlanSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "default_price_id",
+        "plans"
+      ],
+      "type": "object"
+    },
     "BillingSummary": {
       "additionalProperties": false,
       "properties": {
@@ -63,6 +82,14 @@
       "enum": [
         "none",
         "pending"
+      ],
+      "type": "string"
+    },
+    "IdentityProvider": {
+      "description": "Identity provider for authentication.",
+      "enum": [
+        "apple",
+        "google"
       ],
       "type": "string"
     },
@@ -189,7 +216,7 @@
       "additionalProperties": false,
       "properties": {
         "expected_price_id": {
-          "description": "A stale quote is rejected; this never selects the server-side price.",
+          "description": "The selected, configured quote; stale or unconfigured quotes are rejected.",
           "type": "string"
         },
         "operation_id": {
@@ -287,12 +314,19 @@
     "WebConfigResponse": {
       "additionalProperties": false,
       "properties": {
+        "available_providers": {
+          "items": {
+            "$ref": "#/$defs/IdentityProvider"
+          },
+          "type": "array"
+        },
         "stripe_publishable_key": {
           "type": "string"
         }
       },
       "required": [
-        "stripe_publishable_key"
+        "stripe_publishable_key",
+        "available_providers"
       ],
       "type": "object"
     },
@@ -342,6 +376,9 @@
     "payment_method_setup": {
       "$ref": "#/$defs/PaymentMethodSetupResponse"
     },
+    "plan_catalog": {
+      "$ref": "#/$defs/BillingPlans"
+    },
     "session": {
       "$ref": "#/$defs/WebSessionResponse"
     },
@@ -357,6 +394,7 @@
     "config",
     "account",
     "billing",
+    "plan_catalog",
     "operation",
     "subscribe_request",
     "subscribe_response",
@@ -376,6 +414,7 @@
     "paymentAction": "/hosted/v1/web/billing/payment-action",
     "paymentMethod": "/hosted/v1/web/billing/payment-method",
     "paymentMethodConfirm": "/hosted/v1/web/billing/payment-method/confirm",
+    "plans": "/hosted/v1/web/billing/plans",
     "reconcile": "/hosted/v1/web/billing/reconcile",
     "resume": "/hosted/v1/web/billing/resume",
     "session": "/hosted/v1/web/session",

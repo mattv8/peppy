@@ -675,9 +675,7 @@ internal object IntegrityCheckingUniffiLib {
     }
 
     internal fun ensureInitialized() = Unit
-    external fun uniffi_peppy_mobile_bindings_checksum_func_android_companion_health(
-    ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_create_smoke_vault_material(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_create_vault_material(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_generate_native_enrollment_key(
     ): Int
@@ -687,21 +685,33 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_pairing_proof_bytes(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_advance(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_passphrase(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_login_request(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_passphrase_acceptable(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_passphrase_acceptable(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_resume(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_start(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_intent_digest_hex(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_advance(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_pairing_intent_sas(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_resume(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account(
     ): Int
-    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_start(
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_login_attempt(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_join_request_qr(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_seal_intent_token(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox(
     ): Int
@@ -902,6 +912,34 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_dispose(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_native_plaintext_path(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_attempt_id(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_expires_in_seconds(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_nonce(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_accept_grant(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_checkpoint(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_complete_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_credential_json(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_grant_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_has_grant(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_passphrase_matches(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_account_id(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_bearer_token(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds(
     ): Int
     external fun ffi_peppy_mobile_bindings_uniffi_contract_version(
     ): Int
@@ -1135,9 +1173,47 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeplaintexthandle_native_plaintext_path(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_android_companion_health(uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_clone_nativehostedloginattempt(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_free_nativehostedloginattempt(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_attempt_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_create_smoke_vault_material(`vaultId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_expires_in_seconds(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_nonce(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_clone_nativehostedprovisioning(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_free_nativehostedprovisioning(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_accept_grant(`ptr`: Long,`responseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_checkpoint(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_complete_request(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_credential_json(`ptr`: Long,`completeResponseJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_grant_request(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_has_grant(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_passphrase_matches(`ptr`: Long,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_view(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_clone_nativehostedsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_free_nativehostedsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_account_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_bearer_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_expires_in_seconds(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_fn_func_create_vault_material(`vaultId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_generate_native_enrollment_key(uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1147,21 +1223,33 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_pairing_proof_bytes(`challengeToken`: RustBuffer.ByValue,`vaultId`: RustBuffer.ByValue,`deviceId`: RustBuffer.ByValue,`profileFingerprint`: RustBuffer.ByValue,`keyEpoch`: Int,`approvedRole`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_advance(`snapshot`: RustBuffer.ByValue,`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_generate_hosted_passphrase(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_passphrase(uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_login_request(`provider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_passphrase_acceptable(`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_passphrase_acceptable(`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_resume(`snapshot`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_session_request(`attemptId`: RustBuffer.ByValue,`idToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_start(`scenario`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_intent_digest_hex(`intentToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_advance(`snapshot`: RustBuffer.ByValue,`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_pairing_intent_sas(`intentToken`: RustBuffer.ByValue,`keyDigest`: RustBuffer.ByValue,`deviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_resume(`snapshot`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_account(`json`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_start(`scenario`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_login_attempt(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_join_request_qr(`payload`: RustBuffer.ByValue,`allowLoopbackHttp`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(`origin`: RustBuffer.ByValue,`accountId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning(`checkpointBytes`: RustBuffer.ByValue,`expectedOrigin`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_seal_intent_token(`joinKeyB64url`: RustBuffer.ByValue,`intentToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_vault_profile_fingerprint(`profileJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_peppy_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1282,10 +1370,7 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_android_companion_health() and 0xFFFF) != 39709) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_create_smoke_vault_material() and 0xFFFF) != 65471) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_create_vault_material() and 0xFFFF) != 14347) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_generate_native_enrollment_key() and 0xFFFF) != 6734) {
@@ -1300,28 +1385,46 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_pairing_proof_bytes() and 0xFFFF) != 9385) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_advance() and 0xFFFF) != 61255) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase() and 0xFFFF) != 10342) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_passphrase() and 0xFFFF) != 59394) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_login_request() and 0xFFFF) != 15096) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_passphrase_acceptable() and 0xFFFF) != 41362) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_passphrase_acceptable() and 0xFFFF) != 65355) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_resume() and 0xFFFF) != 12546) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request() and 0xFFFF) != 59693) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_start() and 0xFFFF) != 48198) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_intent_digest_hex() and 0xFFFF) != 10067) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_advance() and 0xFFFF) != 23477) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_pairing_intent_sas() and 0xFFFF) != 60670) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_resume() and 0xFFFF) != 14632) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account() and 0xFFFF) != 35553) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_preview_v2_start() and 0xFFFF) != 44510) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_login_attempt() and 0xFFFF) != 63378) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() and 0xFFFF) != 62352) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_join_request_qr() and 0xFFFF) != 41586) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() and 0xFFFF) != 1953) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning() and 0xFFFF) != 44262) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_seal_intent_token() and 0xFFFF) != 6010) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint() and 0xFFFF) != 3664) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() and 0xFFFF) != 17788) {
@@ -1622,6 +1725,48 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_native_plaintext_path() and 0xFFFF) != 10080) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_attempt_id() and 0xFFFF) != 52594) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_expires_in_seconds() and 0xFFFF) != 62050) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedloginattempt_nonce() and 0xFFFF) != 25914) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_accept_grant() and 0xFFFF) != 15178) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_checkpoint() and 0xFFFF) != 36471) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_complete_request() and 0xFFFF) != 32126) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_credential_json() and 0xFFFF) != 12476) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_grant_request() and 0xFFFF) != 30937) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_has_grant() and 0xFFFF) != 46980) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_passphrase_matches() and 0xFFFF) != 59165) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedprovisioning_view() and 0xFFFF) != 36610) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_account_id() and 0xFFFF) != 62329) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_bearer_token() and 0xFFFF) != 39287) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds() and 0xFFFF) != 15882) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -4369,6 +4514,944 @@ public object FfiConverterTypeNativeEnrollmentKey: FfiConverter<NativeEnrollment
 //
 
 
+public interface NativeHostedLoginAttemptInterface {
+    
+    fun `attemptId`(): kotlin.String
+    
+    fun `expiresInSeconds`(): kotlin.UInt
+    
+    fun `nonce`(): kotlin.String
+    
+    companion object
+}
+
+open class NativeHostedLoginAttempt: Disposable, AutoCloseable, NativeHostedLoginAttemptInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_peppy_mobile_bindings_fn_free_nativehostedloginattempt(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_peppy_mobile_bindings_fn_clone_nativehostedloginattempt(handle, status)
+        }
+    }
+
+    override fun `attemptId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_attempt_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `expiresInSeconds`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_expires_in_seconds(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `nonce`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedloginattempt_nonce(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeHostedLoginAttempt: FfiConverter<NativeHostedLoginAttempt, Long> {
+    override fun lower(value: NativeHostedLoginAttempt): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NativeHostedLoginAttempt {
+        return NativeHostedLoginAttempt(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NativeHostedLoginAttempt {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NativeHostedLoginAttempt) = 8UL
+
+    override fun write(value: NativeHostedLoginAttempt, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface NativeHostedProvisioningInterface {
+    
+    fun `acceptGrant`(`responseJson`: kotlin.String)
+    
+    fun `checkpoint`(): kotlin.ByteArray
+    
+    fun `completeRequest`(): kotlin.String
+    
+    fun `credentialJson`(`completeResponseJson`: kotlin.String): kotlin.String
+    
+    fun `grantRequest`(): kotlin.String
+    
+    fun `hasGrant`(): kotlin.Boolean
+    
+    fun `passphraseMatches`(`passphrase`: kotlin.String): kotlin.Boolean
+    
+    fun `view`(): NativeHostedProvisioningView
+    
+    companion object
+}
+
+open class NativeHostedProvisioning: Disposable, AutoCloseable, NativeHostedProvisioningInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_peppy_mobile_bindings_fn_free_nativehostedprovisioning(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_peppy_mobile_bindings_fn_clone_nativehostedprovisioning(handle, status)
+        }
+    }
+
+    
+    @Throws(MobileBindingsException::class)override fun `acceptGrant`(`responseJson`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_accept_grant(
+        it,
+        
+        FfiConverterString.lower(`responseJson`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `checkpoint`(): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_checkpoint(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `completeRequest`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_complete_request(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `credentialJson`(`completeResponseJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_credential_json(
+        it,
+        
+        FfiConverterString.lower(`completeResponseJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `grantRequest`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_grant_request(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `hasGrant`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_has_grant(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `passphraseMatches`(`passphrase`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_passphrase_matches(
+        it,
+        
+        FfiConverterString.lower(`passphrase`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `view`(): NativeHostedProvisioningView {
+            return FfiConverterTypeNativeHostedProvisioningView.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedprovisioning_view(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeHostedProvisioning: FfiConverter<NativeHostedProvisioning, Long> {
+    override fun lower(value: NativeHostedProvisioning): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NativeHostedProvisioning {
+        return NativeHostedProvisioning(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NativeHostedProvisioning {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NativeHostedProvisioning) = 8UL
+
+    override fun write(value: NativeHostedProvisioning, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface NativeHostedSessionInterface {
+    
+    fun `accountId`(): kotlin.String
+    
+    fun `bearerToken`(): kotlin.String
+    
+    fun `expiresInSeconds`(): kotlin.UInt
+    
+    companion object
+}
+
+open class NativeHostedSession: Disposable, AutoCloseable, NativeHostedSessionInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_peppy_mobile_bindings_fn_free_nativehostedsession(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_peppy_mobile_bindings_fn_clone_nativehostedsession(handle, status)
+        }
+    }
+
+    override fun `accountId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_account_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `bearerToken`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_bearer_token(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `expiresInSeconds`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativehostedsession_expires_in_seconds(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeHostedSession: FfiConverter<NativeHostedSession, Long> {
+    override fun lower(value: NativeHostedSession): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NativeHostedSession {
+        return NativeHostedSession(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NativeHostedSession {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NativeHostedSession) = 8UL
+
+    override fun write(value: NativeHostedSession, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 /**
  * Owns a core-created temporary plaintext file. It is deleted when this handle
  * is disposed or dropped; callers must never forward its path to a web view.
@@ -5312,6 +6395,117 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
 
 
 
+data class NativeHostedAccount (
+    var `accountId`: kotlin.String
+    , 
+    var `classification`: kotlin.String
+    , 
+    var `entitlement`: kotlin.String
+    , 
+    var `access`: kotlin.String
+    , 
+    var `vaultId`: kotlin.String?
+    , 
+    var `operationId`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeHostedAccount: FfiConverterRustBuffer<NativeHostedAccount> {
+    override fun read(buf: ByteBuffer): NativeHostedAccount {
+        return NativeHostedAccount(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeHostedAccount) = (
+            FfiConverterString.allocationSize(value.`accountId`) +
+            FfiConverterString.allocationSize(value.`classification`) +
+            FfiConverterString.allocationSize(value.`entitlement`) +
+            FfiConverterString.allocationSize(value.`access`) +
+            FfiConverterOptionalString.allocationSize(value.`vaultId`) +
+            FfiConverterOptionalString.allocationSize(value.`operationId`)
+    )
+
+    override fun write(value: NativeHostedAccount, buf: ByteBuffer) {
+            FfiConverterString.write(value.`accountId`, buf)
+            FfiConverterString.write(value.`classification`, buf)
+            FfiConverterString.write(value.`entitlement`, buf)
+            FfiConverterString.write(value.`access`, buf)
+            FfiConverterOptionalString.write(value.`vaultId`, buf)
+            FfiConverterOptionalString.write(value.`operationId`, buf)
+    }
+}
+
+
+
+data class NativeHostedProvisioningView (
+    var `origin`: kotlin.String
+    , 
+    var `accountId`: kotlin.String
+    , 
+    var `operationId`: kotlin.String
+    , 
+    var `vaultId`: kotlin.String
+    , 
+    var `deviceId`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeHostedProvisioningView: FfiConverterRustBuffer<NativeHostedProvisioningView> {
+    override fun read(buf: ByteBuffer): NativeHostedProvisioningView {
+        return NativeHostedProvisioningView(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeHostedProvisioningView) = (
+            FfiConverterString.allocationSize(value.`origin`) +
+            FfiConverterString.allocationSize(value.`accountId`) +
+            FfiConverterString.allocationSize(value.`operationId`) +
+            FfiConverterString.allocationSize(value.`vaultId`) +
+            FfiConverterString.allocationSize(value.`deviceId`)
+    )
+
+    override fun write(value: NativeHostedProvisioningView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`origin`, buf)
+            FfiConverterString.write(value.`accountId`, buf)
+            FfiConverterString.write(value.`operationId`, buf)
+            FfiConverterString.write(value.`vaultId`, buf)
+            FfiConverterString.write(value.`deviceId`, buf)
+    }
+}
+
+
+
 data class NativeIncomingSms (
     var `conversationId`: kotlin.String?
     , 
@@ -5398,6 +6592,49 @@ public object FfiConverterTypeNativeIngestResult: FfiConverterRustBuffer<NativeI
     override fun write(value: NativeIngestResult, buf: ByteBuffer) {
             FfiConverterTypeNativeIngestState.write(value.`state`, buf)
             FfiConverterOptionalString.write(value.`quarantineReason`, buf)
+    }
+}
+
+
+
+data class NativeJoinRequestQr (
+    var `httpsOrigin`: kotlin.String
+    , 
+    var `joinRequestId`: kotlin.String
+    , 
+    var `joinKey`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeJoinRequestQr: FfiConverterRustBuffer<NativeJoinRequestQr> {
+    override fun read(buf: ByteBuffer): NativeJoinRequestQr {
+        return NativeJoinRequestQr(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeJoinRequestQr) = (
+            FfiConverterString.allocationSize(value.`httpsOrigin`) +
+            FfiConverterString.allocationSize(value.`joinRequestId`) +
+            FfiConverterString.allocationSize(value.`joinKey`)
+    )
+
+    override fun write(value: NativeJoinRequestQr, buf: ByteBuffer) {
+            FfiConverterString.write(value.`httpsOrigin`, buf)
+            FfiConverterString.write(value.`joinRequestId`, buf)
+            FfiConverterString.write(value.`joinKey`, buf)
     }
 }
 
@@ -7683,25 +8920,15 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
             FfiConverterTypeNativeRawSnapshotRecord.write(it, buf)
         }
     }
-} fun `androidCompanionHealth`(): GatewayHealth {
-            return FfiConverterTypeGatewayHealth.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_android_companion_health(
-    
-        _status)
 }
-    )
-    }
-    
-
         /**
-         * Creates synthetic test enrollment material for host smoke tests only. Production
-         * enrollment supplies its already-authenticated profile/header through `unlock`.
+         * Creates a new vault key profile and encrypted check header from a passphrase.
+         * Hosts use this material to initialize a vault before opening a native client.
          */
-    @Throws(MobileBindingsException::class) fun `createSmokeVaultMaterial`(`vaultId`: kotlin.String, `passphrase`: kotlin.String): NativeVaultMaterial {
+    @Throws(MobileBindingsException::class) fun `createVaultMaterial`(`vaultId`: kotlin.String, `passphrase`: kotlin.String): NativeVaultMaterial {
             return FfiConverterTypeNativeVaultMaterial.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_create_smoke_vault_material(
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_create_vault_material(
     
         
         FfiConverterString.lower(`vaultId`),
@@ -7766,35 +8993,32 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
     )
     }
     
- fun `hostedPreviewAdvance`(`snapshot`: kotlin.String, `event`: kotlin.String): kotlin.String {
+ fun `generateHostedPassphrase`(): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_advance(
-    
-        
-        FfiConverterString.lower(`snapshot`),
-        FfiConverterString.lower(`event`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * Resamples six EFF large-list words until they pass the conservative local UI gate.
-         */ fun `hostedPreviewPassphrase`(): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_passphrase(
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_generate_hosted_passphrase(
     
         _status)
 }
     )
     }
     
- fun `hostedPreviewPassphraseAcceptable`(`passphrase`: kotlin.String): kotlin.Boolean {
+
+    @Throws(MobileBindingsException::class) fun `hostedLoginRequest`(`provider`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_login_request(
+    
+        
+        FfiConverterString.lower(`provider`),_status)
+}
+    )
+    }
+    
+ fun `hostedPassphraseAcceptable`(`passphrase`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_passphrase_acceptable(
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_passphrase_acceptable(
     
         
         FfiConverterString.lower(`passphrase`),_status)
@@ -7802,58 +9026,143 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
     )
     }
     
- fun `hostedPreviewResume`(`snapshot`: kotlin.String): kotlin.String {
+
+    @Throws(MobileBindingsException::class) fun `hostedSessionRequest`(`attemptId`: kotlin.String, `idToken`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_resume(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_session_request(
     
         
-        FfiConverterString.lower(`snapshot`),_status)
+        FfiConverterString.lower(`attemptId`),
+        FfiConverterString.lower(`idToken`),_status)
 }
     )
     }
     
- fun `hostedPreviewStart`(`scenario`: kotlin.String): kotlin.String {
+ fun `intentDigestHex`(`intentToken`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_start(
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_intent_digest_hex(
     
         
-        FfiConverterString.lower(`scenario`),_status)
+        FfiConverterString.lower(`intentToken`),_status)
 }
     )
     }
     
- fun `hostedPreviewV2Advance`(`snapshot`: kotlin.String, `event`: kotlin.String): kotlin.String {
+
+    @Throws(MobileBindingsException::class) fun `pairingIntentSas`(`intentToken`: kotlin.String, `keyDigest`: kotlin.String, `deviceId`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_advance(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_pairing_intent_sas(
     
         
-        FfiConverterString.lower(`snapshot`),
-        FfiConverterString.lower(`event`),_status)
+        FfiConverterString.lower(`intentToken`),
+        FfiConverterString.lower(`keyDigest`),
+        FfiConverterString.lower(`deviceId`),_status)
 }
     )
     }
     
- fun `hostedPreviewV2Resume`(`snapshot`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_resume(
+
+    @Throws(MobileBindingsException::class) fun `parseHostedAccount`(`json`: kotlin.String, `expectedAccountId`: kotlin.String): NativeHostedAccount {
+            return FfiConverterTypeNativeHostedAccount.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_hosted_account(
     
         
-        FfiConverterString.lower(`snapshot`),_status)
+        FfiConverterString.lower(`json`),
+        FfiConverterString.lower(`expectedAccountId`),_status)
 }
     )
     }
     
- fun `hostedPreviewV2Start`(`scenario`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_preview_v2_start(
+
+    @Throws(MobileBindingsException::class) fun `parseHostedLoginAttempt`(`json`: kotlin.String): NativeHostedLoginAttempt {
+            return FfiConverterTypeNativeHostedLoginAttempt.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_hosted_login_attempt(
     
         
-        FfiConverterString.lower(`scenario`),_status)
+        FfiConverterString.lower(`json`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parseHostedSession`(`json`: kotlin.String): NativeHostedSession {
+            return FfiConverterTypeNativeHostedSession.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(
+    
+        
+        FfiConverterString.lower(`json`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parseJoinRequestQr`(`payload`: kotlin.String, `allowLoopbackHttp`: kotlin.Boolean): NativeJoinRequestQr {
+            return FfiConverterTypeNativeJoinRequestQr.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_join_request_qr(
+    
+        
+        FfiConverterString.lower(`payload`),
+        FfiConverterBoolean.lower(`allowLoopbackHttp`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `prepareHostedProvisioning`(`origin`: kotlin.String, `accountId`: kotlin.String, `passphrase`: kotlin.String): NativeHostedProvisioning {
+            return FfiConverterTypeNativeHostedProvisioning.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(
+    
+        
+        FfiConverterString.lower(`origin`),
+        FfiConverterString.lower(`accountId`),
+        FfiConverterString.lower(`passphrase`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `restoreHostedProvisioning`(`checkpointBytes`: kotlin.ByteArray, `expectedOrigin`: kotlin.String, `expectedAccountId`: kotlin.String): NativeHostedProvisioning {
+            return FfiConverterTypeNativeHostedProvisioning.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning(
+    
+        
+        FfiConverterByteArray.lower(`checkpointBytes`),
+        FfiConverterString.lower(`expectedOrigin`),
+        FfiConverterString.lower(`expectedAccountId`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `sealIntentToken`(`joinKeyB64url`: kotlin.String, `intentToken`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_seal_intent_token(
+    
+        
+        FfiConverterString.lower(`joinKeyB64url`),
+        FfiConverterString.lower(`intentToken`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `vaultProfileFingerprint`(`profileJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_vault_profile_fingerprint(
+    
+        
+        FfiConverterString.lower(`profileJson`),_status)
 }
     )
     }

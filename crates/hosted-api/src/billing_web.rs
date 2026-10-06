@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 pub mod routes {
     pub const BILLING: &str = "/hosted/v1/web/billing";
+    pub const PLANS: &str = "/hosted/v1/web/billing/plans";
     pub const SUBSCRIBE: &str = "/hosted/v1/web/billing/subscribe";
     pub const PAYMENT_ACTION: &str = "/hosted/v1/web/billing/payment-action";
     pub const RECONCILE: &str = "/hosted/v1/web/billing/reconcile";
@@ -27,7 +28,7 @@ pub struct BillingOperationRequest {
 #[derive(schemars::JsonSchema)]
 pub struct SubscribeRequest {
     pub operation_id: Uuid,
-    /// A stale quote is rejected; this never selects the server-side price.
+    /// The selected, configured quote; stale or unconfigured quotes are rejected.
     pub expected_price_id: String,
 }
 
@@ -97,6 +98,14 @@ pub struct PlanSummary {
     pub comped: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
+pub struct BillingPlans {
+    pub default_price_id: String,
+    pub plans: Vec<PlanSummary>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
@@ -120,6 +129,7 @@ mod tests {
     #[test]
     fn web_billing_routes_are_distinct_from_legacy_checkout() {
         assert_eq!(routes::SUBSCRIBE, "/hosted/v1/web/billing/subscribe");
+        assert_eq!(routes::PLANS, "/hosted/v1/web/billing/plans");
         assert_eq!(
             routes::PAYMENT_ACTION,
             "/hosted/v1/web/billing/payment-action"

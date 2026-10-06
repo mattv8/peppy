@@ -1,4 +1,5 @@
 //! Generic cryptographic building blocks. Protocol envelope integration is deliberately external.
+pub mod passphrase;
 use hmac::{Hmac, Mac};
 use libsodium_rs::{
     crypto_aead::xchacha20poly1305 as aead, crypto_pwhash::argon2id,

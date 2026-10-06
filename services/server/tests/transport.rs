@@ -721,6 +721,24 @@ async fn pairing_intent_claim_approval_challenge_and_consume_are_end_to_end() {
     let intent_token = intent["intent_token"].as_str().unwrap();
     assert_eq!(intent_token.len(), 43);
 
+    let owner_claim = json!({
+        "device_id": Uuid::new_v4(),
+        "public_key": {"ed25519_public_key":URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&rand_bytes()).verifying_key().as_bytes())},
+        "requested_role": "owner",
+    });
+    let (status, rejected_owner_claim) = server
+        .call(
+            client
+                .post(format!(
+                    "{}/v1/pairing/intents/{intent_token}/claim",
+                    server.base_url
+                ))
+                .json(&owner_claim),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(rejected_owner_claim["code"], "invalid_pairing_claim");
+
     let key = SigningKey::from_bytes(&rand_bytes());
     let device = Uuid::new_v4();
     let public_key =
@@ -1024,6 +1042,203 @@ async fn pairing_intent_maintenance_removes_expired_and_consumed_rows_only() {
 }
 
 #[tokio::test]
+async fn join_requests_create_offer_poll_and_prune() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start_without_maintenance().await;
+    let client = Client::new();
+    let create = || client.post(format!("{}/v1/pairing/join-requests", server.base_url));
+    let response = create().send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value = response.json().await.unwrap();
+    let id = created["join_request_id"].as_str().unwrap();
+    let secret = created["poll_secret"].as_str().unwrap();
+    assert_eq!(secret.len(), 43);
+    assert!(created["expires_in_seconds"].as_i64().unwrap() <= 300);
+
+    for (path, poll_secret) in [
+        (id.to_owned(), "wrong"),
+        (Uuid::new_v4().to_string(), secret),
+    ] {
+        let response = client
+            .get(format!(
+                "{}/v1/pairing/join-requests/{path}",
+                server.base_url
+            ))
+            .header("Peppy-Join-Secret", poll_secret)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    let device = server.pair("device").await;
+    let intent = server
+        .post(
+            &server.owner_token,
+            "/v1/pairing/intents",
+            &json!({"https_origin":"https://api.example"}),
+        )
+        .await
+        .1;
+    let offer = json!({
+        "intent_digest": hex::encode(Sha256::digest(intent["intent_token"].as_str().unwrap().as_bytes())),
+        "sealed_intent_token": URL_SAFE_NO_PAD.encode([1, 2, 3]),
+    });
+    let response = client
+        .post(format!(
+            "{}/v1/pairing/join-requests/{id}/offer",
+            server.base_url
+        ))
+        .bearer_auth(&device.token)
+        .json(&offer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = server
+        .auth(client.post(format!(
+            "{}/v1/pairing/join-requests/{id}/offer",
+            server.base_url
+        )))
+        .json(&offer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let poll = || {
+        client
+            .get(format!("{}/v1/pairing/join-requests/{id}", server.base_url))
+            .header("Peppy-Join-Secret", secret)
+    };
+    let first: Value = poll().send().await.unwrap().json().await.unwrap();
+    for _ in 0..24 {
+        let response = poll().send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap(), first);
+    }
+    assert_eq!(first["state"], "offered");
+    assert_eq!(first["sealed_intent_token"], offer["sealed_intent_token"]);
+    assert_eq!(first["intent_digest"], offer["intent_digest"]);
+
+    // Two earlier offers for this join request already used two of its 20 admissions.
+    for _ in 0..18 {
+        let response = server
+            .auth(client.post(format!(
+                "{}/v1/pairing/join-requests/{id}/offer",
+                server.base_url
+            )))
+            .json(&offer)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "join_request_already_offered"
+        );
+    }
+    let response = server
+        .auth(client.post(format!(
+            "{}/v1/pairing/join-requests/{id}/offer",
+            server.base_url
+        )))
+        .json(&offer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "pairing_admission_limited"
+    );
+
+    let expired: Value = create().send().await.unwrap().json().await.unwrap();
+    let expired_id = expired["join_request_id"].as_str().unwrap();
+    sqlx::query("UPDATE pairing_join_requests SET expires_at=now()-interval '1 second' WHERE join_request_id=$1")
+        .bind(expired_id.parse::<Uuid>().unwrap()).execute(&server.pool).await.unwrap();
+    let response = server
+        .auth(client.post(format!(
+            "{}/v1/pairing/join-requests/{expired_id}/offer",
+            server.base_url
+        )))
+        .json(&offer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GONE);
+    assert_eq!(
+        prune_expired_pairing_intents(&server.pool).await.unwrap(),
+        1
+    );
+
+    let revoked: Value = create().send().await.unwrap().json().await.unwrap();
+    sqlx::query("UPDATE device_credentials SET revoked_at=now() WHERE token_digest=$1")
+        .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let response = server
+        .auth(client.post(format!(
+            "{}/v1/pairing/join-requests/{}/offer",
+            server.base_url, revoked["join_request_id"]
+        )))
+        .json(&offer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn join_request_offer_rejects_unofferable_intent_and_cap() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let client = Client::new();
+    let created: Value = client
+        .post(format!("{}/v1/pairing/join-requests", server.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["join_request_id"].as_str().unwrap();
+    let digest = [7_u8; 32];
+    sqlx::query("INSERT INTO pairing_intents(intent_digest,vault_id,origin,created_by_device_id,expires_at) VALUES($1,$2,'https://api.example',$3,now()+interval '1 hour')")
+        .bind(digest.as_slice()).bind(server.vault).bind(Uuid::new_v4()).execute(&server.pool).await.unwrap();
+    let response = server
+        .auth(client.post(format!(
+            "{}/v1/pairing/join-requests/{id}/offer",
+            server.base_url
+        )))
+        .json(&json!({"intent_digest":hex::encode(digest),"sealed_intent_token":"AQ"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "pairing_intent_not_offerable"
+    );
+
+    sqlx::query("INSERT INTO pairing_join_requests(join_request_id,poll_secret_digest,expires_at) SELECT gen_random_uuid(),decode(repeat('00',32),'hex'),now()+interval '1 hour' FROM generate_series(1,10000)")
+        .execute(&server.pool).await.unwrap();
+    let response = client
+        .post(format!("{}/v1/pairing/join-requests", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "join_requests_unavailable"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn device_revocation_enforces_owner_scope_last_owner_and_token_cleanup() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
@@ -1272,6 +1487,226 @@ async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
     assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
 
     first.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let gateway = server.pair("gateway").await;
+    let ordinary = server.pair("device").await;
+    let desktop_owner = server.pair("gateway").await;
+    sqlx::query("UPDATE devices SET role='owner' WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(desktop_owner.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let capability = json!({"simulator":false,"capabilities":{"carrier":true}});
+
+    let (status, _) = server
+        .post(&ordinary.token, "/v1/capabilities", &capability)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let before = set_fingerprint(
+        command(
+            server.vault,
+            server.owner_device,
+            1,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            server.owner_device,
+        ),
+        &server.fingerprint,
+    );
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/commands", &before)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let gateway_command = Uuid::new_v4();
+    let routed_to_gateway = set_fingerprint(
+        command(
+            server.vault,
+            server.owner_device,
+            2,
+            Uuid::new_v4(),
+            gateway_command,
+            gateway.id,
+        ),
+        &server.fingerprint,
+    );
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/commands", &routed_to_gateway)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, desktop_pending) = server
+        .get(&server.owner_token, "/v1/commands/pending")
+        .await;
+    assert_eq!(
+        desktop_pending["commands"][0]["command_id"],
+        json!(gateway_command)
+    );
+
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/capabilities", &capability)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let owner_role: String =
+        sqlx::query_scalar("SELECT role FROM devices WHERE vault_id=$1 AND device_id=$2")
+            .bind(server.vault)
+            .bind(server.owner_device)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert_eq!(owner_role, "owner");
+
+    let owner_command = Uuid::new_v4();
+    let routed_to_owner = set_fingerprint(
+        command(
+            server.vault,
+            server.owner_device,
+            3,
+            Uuid::new_v4(),
+            owner_command,
+            server.owner_device,
+        ),
+        &server.fingerprint,
+    );
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/commands", &routed_to_owner)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, mobile_pending) = server
+        .get(&server.owner_token, "/v1/commands/pending")
+        .await;
+    assert_eq!(mobile_pending["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        mobile_pending["commands"][0]["command_id"],
+        json!(owner_command)
+    );
+    let (_, desktop_owner_pending) = server
+        .get(&desktop_owner.token, "/v1/commands/pending")
+        .await;
+    assert_eq!(
+        desktop_owner_pending["commands"].as_array().unwrap().len(),
+        2
+    );
+    assert!(
+        desktop_owner_pending["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["command_id"] == json!(gateway_command))
+    );
+    assert!(
+        desktop_owner_pending["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["command_id"] == json!(owner_command))
+    );
+
+    let own_receipt = format!("/v1/commands/{owner_command}/receipts");
+    let (status, _) = server
+        .post(
+            &server.owner_token,
+            &own_receipt,
+            &json!({"receipt":{"state":"sent"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let foreign_receipt = format!("/v1/commands/{gateway_command}/receipts");
+    let (status, _) = server
+        .post(
+            &server.owner_token,
+            &foreign_receipt,
+            &json!({"receipt":{"state":"sent"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let foreign_vault = Uuid::new_v4();
+    let (foreign_profile, foreign_fingerprint) = profile(foreign_vault, 1);
+    let foreign_owner = create_owner(
+        &server.pool,
+        foreign_profile,
+        vec![1, 2, 3],
+        foreign_fingerprint,
+        1,
+    )
+    .await
+    .unwrap();
+    let (status, foreign_capability) = server
+        .post(&foreign_owner.device_token, "/v1/capabilities", &capability)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{foreign_capability}");
+    let foreign_target = set_fingerprint(
+        command(
+            server.vault,
+            server.owner_device,
+            4,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            foreign_owner.device_id,
+        ),
+        &server.fingerprint,
+    );
+    let (status, foreign_target_rejected) = server
+        .post(&server.owner_token, "/v1/commands", &foreign_target)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(foreign_target_rejected["code"], "gateway_not_authorized");
+
+    let revoked_owner = server.pair("gateway").await;
+    sqlx::query("UPDATE devices SET role='owner' WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(revoked_owner.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let (status, revoked_capability) = server
+        .post(&revoked_owner.token, "/v1/capabilities", &capability)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{revoked_capability}");
+    let (status, revoked) = server
+        .post(
+            &server.owner_token,
+            &format!("/v1/devices/{}/revoke", revoked_owner.id),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{revoked}");
+    let revoked_target = set_fingerprint(
+        command(
+            server.vault,
+            server.owner_device,
+            5,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            revoked_owner.id,
+        ),
+        &server.fingerprint,
+    );
+    let (status, revoked_target_rejected) = server
+        .post(&server.owner_token, "/v1/commands", &revoked_target)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(revoked_target_rejected["code"], "gateway_not_authorized");
+
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let (status, _) = server
+        .post(&server.owner_token, "/v1/capabilities", &capability)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    server.shutdown().await;
 }
 
 #[tokio::test]

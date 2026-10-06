@@ -10,7 +10,7 @@ import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeComposeDraftUpdate
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.NativeVaultMaterial
-import uniffi.peppy_mobile_bindings.createSmokeVaultMaterial
+import uniffi.peppy_mobile_bindings.createVaultMaterial
 import uniffi.peppy_mobile_bindings.openNativeClient
 import java.io.File
 import java.nio.file.Files
@@ -43,7 +43,7 @@ class TestKeyHolder {
 object SharedVault {
     val vaultId: String = UUID.randomUUID().toString()
     val gatewayDeviceId: String = UUID.randomUUID().toString()
-    val material: NativeVaultMaterial by lazy { createSmokeVaultMaterial(vaultId, TEST_PASSPHRASE) }
+    val material: NativeVaultMaterial by lazy { createVaultMaterial(vaultId, TEST_PASSPHRASE) }
     val desktop: NativeClient by lazy {
         val dir = Files.createTempDirectory("peppy-desktop").toFile().apply { deleteOnExit() }
         openNativeClient(NativeOpenConfig(File(dir, "desktop.db").path, vaultId, UUID.randomUUID().toString(), ByteArray(32) { 5 }))

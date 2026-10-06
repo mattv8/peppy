@@ -48,7 +48,7 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
     init(vaultId: String = UUID().uuidString.lowercased(), passphrase: String) throws {
         self.vaultId = vaultId
         tokens = [token]
-        material = try createSmokeVaultMaterial(vaultId: vaultId, passphrase: passphrase)
+        material = try createVaultMaterial(vaultId: vaultId, passphrase: passphrase)
     }
 
     func credential(deviceId: String, origin: String = FakeServer.origin, token: String? = nil) -> Data {

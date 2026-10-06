@@ -74,13 +74,55 @@ describe("draft lifecycle flushing", () => {
   });
 });
 
-describe("hosted preview gate", () => {
-  it("uses hosted onboarding only for fresh server-required desktops", async () => {
+describe("setup landing routing", () => {
+  const signedOut = { available: false, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false } as const;
+  const landingSnapshot = async (overrides: Partial<DesktopSnapshot>) => {
     const snapshot = await fixtureBridge.load_state();
-    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, connection: { state: "offline", errorCode: "server-required" }, activeConversationId: undefined });
-    vi.spyOn(bridge, "hosted_preview_state").mockResolvedValue({ scenario: "new", screen: "welcome", accountState: "anonymous", entitlementState: "none", approvalState: "none", unlocked: false, rejected: false, statusKey: null, localError: null, operationId: null, fixture: { accountLabel: null, signInProvider: null, subscription: null, approvalCode: null, hostedOrigin: null }, scenarios: ["new"] });
+    vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, activeConversationId: undefined, ...overrides });
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "join_start").mockResolvedValue({ state: "waiting", qrPayload: "{\"join\":true}", expiresInSeconds: 300 });
+    vi.spyOn(bridge, "join_status").mockResolvedValue({ state: "waiting", qrPayload: "{\"join\":true}", expiresInSeconds: 300 });
+    vi.spyOn(bridge, "join_cancel").mockResolvedValue();
+  };
+  afterEach(() => localStorage.removeItem("peppy.setup.mode"));
+
+  it("opens a fresh server-required desktop on the hosted QR join", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
     render(<App />);
-    await waitFor(() => expect(document.getElementById("hosted-onboarding")).toBeInTheDocument());
+    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+    expect(screen.getByRole("combobox", { name: /server mode/i })).toHaveValue("hosted");
+    await waitFor(() => expect(bridge.join_start).toHaveBeenCalled());
+  });
+
+  it("offers the self-hosted mode with URL input", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
+    render(<App />);
+    fireEvent.change(await screen.findByRole("combobox", { name: /server mode/i }), { target: { value: "self-hosted" } });
+    expect(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" })).toBeInTheDocument();
+  });
+
+  it("shows phone pairing on a connected owner desktop with no phone", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "owner" });
+    vi.spyOn(bridge, "create_pairing_intent").mockResolvedValue({ httpsOrigin: "https://example.test", intentToken: "a".repeat(43), expiresInSeconds: 300 } as Awaited<ReturnType<typeof bridge.create_pairing_intent>>);
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+    expect(screen.queryByRole("combobox", { name: /server mode/i })).not.toBeInTheDocument();
+    expect(bridge.join_start).not.toHaveBeenCalled();
+  });
+
+  it("keeps a joined non-owner desktop on the conversation view without starting a new join", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "device" });
+    render(<App />);
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalled());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(bridge.join_start).not.toHaveBeenCalled();
+  });
+
+  it("keeps the conversation view once a phone is connected", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" } });
+    render(<App />);
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalled());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
   });
 });
 
@@ -1406,6 +1448,22 @@ describe("host state display", () => {
 });
 
 describe("desktop presentation controls", () => {
+  it("uses titlebar conversation actions to restore the list before starting a draft", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const toggle = screen.getByRole("button", { name: "Toggle conversation list" });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(document.getElementById("thread-list")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+    expect(document.getElementById("draft-recipients")).toBeInTheDocument();
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledWith(
+      expect.objectContaining({ recipientIds: [] }),
+    ));
+    expect(vi.mocked(bridge.save_draft).mock.calls.some(([input]) => input.recipientIds.includes(""))).toBe(false);
+  });
+
   it("shows the overlay scrollbar while the message list is scrolled", async () => {
     render(<App />);
     const list = await screen.findByRole("log", { name: "Messages" });

@@ -41,7 +41,7 @@ INSPECT_MODE=exists run_publisher
 grep -Fq 'docker buildx imagetools inspect --format \{\{.Manifest.Digest\}\}' "$root/log"
 grep -Fq 'cosign verify --key env://COSIGN_PUBLIC_KEY hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
 grep -Fq 'docker buildx imagetools create --tag hub.docker.visnovsky.us/library/peppy-server:staging hub.docker.visnovsky.us/library/peppy-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/log"
-! grep -Fq 'docker buildx build' "$root/log"
+if grep -Fq 'docker buildx build' "$root/log"; then echo 'unexpected docker buildx build in log' >&2; exit 1; fi
 grep -Fq 'digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$root/output"
 reset_case
 INSPECT_MODE=missing run_publisher
@@ -56,7 +56,7 @@ if INSPECT_MODE=exists VERIFY_FAIL=true run_publisher >/dev/null 2>"$root/stderr
 assert_no_mutation
 reset_case
 if INSPECT_MODE=invalid run_publisher >/dev/null 2>"$root/stderr"; then echo 'invalid digest should fail' >&2; exit 1; fi
-assert_no_mutation; ! grep -Fq 'cosign verify' "$root/log"
+assert_no_mutation; if grep -Fq 'cosign verify' "$root/log"; then echo 'unexpected cosign verify in log' >&2; exit 1; fi
 reset_case
 if IMAGE=hub.docker.visnovsky.us/private-library/peppy-server INSPECT_MODE=exists run_publisher >/dev/null 2>"$root/stderr"; then echo 'private namespace should fail' >&2; exit 1; fi
 assert_no_mutation

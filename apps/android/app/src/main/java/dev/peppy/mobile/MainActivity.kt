@@ -53,6 +53,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -155,7 +156,7 @@ private fun CompanionScreen() {
     var destination by remember { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
     var pairingOpen by remember { mutableStateOf(false) }
-    var hostedPreviewOpen by remember { mutableStateOf(BuildConfig.DEBUG) }
+    var hostedOpen by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(refresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
@@ -200,14 +201,16 @@ private fun CompanionScreen() {
         return
     }
 
-    // The fake hosted route is compiled in but inaccessible in release builds and for
-    // a real enrollment. It never shares the gateway's credentials or state.
     if (status == null) {
         CircularProgressIndicator(Modifier.padding(24.dp))
         return
     }
-    if (BuildConfig.DEBUG && hostedPreviewOpen && status?.enrolled == false) {
-        HostedOnboardingScreen(onSelfHosted = { hostedPreviewOpen = false })
+    if (hostedOpen && status?.enrolled == false) {
+        HostedEnrollmentScreen(
+            onDismiss = { hostedOpen = false },
+            onEnrolled = { hostedOpen = false; refresh++ },
+            onPairExisting = { hostedOpen = false; pairingOpen = true },
+        )
         return
     }
 
@@ -250,13 +253,12 @@ private fun CompanionScreen() {
                 contentDescription = null,
                 modifier = Modifier.size(88.dp).testTag("pairing-hero"),
             )
-            if (BuildConfig.DEBUG) {
-                OutlinedButton(onClick = { hostedPreviewOpen = true }, modifier = Modifier.testTag("self-hosted-back")) {
-                    Text(stringResource(R.string.peppy_back))
-                }
+            Button(onClick = { hostedOpen = true }, modifier = Modifier.fillMaxWidth().testTag("hosted-signup-button")) {
+                Text(stringResource(R.string.peppy_production_hosted_cta))
             }
             Text(stringResource(R.string.peppy_self_hosted_headline), style = MaterialTheme.typography.headlineSmall)
             Text(stringResource(R.string.peppy_self_hosted_body), style = MaterialTheme.typography.bodyMedium)
+            OutlinedButton(onClick = { pairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("self-hosted-button")) { Text(stringResource(R.string.peppy_production_join_cta)) }
             Button(onClick = { pairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("pair-qr-button")) { Text("Scan QR code") }
             BusyButton("import-credential-button", "Import credential file", importBusy, enabled = !importBusy && !unlockBusy, modifier = Modifier.fillMaxWidth()) {
                 filePicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
