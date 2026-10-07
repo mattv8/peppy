@@ -22,6 +22,7 @@ pub struct WebClientConfig {
     pub host: String,
     pub asset_dir: PathBuf,
     pub api_origin: Url,
+    pub account_url: Option<Url>,
 }
 
 impl WebClientConfig {
@@ -37,8 +38,46 @@ impl WebClientConfig {
             host,
             asset_dir,
             api_origin,
+            account_url: None,
         })
     }
+
+    pub fn with_account_url(mut self, account_url: Url) -> Result<Self, String> {
+        let Some(account_host) = account_url.host_str() else {
+            return Err("PEPPY_WEB_CLIENT_ACCOUNT_URL must use an HTTPS hostname".into());
+        };
+        if account_url.scheme() != "https"
+            || !matches!(account_url.host(), Some(url::Host::Domain(_)))
+            || !account_url.username().is_empty()
+            || account_url.password().is_some()
+            || account_url.query().is_some()
+            || account_url.fragment().is_some()
+            || account_url.as_str().chars().any(char::is_control)
+            || contains_percent_encoded_control(account_url.as_str())
+        {
+            return Err("PEPPY_WEB_CLIENT_ACCOUNT_URL must be an HTTPS URL without credentials, query, fragment, or control characters".into());
+        }
+        let account_host = normalize_configured_host(account_host).map_err(|_| {
+            "PEPPY_WEB_CLIENT_ACCOUNT_URL must use an HTTPS DNS hostname".to_owned()
+        })?;
+        if account_host == self.host {
+            return Err(
+                "PEPPY_WEB_CLIENT_ACCOUNT_URL host must differ from PEPPY_WEB_CLIENT_HOST".into(),
+            );
+        }
+        self.account_url = Some(account_url);
+        Ok(self)
+    }
+}
+
+fn contains_percent_encoded_control(value: &str) -> bool {
+    value.as_bytes().windows(3).any(|encoded| {
+        encoded[0] == b'%'
+            && std::str::from_utf8(&encoded[1..])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .is_some_and(|byte| byte.is_ascii_control())
+    })
 }
 
 #[derive(Clone)]
@@ -287,13 +326,14 @@ fn configuration_response(config: &WebClientConfig, head_only: bool) -> Response
     let body = if head_only {
         Body::empty()
     } else {
-        Body::from(
-            serde_json::to_vec(&json!({
+        let mut body = json!({
                 "version": 1,
                 "apiOrigin": config.api_origin.as_str(),
-            }))
-            .expect("web client configuration is serializable"),
-        )
+        });
+        if let Some(account_url) = &config.account_url {
+            body["accountUrl"] = json!(account_url.as_str());
+        }
+        Body::from(serde_json::to_vec(&body).expect("web client configuration is serializable"))
     };
     let mut response = Response::new(body);
     response.headers_mut().insert(

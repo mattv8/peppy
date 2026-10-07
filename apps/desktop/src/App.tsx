@@ -912,6 +912,7 @@ function SettingsView({
   onApprovePairing,
   onLock,
   browserHost = false,
+  accountUrl,
 }: {
   origin: string;
   onOrigin(value: string): void;
@@ -934,6 +935,7 @@ function SettingsView({
   onApprovePairing(intentToken: string, keyDigest: string): ReturnType<typeof bridge.approve_pairing_intent>;
   onLock?: () => Promise<void>;
   browserHost?: boolean;
+  accountUrl?: string;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -977,6 +979,13 @@ function SettingsView({
       <section data-settings-section="pair-phone">
         <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} />
       </section>
+      {browserHost && accountUrl && <section data-settings-section="account-billing">
+        <h2>Account &amp; billing</h2>
+        <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
+        <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">
+          Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span>
+        </a>
+      </section>}
       <section data-settings-section="sync">
         <h2>Sync encryption</h2>
         <p className="settings-sync-state">
@@ -1076,7 +1085,7 @@ function StatusDetails({
 
 /* ------------------------------------------------------------------ app */
 
-export function App({ hostKind = "native", fixedOrigin }: { hostKind?: "native" | "browser"; fixedOrigin?: string } = {}) {
+export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string } = {}) {
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
   const [composerConversation] = useState(() =>
@@ -2214,6 +2223,7 @@ export function App({ hostKind = "native", fixedOrigin }: { hostKind?: "native" 
               onApprovePairing={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
               onLock={browserHost ? lockSync : undefined}
               browserHost={browserHost}
+              accountUrl={accountUrl}
             />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2254,6 +2264,7 @@ export function App({ hostKind = "native", fixedOrigin }: { hostKind?: "native" 
                   />}
                   onJoined={() => browserHost ? void refresh() : void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
+                  accountUrl={browserHost ? accountUrl : undefined}
                 />
               ) : snapshot && snapshot.connection.state !== "connected" && !selected ? (
                 <OnboardingView

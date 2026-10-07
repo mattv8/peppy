@@ -314,6 +314,12 @@
     "WebConfigResponse": {
       "additionalProperties": false,
       "properties": {
+        "app_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "available_providers": {
           "items": {
             "$ref": "#/$defs/IdentityProvider"
