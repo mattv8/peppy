@@ -103,6 +103,25 @@ test("generated copy has both native catalog formats", () => {
   assert.equal(strings.strings["peppy.locked"].localizations.en.stringUnit.value, "Locked");
 });
 
+test("onboarding server mode copy maps to each generated platform format", () => {
+  const copy = {
+    onboarding_mode_selector: "Server",
+    onboarding_mode_hosted: "Peppy Hosted",
+    onboarding_mode_self_hosted: "Self-hosted",
+  };
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(catalog[key], value);
+    assert.equal(nativeCatalog[key], value);
+    assert.match(android, new RegExp(`<string name="peppy_${key}">${value}</string>`));
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(value)},`));
+  }
+});
+
 test("account resolution copy maps to each generated platform format", () => {
   const copy = {
     hosted_account_checking: "Checking your account…",
