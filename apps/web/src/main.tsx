@@ -1,9 +1,10 @@
-import { StrictMode } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "../../desktop/src/App";
 import { installBrowserBridge } from "./ui-bridge";
 import "../../desktop/src/app.css";
 import { BrowserBridge } from "./browser-bridge";
+import { fetchAccountUrl } from "./account-navigation";
 import "./web.css";
 
 function unsupported(reasons: string[]): void {
@@ -44,6 +45,22 @@ function showStartupFailure(reason: string): void {
   document.getElementById("browser-startup-failure-heading")?.focus();
 }
 
+function BrowserApp({ bridge }: { bridge: BrowserBridge }) {
+  const [accountUrl, setAccountUrl] = useState<string>();
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchAccountUrl(controller.signal).then((nextAccountUrl) => {
+      if (controller.signal.aborted) return;
+      bridge.setAccountUrl(nextAccountUrl);
+      setAccountUrl(nextAccountUrl);
+    });
+    return () => controller.abort();
+  }, [bridge]);
+
+  return <App hostKind="browser" fixedOrigin={location.origin} accountUrl={accountUrl} />;
+}
+
 function boot(): void {
   const reasons = missingCapabilities();
   if (reasons.length) return unsupported(reasons);
@@ -57,7 +74,7 @@ function boot(): void {
     bridge.onReady(() => {
       if (ready) return;
       ready = true;
-      root.render(<StrictMode><App hostKind="browser" fixedOrigin={location.origin} /></StrictMode>);
+      root.render(<StrictMode><BrowserApp bridge={bridge} /></StrictMode>);
     });
     bridge.onStopped((reason) => { root.unmount(); if (ready) showStopped(reason); else showStartupFailure(reason); });
     worker.onerror = () => bridge.workerError();

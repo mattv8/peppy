@@ -21,6 +21,8 @@ pub struct WebSessionResponse {
 pub struct WebConfigResponse {
     pub stripe_publishable_key: String,
     pub available_providers: Vec<IdentityProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_url: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -57,6 +59,7 @@ mod tests {
         let config = WebConfigResponse {
             stripe_publishable_key: "pk_test".into(),
             available_providers: vec![IdentityProvider::Google],
+            app_url: None,
         };
 
         assert_eq!(
@@ -65,6 +68,34 @@ mod tests {
                 "stripe_publishable_key": "pk_test",
                 "available_providers": ["google"],
             })
+        );
+    }
+
+    #[test]
+    fn web_config_accepts_older_payloads_without_an_app_url() {
+        let config: WebConfigResponse = serde_json::from_value(serde_json::json!({
+            "stripe_publishable_key": "pk_test",
+            "available_providers": ["google"],
+        }))
+        .unwrap();
+
+        assert_eq!(config.app_url, None);
+    }
+
+    #[test]
+    fn web_config_serializes_and_deserializes_an_app_url() {
+        let config = WebConfigResponse {
+            stripe_publishable_key: "pk_test".into(),
+            available_providers: vec![IdentityProvider::Google],
+            app_url: Some("https://app.example.test/".into()),
+        };
+
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["app_url"], "https://app.example.test/");
+        let deserialized: WebConfigResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            deserialized.app_url.as_deref(),
+            Some("https://app.example.test/")
         );
     }
 }

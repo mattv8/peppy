@@ -17,6 +17,10 @@ fn app() -> (TempDir, Router) {
 }
 
 fn app_for_host(host: &str) -> (TempDir, Router) {
+    app_for_host_and_account_url(host, None)
+}
+
+fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempDir, Router) {
     let assets = TempDir::new().unwrap();
     fs::write(assets.path().join("index.html"), "<main>Peppy</main>").unwrap();
     fs::create_dir(assets.path().join("assets")).unwrap();
@@ -48,11 +52,79 @@ fn app_for_host(host: &str) -> (TempDir, Router) {
         Url::parse("https://api.example.test/v1").unwrap(),
     )
     .unwrap();
+    let config = match account_url {
+        Some(account_url) => config
+            .with_account_url(Url::parse(account_url).unwrap())
+            .unwrap(),
+        None => config,
+    };
     let inner = Router::new()
         .route("/v1/ping", get(|| async { "api" }))
         .route("/healthz", get(|| async { "healthy" }))
         .fallback(|| async { StatusCode::IM_A_TEAPOT });
     (assets, wrap(inner, config))
+}
+
+#[tokio::test]
+async fn config_emits_an_optional_account_url() {
+    let (_assets, app) = app_for_host_and_account_url(
+        "app.example.test",
+        Some("https://account.example.test/account"),
+    );
+
+    let response = app
+        .oneshot(request("/web/config.json", Some("app.example.test"), "GET"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes().as_ref(),
+        br#"{"accountUrl":"https://account.example.test/account","apiOrigin":"https://api.example.test/","version":1}"#,
+    );
+}
+
+#[test]
+fn account_url_must_be_a_safe_distinct_https_hostname() {
+    let assets = TempDir::new().unwrap();
+    let config = WebClientConfig::new(
+        "app.example.test".into(),
+        assets.path().into(),
+        Url::parse("https://api.example.test").unwrap(),
+    )
+    .unwrap();
+    let valid = config
+        .clone()
+        .with_account_url(Url::parse("https://account.example.test/account").unwrap())
+        .unwrap();
+    assert_eq!(
+        valid.account_url.unwrap().as_str(),
+        "https://account.example.test/account"
+    );
+
+    for account_url in [
+        "http://account.example.test/account",
+        "https://user@account.example.test/account",
+        "https://account.example.test/account?next=/",
+        "https://account.example.test/account#billing",
+        "https://account.example.test/%0A",
+        "https://app.example.test/account",
+        "https://invalid_host.example.test/account",
+    ] {
+        assert!(
+            config
+                .clone()
+                .with_account_url(Url::parse(account_url).unwrap())
+                .is_err(),
+            "{account_url}"
+        );
+    }
+
+    let error = config
+        .with_account_url(Url::parse("https://invalid_host.example.test/account").unwrap())
+        .unwrap_err();
+    assert!(error.contains("PEPPY_WEB_CLIENT_ACCOUNT_URL"));
+    assert!(!error.contains("PEPPY_WEB_CLIENT_HOST must"));
 }
 
 fn request(path: &str, host: Option<&str>, method: &str) -> Request<Body> {
