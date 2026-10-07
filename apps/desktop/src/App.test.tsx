@@ -86,12 +86,15 @@ describe("setup landing routing", () => {
   };
   afterEach(() => localStorage.removeItem("peppy.setup.mode"));
 
-  it("opens a fresh server-required desktop on the hosted QR join", async () => {
+  it("offers a fresh server-required desktop's hosted pairing only after the existing-phone choice", async () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
     render(<App />);
     await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
     expect(screen.getByRole("combobox", { name: /server mode/i })).toHaveValue("hosted");
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalled());
+    const existingPhone = await screen.findByRole("button", { name: /already use peppy/i });
+    expect(bridge.join_start).not.toHaveBeenCalled();
+    fireEvent.click(existingPhone);
+    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
   });
 
   it("offers the self-hosted mode with URL input", async () => {
@@ -99,6 +102,37 @@ describe("setup landing routing", () => {
     render(<App />);
     fireEvent.change(await screen.findByRole("combobox", { name: /server mode/i }), { target: { value: "self-hosted" } });
     expect(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" })).toBeInTheDocument();
+  });
+
+  it("routes an unenrolled browser snapshot through fixed-origin setup without enabling unlock", async () => {
+    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    expect(await screen.findByText("https://community.example")).toBeInTheDocument();
+    expect(document.getElementById("setup-landing")).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/advanced/i));
+    expect(screen.queryByRole("button", { name: "Configure server" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unlock sync" })).toBeDisabled();
+  });
+
+  it.each(["locked", "mismatch"] as const)("reports a rejected browser %s unlock while keeping recovery available", async (state) => {
+    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state } });
+    vi.spyOn(bridge, "unlock_sync").mockRejectedValue({ message: "Unlock rejected." });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    const unlockButton = await screen.findByRole("button", { name: "Unlock sync" });
+    expect(unlockButton).toBeEnabled();
+    fireEvent.click(unlockButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unlock rejected.");
+    expect(screen.getByRole("button", { name: "Unlock sync" })).toBeEnabled();
+  });
+
+  it("refreshes after browser join approval without prompting for a second unlock", async () => {
+    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
+    vi.mocked(bridge.join_status).mockResolvedValue({ state: "approved" });
+    const unlock = vi.spyOn(bridge, "unlock_sync");
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await waitFor(() => expect(bridge.join_status).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
+    expect(unlock).not.toHaveBeenCalled();
   });
 
   it("shows phone pairing on a connected owner desktop with no phone", async () => {
@@ -333,6 +367,16 @@ let lifecycleFinished: ((result: { id: string; ok: boolean }) => void) | undefin
 let lifecycleFinishedDispose: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+      clear: () => values.clear(),
+    },
+  });
   vi.restoreAllMocks();
   host = createHost();
   hint = undefined;
@@ -844,6 +888,26 @@ describe("draft durability", () => {
 });
 
 describe("composer window", () => {
+  it("waits for the stored draft before mounting the composer editor", async () => {
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "stored before the composer mounted",
+      recipientIds: [],
+      attachmentIds: [],
+      revision: "4",
+    });
+    const pending = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValue(pending.promise);
+    openComposerWindow("aurora");
+    render(<App />);
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+    await act(async () => pending.resolve(host.load("aurora")));
+    expect(await screen.findByLabelText("Message")).toHaveValue("stored before the composer mounted");
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+  });
+
   it("bootstraps head chrome and converts in place without losing the draft", async () => {
     openComposerWindow("aurora", true);
     render(<App />);
@@ -941,7 +1005,8 @@ describe("composer window", () => {
     expect(screen.getByRole("banner")).toHaveAttribute(
       "data-tauri-drag-region",
     );
-    expect(document.querySelector("#desktop-titlebar [data-disclosure=\"sync-state\"]")).toBeInTheDocument();
+    expect(document.querySelector("#desktop-titlebar [data-connection-state=\"connected\"]")).toBeInTheDocument();
+    expect(document.querySelector("#desktop-titlebar [data-disclosure]")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
 
     host.failSaves = { code: "io", message: "Disk full." };
@@ -1231,6 +1296,53 @@ describe("gateway routes", () => {
 });
 
 describe("host state display", () => {
+  it("hides OS window controls immediately for the browser host while native retains them", () => {
+    const pending = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValue(pending.promise);
+    const { rerender } = render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    expect(document.getElementById("window-controls")).not.toBeInTheDocument();
+    rerender(<App />);
+    expect(document.getElementById("window-controls")).toBeInTheDocument();
+  });
+
+  it("locks browser snapshots only after saving drafts through a receiver-bound host capability", async () => {
+    const lock = vi.fn().mockResolvedValue(undefined);
+    bridge.lock_sync = function() {
+      expect(this).toBe(bridge);
+      return lock();
+    };
+    const snapshot = host.load();
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...snapshot, mode: "browser", desktop: undefined });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.change(message(), { target: { value: "save before locking" } });
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const lockButton = screen.getByRole("button", { name: "Lock now" });
+    fireEvent.click(lockButton);
+    await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+    expect(bridge.save_draft).toHaveBeenCalled();
+    expect(vi.mocked(bridge.save_draft).mock.invocationCallOrder[0]).toBeLessThan(lock.mock.invocationCallOrder[0]);
+    delete bridge.lock_sync;
+  });
+
+  it("supplies a neutral loading status before the native snapshot arrives", () => {
+    const pending = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValue(pending.promise);
+    render(<App />);
+    const trigger = document.querySelector("[data-status-trigger]") as HTMLButtonElement;
+    expect(trigger).toHaveAttribute("data-status-tone", "neutral");
+    expect(trigger).toHaveAccessibleName(/loading status/i);
+    expect(document.getElementById("desktop-shell")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText("Loading messaging state…")).toBeVisible();
+    expect(document.getElementById("desktop-loading-state")).toBeVisible();
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    expect(document.querySelector("[data-status-panel]")).toBeVisible();
+    expect(document.querySelector("[data-status-panel]")).toHaveTextContent("Loading status…");
+  });
+
   it("formats numeric conversation labels while preserving existing names", async () => {
     host.conversations[1].name = "+12025550100";
     render(<App />);
@@ -1292,13 +1404,19 @@ describe("host state display", () => {
     expect(
       screen.getByRole("region", { name: "Settings" }),
     ).toBeInTheDocument();
-    expect(document.getElementById("connection-status")).toHaveAttribute(
+    const trigger = document.querySelector("[data-status-trigger]") as HTMLButtonElement;
+    fireEvent.click(trigger);
+    const statusDetails = screen.getByRole("region", { name: "Status details" });
+    expect(statusDetails).toBeVisible();
+    expect(within(statusDetails).getByText("Carrier SMS/MMS not end-to-end encrypted")).toBeVisible();
+    expect(within(statusDetails).getByText("Carrier SMS/MMS not end-to-end encrypted").closest("[data-disclosure]")).toHaveAttribute("title", "Carrier SMS/MMS not end-to-end encrypted");
+    expect(within(statusDetails).getByText("Device sync encrypted").closest("[data-disclosure]")).toHaveAttribute("title", "Device sync encrypted");
+    expect(statusDetails.querySelector("[data-status-details]")).toBeInTheDocument();
+    expect(within(statusDetails).getByText(/Connected/).closest("#connection-status")).toHaveAttribute(
       "data-connection-state",
       "connected",
     );
-    expect(
-      screen.getByText("Carrier SMS/MMS not end-to-end encrypted"),
-    ).toBeInTheDocument();
+    expect(statusDetails.querySelector("#connection-status")).toHaveAttribute("title", "Connected");
     expect(document.getElementById("thread-list")).not.toBeVisible();
     expect(
       screen.queryByRole("separator", { name: "Resize thread list" }),
@@ -1369,26 +1487,34 @@ describe("host state display", () => {
       errorCode: "outbox-rejected",
     };
     render(<App />);
-    expect(
-      await screen.findByText(/the server rejected queued messages/),
-    ).toBeInTheDocument();
+    const trigger = await screen.findByRole("button", { name: /status:/i });
+    fireEvent.click(trigger);
+    const statusDetails = screen.getByRole("region", { name: "Status details" });
+    expect(within(statusDetails).getByText(/the server rejected queued messages/)).toBeVisible();
+    expect(statusDetails.querySelector("#connection-status")).toHaveAttribute("data-error-code", "outbox-rejected");
     host.connection = {
       state: "offline",
       origin: "https://example.test",
       errorCode: "live-x",
     };
     await act(async () => hint?.());
-    expect(await screen.findByText("Offline — live-x")).toBeInTheDocument();
+    await waitFor(() => expect(within(statusDetails).getByText("Offline — live-x")).toBeVisible());
+    expect(statusDetails.querySelector("#connection-status")).toHaveAttribute("data-error-code", "live-x");
   });
 
-  it("renders global status pills in the titlebar", async () => {
+  it("binds status details to the rail popover instead of the main titlebar", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     const titlebar = document.getElementById("desktop-titlebar")!;
-    expect(titlebar.querySelector("#connection-status")).toBeInTheDocument();
-    expect(titlebar.querySelector("[data-disclosure=\"carrier-sms\"]")).toBeInTheDocument();
-    expect(document.querySelector("#conversation-pane #connection-status")).not.toBeInTheDocument();
-    expect(document.querySelector("#conversation-pane [data-disclosure=\"carrier-sms\"]")).not.toBeInTheDocument();
+    expect(titlebar.querySelector("#connection-status")).not.toBeInTheDocument();
+    const trigger = document.querySelector("[data-status-trigger]") as HTMLButtonElement;
+    const panel = document.querySelector("[data-status-panel]") as HTMLElement;
+    expect(panel).toHaveAttribute("hidden");
+    fireEvent.click(trigger);
+    expect(panel).not.toHaveAttribute("hidden");
+    expect(panel.querySelector("[data-disclosure=\"sync-state\"]")).toHaveAttribute("data-sync-state", "unlocked");
+    expect(panel.querySelector("[data-disclosure=\"carrier-sms\"]")).toBeInTheDocument();
+    expect(panel.querySelector("#connection-status")).toHaveAttribute("data-connection-state", "connected");
   });
 
   it("does not repeat a connection state used as its error code", async () => {

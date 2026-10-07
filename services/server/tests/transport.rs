@@ -140,6 +140,7 @@ impl TestServer {
                     trusted_proxy_cidrs: Vec::new(),
                     replay_retention: options.replay_retention,
                     relay_url,
+                    web_client: None,
                 };
                 peppy_server::ServerBuilder::new(config, server_pool)
                     .build()

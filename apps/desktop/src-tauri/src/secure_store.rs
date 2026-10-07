@@ -8,8 +8,6 @@ use zeroize::Zeroizing;
 #[cfg(any(target_os = "macos", test))]
 use zeroize::{Zeroize, Zeroizing};
 
-pub const SERVICE: &str = "org.peppy.desktop";
-
 pub trait SecretStore: Send + Sync {
     fn get(&self, account: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>>;
     fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()>;
@@ -317,13 +315,22 @@ mod bundled {
 #[cfg(any(target_os = "macos", test))]
 pub use bundled::BundledStore;
 
-/// Production store. Unit tests use [`MemoryStore`] instead of touching the real keychain.
-pub struct KeyringStore;
+/// OS credential store scoped to the configured application identifier.
+/// Unit tests use [`MemoryStore`] instead of touching the real keychain.
+pub struct KeyringStore {
+    service: String,
+}
+
+impl KeyringStore {
+    pub fn new(service: String) -> Self {
+        Self { service }
+    }
+}
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl SecretStore for KeyringStore {
     fn get(&self, account: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
-        let entry = keyring::Entry::new(SERVICE, account).map_err(|_| unavailable())?;
+        let entry = keyring::Entry::new(&self.service, account).map_err(|_| unavailable())?;
         match entry.get_secret() {
             Ok(secret) => Ok(Some(Zeroizing::new(secret))),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -331,7 +338,7 @@ impl SecretStore for KeyringStore {
         }
     }
     fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()> {
-        let entry = keyring::Entry::new(SERVICE, account).map_err(|_| unavailable())?;
+        let entry = keyring::Entry::new(&self.service, account).map_err(|_| unavailable())?;
         entry.set_secret(secret).map_err(|_| unavailable())?;
         // Read back so a silently non-persistent store can never be mistaken for success.
         let stored = Zeroizing::new(entry.get_secret().map_err(|_| unavailable())?);
@@ -350,6 +357,21 @@ impl SecretStore for KeyringStore {
     }
     fn set(&self, _: &str, _: &[u8]) -> BridgeResult<()> {
         Err(unavailable())
+    }
+}
+
+#[cfg(test)]
+mod keyring_store_tests {
+    use super::KeyringStore;
+
+    #[test]
+    fn configured_services_keep_development_credentials_separate() {
+        let production = KeyringStore::new("org.peppy.desktop".to_owned());
+        let development = KeyringStore::new("org.peppy.desktop.dev".to_owned());
+
+        assert_eq!(production.service, "org.peppy.desktop");
+        assert_eq!(development.service, "org.peppy.desktop.dev");
+        assert_ne!(production.service, development.service);
     }
 }
 

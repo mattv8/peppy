@@ -14,11 +14,12 @@ not import from it.
 | Source | Owns |
 |---|---|
 | `packages/desktop-ui/src/peppy-tokens.css` | `--peppy-*` theme tokens, local Droid Sans, reduced motion |
-| `packages/desktop-ui/src/styles.css` | Shared titlebar, panes, composer, and resize styling |
-| `packages/desktop-ui/src/index.tsx` | `AppTitlebar`, shared desktop UI, composer, recipient panel |
+| `packages/desktop-ui/src/styles.css` | Shared titlebar, panes, composer, resize, and status-popover styling |
+| `packages/desktop-ui/src/index.tsx` | `AppTitlebar`, `Panel`, `StatusPopover`, `ConnectionDot`, shared desktop UI, composer, recipient panel |
 | `packages/desktop-ui/src/phone.ts` | Shared phone validation, normalization, input and display formatting |
 | `packages/desktop-ui/src/ResizeHandle.tsx` | Resizing behavior and handle semantics |
-| `apps/desktop/src/App.tsx` | Shells, views, drafts, persistence, and titlebar status |
+| `apps/desktop/src/App.tsx` | Shells, views, drafts, persistence, status details, and status severity bindings |
+| `apps/desktop/src/status.ts` | Desktop-domain connection/sync labels, summaries, and severity priority |
 | `apps/desktop/src/app.css` | Desktop shell, conversation view, bubbles, and settings |
 
 ## Distinctive design and themes
@@ -40,15 +41,16 @@ display timestamps as opaque strings rather than values to parse or reformat.
 
 ## Titlebar status and chrome
 
-`TitlebarStatus` supplies all three pills to `AppTitlebar` in both main and
-composer windows: the sync state, the carrier disclosure, and connection
-state. Connection and disclosures do not live in the conversation pane; there
-is no separate security-disclosures row.
+The main window supplies a `Panel.status` with the sync state, carrier
+disclosure, and connection state. `StatusPopover` exposes those details from
+the navigation-rail dot; keep the detail rows readable and wrapped. The main
+titlebar has no status pills. Composer and floating-head headers use only a
+read-only `ConnectionDot` with the complete `Connection: <connectionText>`
+label; they do not show sync or carrier disclosures.
 
 Keep this fixed text exactly: `Device sync encrypted`, `Device sync key
 mismatch`, `Device sync not unlocked`, and `Carrier SMS/MMS not end-to-end
-encrypted`. Labels may compact or hide responsively, while their `aria-label`
-and `title` remain available.
+encrypted`. Do not truncate these disclosure rows.
 
 The app draws platform-appropriate chrome so both windows share a recognizable
 shell. Do not switch to native decorations: main-window and composer close
