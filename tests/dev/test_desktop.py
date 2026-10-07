@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import subprocess
@@ -7,6 +8,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/dev/desktop.sh"
+BASE_CONFIG = ROOT / "apps/desktop/src-tauri/tauri.conf.json"
+DEV_CONFIG = ROOT / "apps/desktop/src-tauri/tauri.dev.conf.json"
 
 
 class DesktopHelperTests(unittest.TestCase):
@@ -28,6 +31,25 @@ class DesktopHelperTests(unittest.TestCase):
         path.write_text("#!/usr/bin/env bash\nset -eu\n" + body)
         path.chmod(0o755)
         return path
+
+    def configure_macos_tools(self, fake_bin):
+        self.fake_command(fake_bin, "uname", "echo Darwin")
+        self.fake_command(fake_bin, "node", "echo v24.21.0")
+        self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+
+    def test_desktop_configs_keep_production_identity_and_define_exact_dev_overlay(self):
+        self.assertEqual(
+            json.loads(BASE_CONFIG.read_text())["productName"],
+            "Peppy",
+        )
+        self.assertEqual(
+            json.loads(BASE_CONFIG.read_text())["identifier"],
+            "org.peppy.desktop",
+        )
+        self.assertEqual(
+            json.loads(DEV_CONFIG.read_text()),
+            {"productName": "Peppy_dev", "identifier": "org.peppy.desktop.dev"},
+        )
 
     def test_rejects_unknown_action_without_running_tools(self):
         result = self.run_helper("unknown")
@@ -91,7 +113,7 @@ class DesktopHelperTests(unittest.TestCase):
             fake_bin = pathlib.Path(temporary) / "bin"
             fake_bin.mkdir()
             target = pathlib.Path(temporary) / "target"
-            bundle = target / "release/bundle/macos/Peppy.app"
+            bundle = target / "release/bundle/macos/Peppy_dev.app"
             bundle.mkdir(parents=True)
             arguments = pathlib.Path(temporary) / "open-arguments"
             self.fake_command(fake_bin, "uname", "echo Darwin")
@@ -100,6 +122,112 @@ class DesktopHelperTests(unittest.TestCase):
             result = self.run_helper("open", env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(arguments.read_text().splitlines(), ["-n", str(bundle)])
+
+    def test_macos_open_rejects_missing_dev_bundle_without_calling_open(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            opened = fake_bin / "opened"
+            self.fake_command(fake_bin, "uname", "echo Darwin")
+            self.fake_command(fake_bin, "open", f"touch '{opened}'")
+
+            result = self.run_helper(
+                "open",
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(fake_bin / "target")},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Peppy_dev.app", result.stderr)
+            self.assertFalse(opened.exists())
+
+    def test_macos_dev_passes_absolute_dev_overlay_before_cargo_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            arguments = fake_bin / "pnpm-arguments"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(
+                fake_bin,
+                "pnpm",
+                f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"$@\" > '{arguments}'; fi",
+            )
+
+            result = self.run_helper("dev", env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                arguments.read_text().splitlines(),
+                [
+                    "--dir", "apps/desktop", "exec", "tauri", "dev", "--config",
+                    str(DEV_CONFIG), "--", "--locked",
+                ],
+            )
+
+    def test_macos_build_passes_app_only_overlay_and_accepts_dev_bundle_without_dmg(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            target = fake_bin / "target"
+            arguments = fake_bin / "pnpm-arguments"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(
+                fake_bin,
+                "pnpm",
+                f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"$@\" > '{arguments}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi",
+            )
+
+            result = self.run_helper(
+                "build",
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                arguments.read_text().splitlines(),
+                [
+                    "--dir", "apps/desktop", "exec", "tauri", "build", "--bundles", "app",
+                    "--config", str(DEV_CONFIG), "--", "--locked",
+                ],
+            )
+            self.assertTrue((target / "release/bundle/macos/Peppy_dev.app").is_dir())
+            self.assertFalse((target / "release/bundle/macos/Peppy_dev.dmg").exists())
+
+    def test_macos_build_rejects_missing_dev_bundle_after_successful_tool_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            target = fake_bin / "target"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
+
+            result = self.run_helper(
+                "build",
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Peppy_dev.app", result.stderr)
+
+    def test_macos_build_propagates_tool_failure_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            target = fake_bin / "target"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; else exit 23; fi")
+
+            result = self.run_helper(
+                "build",
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)},
+            )
+
+            self.assertEqual(result.returncode, 23)
+
+    def test_macos_build_does_not_add_apple_signing_identity_by_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            target = fake_bin / "target"
+            pnpm_env = fake_bin / "pnpm-env"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi")
+            result = self.run_helper("build", env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(pnpm_env.read_text().strip(), "")
 
     def test_macos_uses_pinned_homebrew_tools_when_path_versions_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -150,28 +278,13 @@ class DesktopHelperTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Node 24.21.0 is required", result.stderr)
 
-    def test_macos_build_does_not_add_apple_signing_identity_by_default(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_bin = pathlib.Path(temporary)
-            target = fake_bin / "target"
-            pnpm_env = fake_bin / "pnpm-env"
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
-            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy.app\"; fi")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
-            result = self.run_helper("build", env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)})
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(pnpm_env.read_text().strip(), "")
-
     def test_macos_build_passes_signing_identity_to_pnpm_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
             target = fake_bin / "target"
             pnpm_env = fake_bin / "pnpm-env"
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
-            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy.app\"; fi")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi")
             self.fake_command(fake_bin, "security", "echo '  2) 0123456789ABCDEF0123456789ABCDEF01234567 \"Apple Development: test@example.com (ABCDEF1234)\"'")
             result = self.run_helper(
                 "build",
@@ -183,13 +296,12 @@ class DesktopHelperTests(unittest.TestCase):
     def test_macos_build_rejects_empty_signing_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
+            target = fake_bin / "target"
+            self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             result = self.run_helper(
                 "build",
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_MACOS_SIGNING_IDENTITY": ""}
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target), "PEPPY_MACOS_SIGNING_IDENTITY": ""}
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("empty", result.stderr.lower() if result.stderr else "")
@@ -197,13 +309,12 @@ class DesktopHelperTests(unittest.TestCase):
     def test_macos_build_rejects_adhoc_signing_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
+            target = fake_bin / "target"
+            self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             result = self.run_helper(
                 "build",
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_MACOS_SIGNING_IDENTITY": "-"}
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target), "PEPPY_MACOS_SIGNING_IDENTITY": "-"}
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Ad-hoc", result.stderr)
@@ -211,14 +322,13 @@ class DesktopHelperTests(unittest.TestCase):
     def test_macos_build_rejects_unknown_signing_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
+            target = fake_bin / "target"
+            self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             self.fake_command(fake_bin, "security", "echo '  2) 0123456789ABCDEF0123456789ABCDEF01234567 \"Apple Development: other@example.com (ABCDEF1234)\"'")
             result = self.run_helper(
                 "build",
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development: test@example.com (ABCDEF1234)"}
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target), "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development: test@example.com (ABCDEF1234)"}
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("not found", result.stderr)
@@ -226,15 +336,14 @@ class DesktopHelperTests(unittest.TestCase):
     def test_macos_build_rejects_partial_signing_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
+            target = fake_bin / "target"
             pnpm_called = fake_bin / "pnpm-called"
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
+            self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", f"touch '{pnpm_called}'")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             self.fake_command(fake_bin, "security", "echo '  2) 0123456789ABCDEF0123456789ABCDEF01234567 \"Apple Development: test@example.com (ABCDEF1234)\"'")
             result = self.run_helper(
                 "build",
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development"}
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target), "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development"}
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(pnpm_called.exists())
@@ -242,15 +351,14 @@ class DesktopHelperTests(unittest.TestCase):
     def test_macos_build_verifies_identity_before_running_pnpm(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
+            target = fake_bin / "target"
             pnpm_called = fake_bin / "pnpm-called"
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
+            self.configure_macos_tools(fake_bin)
             self.fake_command(fake_bin, "pnpm", f"touch '{pnpm_called}'")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             self.fake_command(fake_bin, "security", "echo '  2) 0123456789ABCDEF0123456789ABCDEF01234567 \"Other Identity\"'")
             result = self.run_helper(
                 "build",
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development: test@example.com (ABCDEF1234)"}
+                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target), "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development: test@example.com (ABCDEF1234)"}
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(pnpm_called.exists())
@@ -260,10 +368,8 @@ class DesktopHelperTests(unittest.TestCase):
             fake_bin = pathlib.Path(temporary)
             target = fake_bin / "target"
             pnpm_env = fake_bin / "pnpm-env"
-            self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
-            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy.app\"; fi")
-            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"${{APPLE_SIGNING_IDENTITY:-}}\" > '{pnpm_env}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi")
             self.fake_command(fake_bin, "security", "echo '  2) ABCDEF1234567890ABCDEF1234567890ABCDEF12 \"Apple Development: test@example.com\"'")
             result = self.run_helper(
                 "build",
@@ -276,7 +382,7 @@ class DesktopHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
             target = pathlib.Path(temporary) / "target"
-            bundle = target / "release/bundle/macos/Peppy.app"
+            bundle = target / "release/bundle/macos/Peppy_dev.app"
             bundle.mkdir(parents=True)
             arguments = pathlib.Path(temporary) / "open-arguments"
             self.fake_command(fake_bin, "uname", "echo Darwin")
