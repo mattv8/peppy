@@ -49,6 +49,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
   const accountFetchEpoch = useRef(0);
   const signInEpoch = useRef(0);
   const previousMode = useRef(mode);
+  const previousRoute = useRef<Route | null>(null);
 
   const invalidateJoin = () => { joinEpoch.current += 1; };
   const resetJoin = (cancel = true) => {
@@ -165,7 +166,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     autoJoinStarted.current = false;
   }, [route]);
   useEffect(() => {
-    if (route !== "join" && joinActive.current) resetJoin();
+    const leftJoinRoute = previousRoute.current === "join" && route !== "join";
+    previousRoute.current = route;
+    if (leftJoinRoute && joinActive.current) resetJoin();
   }, [route]);
   useEffect(() => {
     if (enrolledWithoutPhone && joinActive.current) resetJoin();

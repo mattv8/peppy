@@ -8,7 +8,15 @@ const account = (overrides: Partial<HostedAccountView> = {}): HostedAccountView 
   available: true, signedIn: false, accountLabel: null, classification: null,
   entitlement: null, access: null, hasVault: false, resumable: false, ...overrides,
 });
-const join = (overrides: Partial<JoinView> = {}): JoinView => ({ state: "waiting", qrPayload: "secret-qr-payload", expiresInSeconds: 300, ...overrides });
+const join = (overrides: Partial<JoinView> = {}): JoinView => {
+  const state = overrides.state ?? "waiting";
+  return {
+    state,
+    ...(["waiting", "claimed", "confirm"].includes(state) ? { expiresInSeconds: 300 } : {}),
+    ...(state === "waiting" ? { qrPayload: "secret-qr-payload" } : {}),
+    ...overrides,
+  };
+};
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -22,6 +30,23 @@ function renderLanding(props: Partial<React.ComponentProps<typeof SetupLanding>>
 
 async function chooseExisting() {
   fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
+}
+
+function mockNextJoinPoll(next: JoinView) {
+  let poll: (() => void) | undefined;
+  const nativeSetInterval = window.setInterval;
+  vi.spyOn(window, "setInterval").mockImplementation((handler, timeout) => {
+    if (timeout === 4_000) {
+      poll = handler as () => void;
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    }
+    return nativeSetInterval(handler, timeout) as unknown as ReturnType<typeof window.setInterval>;
+  });
+  vi.mocked(bridge.join_status).mockResolvedValue(next);
+  return async () => {
+    await waitFor(() => expect(poll).toBeDefined());
+    await act(async () => poll?.());
+  };
 }
 
 describe("SetupLanding", () => {
@@ -168,9 +193,10 @@ describe("SetupLanding", () => {
   });
 
   it("preserves the SAS confirmation gate", async () => {
-    vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "confirm", sas: "123456" }));
+    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
     renderLanding();
     await chooseExisting();
+    await advanceToConfirm();
     const continueButton = await screen.findByRole("button", { name: "Continue" });
     expect(continueButton).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox"));
@@ -221,11 +247,12 @@ describe("SetupLanding", () => {
 
   it("disables confirmation cancellation while confirming and reports approval to the parent", async () => {
     const onJoined = vi.fn();
-    vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "confirm", sas: "123456" }));
+    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
     const confirm = deferred<JoinView>();
     vi.spyOn(bridge, "join_confirm").mockReturnValue(confirm.promise);
     renderLanding({ onJoined });
     await chooseExisting();
+    await advanceToConfirm();
     const continueButton = await screen.findByRole("button", { name: "Continue" });
     expect(continueButton).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox"));
@@ -248,12 +275,15 @@ describe("SetupLanding", () => {
   });
 
   it("turns confirmation errors into a retryable join failure", async () => {
-    vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "confirm", sas: "123456" }));
+    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
     vi.spyOn(bridge, "join_confirm").mockRejectedValue(new Error("offline"));
     renderLanding();
     await chooseExisting();
+    await advanceToConfirm();
     fireEvent.click(await screen.findByRole("checkbox"));
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+    const continueButton = await screen.findByRole("button", { name: "Continue" });
+    await waitFor(() => expect(continueButton).toBeEnabled());
+    fireEvent.click(continueButton);
     expect(await screen.findByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
 
@@ -345,9 +375,10 @@ describe("SetupLanding", () => {
   });
 
   it("announces the confirmation state through the dedicated status region", async () => {
-    vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "confirm", sas: "123456" }));
+    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
     renderLanding();
     await chooseExisting();
+    await advanceToConfirm();
     await waitFor(() => expect(document.getElementById("setup-status-region")).toHaveTextContent(/continue only if/i));
   });
 
