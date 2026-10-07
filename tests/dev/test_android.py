@@ -20,10 +20,14 @@ class AndroidHelperTests(unittest.TestCase):
     def run_script(self, script, *args, env=None):
         values = os.environ.copy()
         for name in (
-            "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "PEPPY_DEBUG_SERVER",
-            "API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
+            "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_BUILD_BACKEND",
+            "RUNNING_IN_CONTAINER", "PEPPY_ANDROID_CONTAINER", "ANDROID_SDK_ROOT",
+            "ANDROID_HOME", "ANDROID_NDK_HOME", "JAVA_HOME", "CARGO_TARGET_DIR",
+            "PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_DEBUG_SERVER", "API_HOST_PORT", "PUBLIC_API_URL",
+            "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
         ):
             values.pop(name, None)
+        values["PEPPY_ANDROID_BUILD_BACKEND"] = "docker"
         values.update(env or {})
         return subprocess.run(
             ["bash", str(script), *args],

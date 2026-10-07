@@ -73,7 +73,7 @@ Retry after startup completes, or override the timeout via `-e PEPPY_WORKSPACE_L
 | Web PATH-helper checks | Running `dev` service | `docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run build web`; `docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run test web` |
 | Native macOS desktop | Node from `.node-version`, pnpm 12.8.1, Rust from `rust-toolchain.toml` | `just desktop-dev`, `just desktop-bundle`, `just desktop-run`, `just desktop-open` |
 | Native Windows desktop from WSL | Current NTFS checkout plus native Windows Node, pnpm, Rust, MSVC/Windows SDK, WebView2, and native Perl | `just desktop-dev`, `just desktop-bundle`, `just desktop-run`, `just desktop-open` |
-| Android builder | Docker Compose; explicit SDK license approval in shell environment or `.opencode/dev/android.env`; optional linux/amd64 image on Apple Silicon may run slowly under emulation | `just android-build` |
+| Android builder | macOS: native host prerequisites below; Linux and Windows via WSL: Docker Compose and `.env`; explicit SDK license approval | `just android-build` |
 | Android emulator operations | Host Android SDK with `platform-tools`, an AVD, and emulator tools | `just android-emulator`, `just android-deploy`, `just android-smoke`, `just android-sms` |
 | iOS host checks | macOS Command Line Tools, Swift, and generated mobile bindings | `just ios-test` |
 
@@ -83,7 +83,41 @@ On macOS, `desktop-dev`, `desktop-bundle`, and `desktop-run` use already-install
 export PATH="$(brew --prefix rustup)/bin:$(brew --prefix node@24)/bin:$PATH"
 ```
 
-The Android builder needs explicit SDK license approval. After reviewing the Android SDK licenses, set `PEPPY_ACCEPT_ANDROID_LICENSES=1` in the current shell or once in ignored `.opencode/dev/android.env`; a shell value, including `0` or empty, takes precedence over that file. It installs API 36, build-tools 35.0.0, and NDK 27.2.12479018. The Linux Android NDK prebuilts require the linux/amd64 builder image, including on Apple Silicon.
+## Android build backends
+
+`just android-build`, `just android-test`, and the editor Android build action select a backend through `PEPPY_ANDROID_BUILD_BACKEND`. Leave it unset (or empty), or set it to `auto`, to use native on macOS and the existing Docker backend on Linux and Windows via WSL. Set `PEPPY_ANDROID_BUILD_BACKEND=native` to require the macOS backend or `PEPPY_ANDROID_BUILD_BACKEND=docker` to require Docker, including on macOS. Native is macOS-only; selecting it elsewhere fails with setup guidance rather than falling back to Docker.
+
+The native `android-build` route does not need Docker or `.env`. `just android-run` still calls `just dev-up` before building, so the complete rebuild-and-open action requires Docker and `.env` even when its build uses the native backend. The Docker backend retains the linux/amd64 builder image, including on Apple Silicon; it can run slowly under emulation.
+
+`just` reads optional Android overrides and the one-time license choice from ignored `.opencode/dev/android.env`. You can instead export them in the shell; a shell value, including `0` or empty, takes precedence. Direct `bash infra/dev/android.sh ...` calls do not read that file, so export the needed variables in that shell.
+
+### Native macOS prerequisites
+
+Install JDK 17, the repository-pinned Rust toolchain, `pkg-config`, and host `libsodium`. On macOS, install the host libraries with `brew install pkg-config libsodium`. Add both Android Rust targets explicitly:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+```
+
+Install Android SDK command-line tools and make available `platforms;android-36`, `build-tools;35.0.0`, `platform-tools`, and `ndk;27.2.12479018`. The SDK resolves from `ANDROID_SDK_ROOT`, then `ANDROID_HOME`, then `~/Library/Android/sdk`; set either SDK variable to use another location. Set `JAVA_HOME` to JDK 17, or on macOS derive it with:
+
+```sh
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+```
+
+The native helper locates SDK command-line tools from that SDK and provisions the pinned SDK packages only after explicit license approval. It does not install global packages, Rust toolchains, or Rust targets. After reviewing the SDK licenses, make the approval explicit before building:
+
+```sh
+PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-build
+```
+
+Native host tooling avoids Linux QEMU. Some Android NDK tools can still require Rosetta on macOS.
+
+### Android outputs and generated files
+
+`just android-build` produces only `app-debug.apk`. `just android-test` routes through the Android helper and uses the same backend selector. It runs the native verifier and five Gradle tasks (`:jvm-smoke:run`, `:app:testDebugUnitTest`, `:app:lintDebug`, `:app:assembleDebug`, and `:app:assembleDebugAndroidTest`), then copies `app-debug.apk` and `app-debug-androidTest.apk` for `just android-smoke`.
+
+Outputs default to `.opencode/dev/artifacts/android/`; set `PEPPY_ANDROID_ARTIFACTS` to override that path. The native backend uses the checkout's `target` directory by default (or an explicit `CARGO_TARGET_DIR`), separate from Docker's named volumes but shared with other native FFI builds. A native build regenerates tracked Rust-owned Kotlin and ignored JNI libraries in the checkout; inspect generated diffs afterwards. Docker generates these files in its private workspace.
 
 ## Android emulator workflow
 
@@ -100,7 +134,7 @@ just android-smoke # requires the test-built app and instrumentation APKs
 just android-sms +15555550123 "synthetic test message"
 ```
 
-`just android-test` performs the Android JVM, unit, lint, native, and APK checks and produces both APKs for an explicit smoke run. `android-smoke` installs the debug and instrumentation APKs and accepts only an instrumentation result with `OK` for at least one test and `INSTRUMENTATION_CODE: -1`. It does not wipe or uninstall an app when signatures conflict. SMS remains configurable through `just android-sms <number> <message>`. On WSL, `android-emulator` uses the tracked Windows helper to start or stop only its owned process.
+`just android-test` routes through the Android helper with the selected backend, runs the verifier and five Gradle tasks, and produces both APKs for an explicit smoke run. `android-smoke` installs the debug and instrumentation APKs and accepts only an instrumentation result with `OK` for at least one test and `INSTRUMENTATION_CODE: -1`. It does not wipe or uninstall an app when signatures conflict. SMS remains configurable through `just android-sms <number> <message>`. On WSL, `android-emulator` uses the tracked Windows helper to start or stop only its owned process.
 
 ## iOS Simulator workflow
 

@@ -12,6 +12,54 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 class AndroidNativeVerifierTests(unittest.TestCase):
+    def test_prefers_current_host_prebuilt_tools_over_other_ndk_hosts(self):
+        cases = (
+            ("Darwin", ("linux-x86_64", "darwin-x86_64"), "darwin-x86_64"),
+            ("Linux", ("darwin-x86_64", "linux-x86_64"), "linux-x86_64"),
+        )
+        for host_name, prebuilt_hosts, expected_host in cases:
+            with self.subTest(host=host_name), tempfile.TemporaryDirectory() as temporary_directory:
+                temporary_directory = pathlib.Path(temporary_directory)
+                repository = temporary_directory / "repository"
+                script = repository / "infra/compose/verify-android-native.sh"
+                script.parent.mkdir(parents=True)
+                shutil.copy(ROOT / "infra/compose/verify-android-native.sh", script)
+
+                target_directory = repository / "target"
+                cargo_log = temporary_directory / "cargo-log.jsonl"
+                tools_directory = temporary_directory / "tools"
+                tools_directory.mkdir()
+                self.write_fake_cargo(tools_directory / "cargo")
+                self.write_fake_uname(tools_directory / "uname", host_name)
+                ndk_home, _ = self.create_fake_ndk(temporary_directory, prebuilt_hosts)
+
+                environment = os.environ.copy()
+                environment.update({
+                    "ANDROID_NDK_HOME": str(ndk_home),
+                    "CARGO_TARGET_DIR": str(target_directory),
+                    "CARGO_LOG": str(cargo_log),
+                    "PATH": f"{tools_directory}:{environment['PATH']}",
+                })
+                result = subprocess.run(
+                    ["bash", str(script)], cwd=repository, env=environment,
+                    text=True, capture_output=True,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                cargo_calls = [json.loads(line) for line in cargo_log.read_text().splitlines()]
+                target_build = next(
+                    call for call in cargo_calls
+                    if call["arguments"][:2] == ["build", "--locked"] and "--target" in call["arguments"]
+                )
+                self.assertEqual(
+                    target_build["environment"]["CC"],
+                    str(
+                        ndk_home
+                        / f"toolchains/llvm/prebuilt/{expected_host}/bin"
+                        / "aarch64-linux-android26-clang"
+                    ),
+                )
+
     def test_host_bindgen_uses_system_libsodium_without_affecting_ndk_builds(self):
         for profile in ("debug", "release"):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temporary_directory:
@@ -29,13 +77,13 @@ class AndroidNativeVerifierTests(unittest.TestCase):
                 ndk_home, ndk_bin = self.create_fake_ndk(temporary_directory)
 
                 environment = os.environ.copy()
-                environment.pop("SODIUM_USE_PKG_CONFIG", None)
                 environment.update({
                     "ANDROID_NDK_HOME": str(ndk_home),
                     "CARGO_TARGET_DIR": str(target_directory),
                     "CARGO_LOG": str(cargo_log),
                     "PATH": f"{tools_directory}:{environment['PATH']}",
                     "PEPPY_ANDROID_NATIVE_PROFILE": profile,
+                    "SODIUM_USE_PKG_CONFIG": "inherited-host-setting",
                 })
                 result = subprocess.run(
                     ["bash", str(script)], cwd=repository, env=environment,
@@ -65,18 +113,69 @@ class AndroidNativeVerifierTests(unittest.TestCase):
                     library = repository / f"apps/android/app/src/main/jniLibs/{abi}/libpeppy_mobile_bindings.so"
                     self.assertGreater(library.stat().st_size, 0)
 
-    def create_fake_ndk(self, temporary_directory):
+    def test_resolves_relative_paths_before_changing_to_script_root(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_directory = pathlib.Path(temporary_directory)
+            repository = temporary_directory / "repository"
+            script = repository / "infra/compose/verify-android-native.sh"
+            script.parent.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/compose/verify-android-native.sh", script)
+
+            caller_directory = temporary_directory / "caller directory"
+            caller_directory.mkdir()
+            cargo_log = temporary_directory / "cargo-log.jsonl"
+            tools_directory = temporary_directory / "tools"
+            tools_directory.mkdir()
+            self.write_fake_cargo(tools_directory / "cargo")
+            self.create_fake_ndk(caller_directory)
+
+            environment = os.environ.copy()
+            environment.update({
+                "ANDROID_NDK_HOME": "ndk",
+                "CARGO_TARGET_DIR": "target directory",
+                "CARGO_LOG": str(cargo_log),
+                "PATH": f"{tools_directory}:{environment['PATH']}",
+            })
+            result = subprocess.run(
+                ["bash", str(script)], cwd=caller_directory, env=environment,
+                text=True, capture_output=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(
+                (
+                    caller_directory
+                    / "target directory/debug/libpeppy_mobile_bindings.dylib"
+                ).is_file(),
+            )
+            self.assertTrue(
+                (
+                    repository
+                    / "apps/android/app/src/main/jniLibs/arm64-v8a"
+                    / "libpeppy_mobile_bindings.so"
+                ).is_file(),
+            )
+
+    def create_fake_ndk(self, temporary_directory, prebuilt_hosts=("test-host",)):
         ndk_home = temporary_directory / "ndk"
-        ndk_bin = ndk_home / "toolchains/llvm/prebuilt/test-host/bin"
-        ndk_bin.mkdir(parents=True)
-        for tool in (
-            "llvm-ar", "llvm-ranlib", "llvm-readelf",
-            "aarch64-linux-android26-clang", "x86_64-linux-android26-clang",
-        ):
-            path = ndk_bin / tool
-            path.write_text("#!/bin/sh\nexit 0\n")
-            path.chmod(0o755)
+        ndk_bin = None
+        for host in prebuilt_hosts:
+            host_bin = ndk_home / f"toolchains/llvm/prebuilt/{host}/bin"
+            host_bin.mkdir(parents=True)
+            for tool in (
+                "llvm-ar", "llvm-ranlib", "llvm-readelf",
+                "aarch64-linux-android26-clang", "x86_64-linux-android26-clang",
+            ):
+                path = host_bin / tool
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+            if host.startswith("darwin") or ndk_bin is None:
+                ndk_bin = host_bin
         return ndk_home, ndk_bin
+
+    def write_fake_uname(self, path, host_name):
+        path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{host_name}'\n")
+        path.chmod(0o755)
 
     def write_fake_cargo(self, path):
         path.write_text(
