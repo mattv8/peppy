@@ -25,6 +25,8 @@ import {
   LockKeyhole,
   LockOpen,
   MessageSquare,
+  NavButtons,
+  type NavigationPosition,
   Panel,
   PairPhone,
   Radio,
@@ -33,6 +35,7 @@ import {
   ResizeHandle,
   ShieldAlert,
   SquarePen,
+  StatusPopover,
   TriangleAlert,
   X,
   type Attachment,
@@ -40,6 +43,7 @@ import {
   detectPlatform,
   installOverlayScrollbars,
   isRecipientPosition,
+  isNavigationPosition,
   formatPhoneNumber,
   type RecipientPosition,
   type RecipientSuggestion,
@@ -898,6 +902,8 @@ function SettingsView({
   canUnlock,
   theme,
   onTheme,
+  navigationPosition,
+  onNavigationPosition,
   desktop,
   onStartAtLogin,
   notifications,
@@ -921,6 +927,8 @@ function SettingsView({
   canUnlock: boolean;
   theme: Theme;
   onTheme(theme: Theme): void;
+  navigationPosition: NavigationPosition;
+  onNavigationPosition(position: NavigationPosition): void;
   desktop?: DesktopSnapshot["desktop"];
   onStartAtLogin(enabled: boolean): Promise<void>;
   notifications: DesktopSnapshot["notifications"];
@@ -1035,6 +1043,30 @@ function SettingsView({
             </select>
           </label>
         </div>
+        <fieldset id="settings-navigation-position" aria-describedby="settings-navigation-position-hint">
+          <legend>Navigation position</legend>
+          <p id="settings-navigation-position-hint" className="settings-field-hint">Choose where the navigation buttons appear.</p>
+          <label className="settings-check">
+            <input
+              type="radio"
+              name="navigation-position"
+              value="side-rail"
+              checked={navigationPosition === "side-rail"}
+              onChange={() => onNavigationPosition("side-rail")}
+            />
+            Side rail
+          </label>
+          <label className="settings-check">
+            <input
+              type="radio"
+              name="navigation-position"
+              value="title-bar"
+              checked={navigationPosition === "title-bar"}
+              onChange={() => onNavigationPosition("title-bar")}
+            />
+            Title bar
+          </label>
+        </fieldset>
       </section>
       {desktop?.startupSupported && <section data-settings-section="startup">
         <h2>Startup</h2>
@@ -1107,6 +1139,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     {},
   );
   const [theme, setTheme] = useState<Theme>("system");
+  const [navigationPosition, setNavigationPosition] = useState<NavigationPosition>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
+      return typeof stored === "object" && stored !== null && !Array.isArray(stored) &&
+          isNavigationPosition(stored.navigationPosition)
+        ? stored.navigationPosition
+        : "side-rail";
+    } catch {
+      return "side-rail";
+    }
+  });
   const [activeView, setActiveViewNow] = useState<"conversations" | "notifications" | "settings" | "contacts">(
     "conversations",
   );
@@ -1196,6 +1239,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       composerHeight?: number | null;
       headComposerHeight?: number | null;
       recipientPosition?: RecipientPosition;
+      navigationPosition?: NavigationPosition;
     } = {},
   ) => {
     try {
@@ -1209,11 +1253,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       /* Storage is optional in embedded previews. */
     }
   };
+  const changeNavigationPosition = (position: NavigationPosition) => {
+    setNavigationPosition(position);
+    persistLayout({ navigationPosition: position });
+  };
+  const railWidth = navigationPosition === "side-rail" ? RAIL_WIDTH : 0;
   const listMaxForWindow = Math.max(
     LIST_MIN_WIDTH,
     Math.min(
       LIST_MAX_WIDTH,
-      viewportWidth - RAIL_WIDTH - 1 - PANE_MIN_WIDTH,
+      viewportWidth - railWidth - 1 - PANE_MIN_WIDTH,
     ),
   );
   const renderedListWidth = Math.min(listWidth, listMaxForWindow);
@@ -2007,6 +2056,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         summary: "Loading status",
         details: <StatusDetails />,
       };
+  const notificationUnread = snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0;
+  const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
   const composerConnectionDot = snapshot
     ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />
     : null;
@@ -2058,6 +2109,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       className={`theme-${theme}`}
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
+      data-navigation={navigationPosition}
       inert={lifecyclePending ? true : undefined}
       aria-busy={loading || lifecyclePending ? "true" : undefined}
     >
@@ -2070,9 +2122,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
         onNewMessage={startTitlebarMessage}
+        navigation={navigationPosition === "title-bar" ? (
+          <NavButtons
+            orientation="titlebar"
+            activeView={activeView}
+            onView={setActiveView}
+            onToggleList={() =>
+              resizeListTo(listCollapsed ? previousListWidth.current : 0)
+            }
+            listCollapsed={listCollapsed}
+            threadListId="thread-list"
+            notificationUnread={notificationUnread}
+            contactsPending={contactsPending}
+          />
+        ) : undefined}
+        status={navigationPosition === "title-bar" ? (
+          <StatusPopover tone={panelStatus.tone} summary={panelStatus.summary}>
+            {panelStatus.details}
+          </StatusPopover>
+        ) : undefined}
       />
       <div ref={desktopBodyRef} id="desktop-body" className="desktop-layout">
-        <Panel
+        {navigationPosition === "side-rail" && <Panel
           activeView={activeView}
           onView={setActiveView}
           onToggleList={() =>
@@ -2081,9 +2152,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           listCollapsed={listCollapsed}
           threadListId="thread-list"
           status={panelStatus}
-          notificationUnread={snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0}
-          contactsPending={snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0}
-        />
+          notificationUnread={notificationUnread}
+          contactsPending={contactsPending}
+        />}
         {loading ? (
           <section id="desktop-loading-state">Loading messaging state…</section>
         ) : <>
@@ -2141,7 +2212,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             const bodyLeft =
               desktopBodyRef.current?.getBoundingClientRect().left ?? 0;
             listDragWidth.current = listCollapsed
-              ? position - (bodyLeft + RAIL_WIDTH)
+              ? position - (bodyLeft + railWidth)
               : renderedListWidth;
           }}
           onResize={resizeList}
@@ -2206,6 +2277,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               canUnlock={canUnlock}
               theme={theme}
               onTheme={setTheme}
+              navigationPosition={navigationPosition}
+              onNavigationPosition={changeNavigationPosition}
               desktop={snapshot?.desktop}
               onStartAtLogin={async enabled => {
                 try { await bridge.set_start_at_login(enabled); await refresh(); }

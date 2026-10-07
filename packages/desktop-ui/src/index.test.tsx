@@ -7,6 +7,8 @@ import {
   Composer,
   installOverlayScrollbars,
   isRecipientPosition,
+  NavButtons,
+  Panel,
   RecipientPanel,
   RecipientPicker,
   ResizeHandle,
@@ -421,6 +423,68 @@ describe("desktop UI controls", () => {
   it("does not render main-window conversation controls in the composer", () => {
     render(<AppTitlebar isComposer onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} onToggleSidebar={() => {}} onNewMessage={() => {}} />);
     expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
+  });
+
+  it.each(["rail", "titlebar"] as const)("renders %s navigation buttons with badges and view behavior", (orientation) => {
+    const onView = vi.fn();
+    const onToggleList = vi.fn();
+    render(<NavButtons
+      orientation={orientation}
+      activeView="conversations"
+      onView={onView}
+      onToggleList={onToggleList}
+      listCollapsed={false}
+      threadListId="thread-list"
+      notificationUnread={100}
+      contactsPending={100}
+    />);
+    const navigation = screen.getByRole("navigation", { name: "Main navigation" });
+    const conversations = screen.getByRole("button", { name: "Conversations" });
+    expect(navigation).toHaveAttribute("data-orientation", orientation);
+    expect(conversations).toHaveAttribute("aria-current", "page");
+    expect(conversations).toHaveAttribute("aria-expanded", "true");
+    expect(conversations).toHaveAttribute("aria-controls", "thread-list");
+    expect(screen.getByRole("button", { name: "Contacts, 100 pending" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Notifications, 100 unread" })).toBeInTheDocument();
+    expect(screen.getAllByText("99+")).toHaveLength(2);
+    fireEvent.click(conversations);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(onToggleList).toHaveBeenCalledOnce();
+    expect(onView).toHaveBeenCalledWith("settings");
+    if (orientation === "titlebar") expect(navigation).toHaveAttribute("id", "titlebar-navigation");
+    else expect(navigation).not.toHaveAttribute("id");
+  });
+
+  it("places titlebar navigation after status on macOS and first on Windows and Linux", () => {
+    const navigation = <NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />;
+    const { rerender } = render(<AppTitlebar platform="macos" status={<span>Status node</span>} navigation={navigation} />);
+    const titlebar = document.getElementById("desktop-titlebar")!;
+    const titlebarNavigation = document.getElementById("titlebar-navigation")!;
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "trailing");
+    expect(titlebar.lastElementChild).toBe(titlebarNavigation);
+    expect(titlebarNavigation.previousElementSibling).toHaveAttribute("id", "titlebar-status");
+    expect(titlebarNavigation).not.toHaveAttribute("data-tauri-drag-region");
+
+    rerender(<AppTitlebar platform="windows" navigation={navigation} />);
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "leading");
+    expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
+
+    rerender(<AppTitlebar platform="linux" navigation={navigation} />);
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "leading");
+    expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
+  });
+
+  it("ignores titlebar navigation in the composer", () => {
+    render(<AppTitlebar isComposer platform="macos" navigation={<NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />} />);
+    expect(document.getElementById("titlebar-navigation")).not.toBeInTheDocument();
+    expect(document.getElementById("desktop-titlebar")).not.toHaveAttribute("data-navigation-placement");
+  });
+
+  it("keeps the desktop rail navigation when Panel uses shared nav buttons", () => {
+    render(<Panel activeView="conversations" onView={() => {}} threadListId="thread-list" />);
+    const rail = document.getElementById("desktop-rail");
+    expect(rail).toBeInTheDocument();
+    expect(within(rail!).getByRole("navigation", { name: "Main navigation" })).toHaveAttribute("data-orientation", "rail");
   });
 
   it("does not end a drag when its parent rerenders", () => {

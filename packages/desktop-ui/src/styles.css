@@ -64,6 +64,10 @@ select:focus-visible {
   color: var(--peppy-text-strong);
   user-select: none;
 }
+.titlebar[data-navigation-placement] {
+  position: relative;
+  z-index: 30;
+}
 .titlebar-product {
   display: block;
   width: 16px;
@@ -146,6 +150,49 @@ select:focus-visible {
 #titlebar-actions button { display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); }
 #titlebar-actions button:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
 #titlebar-actions svg { pointer-events: none; }
+#titlebar-navigation {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  align-items: center;
+  overflow: visible;
+}
+#titlebar-navigation button {
+  display: grid;
+  position: relative;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--peppy-control-radius);
+  background: transparent;
+  color: var(--peppy-text-secondary);
+}
+#titlebar-navigation button:hover {
+  background: var(--peppy-surface-hover);
+  color: var(--peppy-text-primary);
+}
+#titlebar-navigation button:active {
+  background: var(--peppy-surface-active);
+}
+#titlebar-navigation button[aria-current] {
+  background: color-mix(in srgb, var(--peppy-accent) 14%, transparent);
+  box-shadow: inset 0 -2px 0 var(--peppy-accent);
+  color: var(--peppy-accent);
+}
+#titlebar-navigation button:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+.titlebar[data-navigation-placement="leading"] #titlebar-navigation {
+  padding-inline-end: 8px;
+  border-inline-end: 1px solid var(--peppy-border-strong);
+}
+.titlebar[data-navigation-placement="trailing"] #titlebar-navigation {
+  padding-inline-start: 8px;
+  border-inline-start: 1px solid var(--peppy-border-strong);
+}
 #desktop-rail {
   position: relative;
   width: var(--peppy-rail-width);
@@ -164,6 +211,7 @@ select:focus-visible {
   margin-top: 4px;
 }
 #desktop-rail nav button {
+  position: relative;
   width: 46px;
   height: var(--peppy-control-height);
   border: 0;
@@ -182,8 +230,8 @@ select:focus-visible {
   color: var(--peppy-accent);
   background: color-mix(in srgb, var(--peppy-accent) 14%, transparent);
 }
-[data-rail-item="notifications"] { position: relative; }
 .rail-notif-badge { position: absolute; top: 3px; right: 3px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--peppy-accent); color: var(--peppy-accent-text); font-size: 9px; line-height: 14px; text-align: center; pointer-events: none; }
+#titlebar-navigation .rail-notif-badge { top: 1px; right: 1px; }
 .rail-spacer {
   flex: 1;
 }
@@ -251,6 +299,25 @@ select:focus-visible {
 }
 [data-status-panel][hidden] {
   display: none;
+}
+.titlebar[data-navigation-placement] .titlebar-status:has([data-status-popover]) {
+  overflow: visible;
+}
+.titlebar[data-navigation-placement] [data-status-popover] {
+  width: auto;
+}
+.titlebar[data-navigation-placement] [data-status-trigger] {
+  width: 28px;
+  height: 26px;
+}
+.titlebar[data-navigation-placement] [data-status-panel] {
+  top: calc(100% + 4px);
+  right: 0;
+  bottom: auto;
+  left: auto;
+  width: min(320px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - var(--peppy-titlebar-height) - 16px);
 }
 .recipient-picker {
   position: relative;

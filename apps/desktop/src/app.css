@@ -630,4 +630,21 @@ html[data-window-rounded="false"] #composer-shell,
 .settings-theme-row label {
   flex: 0 0 auto;
 }
+#settings-navigation-position {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+#settings-navigation-position legend {
+  padding: 0;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+.settings-field-hint {
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
 .settings-error { color: var(--peppy-error); font-size: 12px; }
