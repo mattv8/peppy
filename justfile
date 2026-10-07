@@ -35,9 +35,13 @@ doctor:
 
 dev-up:
     {{ dev_prereq }}
+    python3 infra/dev/dev_port.py validate .env
     {{ dev_prepare }}
+    {{ dev_compose }} build web dev
     {{ compose }} rm --stop --force api migrate
-    {{ dev_compose }} up --build --detach --wait --wait-timeout 1800
+    {{ dev_compose }} rm --stop --force web dev
+    {{ dev_compose }} up --detach --wait --wait-timeout 1800 --force-recreate dev
+    @echo "Development UI/API: $(python3 infra/dev/dev_port.py smoke-url .env)"
 
 dev-down:
     {{ dev_prereq }}
@@ -65,6 +69,9 @@ dev-test:
     {{ dev_prereq }}
     {{ dev_prepare }}
     {{ dev_compose }} run --rm --no-deps dev run test rust
+
+dev-smoke:
+    bash infra/dev/dev-smoke.sh
 
 ci-test:
     bash infra/dev/ci-test.sh
@@ -118,9 +125,9 @@ desktop-open:
 
 smoke-infra:
     @test -f .env || { echo ".env is required; copy .env.example and set synthetic development credentials" >&2; exit 1; }
+    python3 infra/dev/dev_port.py validate .env
     {{ compose }} up --detach --wait
-    @curl --fail --silent --show-error http://127.0.0.1:7000/healthz
-    @curl --fail --silent --show-error http://127.0.0.1:7000/readyz
+    @base_url=$(python3 infra/dev/dev_port.py smoke-url .env); curl --fail --silent --show-error "$base_url/healthz"; curl --fail --silent --show-error "$base_url/readyz"
     {{ compose }} run --rm api storage-check
 
 cargo-fmt:

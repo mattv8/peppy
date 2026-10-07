@@ -329,7 +329,7 @@ def run_host_demo() -> None:
         cargo_timeout = timeout_from_environment("PEPPY_DEMO_CARGO_TIMEOUT", COLD_BUILD_TIMEOUT)
         checked(compose + ["build", "dev"], env=environment, timeout=build_timeout, cwd=ROOT)
         checked(compose + ["up", "--detach", "--wait", "postgres", "seaweedfs"], env=environment, timeout=2 * RUNTIME_TIMEOUT, cwd=ROOT)
-        checked(compose + ["run", "--rm", "-e", "PEPPY_ISOLATED_DEMO=1", "-e", "PEPPY_DEMO_RUN=/artifacts/" + run.name, "-e", f"PEPPY_DEMO_CARGO_TIMEOUT={cargo_timeout}", "dev", "run", "demo"], env=environment, timeout=cargo_timeout + 8 * RUNTIME_TIMEOUT, cwd=ROOT)
+        checked(compose + ["run", "--rm", "--no-deps", "-e", "PEPPY_WEB_CLIENT_ROOT=false", "-e", "PEPPY_ISOLATED_DEMO=1", "-e", "PEPPY_DEMO_RUN=/artifacts/" + run.name, "-e", f"PEPPY_DEMO_CARGO_TIMEOUT={cargo_timeout}", "dev", "run", "demo"], env=environment, timeout=cargo_timeout + 8 * RUNTIME_TIMEOUT, cwd=ROOT)
     finally:
         subprocess.run(compose + ["down", "--volumes", "--remove-orphans"], env=environment, timeout=RUNTIME_TIMEOUT, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT)
         for sig, handler in old_handlers.items():

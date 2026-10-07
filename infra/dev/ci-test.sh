@@ -83,8 +83,8 @@ main() {
     node packages/mobile-design/scripts/generate.mjs --check
     node --test packages/mobile-design/test/*.test.mjs
     python3 -m unittest discover -s tests/dev -p 'test_*.py'
-    bash -n infra/dev/dev.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/ci-test.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
-    shellcheck infra/dev/dev.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/ci-test.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh .github/scripts/*.sh
+    bash -n infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/ci-test.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
+    shellcheck infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/ci-test.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh .github/scripts/*.sh
     bash .github/scripts/test-ci-scripts.sh
 
     suite "Rust workspace"

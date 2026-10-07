@@ -19,8 +19,11 @@ class AndroidHelperTests(unittest.TestCase):
 
     def run_script(self, script, *args, env=None):
         values = os.environ.copy()
-        values.pop("PEPPY_ANDROID_AVD", None)
-        values.pop("PEPPY_ANDROID_SERIAL", None)
+        for name in (
+            "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "PEPPY_DEBUG_SERVER",
+            "API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
+        ):
+            values.pop(name, None)
         values.update(env or {})
         return subprocess.run(
             ["bash", str(script), *args],
@@ -445,6 +448,27 @@ class AndroidHelperTests(unittest.TestCase):
             calls = log.read_text()
             self.assertIn("reverse tcp:7000 tcp:7000", calls)
             self.assertIn("shell am start -W -n dev.peppy.mobile/.MainActivity", calls)
+
+    def test_open_uses_configured_development_port_by_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp)
+            repo = temp / "repo"
+            script = repo / "infra/dev/android.sh"
+            script.parent.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+            (repo / ".env").write_text(
+                "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100\n"
+            )
+            sdk = temp / "sdk"
+            (sdk / "platform-tools").mkdir(parents=True)
+            log = temp / "adb.log"
+            adb = sdk / "platform-tools/adb"
+            adb.write_text("#!/bin/sh\necho \"$@\" >> \"$ADB_LOG\"\ncase \"$*\" in *devices*) echo 'emulator-5554 device';; *getprop*) echo x86_64;; *'am start'*) echo 'Status: ok';; esac\n")
+            adb.chmod(0o755)
+            result = self.run_script(script, "open", env={"ANDROID_SDK_ROOT": str(sdk), "ADB_LOG": str(log), "PEPPY_DEBUG_SERVER": ""})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("reverse tcp:7100 tcp:7100", log.read_text())
 
     def test_open_refuses_am_error_even_when_adb_exits_zero(self):
         with tempfile.TemporaryDirectory() as temp:

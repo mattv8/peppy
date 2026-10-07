@@ -23,11 +23,33 @@ pub struct WebClientConfig {
     pub asset_dir: PathBuf,
     pub api_origin: Url,
     pub account_url: Option<Url>,
+    all_hosts: bool,
 }
 
 impl WebClientConfig {
     pub fn new(host: String, asset_dir: PathBuf, api_url: Url) -> Result<Self, String> {
         let host = normalize_configured_host(&host)?;
+        Self::configured(host, asset_dir, api_url, false)
+    }
+
+    /// Creates a web-client configuration that serves every request host.
+    /// `host` remains the canonical API host for account-navigation checks.
+    pub fn for_all_hosts(asset_dir: PathBuf, api_url: Url) -> Result<Self, String> {
+        let api_origin = canonical_origin(api_url)?;
+        let host = canonical_api_host(&api_origin);
+        Self::configured(host, asset_dir, api_origin, true)
+    }
+
+    pub fn serves_all_hosts(&self) -> bool {
+        self.all_hosts
+    }
+
+    fn configured(
+        host: String,
+        asset_dir: PathBuf,
+        api_url: Url,
+        all_hosts: bool,
+    ) -> Result<Self, String> {
         let asset_dir = std::fs::canonicalize(asset_dir)
             .map_err(|error| format!("PEPPY_WEB_CLIENT_DIR cannot be resolved: {error}"))?;
         if !asset_dir.is_dir() {
@@ -39,6 +61,7 @@ impl WebClientConfig {
             asset_dir,
             api_origin,
             account_url: None,
+            all_hosts,
         })
     }
 
@@ -60,14 +83,27 @@ impl WebClientConfig {
         let account_host = normalize_configured_host(account_host).map_err(|_| {
             "PEPPY_WEB_CLIENT_ACCOUNT_URL must use an HTTPS DNS hostname".to_owned()
         })?;
-        if account_host == self.host {
-            return Err(
-                "PEPPY_WEB_CLIENT_ACCOUNT_URL host must differ from PEPPY_WEB_CLIENT_HOST".into(),
-            );
+        let (configured_host, configured_host_name) = if self.serves_all_hosts() {
+            (canonical_api_host(&self.api_origin), "PUBLIC_API_URL")
+        } else {
+            (self.host.clone(), "PEPPY_WEB_CLIENT_HOST")
+        };
+        if account_host == configured_host {
+            return Err(format!(
+                "PEPPY_WEB_CLIENT_ACCOUNT_URL host must differ from {configured_host_name}"
+            ));
         }
         self.account_url = Some(account_url);
         Ok(self)
     }
+}
+
+fn canonical_api_host(api_origin: &Url) -> String {
+    api_origin
+        .host_str()
+        .expect("canonical web client API origin has a host")
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
 }
 
 fn contains_percent_encoded_control(value: &str) -> bool {
@@ -86,8 +122,8 @@ struct WebClientRouter {
     config: WebClientConfig,
 }
 
-/// Dispatches requests for the dedicated browser host without changing routes
-/// on every other host.
+/// Dispatches requests for the dedicated browser host, or every host in
+/// explicit root mode, without changing the API path dispatcher.
 pub fn wrap(router: Router, config: WebClientConfig) -> Router {
     Router::new()
         .fallback(any(dispatch))
@@ -101,16 +137,18 @@ async fn dispatch(
     State(state): State<Arc<WebClientRouter>>,
     request: Request<Body>,
 ) -> Response<Body> {
-    match request_host_target(request.headers(), &state.config.host) {
-        HostTarget::App => {}
-        HostTarget::AppLikeMalformed => return StatusCode::NOT_FOUND.into_response(),
-        HostTarget::Other => {
-            return state
-                .inner
-                .clone()
-                .oneshot(request)
-                .await
-                .unwrap_or_else(|never| match never {});
+    if !state.config.serves_all_hosts() {
+        match request_host_target(request.headers(), &state.config.host) {
+            HostTarget::App => {}
+            HostTarget::AppLikeMalformed => return StatusCode::NOT_FOUND.into_response(),
+            HostTarget::Other => {
+                return state
+                    .inner
+                    .clone()
+                    .oneshot(request)
+                    .await
+                    .unwrap_or_else(|never| match never {});
+            }
         }
     }
 
@@ -152,6 +190,7 @@ async fn dispatch(
 }
 
 fn is_api_path(path: &str) -> bool {
+    // Keep this coupled to the top-level API routes assembled in `lib.rs`.
     matches!(path, "/healthz" | "/readyz" | "/__release")
         || path == "/v1"
         || path.starts_with("/v1/")

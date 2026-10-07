@@ -243,12 +243,35 @@ fn web_client_config(
     get: &impl Fn(&str) -> Option<String>,
     public_api_url: Option<&Url>,
 ) -> Result<Option<WebClientConfig>, ConfigError> {
+    let root = bool_env(get, "PEPPY_WEB_CLIENT_ROOT")?;
     let host = get("PEPPY_WEB_CLIENT_HOST").filter(|value| !value.is_empty());
     let asset_dir = get("PEPPY_WEB_CLIENT_DIR").filter(|value| !value.is_empty());
     let account_url = get("PEPPY_WEB_CLIENT_ACCOUNT_URL").filter(|value| !value.is_empty());
+    if root {
+        if host.is_some() {
+            return Err(ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ROOT",
+                message: "cannot be enabled with PEPPY_WEB_CLIENT_HOST".into(),
+            });
+        }
+        let asset_dir = asset_dir.ok_or_else(|| ConfigError::Invalid {
+            name: "PEPPY_WEB_CLIENT_ROOT",
+            message: "requires PEPPY_WEB_CLIENT_DIR".into(),
+        })?;
+        let api_origin = public_api_url.ok_or(ConfigError::Missing("PUBLIC_API_URL"))?;
+        let config = WebClientConfig::for_all_hosts(PathBuf::from(asset_dir), api_origin.clone())
+            .map_err(|message| ConfigError::Invalid {
+            name: "PEPPY_WEB_CLIENT_ROOT",
+            message,
+        })?;
+        return match account_url {
+            Some(account_url) => parse_account_url(config, account_url).map(Some),
+            None => Ok(Some(config)),
+        };
+    }
     let (host, asset_dir) = match (host, asset_dir) {
-        // Images may provide a harmless default asset directory. Hosting is
-        // deliberately opt-in through the dedicated hostname.
+        // Images may provide a harmless default asset directory. Dedicated-host
+        // hosting remains opt-in when root mode is disabled.
         (None, _) => return Ok(None),
         (Some(host), Some(asset_dir)) => (host, asset_dir),
         _ => {
@@ -268,20 +291,27 @@ fn web_client_config(
         },
     )?;
     let config = match account_url {
-        Some(account_url) => config
-            .with_account_url(account_url.parse().map_err(|source: url::ParseError| {
-                ConfigError::Invalid {
-                    name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
-                    message: source.to_string(),
-                }
-            })?)
-            .map_err(|message| ConfigError::Invalid {
-                name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
-                message,
-            })?,
+        Some(account_url) => parse_account_url(config, account_url)?,
         None => config,
     };
     Ok(Some(config))
+}
+
+fn parse_account_url(
+    config: WebClientConfig,
+    account_url: String,
+) -> Result<WebClientConfig, ConfigError> {
+    config
+        .with_account_url(account_url.parse().map_err(|source: url::ParseError| {
+            ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
+                message: source.to_string(),
+            }
+        })?)
+        .map_err(|message| ConfigError::Invalid {
+            name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
+            message,
+        })
 }
 
 fn required(
@@ -580,6 +610,131 @@ mod tests {
             missing_origin,
             ConfigError::Missing("PUBLIC_API_URL")
         ));
+    }
+
+    #[test]
+    fn root_web_client_requires_assets_and_public_origin_and_conflicts_with_host() {
+        let assets = tempfile::tempdir().unwrap();
+        let configured = || {
+            Config::from_get(|variable| match variable {
+                "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+                "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+                "PUBLIC_API_URL" => Some("http://localhost:7000/v1".into()),
+                _ => base(variable),
+            })
+        };
+
+        let config = configured().unwrap();
+        let web_client = config.web_client.unwrap();
+        assert!(web_client.serves_all_hosts());
+        assert_eq!(web_client.api_origin.as_str(), "http://localhost:7000/");
+
+        let ipv6 = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("http://[::1]:7000/v1".into()),
+            _ => base(name),
+        })
+        .unwrap()
+        .web_client
+        .unwrap();
+        assert_eq!(ipv6.host, "[::1]");
+
+        let config = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("https://api.example.test:7443/v1".into()),
+            "PEPPY_WEB_CLIENT_ACCOUNT_URL" => Some("https://account.example.test/account".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert_eq!(
+            config.web_client.unwrap().account_url.unwrap().as_str(),
+            "https://account.example.test/account"
+        );
+
+        let error = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("https://api.example.test:7443/v1".into()),
+            "PEPPY_WEB_CLIENT_ACCOUNT_URL" => Some("https://api.example.test/account".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
+                ..
+            }
+        ));
+
+        let missing_directory = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PUBLIC_API_URL" => Some("http://localhost:7000/v1".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            missing_directory,
+            ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ROOT",
+                ..
+            }
+        ));
+
+        let missing_origin = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            missing_origin,
+            ConfigError::Missing("PUBLIC_API_URL")
+        ));
+
+        let host_conflict = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("true".into()),
+            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("http://localhost:7000/v1".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            host_conflict,
+            ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ROOT",
+                ..
+            }
+        ));
+
+        let error = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("enabled".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ROOT",
+                ..
+            }
+        ));
+
+        let dedicated = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_ROOT" => Some("false".into()),
+            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PUBLIC_API_URL" => Some("http://localhost:7000/v1".into()),
+            _ => base(name),
+        })
+        .unwrap()
+        .web_client
+        .unwrap();
+        assert!(!dedicated.serves_all_hosts());
+        assert_eq!(dedicated.host, "app.example.test");
     }
 
     #[test]

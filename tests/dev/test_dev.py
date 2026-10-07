@@ -14,7 +14,7 @@ class DevScriptTests(unittest.TestCase):
     @staticmethod
     def shortcut_env(**values):
         env = os.environ.copy()
-        for key in ("PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL"):
+        for key in ("PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED"):
             env.pop(key, None)
         env.update(values)
         return env
@@ -46,6 +46,7 @@ class DevScriptTests(unittest.TestCase):
             installer = root / "infra/dev/install-actions.py"
             installer.parent.mkdir(parents=True)
             installer.write_text("print('actions installed')\n")
+            shutil.copy(ROOT / "infra/dev/dev_port.py", installer.parent / "dev_port.py")
             result = self.run_script("dev-setup", env=os.environ | {"PEPPY_REPOSITORY_ROOT": directory})
             self.assertEqual(result.returncode, 0, result.stderr)
             configuration = (root / ".env")
@@ -55,6 +56,108 @@ class DevScriptTests(unittest.TestCase):
             self.assertIn("PUBLIC_API_URL=http://127.0.0.1:7000\n", values)
             self.assertIn("PUBLIC_ATTACHMENT_URL=http://127.0.0.1:7000\n", values)
         self.assertNotIn("replace-with-", values)
+
+    def test_dev_smoke_checks_web_only_when_enabled_and_rejects_malformed_ui_setting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper_directory = root / "infra/dev"
+            helper_directory.mkdir(parents=True)
+            for name in ("dev-smoke.sh", "dev_port.py"):
+                shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
+            tools = root / "tools"
+            tools.mkdir()
+            log = root / "curl.log"
+            curl = tools / "curl"
+            curl.write_text(
+                "#!/bin/sh\n"
+                "url=\"\"; for argument in \"$@\"; do url=$argument; done\n"
+                "printf '%s\\n' \"$url\" >> \"$PEPPY_CURL_LOG\"\n"
+                "case \"$url\" in */) printf '<script src=\"/assets/app.js\"></script>';; */web/config.json) printf '{\"apiOrigin\":\"%s\"}' \"${PEPPY_CONFIG_ORIGIN:-http://127.0.0.1:7000/}\";; esac\n"
+            )
+            curl.chmod(0o755)
+            dotenv = root / ".env"
+            environment = self.shortcut_env(PATH=f"{tools}:{os.environ['PATH']}", PEPPY_CURL_LOG=str(log))
+
+            for setting, expected_urls in (
+                ("", ["/", "/assets/app.js", "/web/config.json", "/healthz", "/readyz"]),
+                ("WEB_UI_ENABLED=0\nPUBLIC_API_URL=http://127.0.0.1:7000/v1\n", ["/healthz", "/readyz"]),
+            ):
+                with self.subTest(setting=setting):
+                    dotenv.write_text(setting)
+                    log.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        ["bash", "infra/dev/dev-smoke.sh", str(dotenv)],
+                        cwd=root,
+                        text=True,
+                        capture_output=True,
+                        env=environment,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        [url.removeprefix("http://127.0.0.1:7000") for url in log.read_text().splitlines()],
+                        expected_urls,
+                    )
+
+            dotenv.write_text("WEB_UI_ENABLED=maybe\n")
+            log.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["bash", "infra/dev/dev-smoke.sh", str(dotenv)],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("WEB_UI_ENABLED must be true, false, 1, or 0", result.stderr)
+            self.assertFalse(log.exists())
+
+            dotenv.write_text("API_HOST_PORT=7100\nPUBLIC_API_URL=https://api.example.test:7443\n")
+            log.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["bash", "infra/dev/dev-smoke.sh", str(dotenv)],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=environment | {"PEPPY_CONFIG_ORIGIN": "https://api.example.test:7443/"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("http://127.0.0.1:7100/web/config.json", log.read_text())
+
+            dotenv.write_text("API_HOST_PORT=7100\nPUBLIC_API_URL=https://api.example.test:7443/v1\n")
+            result = subprocess.run(
+                ["bash", "infra/dev/dev-smoke.sh", str(dotenv)],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=environment | {"PEPPY_CONFIG_ORIGIN": "https://api.example.test:7443/"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            result = subprocess.run(
+                ["bash", "infra/dev/dev-smoke.sh", str(dotenv)],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("web config apiOrigin", result.stderr)
+
+            for invalid_origin in (
+                "https://api.example.test:7443/extra",
+                "https://api.example.test:7443/?query=1",
+                "https://user@api.example.test:7443/",
+            ):
+                with self.subTest(invalid_origin=invalid_origin):
+                    result = subprocess.run(
+                        ["bash", "infra/dev/dev-smoke.sh", str(dotenv)],
+                        cwd=root,
+                        text=True,
+                        capture_output=True,
+                        env=environment | {"PEPPY_CONFIG_ORIGIN": invalid_origin},
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("apiOrigin must be an http or https origin", result.stderr)
 
     def test_actions_refresh_installs_actions_without_creating_or_modifying_env(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -105,6 +208,7 @@ class DevScriptTests(unittest.TestCase):
             (root / "infra/dev").mkdir(parents=True)
             for name in ("dev.sh", "android.sh"):
                 shutil.copy(ROOT / "infra/dev" / name, root / "infra/dev" / name)
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev/install-actions.py").write_text(
                 "from pathlib import Path\nPath(__import__('os').environ['PEPPY_ORDER']).open('a').write('setup\\n')\n"
@@ -132,6 +236,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory)
             (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev/install-actions.py").write_text("from pathlib import Path\nPath(__import__('os').environ['PEPPY_ORDER']).open('a').write('setup\\n')\n")
             (root / ".env").write_text("synthetic=1\n")
@@ -164,6 +269,7 @@ class DevScriptTests(unittest.TestCase):
             (root / ".opencode/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             (root / ".env").write_text("synthetic=1\n")
             (root / ".opencode/dev/android.env").write_text(
                 "PEPPY_ACCEPT_ANDROID_LICENSES=1\nPEPPY_ANDROID_AVD=from-file\n"
@@ -191,6 +297,7 @@ class DevScriptTests(unittest.TestCase):
             (root / "infra/dev").mkdir(parents=True)
             (root / ".opencode/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             (root / ".env").write_text("synthetic=1\n")
             sentinel, marker = root / "SENTINEL", root / "effects"
             (root / ".opencode/dev/android.env").write_text(
@@ -226,6 +333,7 @@ class DevScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             (root / ".env").write_text("synthetic=1\n")
             helper = root / "infra/dev/android.sh"
             helper.write_text(
@@ -245,6 +353,7 @@ class DevScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             (root / ".env").write_text("synthetic=1\n")
             order = root / "order"; tools = root / "tools"; tools.mkdir()
             docker = tools / "docker"; docker.write_text("#!/bin/sh\ncase \"$*\" in *' up '*) echo dev-up >> \"$PEPPY_ORDER\";; esac\n"); docker.chmod(0o755)

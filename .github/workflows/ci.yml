@@ -257,7 +257,7 @@ jobs:
       - run: node packages/mobile-design/scripts/generate.mjs --check
       - run: node --test packages/mobile-design/test/*.test.mjs
       - run: python3 -m unittest discover -s tests/dev -p 'test_*.py'
-      - run: bash -n infra/dev/dev.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh && shellcheck infra/dev/dev.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
+      - run: bash -n infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh && shellcheck infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
       - run: shellcheck .github/scripts/*.sh
       - run: bash .github/scripts/test-ci-scripts.sh
       - run: just --list

@@ -27,28 +27,7 @@ case "$recipe" in
       exit 1
     fi
     if [[ ! -e .env ]]; then
-      python3 - <<'PY'
-import os
-import secrets
-
-values = {
-    "PEPPY_ENV": "development",
-    "POSTGRES_DB": "peppy",
-    "POSTGRES_USER": "peppy",
-    "POSTGRES_PASSWORD": "synthetic-" + secrets.token_urlsafe(32),
-    "S3_ACCESS_KEY": "synthetic-" + secrets.token_urlsafe(16),
-    "S3_SECRET_KEY": "synthetic-" + secrets.token_urlsafe(32),
-    "S3_BUCKET": "peppy-private",
-    "PEPPY_REPLAY_RETENTION_DAYS": "30",
-    "VAULT_ATTACHMENT_QUOTA_BYTES": "536870912",
-    "PUBLIC_API_URL": "http://127.0.0.1:7000",
-    "PUBLIC_ATTACHMENT_URL": "http://127.0.0.1:7000",
-}
-fd = os.open(".env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w") as output:
-    for key, value in values.items():
-        output.write(f"{key}={value}\n")
-PY
+      python3 infra/dev/dev_port.py write-setup .env
       echo "Created .env with synthetic local credentials (mode 0600)." >&2
     fi
     exec python3 infra/dev/install-actions.py "$@" ;;

@@ -18,13 +18,13 @@ use std::{
     str::FromStr,
     sync::{Mutex, OnceLock},
 };
-use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 mod enrollment;
 mod identity_session;
 pub mod local_identity;
+mod origin;
 
 mod contacts;
 mod context;
@@ -537,18 +537,7 @@ pub(crate) fn attachment_id(args: &Value) -> Result<AttachmentId, Failure> {
 }
 
 fn canonical_origin(input: &str) -> Result<String, Failure> {
-    let url = Url::parse(input).map_err(|_| invalid())?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return Err(invalid());
-    }
-    Ok(url.origin().ascii_serialization())
+    origin::canonical_origin(input).map_err(|_| invalid())
 }
 
 fn compose_failure(error: ComposeError) -> Failure {

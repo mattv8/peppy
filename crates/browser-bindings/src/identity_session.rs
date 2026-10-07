@@ -548,6 +548,43 @@ mod tests {
     }
 
     #[test]
+    fn worker_initialize_allows_only_loopback_http_origins() {
+        for origin in [
+            "http://localhost:7100",
+            "http://127.0.0.1:7100",
+            "http://[::1]:7100",
+            "https://example.test",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut core = BrowserCore::new(root.path().to_owned());
+            assert_eq!(
+                dispatch(&mut core, "_worker_initialize", json!({"origin": origin}))["ok"],
+                true,
+                "{origin}"
+            );
+        }
+
+        for origin in [
+            "http://192.168.1.1",
+            "http://example.test",
+            "http://localhost.evil.test",
+            "http://127.0.0.1.evil.test",
+            "http://user:secret@localhost",
+            "http://localhost/path",
+            "http://localhost?query=value",
+            "http://localhost#fragment",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut core = BrowserCore::new(root.path().to_owned());
+            assert_eq!(
+                error_code(&mut core, "_worker_initialize", json!({"origin": origin})),
+                "invalid-request",
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
     fn rotation_failures_preserve_old_state_and_success_cuts_over_atomically() {
         let root = tempfile::tempdir().unwrap();
         let device_id = Uuid::new_v4();

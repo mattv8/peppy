@@ -21,7 +21,7 @@ Peppy is a clean-install boundary with no compatibility or migration path for pr
 ## Components
 
 - **Server:** device authentication, ordered encrypted envelopes, encrypted attachments, snapshots, and public image-copy endpoints.
-- **Browser client:** the shared messaging UI with Rust/WASM, encrypted browser storage, and a single SharedWorker session across tabs. The server image bundles its assets; `WEB_CLIENT_HOST` enables Community hosting over HTTPS. See the [browser build and hosting guide](apps/web/README.md).
+- **Browser client:** the shared messaging UI with Rust/WASM, encrypted browser storage, and a single SharedWorker session across tabs. The server image bundles its assets and Community serves it at the public root by default. See the [browser build and hosting guide](apps/web/README.md).
 - **Gateway simulator:** synthetic SMS and carrier-effect exercise for local development.
 - **Native clients:** Tauri desktop, Android SMS companion with opt-in experimental MMS, and capability-gated Swift client.
 
@@ -130,7 +130,7 @@ export PUBLIC_ATTACHMENT_URL=http://127.0.0.1:18080
 docker compose --env-file .env -f docker-compose.yml up
 ```
 
-For a public TLS experiment, set `PUBLIC_HOST` and add `-f infra/compose/compose.caddy.yml` to the Compose command. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
+For a public TLS experiment, set `PUBLIC_HOST` and add `-f infra/compose/compose.caddy.yml` to the Compose command. Community serves the browser UI and API together at `https://PUBLIC_HOST/`; set `WEB_UI_ENABLED=false` to opt out of the UI. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
 
 ## Develop and contribute
 
