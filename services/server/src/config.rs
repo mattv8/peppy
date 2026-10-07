@@ -245,6 +245,7 @@ fn web_client_config(
 ) -> Result<Option<WebClientConfig>, ConfigError> {
     let host = get("PEPPY_WEB_CLIENT_HOST").filter(|value| !value.is_empty());
     let asset_dir = get("PEPPY_WEB_CLIENT_DIR").filter(|value| !value.is_empty());
+    let account_url = get("PEPPY_WEB_CLIENT_ACCOUNT_URL").filter(|value| !value.is_empty());
     let (host, asset_dir) = match (host, asset_dir) {
         // Images may provide a harmless default asset directory. Hosting is
         // deliberately opt-in through the dedicated hostname.
@@ -260,12 +261,27 @@ fn web_client_config(
         }
     };
     let api_origin = public_api_url.ok_or(ConfigError::Missing("PUBLIC_API_URL"))?;
-    WebClientConfig::new(host, PathBuf::from(asset_dir), api_origin.clone())
-        .map(Some)
-        .map_err(|message| ConfigError::Invalid {
+    let config = WebClientConfig::new(host, PathBuf::from(asset_dir), api_origin.clone()).map_err(
+        |message| ConfigError::Invalid {
             name: "PEPPY_WEB_CLIENT_HOST",
             message,
-        })
+        },
+    )?;
+    let config = match account_url {
+        Some(account_url) => config
+            .with_account_url(account_url.parse().map_err(|source: url::ParseError| {
+                ConfigError::Invalid {
+                    name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
+                    message: source.to_string(),
+                }
+            })?)
+            .map_err(|message| ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
+                message,
+            })?,
+        None => config,
+    };
+    Ok(Some(config))
 }
 
 fn required(
@@ -533,6 +549,13 @@ mod tests {
         })
         .unwrap();
         assert!(directory_only.web_client.is_none());
+        let account_url_without_host = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            "PEPPY_WEB_CLIENT_ACCOUNT_URL" => Some("https://account.example.test/account".into()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert!(account_url_without_host.web_client.is_none());
         let missing_directory = Config::from_get(|name| match name {
             "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
             "PUBLIC_API_URL" => Some("https://api.example.test".into()),
@@ -557,5 +580,51 @@ mod tests {
             missing_origin,
             ConfigError::Missing("PUBLIC_API_URL")
         ));
+    }
+
+    #[test]
+    fn web_client_account_url_is_optional_and_must_be_safe_when_configured() {
+        let assets = tempfile::tempdir().unwrap();
+        let configured = |account_url: &str| {
+            Config::from_get(|name| match name {
+                "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
+                "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+                "PUBLIC_API_URL" => Some("https://api.example.test".into()),
+                "PEPPY_WEB_CLIENT_ACCOUNT_URL" => Some(account_url.into()),
+                _ => base(name),
+            })
+        };
+
+        assert!(
+            configured("")
+                .unwrap()
+                .web_client
+                .unwrap()
+                .account_url
+                .is_none()
+        );
+        assert_eq!(
+            configured("https://account.example.test/account")
+                .unwrap()
+                .web_client
+                .unwrap()
+                .account_url
+                .unwrap()
+                .as_str(),
+            "https://account.example.test/account"
+        );
+        for account_url in [
+            "http://account.example.test",
+            "https://app.example.test/account",
+            "https://account.example.test/?next=/",
+        ] {
+            assert!(matches!(
+                configured(account_url),
+                Err(ConfigError::Invalid {
+                    name: "PEPPY_WEB_CLIENT_ACCOUNT_URL",
+                    ..
+                })
+            ));
+        }
     }
 }

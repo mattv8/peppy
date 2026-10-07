@@ -4,6 +4,7 @@ import type {
   DraftInput, JoinView, NotificationPreferences, NotificationTarget, PairingIntent, PairingStatus,
   PublicCopy, RecipientSuggestion, RestorableContact, SendDraftInput,
 } from "../../desktop/src/bridge";
+import { validateAccountUrl } from "./account-navigation";
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
@@ -145,6 +146,7 @@ export class BrowserBridge implements DesktopBridge {
   private readonly blobUrls = new Set<string>();
   private readonly banners = new Set<Notification>();
   private notificationContext?: { view: "conversations" | "notifications" | "settings" | "contacts"; conversationId?: string };
+  private accountUrl?: string;
 
   public constructor(private readonly port: MessagePort, private readonly timeoutMs = REQUEST_TIMEOUT_MS) {
     port.onmessage = (event: MessageEvent<RpcReply | WorkerEvent>) => this.receive(event.data);
@@ -166,6 +168,10 @@ export class BrowserBridge implements DesktopBridge {
   }
 
   public workerError(): void { this.stop("unavailable"); }
+
+  public setAccountUrl(value: unknown): void {
+    this.accountUrl = validateAccountUrl(value);
+  }
 
   private receive(message: RpcReply | WorkerEvent): void {
     if ("event" in message) {
@@ -294,6 +300,10 @@ export class BrowserBridge implements DesktopBridge {
   public hosted_account(): Promise<never> { return unsupported("Hosted accounts"); }
   public hosted_sign_in(): Promise<never> { return unsupported("Hosted sign-in"); }
   public hosted_sign_out(): Promise<void> { return unsupported("Hosted sign-out"); }
-  public hosted_open_billing(): Promise<void> { return unsupported("Hosted billing"); }
+  public hosted_open_billing(): Promise<void> {
+    if (!this.accountUrl) return unsupported("Hosted billing");
+    window.open(this.accountUrl, "_blank", "noopener,noreferrer");
+    return Promise.resolve();
+  }
   public hosted_provision(): Promise<void> { return unsupported("Hosted provisioning"); }
 }

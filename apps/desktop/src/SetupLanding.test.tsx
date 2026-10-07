@@ -85,6 +85,20 @@ describe("SetupLanding", () => {
     expect(document.getElementById("self-hosted-url-input")).not.toBeInTheDocument();
     expect(document.getElementById("fixed-self-hosted-origin")).toHaveTextContent("https://community.example");
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /manage account/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /connect to your own server/i })).toBeInTheDocument();
+  });
+
+  it("shows hosted-neutral copy and a safe billing link only with account metadata", async () => {
+    renderLanding({ fixedOrigin: "https://app.example.com", accountUrl: "https://account.example.com/account" });
+
+    const link = await screen.findByRole("link", { name: /manage account & billing/i });
+    expect(document.querySelector("#self-hosted-panel > h2")).toHaveTextContent("Add this computer");
+    expect(screen.getByText("Scan a code with your phone to add this computer.")).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "https://account.example.com/account");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(document.getElementById("setup-account-billing-hint")?.compareDocumentPosition(document.getElementById("self-hosted-advanced")!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it("starts a hosted join only after the existing-phone choice", async () => {

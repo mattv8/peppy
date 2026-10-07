@@ -56,6 +56,7 @@ services:
       PUBLIC_API_URL: ${PUBLIC_API_URL:?set in .env}
       PUBLIC_ATTACHMENT_URL: ${PUBLIC_ATTACHMENT_URL:?set in .env}
       PEPPY_WEB_CLIENT_HOST: ${WEB_CLIENT_HOST:-}
+      PEPPY_WEB_CLIENT_ACCOUNT_URL: ${WEB_CLIENT_ACCOUNT_URL:-}
     depends_on:
       postgres:
         condition: service_healthy

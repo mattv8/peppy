@@ -1325,6 +1325,26 @@ describe("host state display", () => {
     delete bridge.lock_sync;
   });
 
+  it("shows account billing only for the browser host and preserves the settings order", async () => {
+    render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const section = document.querySelector('[data-settings-section="account-billing"]');
+    const link = screen.getByRole("link", { name: /open account & billing/i });
+    expect(section).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "https://account.example.com/account");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(document.querySelector('[data-settings-section="pair-phone"]')?.compareDocumentPosition(section!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(section?.compareDocumentPosition(document.querySelector('[data-settings-section="sync"]')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    cleanup();
+    render(<App accountUrl="https://account.example.com/account" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="account-billing"]')).not.toBeInTheDocument();
+  });
+
   it("supplies a neutral loading status before the native snapshot arrives", () => {
     const pending = deferred<DesktopSnapshot>();
     vi.mocked(bridge.load_state).mockReturnValue(pending.promise);

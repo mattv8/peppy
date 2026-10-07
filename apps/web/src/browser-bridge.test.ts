@@ -30,6 +30,19 @@ describe("BrowserBridge", () => {
     await expect(bridge.open_composer()).rejects.toMatchObject({ code: "unsupported" });
   });
 
+  it("opens only a validated billing destination in a new tab", async () => {
+    const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+
+    bridge.setAccountUrl("https://account.example.com/account");
+    await bridge.hosted_open_billing();
+    expect(open).toHaveBeenCalledWith("https://account.example.com/account", "_blank", "noopener,noreferrer");
+
+    bridge.setAccountUrl(`https://${location.hostname}/account`);
+    await expect(bridge.hosted_open_billing()).rejects.toMatchObject({ code: "unsupported" });
+    expect(open).toHaveBeenCalledOnce();
+  });
+
   it("notifies all subscriptions when the shared worker changes", () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

@@ -14,7 +14,7 @@ const qrOptions = { errorCorrectionLevel: "M" as const, margin: 1, width: 256 };
 
 export const savedSetupMode = (): Mode => window.localStorage.getItem("peppy.setup.mode") === "self-hosted" ? "self-hosted" : "hosted";
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, selfHostedFallback, onJoined, fixedOrigin }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, selfHostedFallback, onJoined, fixedOrigin, accountUrl }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
@@ -22,6 +22,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
   selfHostedFallback: ReactNode;
   onJoined(): void;
   fixedOrigin?: string;
+  accountUrl?: string;
 }) {
   const [account, setAccount] = useState<HostedAccountView | null>(null);
   const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
@@ -305,7 +306,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
 
   let content: ReactNode;
   if (fixedOrigin || mode === "self-hosted") {
-    content = <section id="self-hosted-panel" aria-label={copy("self_hosted_headline")}><h2 ref={heading} tabIndex={-1}>{copy("self_hosted_headline")}</h2><p>{copy("setup_self_hosted_join_body")}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={() => { setSelfHostedOrigin(validOrigin); void beginJoin(validOrigin); }}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
+    const hostedBrowser = Boolean(fixedOrigin && accountUrl);
+    const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
+    const body = hostedBrowser ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
+    content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={() => { setSelfHostedOrigin(validOrigin); void beginJoin(validOrigin); }}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
   } else if (route === "checking") {
     content = <section id="hosted-account-checking" aria-busy="true"><h2 ref={heading} tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>;
   } else if (route === "chooser") {
