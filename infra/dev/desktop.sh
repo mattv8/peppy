@@ -5,7 +5,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: bash infra/dev/desktop.sh <dev|build|open>
 
-On macOS, builds development .app and .dmg bundles without Developer ID signing
+On macOS, builds development .app bundle without Developer ID signing
 or notarization. Set PEPPY_MACOS_SIGNING_IDENTITY to a stable identity for
 consistent Keychain access; unset uses ad-hoc signing. From WSL, runs the native
 Windows Tauri toolchain against this same NTFS checkout. Linux native desktop
@@ -99,21 +99,22 @@ verify_macos_signing_identity() {
 }
 
 macos() {
-  local app_bundle="$target_dir/release/bundle/macos/Peppy.app"
+  local dev_config="$root/apps/desktop/src-tauri/tauri.dev.conf.json"
+  local app_bundle="$target_dir/release/bundle/macos/Peppy_dev.app"
   case "$action" in
     open)
       [[ -d "$app_bundle" ]] || die "No current macOS bundle at $app_bundle; run desktop-bundle first."
       open -n "$app_bundle"
       ;;
     dev)
-      (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri dev -- --locked)
+      (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri dev --config "$dev_config" -- --locked)
       ;;
     build)
       if [[ ${PEPPY_MACOS_SIGNING_IDENTITY+set} == set ]]; then
         verify_macos_signing_identity "$PEPPY_MACOS_SIGNING_IDENTITY"
-        (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" APPLE_SIGNING_IDENTITY="$PEPPY_MACOS_SIGNING_IDENTITY" pnpm --dir apps/desktop exec tauri build --bundles app,dmg -- --locked)
+        (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" APPLE_SIGNING_IDENTITY="$PEPPY_MACOS_SIGNING_IDENTITY" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
       else
-        (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri build --bundles app,dmg -- --locked)
+        (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
       fi
       [[ -d "$app_bundle" ]] || die "Tauri completed without the expected bundle: $app_bundle"
       ;;

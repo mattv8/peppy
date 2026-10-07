@@ -1,5 +1,6 @@
 packages:
   - apps/desktop
+  - apps/web
   - packages/*
 catalog:
   '@remixicon/react': ^4.9.0

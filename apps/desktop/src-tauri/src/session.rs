@@ -4,21 +4,19 @@
 use crate::{
     credentials::{ensure_database_key, prepare_data_dir, stored_credential, Binding},
     dto::{
-        self, AttachmentView, ConversationView, DraftView, GatewayView, Head, SendResultView,
-        Snapshot,
+        self, AttachmentView, ConversationView, DraftView, GatewayView, Head, Snapshot,
     },
     error::{core_error, BridgeError, BridgeResult},
-    gateways::find_route,
     media,
     net::Api,
     notifications::NotificationPreferences,
     secure_store::SecretStore,
 };
 use peppy_client_core::{
-    AttachmentId, Client, ClientConfig, ComposeDraft, ComposeDraftUpdate, ConversationId,
-    DatabaseKey, DeviceId, Direction, DraftId, GatewayRoute, Message, MessageId, NativeKeyCache,
-    Transport, VaultId,
+    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Message, MessageId,
+    NativeKeyCache, VaultId,
 };
+use peppy_desktop_api::compose::{self, ComposeError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -39,12 +37,7 @@ const MAX_ACTIVE_MESSAGES: usize = 500;
 const MAX_PREVIEWS_PER_SNAPSHOT: usize = 12;
 const MAX_PREVIEW_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
-const MAX_ATTACHMENTS: usize = 10;
 const PENDING_COUNT_CAP: usize = 200;
-/// Mirrors client-core's message body and recipient limits.
-const MAX_BODY_BYTES: usize = 64 * 1024;
-const MAX_RECIPIENTS: usize = 20;
-const FALLBACK_MMS_MAX_BYTES: u64 = 300 * 1024;
 pub const GATEWAYS_FILE: &str = "gateways.json";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -329,74 +322,14 @@ pub fn open_session(
     })
 }
 
-/// Draft input from the UI. Unknown fields (for example the draft's own `revision`) are ignored.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DraftInput {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub conversation_id: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub recipient_ids: Vec<String>,
-    #[serde(default)]
-    pub attachment_ids: Vec<String>,
-    #[serde(default)]
-    pub gateway_id: Option<String>,
-    #[serde(default)]
-    pub sim_id: Option<String>,
-    pub expected_revision: String,
-}
+pub use peppy_desktop_api::compose::DraftInput;
 
-fn invalid_draft(message: &'static str) -> BridgeError {
-    BridgeError::new("invalid-draft", message)
-}
-
-fn parse_revision(value: &str) -> BridgeResult<u64> {
-    value
-        .parse()
-        .map_err(|_| invalid_draft("The draft revision is invalid."))
-}
-
-/// Accepts international (`+CC…`) and national numbers and short codes; separators are removed.
-pub fn normalize_recipient(value: &str) -> BridgeResult<String> {
-    let compact: String = value
-        .trim()
-        .chars()
-        .filter(|c| !matches!(c, ' ' | '-' | '(' | ')' | '.'))
-        .collect();
-    let (plus, digits) = match compact.strip_prefix('+') {
-        Some(rest) => (true, rest),
-        None => (false, compact.as_str()),
-    };
-    if (3..=15).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit()) {
-        Ok(if plus {
-            format!("+{digits}")
-        } else {
-            digits.to_owned()
-        })
-    } else {
-        Err(BridgeError::new(
-            "invalid-recipient",
-            "Recipients must be phone numbers (international +CC format, national digits, or a short code). Other address types are not supported.",
-        ))
-    }
-}
-
-fn parse_route(gateway: &str, sim: &str) -> BridgeResult<GatewayRoute> {
-    Ok(GatewayRoute {
-        gateway_device_id: DeviceId::from_str(gateway)
-            .map_err(|_| BridgeError::new("invalid-route", "The gateway ID is invalid."))?,
-        subscription_id: sim.to_owned(),
-    })
-}
-
-fn other_party(message: &Message) -> Vec<String> {
-    match message.payload.direction {
-        Direction::Incoming => message.payload.sender_address.clone().into_iter().collect(),
-        Direction::Outgoing => message.payload.recipients.clone(),
+fn compose_error(error: ComposeError) -> BridgeError {
+    match error {
+        ComposeError::Ui { code, message } => BridgeError::new(code, message),
+        ComposeError::ReplyBlocked(message) => BridgeError::new("mms-reply-blocked", message),
+        ComposeError::Core(error) => core_error(error),
+        ComposeError::AfterRoute { source, current_revision } => core_error(source).with_revision(current_revision),
     }
 }
 
@@ -410,10 +343,7 @@ impl Session {
     }
 
     pub fn gateways(&self) -> (Vec<GatewayView>, bool) {
-        let status = self
-            .status
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let status = self.status.lock().unwrap_or_else(|poison| poison.into_inner());
         (status.gateways.clone(), status.gateways_known)
     }
 
@@ -488,308 +418,18 @@ impl Session {
         Ok(())
     }
 
-    /// Reply recipients and transport derived from the latest stored message only.
-    fn conversation_context(
-        &self,
-        conversation: ConversationId,
-    ) -> BridgeResult<(Vec<String>, Option<Transport>)> {
-        let messages = self.client.messages(conversation).map_err(core_error)?;
-        let Some(latest) = messages.last() else {
-            return Ok((Vec::new(), None));
-        };
-        let transport = latest.payload.transport;
-        if transport == Transport::Mms {
-            let context = self
-                .client
-                .mms_reply_context(conversation)
-                .map_err(core_error)?;
-            if let Some(reason) = context.blocked_reason {
-                return Err(BridgeError::new("mms-reply-blocked", reason));
-            }
-            return Ok((context.recipients, Some(transport)));
-        }
-        Ok((other_party(latest), Some(transport)))
-    }
-
-    fn check_attachments(&self, ids: &[String]) -> BridgeResult<Vec<AttachmentId>> {
-        if ids.len() > MAX_ATTACHMENTS {
-            return Err(BridgeError::new(
-                "invalid-attachment",
-                "A message can carry at most 10 attachments.",
-            ));
-        }
-        ids.iter()
-            .map(|id| {
-                let id = AttachmentId::from_str(id).map_err(|_| {
-                    BridgeError::new("invalid-attachment", "The attachment ID is invalid.")
-                })?;
-                let info = self.client.attachment_info(id).map_err(core_error)?;
-                if !info.state.is_local() {
-                    return Err(BridgeError::new(
-                        "invalid-attachment",
-                        "Only attachments added on this device can be sent.",
-                    ));
-                }
-                Ok(id)
-            })
-            .collect()
-    }
-
     /// CAS draft save. Text, recipients, attachments and route are persisted together.
     pub fn save_draft(&self, input: &DraftInput) -> BridgeResult<DraftView> {
-        let expected = parse_revision(&input.expected_revision)?;
-        let draft_id = match DraftId::from_str(&input.id) {
-            Ok(id) => id,
-            // A UI placeholder for a draft that was never stored yet.
-            Err(_) => {
-                let conversation = match input.conversation_id.as_str() {
-                    "" => None,
-                    id => Some(
-                        ConversationId::from_str(id)
-                            .map_err(|_| invalid_draft("The conversation ID is invalid."))?,
-                    ),
-                };
-                self.client
-                    .create_compose_draft(conversation)
-                    .map_err(core_error)?
-                    .draft_id
-            }
-        };
-        let current = self
-            .client
-            .compose_draft(draft_id)
-            .map_err(core_error)?
-            .ok_or_else(|| core_error(peppy_client_core::Error::NotFound))?;
-        if !input.conversation_id.is_empty()
-            && input.conversation_id != current.conversation_id.to_string()
-        {
-            return Err(invalid_draft(
-                "The draft does not belong to this conversation.",
-            ));
-        }
-        let route = match (
-            input.gateway_id.as_deref().unwrap_or(""),
-            input.sim_id.as_deref().unwrap_or(""),
-        ) {
-            ("", "") => current.route.clone(),
-            (gateway, sim) if !gateway.is_empty() && !sim.is_empty() => {
-                Some(parse_route(gateway, sim)?)
-            }
-            _ => {
-                return Err(BridgeError::new(
-                    "invalid-route",
-                    "Select a gateway and SIM together.",
-                ))
-            }
-        };
-        let recipients = input
-            .recipient_ids
-            .iter()
-            .map(|value| normalize_recipient(value))
-            .collect::<BridgeResult<Vec<_>>>()?;
-        let update = ComposeDraftUpdate {
-            text: input.text.clone(),
-            recipients,
-            attachment_ids: self.check_attachments(&input.attachment_ids)?,
-            route,
-        };
-        let saved = self
-            .client
-            .save_compose_draft(draft_id, expected, update)
-            .map_err(core_error)?;
-        Ok(dto::draft_view(&saved))
+        compose::save_draft(&self.client, input).map_err(compose_error)
     }
 
-    /// Sends the STORED draft at `expectedRevision` through the exact selected, currently
-    /// reported gateway/SIM route. Queueing and clearing are one core transaction; `accepted`
-    /// means durably queued in the local encrypted outbox, nothing more.
-    pub fn send_draft(&self, input: &DraftInput) -> BridgeResult<SendResultView> {
-        let draft_id = DraftId::from_str(&input.id)
-            .map_err(|_| invalid_draft("Save the draft before sending it."))?;
-        let expected = parse_revision(&input.expected_revision)?;
-        let (gateway_id, sim_id) = match (input.gateway_id.as_deref(), input.sim_id.as_deref()) {
-            (Some(gateway), Some(sim)) if !gateway.is_empty() && !sim.is_empty() => (gateway, sim),
-            _ => {
-                return Err(BridgeError::new(
-                    "invalid-route",
-                    "Select a gateway and SIM before sending.",
-                ))
-            }
-        };
-        let stored: ComposeDraft = self
-            .client
-            .compose_draft(draft_id)
-            .map_err(core_error)?
-            .ok_or_else(|| core_error(peppy_client_core::Error::NotFound))?;
-        // Same binding check as `save_draft`, before anything is persisted: a window scoped to
-        // one conversation cannot send another conversation's draft by naming its draft ID.
-        if !input.conversation_id.is_empty()
-            && input.conversation_id != stored.conversation_id.to_string()
-        {
-            return Err(invalid_draft(
-                "The draft does not belong to this conversation.",
-            ));
-        }
-        if stored.revision != expected {
-            return Err(core_error(peppy_client_core::Error::StaleDraft {
-                current_revision: stored.revision,
-            }));
-        }
+    /// Queues locally only after shared composition policy accepts the stored draft.
+    pub fn send_draft(&self, input: &DraftInput) -> BridgeResult<peppy_desktop_api::SendResultView> {
         let (gateways, known) = self.gateways();
-        if !known {
-            return Err(BridgeError::new("gateways-unknown", "Gateway capabilities have not been loaded from the server yet; the draft was kept."));
-        }
-        let gateway = find_route(&gateways, gateway_id, sim_id)
-            .ok_or_else(|| BridgeError::new("gateway-unavailable", "The selected gateway/SIM is not currently reported by the server; the draft was kept."))?;
-        if !gateway.supports_sms {
-            return Err(BridgeError::new(
-                "gateway-unsupported",
-                "The selected gateway/SIM cannot send SMS; the draft was kept.",
-            ));
-        }
-        let route = parse_route(gateway_id, sim_id)?;
-        let (derived_recipients, latest_transport) =
-            self.conversation_context(stored.conversation_id)?;
-        let recipients = if stored.recipients.is_empty() {
-            derived_recipients
-        } else {
-            stored.recipients.clone()
-        };
-        if recipients.is_empty() {
-            return Err(BridgeError::new(
-                "invalid-recipient",
-                "Add a recipient before sending; the draft was kept.",
-            ));
-        }
-        if latest_transport == Some(Transport::Mms) {
-            let context = self
-                .client
-                .mms_reply_context(stored.conversation_id)
-                .map_err(core_error)?;
-            if let Some(reason) = context.blocked_reason {
-                return Err(BridgeError::new("mms-reply-blocked", reason));
-            }
-        }
-        if stored.text.trim().is_empty() && stored.attachment_ids.is_empty() {
-            return Err(BridgeError::new(
-                "empty-message",
-                "Write a message or add an attachment before sending.",
-            ));
-        }
-        // Everything core would reject is validated before the route is persisted, so a refused
-        // send never bumps the stored revision behind the UI's back.
-        if stored.text.len() > MAX_BODY_BYTES {
-            return Err(BridgeError::new(
-                "message-too-long",
-                "The message is too long to send.",
-            ));
-        }
-        if recipients.len() > MAX_RECIPIENTS
-            || recipients.iter().any(|r| r.is_empty() || r.len() > 256)
-        {
-            return Err(BridgeError::new(
-                "invalid-recipient",
-                "The recipients are not valid for sending.",
-            ));
-        }
-        let attachment_ids: Vec<String> = stored
-            .attachment_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let attachment_info: Vec<_> = attachment_ids
-            .iter()
-            .map(|id| {
-                let id = AttachmentId::from_str(id).map_err(|_| {
-                    BridgeError::new("invalid-attachment", "The attachment ID is invalid.")
-                })?;
-                self.client.attachment_info(id).map_err(core_error)
-            })
-            .collect::<BridgeResult<_>>()?;
-        self.check_attachments(&attachment_ids)?;
-        let requires_mms = !attachment_info.is_empty()
-            || recipients.len() > 1
-            || latest_transport == Some(Transport::Mms);
-        if requires_mms {
-            if !gateway.supports_mms || gateway.mms_content_version.unwrap_or(0) < 2 {
-                return Err(BridgeError::new(
-                    "mms-unsupported",
-                    "The selected gateway/SIM does not report MMS capability version 2; the draft was kept.",
-                ));
-            }
-            let max_recipients = gateway.mms_max_recipients.unwrap_or(MAX_RECIPIENTS);
-            if recipients.len() > max_recipients {
-                return Err(BridgeError::new(
-                    "mms-too-many-recipients",
-                    "This MMS route does not support that many recipients; the draft was kept.",
-                ));
-            }
-            // This deliberately excludes PDU headers and encoding overhead. It can refuse a
-            // known-too-large draft but never claims that a lower bound will fit the carrier PDU.
-            let attachment_bytes = attachment_info.iter().try_fold(0u64, |total, info| {
-                total.checked_add(info.plaintext_bytes).ok_or_else(|| {
-                    BridgeError::new(
-                        "mms-too-large",
-                        "The MMS is too large to send; the draft was kept.",
-                    )
-                })
-            })?;
-            let lower_bound = attachment_bytes
-                .checked_add(stored.text.len() as u64)
-                .ok_or_else(|| {
-                    BridgeError::new(
-                        "mms-too-large",
-                        "The MMS is too large to send; the draft was kept.",
-                    )
-                })?;
-            if lower_bound > gateway.mms_max_bytes.unwrap_or(FALLBACK_MMS_MAX_BYTES) {
-                return Err(BridgeError::new(
-                    "mms-too-large",
-                    "The MMS content already exceeds this route's size limit; the draft was kept.",
-                ));
-            }
-        }
-        // Persist the selected route (and derived recipients) with CAS; content stays as stored.
-        let revision = if stored.route.as_ref() != Some(&route) || recipients != stored.recipients {
-            let update = ComposeDraftUpdate {
-                text: stored.text.clone(),
-                recipients,
-                attachment_ids: stored.attachment_ids.clone(),
-                route: Some(route),
-            };
-            self.client
-                .save_compose_draft(draft_id, expected, update)
-                .map_err(core_error)?
-                .revision
-        } else {
-            expected
-        };
-        let expected_transport = if requires_mms {
-            Transport::Mms
-        } else {
-            Transport::Sms
-        };
-        if let Err(error) =
-            self.client
-                .send_compose_draft_checked_transport(draft_id, revision, expected_transport)
-        {
-            // Report the stored revision so the UI can keep editing without a stale conflict.
-            let stored_now = self
-                .client
-                .compose_draft(draft_id)
-                .ok()
-                .flatten()
-                .map(|d| d.revision)
-                .unwrap_or(revision);
-            return Err(core_error(error).with_revision(stored_now));
-        }
+        let result = compose::send_draft(&self.client, input, known.then_some(gateways.as_slice()))
+            .map_err(compose_error)?;
         self.request_work();
-        Ok(SendResultView {
-            accepted: true,
-            status: "queued-local",
-            reason: None,
-            revision: Some((revision + 1).to_string()),
-        })
+        Ok(result)
     }
 
     pub fn mark_seen(&self, ids: &[String]) -> BridgeResult<()> {

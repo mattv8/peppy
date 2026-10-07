@@ -1,8 +1,10 @@
-use std::{env, fmt, net::SocketAddr, time::Duration};
+use std::{env, fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
 use ipnet::IpNet;
 use thiserror::Error;
 use url::Url;
+
+use crate::web_client::WebClientConfig;
 
 pub const DEFAULT_REPLAY_RETENTION_DAYS: u32 = 30;
 const MAX_REPLAY_RETENTION_DAYS: u32 = 3650;
@@ -22,6 +24,7 @@ pub struct Config {
     pub replay_retention: Duration,
     /// Fixed operator relay origin. The server never receives provider/manage credentials.
     pub relay_url: Option<Url>,
+    pub web_client: Option<WebClientConfig>,
 }
 
 impl fmt::Debug for Config {
@@ -41,6 +44,7 @@ impl fmt::Debug for Config {
             .field("trusted_proxy_cidrs", &self.trusted_proxy_cidrs)
             .field("replay_retention", &self.replay_retention)
             .field("relay_configured", &self.relay_url.is_some())
+            .field("web_client_configured", &self.web_client.is_some())
             .finish()
     }
 }
@@ -145,6 +149,7 @@ impl Config {
         }
         let replay_retention = Duration::from_secs(u64::from(replay_retention_days) * 86_400);
         let relay_url = relay_url(&get, production)?;
+        let web_client = web_client_config(&get, public_api_url.as_ref())?;
         let trusted_proxy_cidrs = get("TRUSTED_PROXY_CIDRS")
             .unwrap_or_default()
             .split(',')
@@ -229,8 +234,38 @@ impl Config {
             trusted_proxy_cidrs,
             replay_retention,
             relay_url,
+            web_client,
         })
     }
+}
+
+fn web_client_config(
+    get: &impl Fn(&str) -> Option<String>,
+    public_api_url: Option<&Url>,
+) -> Result<Option<WebClientConfig>, ConfigError> {
+    let host = get("PEPPY_WEB_CLIENT_HOST").filter(|value| !value.is_empty());
+    let asset_dir = get("PEPPY_WEB_CLIENT_DIR").filter(|value| !value.is_empty());
+    let (host, asset_dir) = match (host, asset_dir) {
+        // Images may provide a harmless default asset directory. Hosting is
+        // deliberately opt-in through the dedicated hostname.
+        (None, _) => return Ok(None),
+        (Some(host), Some(asset_dir)) => (host, asset_dir),
+        _ => {
+            return Err(ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_HOST",
+                message:
+                    "PEPPY_WEB_CLIENT_HOST and PEPPY_WEB_CLIENT_DIR must be configured together"
+                        .into(),
+            });
+        }
+    };
+    let api_origin = public_api_url.ok_or(ConfigError::Missing("PUBLIC_API_URL"))?;
+    WebClientConfig::new(host, PathBuf::from(asset_dir), api_origin.clone())
+        .map(Some)
+        .map_err(|message| ConfigError::Invalid {
+            name: "PEPPY_WEB_CLIENT_HOST",
+            message,
+        })
 }
 
 fn required(
@@ -485,6 +520,42 @@ mod tests {
                 name: "PEPPY_RELEASE_ID",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn web_client_configuration_is_optional_but_complete_when_enabled() {
+        assert!(Config::from_get(base).unwrap().web_client.is_none());
+        let assets = tempfile::tempdir().unwrap();
+        let directory_only = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            _ => base(name),
+        })
+        .unwrap();
+        assert!(directory_only.web_client.is_none());
+        let missing_directory = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
+            "PUBLIC_API_URL" => Some("https://api.example.test".into()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            missing_directory,
+            ConfigError::Invalid {
+                name: "PEPPY_WEB_CLIENT_HOST",
+                ..
+            }
+        ));
+
+        let missing_origin = Config::from_get(|name| match name {
+            "PEPPY_WEB_CLIENT_HOST" => Some("app.example.test".into()),
+            "PEPPY_WEB_CLIENT_DIR" => Some(assets.path().display().to_string()),
+            _ => base(name),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            missing_origin,
+            ConfigError::Missing("PUBLIC_API_URL")
         ));
     }
 }

@@ -21,6 +21,7 @@ Peppy is a clean-install boundary with no compatibility or migration path for pr
 ## Components
 
 - **Server:** device authentication, ordered encrypted envelopes, encrypted attachments, snapshots, and public image-copy endpoints.
+- **Browser client:** the shared messaging UI with Rust/WASM, encrypted browser storage, and a single SharedWorker session across tabs. The server image bundles its assets; `WEB_CLIENT_HOST` enables Community hosting over HTTPS. See the [browser build and hosting guide](apps/web/README.md).
 - **Gateway simulator:** synthetic SMS and carrier-effect exercise for local development.
 - **Native clients:** Tauri desktop, Android SMS companion with opt-in experimental MMS, and capability-gated Swift client.
 

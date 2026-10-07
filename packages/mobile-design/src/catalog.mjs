@@ -218,6 +218,12 @@ export const desktopOverrides = Object.freeze({
   setup_self_hosted_join_body: "Enter your server address to scan a QR code from an enrolled owner device.",
   setup_self_hosted_url_hint: "Must start with https://",
   setup_self_hosted_advanced: "Advanced: import credentials",
+  setup_choice_existing: "I already use Peppy on my phone",
+  setup_choice_existing_hint: "Scan a code with your phone to add this computer.",
+  setup_choice_new: "I'm new to Peppy",
+  setup_choice_new_hint: "Sign in, choose a plan, and create your vault.",
+  setup_join_waiting: "Waiting for your phone to scan…",
+  setup_join_scan_hint: "On your enrolled phone, choose Add a computer and scan this code.",
 });
-export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_join_claimed", "setup_join_confirm", "setup_join_approved", "setup_join_continue", "setup_join_retrying", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_advanced"]);
+export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_join_claimed", "setup_join_confirm", "setup_join_approved", "setup_join_continue", "setup_join_retrying", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_advanced", "setup_choice_existing", "setup_choice_existing_hint", "setup_choice_new", "setup_choice_new_hint", "setup_join_waiting", "setup_join_scan_hint"]);
 export const desktopCatalog = Object.freeze({ ...catalog, ...desktopOverrides });

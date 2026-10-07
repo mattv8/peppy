@@ -57,12 +57,19 @@ Install Node at the version in `../../.node-version`, pnpm 12.8.1, and Rust from
 ```sh
 just desktop-dev
 just desktop-bundle
+just desktop-run
 just desktop-open
 ```
 
-`desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`. The default target directory is `apps/desktop/src-tauri/target`. A build writes development bundles to `apps/desktop/src-tauri/target/release/bundle/macos/Peppy.app` and `apps/desktop/src-tauri/target/release/bundle/dmg/`. They are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources. `desktop-open` opens the `.app` in place and does not install it in `/Applications`.
+`desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory. `desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`.
 
-Each ad-hoc rebuild has a new code identity, so macOS asks again before Peppy can read its Keychain record; one record can produce two dialogs. Peppy keeps the credential, database key and cached vault keys for each device in one Keychain record. The first launch after this change can show up to two dialogs for each older item while it copies them; it leaves the older items in place. To stop the prompts across rebuilds, set `PEPPY_MACOS_SIGNING_IDENTITY` to the exact name or SHA-1 of an Apple Development identity (Xcode, signed in with your Apple ID) or a Developer ID identity, then choose **Always Allow** once. This applies when `just desktop-bundle` or `just desktop-run` builds the bundle; `just desktop-open` only opens the existing bundle, and `just desktop-dev` does not use it. Switching identities asks once more, and Apple Development certificates expire after a year.
+On macOS, development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
+
+Development uses a separate Keychain namespace. The first dev launch creates an empty profile. Any prior app data and Keychain records stored under the production identity `org.peppy.desktop` remain unchanged; there is no automatic migration. Legacy Keychain records copy only within the current namespace, never from production into dev.
+
+Each ad-hoc rebuild has a new code identity, so macOS asks again before the dev app can read its Keychain record. To stop the prompts across rebuilds, set `PEPPY_MACOS_SIGNING_IDENTITY` to the exact name or SHA-1 of an Apple Development identity (Xcode, signed in with your Apple ID) or a Developer ID identity, then choose **Always Allow** once. This applies when `just desktop-bundle` or `just desktop-run` builds the bundle; `just desktop-open` only opens the existing bundle, and `just desktop-dev` does not use it. Switching identities asks once more, and Apple Development certificates expire after a year.
+
+Production installers use the `tauri.conf.json` configuration (`productName: Peppy`, identifier: `org.peppy.desktop`) and are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
 
 ## Windows from WSL
 

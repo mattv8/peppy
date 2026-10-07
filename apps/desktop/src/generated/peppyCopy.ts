@@ -185,6 +185,12 @@ export const peppyCopy = {
   setup_self_hosted_join_body: "Enter your server address to scan a QR code from an enrolled owner device.",
   setup_self_hosted_url_hint: "Must start with https://",
   setup_self_hosted_advanced: "Advanced: import credentials",
+  setup_choice_existing: "I already use Peppy on my phone",
+  setup_choice_existing_hint: "Scan a code with your phone to add this computer.",
+  setup_choice_new: "I'm new to Peppy",
+  setup_choice_new_hint: "Sign in, choose a plan, and create your vault.",
+  setup_join_waiting: "Waiting for your phone to scan…",
+  setup_join_scan_hint: "On your enrolled phone, choose Add a computer and scan this code.",
 } as const;
 
 export type PeppyCopyKey = keyof typeof peppyCopy;

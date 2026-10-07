@@ -5,9 +5,11 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use peppy_server::{ServerBuilder, config::Config};
+use peppy_server::{ServerBuilder, config::Config, web_client::WebClientConfig};
 use sqlx::postgres::PgPoolOptions;
+use tempfile::TempDir;
 use tower::ServiceExt;
+use url::Url;
 
 fn config(revision: &str) -> Config {
     Config {
@@ -21,6 +23,7 @@ fn config(revision: &str) -> Config {
         trusted_proxy_cidrs: Vec::new(),
         replay_retention: Duration::from_secs(86_400),
         relay_url: None,
+        web_client: None,
     }
 }
 
@@ -68,6 +71,37 @@ async fn builder_assembles_routes_without_starting_maintenance() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn builder_leaves_web_client_wrapping_to_the_entrypoint() {
+    let assets = TempDir::new().unwrap();
+    std::fs::write(assets.path().join("index.html"), "browser client").unwrap();
+    let mut server_config = config("api-only");
+    server_config.web_client = Some(
+        WebClientConfig::new(
+            "app.example.test".into(),
+            assets.path().into(),
+            Url::parse("https://api.example.test").unwrap(),
+        )
+        .unwrap(),
+    );
+    let server = ServerBuilder::new(server_config, pool())
+        .build()
+        .await
+        .unwrap();
+    let response = server
+        .router()
+        .oneshot(
+            Request::get("/")
+                .header("host", "app.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

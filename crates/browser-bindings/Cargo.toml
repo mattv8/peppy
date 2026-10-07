@@ -1,0 +1,34 @@
+[package]
+name = "peppy-browser-bindings"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "peppy-browser-core"
+path = "src/main.rs"
+
+[dependencies]
+peppy-client-core.workspace = true
+peppy-desktop-api.workspace = true
+peppy-crypto.workspace = true
+peppy-domain.workspace = true
+peppy-protocol.workspace = true
+peppy-hosted-client = { path = "../hosted-client", version = "0.1.0" }
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+url.workspace = true
+libsodium-rs.workspace = true
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+rusqlite = { version = "=0.32.1", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }

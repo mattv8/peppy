@@ -147,6 +147,7 @@ select:focus-visible {
 #titlebar-actions button:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
 #titlebar-actions svg { pointer-events: none; }
 #desktop-rail {
+  position: relative;
   width: var(--peppy-rail-width);
   flex: 0 0 var(--peppy-rail-width);
   display: flex;
@@ -155,13 +156,14 @@ select:focus-visible {
   padding: 8px 0;
   background: var(--peppy-surface-chrome);
   border-right: 1px solid var(--peppy-border);
+  overflow: visible;
 }
 #desktop-rail nav {
   display: grid;
   gap: 4px;
   margin-top: 4px;
 }
-#desktop-rail button {
+#desktop-rail nav button {
   width: 46px;
   height: var(--peppy-control-height);
   border: 0;
@@ -171,11 +173,11 @@ select:focus-visible {
   display: grid;
   place-items: center;
 }
-#desktop-rail button:hover {
+#desktop-rail nav button:hover {
   background: var(--peppy-surface-hover);
   color: var(--peppy-text-primary);
 }
-#desktop-rail button[aria-current] {
+#desktop-rail nav button[aria-current] {
   border-left-color: var(--peppy-accent);
   color: var(--peppy-accent);
   background: color-mix(in srgb, var(--peppy-accent) 14%, transparent);
@@ -184,9 +186,6 @@ select:focus-visible {
 .rail-notif-badge { position: absolute; top: 3px; right: 3px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: var(--peppy-accent); color: var(--peppy-accent-text); font-size: 9px; line-height: 14px; text-align: center; pointer-events: none; }
 .rail-spacer {
   flex: 1;
-}
-.rail-connection-dot {
-  padding: 12px;
 }
 .connection-dot {
   display: block;
@@ -200,6 +199,58 @@ select:focus-visible {
 }
 [data-connection-state="error"] .connection-dot {
   background: var(--peppy-error);
+}
+[data-connection-state="missing-native-host"] .connection-dot {
+  background: var(--peppy-error);
+}
+[data-status-popover] {
+  position: relative;
+  display: flex;
+  width: 100%;
+  justify-content: center;
+}
+[data-status-trigger] {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--peppy-control-radius);
+  background: transparent;
+}
+[data-status-trigger]:hover {
+  background: var(--peppy-surface-hover);
+}
+[data-status-trigger][data-status-tone="ok"] .connection-dot {
+  background: var(--peppy-success);
+}
+[data-status-trigger][data-status-tone="warning"] .connection-dot {
+  background: var(--peppy-warning-text);
+}
+[data-status-trigger][data-status-tone="error"] .connection-dot {
+  background: var(--peppy-error);
+}
+[data-status-panel] {
+  position: absolute;
+  z-index: 20;
+  bottom: 0;
+  left: calc(100% + 4px);
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - var(--peppy-rail-width) - 12px));
+  max-width: calc(100vw - var(--peppy-rail-width) - 12px);
+  max-height: calc(100dvh - var(--peppy-titlebar-height) - 16px);
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-control-radius);
+  background: var(--peppy-surface-panel);
+  box-shadow: var(--peppy-shadow-floating);
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+[data-status-panel][hidden] {
+  display: none;
 }
 .recipient-picker {
   position: relative;
