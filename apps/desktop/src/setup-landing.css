@@ -1,18 +1,170 @@
-#setup-landing { color: var(--peppy-text); display: grid; gap: 12px; max-width: 560px; padding: 20px; }
-#setup-landing-header { align-items: center; display: flex; gap: 12px; }
-#setup-landing-header h1 { margin: 0; }
-#setup-mode-select { margin-left: auto; }
-#setup-landing-body > section, #setup-landing-body #hosted-signin-section { background: var(--peppy-surface-widget); border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius); display: grid; gap: 12px; padding: 16px; }
-#setup-landing-body #hosted-signin-section { margin-top: 12px; }
-#join-qr-hero { align-items: center; display: grid; justify-items: center; }
-#hosted-join-panel[data-join-state="claimed"] #join-qr-image { opacity: .3; }
-#hosted-join-panel[data-join-state="confirm"] #join-qr-image { display: none; }
-#join-qr-image { image-rendering: pixelated; max-width: 256px; }
-#join-sas-panel { display: grid; gap: 8px; }
-#join-sas-code { font-family: monospace; font-size: 24px; letter-spacing: .12em; }
-#join-confirm-actions { display: grid; gap: 8px; }
-#join-confirm-button { margin-top: 8px; }
-#join-cancel-button-confirm { margin-top: 0; }
-.join-retrying-hint { color: var(--peppy-text-secondary, var(--peppy-text)); font-size: 13px; margin: 4px 0 0 0; }
-#self-hosted-url-input { display: block; margin-top: 4px; width: 100%; }
-#self-hosted-advanced { margin-top: 8px; }
+#setup-landing {
+  color: var(--peppy-text);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+#setup-landing-inner {
+  box-sizing: border-box;
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 20px 16px;
+}
+
+#setup-landing-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+#setup-landing-header h1 {
+  min-width: 0;
+  margin: 0;
+  color: var(--peppy-text-primary);
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+#setup-mode-select {
+  max-width: 100%;
+  margin-left: auto;
+}
+
+#setup-landing-body,
+#setup-landing-body > section,
+#hosted-signin-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+#setup-landing-body :is(h2, h3, h4, h5, h6, p) {
+  margin: 0;
+}
+
+#hosted-path-chooser {
+  display: grid;
+  gap: 12px;
+}
+
+.chooser-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 10px;
+}
+
+.chooser-button {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-control-radius);
+  background: transparent;
+  color: var(--peppy-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.chooser-button:hover {
+  background: var(--peppy-surface-hover);
+}
+
+.chooser-button:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+
+.chooser-button-label {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.chooser-button-hint {
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+#setup-back-button {
+  align-self: start;
+  justify-self: start;
+  margin-top: 4px;
+}
+
+#join-qr-hero {
+  align-items: center;
+  display: grid;
+  justify-items: center;
+}
+
+#hosted-join-panel[data-join-state="claimed"] #join-qr-image {
+  opacity: .3;
+}
+
+#hosted-join-panel[data-join-state="confirm"] #join-qr-image {
+  display: none;
+}
+
+#join-qr-image {
+  width: clamp(160px, 38vh, 256px);
+  max-width: 100%;
+  height: auto;
+  image-rendering: auto;
+}
+
+#join-sas-panel {
+  display: grid;
+  gap: 8px;
+}
+
+#join-sas-code {
+  font-family: monospace;
+  font-size: 24px;
+  letter-spacing: .12em;
+}
+
+#join-confirm-actions {
+  display: grid;
+  gap: 8px;
+}
+
+#join-confirm-button {
+  margin-top: 8px;
+}
+
+#join-cancel-button-confirm {
+  margin-top: 0;
+}
+
+.join-retrying-hint {
+  color: var(--peppy-text-secondary, var(--peppy-text));
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+#self-hosted-url-input {
+  display: block;
+  margin-top: 4px;
+  width: 100%;
+}
+
+#self-hosted-advanced {
+  margin-top: 8px;
+}
+
+@media (max-width: 360px) {
+  #setup-mode-select {
+    margin-left: 0;
+  }
+}

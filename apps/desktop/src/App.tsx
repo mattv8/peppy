@@ -15,6 +15,7 @@ import {
   CheckCircle,
   Clock,
   Composer,
+  ConnectionDot,
   ContactAvatar,
   ConversationList,
   ExternalLink,
@@ -62,6 +63,7 @@ import { NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
+import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
 
 /**
  * Display-only names for phone addresses. Stored conversation names, addresses and draft
@@ -110,27 +112,6 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   unknown: "Unknown delivery state — not retried",
 };
 
-const CONNECTION_STATE_LABEL: Record<
-  DesktopSnapshot["connection"]["state"],
-  string
-> = {
-  connected: "Connected",
-  offline: "Offline",
-  "missing-native-host": "Native host unavailable",
-  error: "Connection error",
-};
-
-/** Known native connection codes; unknown codes are shown verbatim (they are static identifiers). */
-const CONNECTION_CODE_LABEL: Record<string, string> = {
-  "server-required": "configure a server URL",
-  "credentials-required": "import device credentials",
-  connecting: "connecting…",
-  revoked: "this device was revoked; local data is kept",
-  "outbox-rejected":
-    "the server rejected queued messages; they stay queued locally",
-  "live-timeout": "live connection timed out; reconnecting",
-};
-
 const FALLBACK_ERROR =
   "The native operation failed. Your edits remain in this window.";
 const COMPOSER_MIN_HEIGHT = 96;
@@ -159,12 +140,6 @@ const errorCode = (error: unknown): string | undefined =>
   typeof error.code === "string"
     ? error.code
     : undefined;
-
-function connectionText(connection: DesktopSnapshot["connection"]): string {
-  const state = CONNECTION_STATE_LABEL[connection.state];
-  if (!connection.errorCode || connection.errorCode === connection.state) return state;
-  return `${state} — ${CONNECTION_CODE_LABEL[connection.errorCode] ?? connection.errorCode}`;
-}
 
 function expiryText(seconds: number): string {
   if (seconds <= 0)
@@ -805,7 +780,9 @@ function OnboardingView({
   onOrigin,
   onAction,
   encryption,
+  browserHost = false,
   onBack,
+  notice,
 }: {
   connected: boolean;
   canUnlock: boolean;
@@ -813,7 +790,9 @@ function OnboardingView({
   onOrigin(value: string): void;
   onAction(action: "origin" | "credentials" | "unlock"): void;
   encryption: DesktopSnapshot["encryption"]["state"];
+  browserHost?: boolean;
   onBack?: () => void;
+  notice?: string;
 }) {
   const step = (
     number: string,
@@ -845,7 +824,7 @@ function OnboardingView({
         </p>
       </header>
       <ol id="onboarding-steps" role="list">
-        {step(
+        {!browserHost && step(
           "1",
           "Configure server",
           <>
@@ -875,16 +854,13 @@ function OnboardingView({
           "2",
           "Import device credentials",
           <>
-            <p>
-              Credentials are handled entirely by the native host — this app
-              never receives them.
-            </p>
+            <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are handled entirely by the native host — this app never receives them."}</p>
             <button
               className="secondary-button"
               data-action="import-credentials"
               onClick={() => onAction("credentials")}
             >
-              Import credentials natively
+              {browserHost ? "Import credentials" : "Import credentials natively"}
             </button>
           </>,
           false,
@@ -895,23 +871,21 @@ function OnboardingView({
             "3",
             "Unlock sync encryption",
             <>
-              <p>
-                Your passphrase is handled natively. Required before messages
-                can sync.
-              </p>
+              <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Your passphrase is handled natively."} Required before messages can sync.</p>
               <button
                 className="secondary-button"
                 data-action="unlock-sync"
                 disabled={!canUnlock}
                 onClick={() => onAction("unlock")}
               >
-                Unlock sync natively
+                {browserHost ? "Unlock sync" : "Unlock sync natively"}
               </button>
             </>,
             false,
             canUnlock,
           )}
       </ol>
+      {notice && <p id="onboarding-notice" className="settings-error" role="alert">{notice}</p>}
     </section>
   );
 }
@@ -936,6 +910,8 @@ function SettingsView({
   onCreatePairingIntent,
   onPairingStatus,
   onApprovePairing,
+  onLock,
+  browserHost = false,
 }: {
   origin: string;
   onOrigin(value: string): void;
@@ -956,6 +932,8 @@ function SettingsView({
   onCreatePairingIntent(): ReturnType<typeof bridge.create_pairing_intent>;
   onPairingStatus(intentToken: string): ReturnType<typeof bridge.pairing_intent_status>;
   onApprovePairing(intentToken: string, keyDigest: string): ReturnType<typeof bridge.approve_pairing_intent>;
+  onLock?: () => Promise<void>;
+  browserHost?: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -988,12 +966,12 @@ function SettingsView({
       </section>
       <section data-settings-section="credentials">
         <h2>Device credentials</h2>
-        <p>Credentials are imported natively and are never shown here.</p>
+        <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are imported natively and are never shown here."}</p>
         <button
           className="secondary-button"
           onClick={() => onAction("credentials")}
         >
-          Import credentials natively
+          {browserHost ? "Import credentials" : "Import credentials natively"}
         </button>
       </section>
       <section data-settings-section="pair-phone">
@@ -1014,7 +992,12 @@ function SettingsView({
             className="secondary-button"
             onClick={() => onAction("unlock")}
           >
-            Unlock sync natively
+            {browserHost ? "Unlock sync" : "Unlock sync natively"}
+          </button>
+        )}
+        {encryption === "unlocked" && onLock && (
+          <button id="browser-lock-all-tabs" className="secondary-button" onClick={() => void onLock()}>
+            Lock now
           </button>
         )}
       </section>
@@ -1058,41 +1041,44 @@ function SettingsView({
   );
 }
 
-function TitlebarStatus({
+function StatusDetails({
   connection,
   encryption,
 }: {
-  connection: DesktopSnapshot["connection"];
-  encryption: DesktopSnapshot["encryption"]["state"];
+  connection?: DesktopSnapshot["connection"];
+  encryption?: DesktopSnapshot["encryption"]["state"];
 }) {
-  const [icon, text] =
-    encryption === "unlocked"
-      ? [<LockOpen size={12} aria-hidden />, "Device sync encrypted"]
-      : encryption === "mismatch"
-        ? [<LockKeyhole size={12} aria-hidden />, "Device sync key mismatch"]
-        : [<Lock size={12} aria-hidden />, "Device sync not unlocked"];
+  if (!connection || !encryption)
+    return <div className="status-details" data-status-details><div className="status-details-row">Loading status…</div></div>;
+  const text = syncStatusText(encryption);
+  const icon = encryption === "unlocked"
+    ? <LockOpen size={14} aria-hidden />
+    : encryption === "mismatch"
+      ? <LockKeyhole size={14} aria-hidden />
+      : <Lock size={14} aria-hidden />;
   const label = connectionText(connection);
   return (
-    <>
-      <span className="titlebar-pill" data-disclosure="sync-state" data-sync-state={encryption} role="status" aria-label={text} title={text}>
-        {icon}<span className="titlebar-pill-label">{text}</span>
-      </span>
-      <span className="titlebar-pill" data-disclosure="carrier-sms" role="status" aria-label="Carrier SMS/MMS not end-to-end encrypted" title="Carrier SMS/MMS not end-to-end encrypted">
-        <ShieldAlert size={12} aria-hidden />
-        <span className="titlebar-pill-label">Carrier SMS/MMS not end-to-end encrypted</span>
-      </span>
-      <span id="connection-status" className="titlebar-pill" role="status" data-connection-state={connection.state} data-error-code={connection.errorCode} aria-label={`Connection: ${label}`} title={label}>
+    <div className="status-details" data-status-details>
+      <div className="status-details-row" data-disclosure="sync-state" data-sync-state={encryption} title={text}>
+        {icon}<span>{text}</span>
+      </div>
+      <div className="status-details-row" data-disclosure="carrier-sms" title="Carrier SMS/MMS not end-to-end encrypted">
+        <ShieldAlert size={14} aria-hidden />
+        <span>Carrier SMS/MMS not end-to-end encrypted</span>
+      </div>
+      <div id="connection-status" className="status-details-row" data-connection-state={connection.state} data-error-code={connection.errorCode} title={label}>
         <span className="connection-dot" aria-hidden />
-        <span className="titlebar-pill-label">{label}</span>
-      </span>
-    </>
+        <span>{label}</span>
+      </div>
+    </div>
   );
 }
 
 /* ------------------------------------------------------------------ app */
 
-export function App() {
+export function App({ hostKind = "native", fixedOrigin }: { hostKind?: "native" | "browser"; fixedOrigin?: string } = {}) {
   const platform = detectPlatform();
+  const browserHost = hostKind === "browser";
   const [composerConversation] = useState(() =>
     typeof window === "undefined"
       ? null
@@ -1102,7 +1088,7 @@ export function App() {
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
-  const [mode, setMode] = useState<"hosted" | "self-hosted">(() => savedSetupMode());
+  const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
   const [attachmentViews, setAttachmentViews] = useState<
@@ -1139,7 +1125,7 @@ export function App() {
       [suggestion.id]: { contactId: "", bookId: "", displayName: suggestion.label, photoDataUrl: suggestion.avatarUrl },
     }));
   }, []);
-  const [origin, setOrigin] = useState("");
+  const [origin, setOrigin] = useState(() => browserHost ? fixedOrigin ?? "" : "");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);
@@ -1819,6 +1805,20 @@ export function App() {
       setNotice(errorText(error));
     }
   };
+  const lock = bridge.lock_sync?.bind(bridge);
+  const lockSync = lock ? async () => {
+    const saved = await store.flushAll();
+    if (!saved.ok) {
+      setNotice(`Not locked: the draft could not be saved (${saved.error}).`);
+      return;
+    }
+    try {
+      await lock();
+      await refresh();
+    } catch (error) {
+      setNotice(`Could not lock sync: ${errorText(error)}`);
+    }
+  } : undefined;
 
   useEffect(() => {
     if (!composerConversation) return;
@@ -1846,25 +1846,13 @@ export function App() {
     })),
   ];
 
-  if (loading)
-    return (
-      <main
-        ref={mainRef}
-        id="desktop-shell"
-        aria-busy="true"
-        data-platform={platform}
-      >
-        Loading messaging state…
-      </main>
-    );
+  if (loading && composerConversation)
+    return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
 
   const setupCode = snapshot?.connection.errorCode;
-  const canUnlock =
-    snapshot?.mode === "native" &&
-    snapshot.encryption.state !== "unlocked" &&
-    !["server-required", "credentials-required", "revoked"].includes(
-      setupCode ?? "",
-    );
+  const canUnlock = snapshot?.mode === "native"
+    ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
+    : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -1999,6 +1987,20 @@ export function App() {
       onScroll={onMessageScroll}
     />
   );
+  const panelStatus = snapshot
+    ? {
+        tone: statusTone(snapshot.connection, snapshot.encryption.state),
+        summary: statusSummary(snapshot.connection, snapshot.encryption.state),
+        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} />,
+      }
+    : {
+        tone: "neutral" as const,
+        summary: "Loading status",
+        details: <StatusDetails />,
+      };
+  const composerConnectionDot = snapshot
+    ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />
+    : null;
   if (composerConversation) {
     return (
       <main
@@ -2018,12 +2020,12 @@ export function App() {
         >
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
-            status={snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}
-            onMinimize={() => {}} onMaximize={() => {}} onClose={handlers.current.close}
+            status={composerConnectionDot}
+            onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
-            <span className="head-panel-status">{snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}</span>
+            <span className="head-panel-status">{composerConnectionDot}</span>
             <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}>−</button>
             <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} aria-hidden /></button>
           </header>}
@@ -2048,14 +2050,13 @@ export function App() {
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
       inert={lifecyclePending ? true : undefined}
-      aria-busy={lifecyclePending ? "true" : undefined}
+      aria-busy={loading || lifecyclePending ? "true" : undefined}
     >
       <AppTitlebar
-        onMinimize={() => void bridge.window("minimize")}
-        onMaximize={() => void bridge.window("maximize")}
-        onClose={() => void closeAfterSave(() => bridge.window("close"))}
+        onMinimize={browserHost ? undefined : () => void bridge.window("minimize")}
+        onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
+        onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
-        status={snapshot && <TitlebarStatus connection={snapshot.connection} encryption={snapshot.encryption.state} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
@@ -2070,13 +2071,13 @@ export function App() {
           }
           listCollapsed={listCollapsed}
           threadListId="thread-list"
-          connectionLabel={
-            snapshot ? connectionText(snapshot.connection) : "Loading"
-          }
-          connectionState={snapshot?.connection.state ?? "offline"}
+          status={panelStatus}
           notificationUnread={snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0}
           contactsPending={snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0}
         />
+        {loading ? (
+          <section id="desktop-loading-state">Loading messaging state…</section>
+        ) : <>
         <aside
           id="thread-list"
           aria-label="Thread list"
@@ -2168,15 +2169,15 @@ export function App() {
               )}
             </div>
             <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
-              <button
+              {!browserHost && <button
                 id="new-composer-window"
                 aria-label="New message window"
                 title="New message window"
                 onClick={() => void openComposerWindow()}
               >
                 <SquarePen size={16} aria-hidden />
-              </button>
-              {conversationLoaded && (
+              </button>}
+              {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
                   aria-label="Open as floating conversation"
                   title="Open as floating conversation"
@@ -2211,6 +2212,8 @@ export function App() {
               onCreatePairingIntent={() => bridge.create_pairing_intent()}
               onPairingStatus={intentToken => bridge.pairing_intent_status(intentToken)}
               onApprovePairing={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
+              onLock={browserHost ? lockSync : undefined}
+              browserHost={browserHost}
             />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2229,7 +2232,7 @@ export function App() {
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot && !selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot)) ? (
+              {snapshot && !selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")) ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
@@ -2246,8 +2249,11 @@ export function App() {
                     onOrigin={setOrigin}
                     onAction={(action) => void setup(action)}
                     encryption={snapshot.encryption.state}
+                    browserHost={browserHost}
+                    notice={notice}
                   />}
-                  onJoined={() => void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
+                  onJoined={() => browserHost ? void refresh() : void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
+                  fixedOrigin={browserHost ? fixedOrigin : undefined}
                 />
               ) : snapshot && snapshot.connection.state !== "connected" && !selected ? (
                 <OnboardingView
@@ -2257,6 +2263,8 @@ export function App() {
                   onOrigin={setOrigin}
                   onAction={(action) => void setup(action)}
                   encryption={snapshot.encryption.state}
+                  browserHost={browserHost}
+                  notice={notice}
                 />
               ) : (
                 <>
@@ -2273,6 +2281,7 @@ export function App() {
             </>
           )}
         </section>
+        </>}
       </div>
     </main>
   );

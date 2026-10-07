@@ -30,6 +30,39 @@ fn scratch_is_empty(dir: &TempDir, name: &str) -> bool {
     })
 }
 
+#[test]
+fn checkpoint_media_inventory_includes_drafts_and_drops_discarded_objects() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "browser", &vault), &vault);
+    let picked = dir.path().join("picked.txt");
+    fs::write(&picked, b"private attachment fixture").unwrap();
+    let first = client
+        .prepare_attachment(&picked, "text/plain", "first.txt")
+        .unwrap();
+    let second = client
+        .prepare_attachment(&picked, "text/plain", "second.txt")
+        .unwrap();
+    assert!(client.pending_uploads().unwrap().is_empty());
+    let mut expected = vec![first.attachment_id, second.attachment_id];
+    expected.sort_by_key(ToString::to_string);
+    let page = client.local_attachment_ids(None, 1).unwrap();
+    assert_eq!(page, expected[..1]);
+    assert_eq!(
+        client.local_attachment_ids(Some(page[0]), 1).unwrap(),
+        expected[1..]
+    );
+    assert_eq!(client.local_attachment_ids(None, 1000).unwrap(), expected);
+    assert!(client.local_attachment_ids(None, 1001).is_err());
+    client
+        .discard_unreferenced_attachment(first.attachment_id)
+        .unwrap();
+    assert_eq!(
+        client.local_attachment_ids(None, 1000).unwrap(),
+        vec![second.attachment_id]
+    );
+}
+
 /// Stand-in object store: the native host uploads ciphertext and reports the server object ID.
 #[derive(Default)]
 struct Objects(HashMap<String, Vec<u8>>);
@@ -162,6 +195,12 @@ fn draft_mms_is_atomic_held_for_upload_and_permit_waits_for_verified_media() {
         PermitDecision::Blocked(PermitBlock::MediaUnavailable)
     );
     let downloads = gateway.pending_downloads().unwrap();
+    assert!(
+        !gateway
+            .local_attachment_ids(None, 1000)
+            .unwrap()
+            .contains(&info.attachment_id)
+    );
     assert_eq!(downloads.len(), 1);
     assert_eq!(
         downloads[0].remote_object_id.as_deref(),
@@ -233,6 +272,12 @@ fn draft_mms_is_atomic_held_for_upload_and_permit_waits_for_verified_media() {
         AttachmentState::Available
     );
     assert!(gateway.pending_downloads().unwrap().is_empty());
+    assert!(
+        gateway
+            .local_attachment_ids(None, 1000)
+            .unwrap()
+            .contains(&info.attachment_id)
+    );
     {
         let plain = gateway.open_native_plaintext(info.attachment_id).unwrap();
         assert!(
@@ -473,5 +518,92 @@ fn prepare_attachment_bounds_names_and_cleans_up() {
     assert_eq!(
         client.attachment_info(AttachmentId::new()),
         Err(Error::NotFound)
+    );
+}
+
+#[test]
+fn attachment_remote_object_id_unknown_returns_not_found() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "test", &vault), &vault);
+    let unknown_id = AttachmentId::new();
+    assert_eq!(
+        client.attachment_remote_object_id(unknown_id),
+        Err(Error::NotFound)
+    );
+}
+
+#[test]
+fn attachment_remote_object_id_pending_local_returns_none() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "test", &vault), &vault);
+    let picked = dir.path().join("attachment.txt");
+    fs::write(&picked, b"content").unwrap();
+    let info = client
+        .prepare_attachment(&picked, "text/plain", "test.txt")
+        .unwrap();
+    // Pending local upload has no remote object ID
+    assert_eq!(
+        client.attachment_remote_object_id(info.attachment_id),
+        Ok(None)
+    );
+}
+
+#[test]
+fn attachment_remote_object_id_persists_uploaded_object_across_reopen() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "test", &vault);
+    let client = unlocked(&cfg, &vault);
+    let picked = dir.path().join("attachment.txt");
+    fs::write(&picked, b"content").unwrap();
+    let info = client
+        .prepare_attachment(&picked, "text/plain", "test.txt")
+        .unwrap();
+    let remote_id = uuid::Uuid::new_v4().to_string();
+    client
+        .mark_attachment_uploaded(info.attachment_id, &remote_id)
+        .unwrap();
+    // After upload, returns the durable remote object ID
+    assert_eq!(
+        client.attachment_remote_object_id(info.attachment_id),
+        Ok(Some(remote_id.clone()))
+    );
+    // Drop client and reopen to verify durability across reopen
+    drop(client);
+    let reopened = unlocked(&cfg, &vault);
+    assert_eq!(
+        reopened.attachment_remote_object_id(info.attachment_id),
+        Ok(Some(remote_id.clone()))
+    );
+}
+
+#[test]
+fn attachment_remote_object_id_returns_downloaded_object() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "test", &vault);
+    let client = unlocked(&cfg, &vault);
+    let picture = image(5_000, 5);
+    let part_path = dir.path().join("part-1");
+    fs::write(&part_path, &picture).unwrap();
+    let info = client
+        .prepare_attachment(&part_path, "image/png", "test.png")
+        .unwrap();
+    let remote_id = uuid::Uuid::new_v4().to_string();
+    client
+        .mark_attachment_uploaded(info.attachment_id, &remote_id)
+        .unwrap();
+    // Simulate download scenario: state changes to Available after install
+    let download = dir.path().join("download.bin");
+    fs::write(&download, &picture).unwrap();
+    client
+        .install_downloaded_attachment(info.attachment_id, &download)
+        .unwrap();
+    // After available state, should still return the remote object ID
+    assert_eq!(
+        client.attachment_remote_object_id(info.attachment_id),
+        Ok(Some(remote_id.clone()))
     );
 }

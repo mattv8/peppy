@@ -7,7 +7,8 @@ use crate::{
     tray,
 };
 use peppy_client_core::BannerCandidate;
-use serde::{Deserialize, Serialize};
+pub use peppy_desktop_api::{NotificationPreferences, Preview};
+use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -23,31 +24,6 @@ const BANNER_BATCH: usize = 20;
 const MAX_BANNER_BATCHES_PER_WAKE: usize = 5;
 const BANNER_BURST_SUMMARY_THRESHOLD: usize = 3;
 const STALE_CANDIDATE_MS: i64 = 2 * 60 * 1000;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationPreferences {
-    pub message_banners: bool,
-    pub mirrored_banners: bool,
-    pub preview: Preview,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Preview {
-    Full,
-    Hidden,
-}
-
-impl Default for NotificationPreferences {
-    fn default() -> Self {
-        Self {
-            message_banners: true,
-            mirrored_banners: true,
-            preview: Preview::Full,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]

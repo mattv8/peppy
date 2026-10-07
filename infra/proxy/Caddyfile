@@ -1,9 +1,10 @@
-{$PUBLIC_HOST} {
+__PEPPY_HOSTS__ {
 	request_body {
 		max_size {$MAX_UPLOAD_BYTES:64MB}
 	}
 
 	reverse_proxy api:8080 {
+		header_up Host {http.request.host}
 		header_up X-Forwarded-Proto https
 		transport http {
 			dial_timeout 5s

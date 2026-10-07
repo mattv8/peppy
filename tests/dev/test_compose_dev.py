@@ -134,13 +134,22 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(config["name"], "peppy")
         caddy = config["services"]["caddy"]
         caddyfile_mount = next(
-            (v for v in caddy["volumes"] if v["target"] == "/etc/caddy/Caddyfile"),
+            (v for v in caddy["volumes"] if v["target"] == "/etc/caddy/Caddyfile.template"),
             None
         )
         self.assertIsNotNone(caddyfile_mount, "Caddyfile mount not found")
         self.assertEqual(caddyfile_mount["type"], "bind")
         self.assertEqual(caddyfile_mount["source"], str(ROOT / "infra/proxy/Caddyfile"))
         self.assertTrue(caddyfile_mount["read_only"])
+        entrypoint_mount = next(
+            (v for v in caddy["volumes"] if v["target"] == "/usr/local/bin/peppy-caddy"),
+            None
+        )
+        self.assertIsNotNone(entrypoint_mount, "Caddy entrypoint mount not found")
+        self.assertEqual(entrypoint_mount["source"], str(ROOT / "infra/proxy/caddy-entrypoint.sh"))
+        self.assertTrue(entrypoint_mount["read_only"])
+        self.assertEqual(caddy["entrypoint"], ["/usr/local/bin/peppy-caddy"])
+        self.assertEqual(caddy["environment"]["WEB_CLIENT_HOST"], "")
 
     def test_dev_recipes_clean_legacy_services_and_use_one_off_helpers(self):
         with tempfile.TemporaryDirectory() as directory:

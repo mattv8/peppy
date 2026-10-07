@@ -1,4 +1,5 @@
 //! Generic cryptographic building blocks. Protocol envelope integration is deliberately external.
+pub mod filesystem;
 pub mod passphrase;
 use hmac::{Hmac, Mac};
 use libsodium_rs::{
@@ -151,6 +152,8 @@ pub enum KeyPurpose {
     Event,
     Header,
     Compaction,
+    /// Local credential wrapping only; never use this purpose for transport envelopes.
+    LocalWrap,
 }
 impl KeyPurpose {
     fn id(self) -> u64 {
@@ -159,6 +162,7 @@ impl KeyPurpose {
             Self::Event => 2,
             Self::Header => 3,
             Self::Compaction => 4,
+            Self::LocalWrap => 5,
         }
     }
 }
@@ -437,7 +441,7 @@ fn create_private_temp(path: &Path) -> Result<File, CryptoError> {
     }
 }
 fn promote_noclobber(temporary: &Path, destination: &Path) -> io::Result<()> {
-    fs::hard_link(temporary, destination)?;
+    filesystem::promote_no_clobber(temporary, destination)?;
     fs::remove_file(temporary)
 }
 #[cfg(unix)]

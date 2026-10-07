@@ -47,12 +47,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return healthcheck(config.bind_addr).await;
     }
     let bind_addr = config.bind_addr;
+    let web_client = config.web_client.clone();
     let runtime_db = sqlx::PgPool::connect(&config.database_url).await?;
     let mut server = ServerBuilder::new(config, runtime_db).build().await?;
     server.start_maintenance()?;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!(address = %bind_addr, "peppy server listening");
-    axum::serve(listener, server.router())
+    let router = match web_client {
+        Some(config) => peppy_server::web_client::wrap(server.router(), config),
+        None => server.router(),
+    };
+    axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

@@ -1373,14 +1373,15 @@ pub fn run() {
             let notifier: Notifier = Arc::new(move || {
                 let _ = handle.emit(STATE_EVENT, ());
             });
+            let secure_store = KeyringStore::new(app.config().identifier.clone());
             #[cfg(target_os = "macos")]
             app.manage(AppState::new(
                 root.clone(),
-                Arc::new(BundledStore::new(KeyringStore, root.join("secrets.lock"))),
+                Arc::new(BundledStore::new(secure_store, root.join("secrets.lock"))),
                 notifier.clone(),
             ));
             #[cfg(not(target_os = "macos"))]
-            app.manage(AppState::new(root, Arc::new(KeyringStore), notifier));
+            app.manage(AppState::new(root, Arc::new(secure_store), notifier));
             app.manage(hosted::HostedState::default());
             app.manage(join::JoinState::default());
             // The state hint is emitted after normal live applies and snapshot work alike. Core's

@@ -44,6 +44,7 @@ jobs:
           FILTER_FORCE_FULL: ${{ github.event_name != 'pull_request' }}
           FILTER_RUST: ${{ steps.filter.outputs.rust }}
           FILTER_DESKTOP: ${{ steps.filter.outputs.desktop }}
+          FILTER_WEB: ${{ steps.filter.outputs.web }}
           FILTER_ANDROID: ${{ steps.filter.outputs.android }}
           FILTER_IOS: ${{ steps.filter.outputs.ios }}
           FILTER_SERVER: ${{ steps.filter.outputs.server }}
@@ -175,9 +176,14 @@ jobs:
           node-version-file: .node-version
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @peppy/browser-runtime typecheck
+      - run: pnpm --filter @peppy/browser-runtime test
       - run: pnpm --filter @peppy/desktop-ui test
       - run: pnpm --filter @peppy/desktop test
       - run: pnpm --filter @peppy/desktop build
+      - run: pnpm --filter @peppy/web typecheck
+      - run: pnpm --filter @peppy/web test
+      - run: pnpm --filter @peppy/web build
       - if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -File tests/dev/windows-desktop.Tests.ps1

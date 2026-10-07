@@ -3,6 +3,7 @@ pub mod config;
 pub mod health;
 pub mod scope;
 pub mod storage;
+pub mod web_client;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
@@ -84,13 +85,14 @@ impl ServerBuilder {
             self.row_security,
         );
         maintenance.db = maintenance_db;
+        let router = Router::new()
+            .route("/healthz", get(health::liveness))
+            .route("/readyz", get(health::readiness))
+            .route("/__release", get(health::release))
+            .with_state(health)
+            .merge(api);
         Ok(Server {
-            router: Router::new()
-                .route("/healthz", get(health::liveness))
-                .route("/readyz", get(health::readiness))
-                .route("/__release", get(health::release))
-                .with_state(health)
-                .merge(api),
+            router,
             maintenance: Some(maintenance),
             maintenance_started: AtomicBool::new(false),
         })

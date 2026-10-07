@@ -2,13 +2,22 @@
 //! of an unlocked desktop session and delivered to a second core client acting as the owner
 //! phone, whose permit shows exactly what the phone would apply.
 use super::*;
+// Contract tests intentionally bind to the shared pure implementation, not native leftovers.
 use crate::{
     media::tests::sample_png,
-    tests::{fixture_at, open, Fixture, PHRASE},
+    tests::{Fixture, PHRASE, fixture_at, open},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use peppy_client_core::{ClientConfig, Cursor, DatabaseKey, DeviceId, Envelope, VaultId};
+use peppy_desktop_api::contacts::{
+    Capabilities, List, PhotoInput, capabilities, contact_view, decode_photo_data_url,
+    display_label, edit_state, item_view, list_patches, photo_input, ui_birthday, utc_date,
+};
 use serde_json::json;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex as StdMutex},
+};
 
 const BOOK: &str = "book-1";
 

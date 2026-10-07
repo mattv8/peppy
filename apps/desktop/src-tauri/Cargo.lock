@@ -3800,6 +3800,7 @@ dependencies = [
  "objc",
  "peppy-client-core",
  "peppy-crypto",
+ "peppy-desktop-api",
  "peppy-hosted-api",
  "peppy-hosted-client",
  "peppy-protocol",
@@ -3825,6 +3826,18 @@ dependencies = [
  "uuid",
  "windows",
  "zeroize",
+]
+
+[[package]]
+name = "peppy-desktop-api"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+ "peppy-client-core",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -3903,6 +3916,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -6391,9 +6405,9 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tower"
-version = "0.5.3"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
+checksum = "d039ad9159c98b70ecfd540b2573b97f7f52c3e8d9f8ad57a24b916a536975f9"
 dependencies = [
  "futures-core",
  "futures-util",

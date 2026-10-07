@@ -8,11 +8,14 @@ services:
         condition: service_healthy
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:?set the externally reachable HTTPS hostname}
+      WEB_CLIENT_HOST: ${WEB_CLIENT_HOST:-}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-64MB}
     volumes:
       - caddy-data:/data
       - caddy-config:/config
-      - ./infra/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./infra/proxy/Caddyfile:/etc/caddy/Caddyfile.template:ro
+      - ./infra/proxy/caddy-entrypoint.sh:/usr/local/bin/peppy-caddy:ro
+    entrypoint: ["/usr/local/bin/peppy-caddy"]
     ports:
       - "80:80"
       - "443:443"

@@ -42,6 +42,7 @@ zeroize = "1"
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 peppy-client-core = { path = "../../../crates/client-core", version = "0.1.0" }
+peppy-desktop-api = { path = "../../../crates/desktop-api", version = "0.1.0" }
 peppy-crypto = { path = "../../../crates/crypto", version = "0.1.0" }
 peppy-protocol = { path = "../../../crates/protocol", version = "0.1.0" }
 peppy-hosted-client = { path = "../../../crates/hosted-client", version = "0.1.0" }
