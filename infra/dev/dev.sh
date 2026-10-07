@@ -58,10 +58,10 @@ PY
   dev-demo)
     require_container_tooling
     exec python3 infra/dev/demo.py "$@" ;;
-  dev-up|dev-down|dev-build|dev-test)
+  dev-up|dev-down|dev-build|dev-test|ci-test)
     require_container_tooling
     exec just "$recipe" "$@" ;;
-  dev-start|android-build|android-emulator|android-deploy|android-open|android-run|android-smoke|android-sms|desktop-dev|desktop-bundle|desktop-run|desktop-open|ios-run)
+  dev-start|android-build|android-test|android-emulator|android-deploy|android-open|android-run|android-smoke|android-sms|desktop-dev|desktop-bundle|desktop-run|desktop-open|ios-run)
     exec just "$recipe" "$@" ;;
   *)
     echo "unknown development recipe: ${recipe:-<missing>}" >&2

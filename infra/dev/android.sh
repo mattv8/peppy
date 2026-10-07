@@ -11,7 +11,7 @@ fi
 AVD_NAME=${PEPPY_ANDROID_AVD:-}
 BOOT_TIMEOUT=${PEPPY_ANDROID_BOOT_TIMEOUT:-180}
 
-usage() { echo "Usage: bash infra/dev/android.sh {build|emulator|deploy|open|smoke|sms} [args...]" >&2; }
+usage() { echo "Usage: bash infra/dev/android.sh {build|test|emulator|deploy|open|smoke|sms} [args...]" >&2; }
 die() { echo "android: $*" >&2; exit 1; }
 is_wsl() { [[ -n ${WSL_INTEROP:-} ]] || grep -qi microsoft /proc/sys/kernel/osrelease /proc/version 2>/dev/null; }
 
@@ -69,9 +69,10 @@ ensure_debug_loopback() {
     fi
     adb -s "$serial" reverse "tcp:$port" "tcp:$port"
 }
-container_build() {
-    command -v docker >/dev/null || die "docker is required for android-build"
-    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-build"
+container_run() {
+    local cmd=$1
+    command -v docker >/dev/null || die "docker is required for android-$cmd"
+    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-$cmd"
     test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
     mkdir -p "$ARTIFACTS"; chmod 0700 "$ARTIFACTS"
     local uid gid volume
@@ -79,7 +80,7 @@ container_build() {
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
-    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run build
+    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run "$cmd"
 }
 accept_licenses() {
     local status
@@ -100,12 +101,23 @@ build() {
     if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
         prepare_sdk
         bash infra/compose/verify-android-native.sh
-        (cd apps/android && ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest)
+        (cd apps/android && ./gradlew --no-daemon :app:assembleDebug)
+        mkdir -p "$ARTIFACTS"
+        install -m 0644 apps/android/app/build/outputs/apk/debug/app-debug.apk "$ARTIFACTS/app-debug.apk"
+    else
+        container_run build
+    fi
+}
+test_android() {
+    if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
+        prepare_sdk
+        bash infra/compose/verify-android-native.sh
+        (cd apps/android && ./gradlew --no-daemon :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
         mkdir -p "$ARTIFACTS"
         install -m 0644 apps/android/app/build/outputs/apk/debug/app-debug.apk "$ARTIFACTS/app-debug.apk"
         install -m 0644 apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk "$ARTIFACTS/app-debug-androidTest.apk"
     else
-        container_build
+        container_run test
     fi
 }
 serial_matches_avd() { [[ $(adb -s "$1" shell getprop ro.boot.qemu.avd_name 2>/dev/null | tr -d '\r') == "$AVD_NAME" ]]; }
@@ -245,7 +257,7 @@ open() {
 smoke() {
     local serial output status
     serial=$(adb_serial)
-    if ! test -f "$(apk app-debug.apk)" || ! test -f "$(apk app-debug-androidTest.apk)"; then die "APK(s) missing; run android-build first"; fi
+    if ! test -f "$(apk app-debug.apk)" || ! test -f "$(apk app-debug-androidTest.apk)"; then die "APK(s) missing; run 'bash infra/dev/android.sh test' to build test APKs first"; fi
     ensure_supported_abi "$serial"
     ensure_debug_loopback "$serial"
     adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"
@@ -260,6 +272,6 @@ smoke() {
 sms() { local serial; serial=$(adb_serial); [[ $# == 2 && -n $1 && -n $2 ]] || die "Usage: android.sh sms <number> <message>"; echo "Synthetic emulator SMS simulation only; no carrier message is sent." >&2; adb -s "$serial" emu sms send "$1" "$2"; }
 
 case ${1:-} in
-    build) build ;; test) [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]] || die "test is only available inside the Android runner"; prepare_sdk; cargo build --locked -p peppy-mobile-bindings; (cd apps/android && ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug) ;;
+    build) build ;; test) test_android ;;
     emulator) emulator ;; deploy) deploy ;; open) open ;; smoke) smoke ;; sms) shift; sms "$@" ;; *) usage; exit 64 ;;
 esac

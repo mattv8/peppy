@@ -66,11 +66,17 @@ dev-test:
     {{ dev_prepare }}
     {{ dev_compose }} run --rm --no-deps dev run test rust
 
+ci-test:
+    bash infra/dev/ci-test.sh
+
 dev-demo:
     bash infra/dev/dev.sh dev-demo
 
 android-build *args:
     bash infra/dev/android.sh build "$@"
+
+android-test:
+    bash infra/dev/android.sh test
 
 android-emulator:
     bash infra/dev/android.sh emulator
@@ -148,9 +154,6 @@ ffi-smoke:
     cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir apps/ios/Generated
     cargo test -p peppy-mobile-bindings --locked
     cd apps/ios && DYLD_LIBRARY_PATH="$PWD/../../target/debug" swift run PeppyMobileSmoke
-
-android-test:
-    cd apps/android && ./gradlew :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
 ios-test:
     cd apps/ios && DYLD_LIBRARY_PATH="$PWD/../../target/debug" swift test --no-parallel
