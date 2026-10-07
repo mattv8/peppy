@@ -14,23 +14,24 @@ const qrOptions = { errorCorrectionLevel: "M" as const, margin: 1, width: 256 };
 
 export const savedSetupMode = (): Mode => window.localStorage.getItem("peppy.setup.mode") === "self-hosted" ? "self-hosted" : "hosted";
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, selfHostedFallback, onJoined }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, selfHostedFallback, onJoined, fixedOrigin }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
   pairPhone: ReactNode;
   selfHostedFallback: ReactNode;
   onJoined(): void;
+  fixedOrigin?: string;
 }) {
   const [account, setAccount] = useState<HostedAccountView | null>(null);
-  const [accountLoading, setAccountLoading] = useState(mode === "hosted" && !enrolledWithoutPhone);
+  const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
   const [accountError, setAccountError] = useState(false);
   const [signInError, setSignInError] = useState(false);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
   const [join, setJoin] = useState<JoinView>({ state: "idle" });
   const [qr, setQr] = useState("");
-  const [selfHostedUrl, setSelfHostedUrl] = useState("");
-  const [selfHostedOrigin, setSelfHostedOrigin] = useState<string | null>(null);
+  const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
+  const [selfHostedOrigin, setSelfHostedOrigin] = useState<string | null>(fixedOrigin ?? null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -112,7 +113,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     if (joinActive.current) void bridge.join_cancel();
   }, []);
   useEffect(() => {
-    if (previousMode.current === mode) return;
+    if (fixedOrigin || previousMode.current === mode) return;
     previousMode.current = mode;
     accountFetchEpoch.current += 1;
     signInEpoch.current += 1;
@@ -122,16 +123,16 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     setAccountError(false);
     setAccountLoading(mode === "hosted");
     setSelfHostedOrigin(null);
-  }, [mode]);
+  }, [fixedOrigin, mode]);
   useEffect(() => {
-    if (mode !== "hosted" || enrolledWithoutPhone) return;
+    if (fixedOrigin || mode !== "hosted" || enrolledWithoutPhone) return;
     void refreshAccount();
     return () => {
       accountFetchEpoch.current += 1;
     };
-  }, [mode, enrolledWithoutPhone]);
+  }, [fixedOrigin, mode, enrolledWithoutPhone]);
 
-  const route: Route = mode === "self-hosted" ? "existing"
+  const route: Route = fixedOrigin || mode === "self-hosted" ? "existing"
     : accountLoading && account === null ? "checking"
       : account?.signedIn
       ? account.hasVault && account.resumable ? "provisioning"
@@ -147,6 +148,18 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     autoJoinStarted.current = true;
     void beginJoin(null);
   }, [route, account?.signedIn]);
+  useEffect(() => {
+    if (!fixedOrigin || autoJoinStarted.current) return;
+    autoJoinStarted.current = true;
+    void bridge.join_status().then(async next => {
+      if (next.state === "idle") {
+        await beginJoin(fixedOrigin);
+        return;
+      }
+      setJoin(next);
+      if (next.qrPayload) setQr(await QRCode.toDataURL(next.qrPayload, qrOptions));
+    }).catch(() => void beginJoin(fixedOrigin));
+  }, [fixedOrigin]);
   useEffect(() => {
     if (route === "join") return;
     autoJoinStarted.current = false;
@@ -208,10 +221,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     }
     requestAnimationFrame(() => {
       if (join.state === "confirm") confirmCheckbox.current?.focus();
-      else if (mode === "self-hosted" && !selfHostedOrigin) modeSelect.current?.focus();
+      else if (!fixedOrigin && mode === "self-hosted" && !selfHostedOrigin) modeSelect.current?.focus();
       else heading.current?.focus();
     });
-  }, [mode, route, join.state, selfHostedOrigin]);
+  }, [fixedOrigin, mode, route, join.state, selfHostedOrigin]);
 
   const selectMode = (next: Mode) => {
     window.localStorage.setItem("peppy.setup.mode", next);
@@ -265,7 +278,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
       if (epoch === joinEpoch.current) setBusy(false);
     }
   };
-  const validOrigin = (() => { try { const url = new URL(selfHostedUrl); return url.protocol === "https:" ? url.origin : null; } catch { return null; } })();
+  const validOrigin = fixedOrigin ?? (() => { try { const url = new URL(selfHostedUrl); return url.protocol === "https:" ? url.origin : null; } catch { return null; } })();
 
   const joinPanel = (
     <section id="hosted-join-panel" data-join-state={join.state} aria-label={copy("hosted_join_headline")}>
@@ -281,15 +294,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
       {join.state === "failed" && <p id="join-state-message">{copy("production_pairing_error")} {join.errorCode && <span>{join.errorCode}</span>}</p>}
       {join.errorCode === "join-retrying" && <p className="join-retrying-hint">{copy("setup_join_retrying")}</p>}
       {(join.state === "waiting" || join.state === "claimed") && <button id="join-cancel-button" className="secondary-button" onClick={cancelJoin}>{copy("cancel")}</button>}
-      {["expired", "denied", "failed"].includes(join.state) && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(mode === "hosted" ? null : selfHostedOrigin)}>{copy("try_again")}</button>}
+      {["expired", "denied", "failed"].includes(join.state) && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(fixedOrigin ?? (mode === "hosted" ? null : selfHostedOrigin))}>{copy("try_again")}</button>}
       {account?.signedIn && join.state === "idle" && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(null)}>{copy("try_again")}</button>}
       {!account?.signedIn && mode === "hosted" && <button id="setup-back-button" className="secondary-button" disabled={busy && join.state === "confirm"} onClick={backToChooser}>{copy("back")}</button>}
     </section>
   );
 
   let content: ReactNode;
-  if (mode === "self-hosted") {
-    content = <section id="self-hosted-panel" aria-label={copy("self_hosted_headline")}><h2 ref={heading} tabIndex={-1}>{copy("self_hosted_headline")}</h2><p>{copy("setup_self_hosted_join_body")}</p><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={() => { setSelfHostedOrigin(validOrigin); void beginJoin(validOrigin); }}>Connect</button>{selfHostedOrigin && joinPanel}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
+  if (fixedOrigin || mode === "self-hosted") {
+    content = <section id="self-hosted-panel" aria-label={copy("self_hosted_headline")}><h2 ref={heading} tabIndex={-1}>{copy("self_hosted_headline")}</h2><p>{copy("setup_self_hosted_join_body")}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={() => { setSelfHostedOrigin(validOrigin); void beginJoin(validOrigin); }}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
   } else if (route === "checking") {
     content = <section id="hosted-account-checking" aria-busy="true"><h2 ref={heading} tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>;
   } else if (route === "chooser") {
@@ -303,7 +316,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
   else content = <section id="hosted-passphrase-card"><h2 ref={heading} tabIndex={-1}>{copy("passphrase_create_headline")}</h2><p>{copy("passphrase_create_body")}</p><p className="setup-hint">{copy("passphrase_irrecoverable_warn")}</p><p className="setup-hint">{copy("passphrase_native_note")}</p><label className="settings-check"><input id="passphrase-ack" type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> {copy("passphrase_ack_label")}</label><button id="passphrase-native-cta-button" className="primary-button" disabled={!acknowledged || busy} onClick={provision}>{copy("passphrase_native_cta")}</button>{provisionError && <p id="hosted-passphrase-error" role="alert">{copy("production_provision_retry")}</p>}</section>;
 
   if (enrolledWithoutPhone) content = pairPhone;
-  return <section id="setup-landing" aria-label="Set up Peppy"><div id="setup-landing-inner"><header id="setup-landing-header"><h1>Set up Peppy</h1>{!enrolledWithoutPhone && <select ref={modeSelect} id="setup-mode-select" aria-label="Server mode" disabled={busy && join.state === "confirm"} value={mode} onChange={event => selectMode(event.target.value as Mode)}><option value="hosted">{copy("setup_mode_hosted")}</option><option value="self-hosted">{copy("setup_mode_self_hosted")}</option></select>}</header><div id="setup-landing-body" role="region">{content}</div></div><div id="setup-status-region" className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{join.state === "waiting" ? copy("setup_join_waiting") : join.state === "claimed" ? copy("setup_join_claimed") : join.state === "confirm" ? copy("setup_join_confirm") : join.state === "approved" ? copy("setup_join_approved") : join.state === "expired" ? copy("production_pairing_expired") : join.state === "denied" ? copy("hosted_join_denied") : join.state === "failed" ? copy("production_pairing_error") : ""}</div></section>;
+  return <section id="setup-landing" aria-label="Set up Peppy"><div id="setup-landing-inner"><header id="setup-landing-header"><h1>Set up Peppy</h1>{!enrolledWithoutPhone && !fixedOrigin && <select ref={modeSelect} id="setup-mode-select" aria-label="Server mode" disabled={busy && join.state === "confirm"} value={mode} onChange={event => selectMode(event.target.value as Mode)}><option value="hosted">{copy("setup_mode_hosted")}</option><option value="self-hosted">{copy("setup_mode_self_hosted")}</option></select>}</header><div id="setup-landing-body" role="region">{content}</div></div><div id="setup-status-region" className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{join.state === "waiting" ? copy("setup_join_waiting") : join.state === "claimed" ? copy("setup_join_claimed") : join.state === "confirm" ? copy("setup_join_confirm") : join.state === "approved" ? copy("setup_join_approved") : join.state === "expired" ? copy("production_pairing_expired") : join.state === "denied" ? copy("hosted_join_denied") : join.state === "failed" ? copy("production_pairing_error") : ""}</div></section>;
 }
 
 function Sas({ value }: { value?: string }) {

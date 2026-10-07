@@ -9,7 +9,9 @@
 //!
 //! File keys live only in SQLCipher rows and inside AEAD-encrypted payloads.
 use crate::{AttachmentId, Error, VaultId};
-use peppy_crypto::{FileKey, decrypt_stream_to_path, encrypt_stream};
+use peppy_crypto::{
+    FileKey, decrypt_stream_to_path, encrypt_stream, filesystem::promote_no_clobber,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -301,7 +303,7 @@ impl<R: Read> Read for Counting<R> {
     }
 }
 
-/// Removes a scratch name when dropped (after a successful hard link only the name goes).
+/// Removes a scratch name when dropped after promotion.
 struct Cleanup(PathBuf);
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -349,8 +351,8 @@ pub(crate) fn encrypt_into_store(
     }
     writer.inner.sync_all().map_err(|_| Error::Storage)?;
     let destination = cipher_path(root, attachment_id);
-    fs::hard_link(&temporary, &destination).map_err(|_| Error::Storage)?;
-    drop(cleanup); // removes the temporary name; the hard link remains
+    promote_no_clobber(&temporary, &destination).map_err(|_| Error::Storage)?;
+    drop(cleanup); // removes the temporary name; the promoted ciphertext remains
     sync_dir(&root.join("cipher"));
     Ok(Encrypted {
         plaintext_bytes: reader.bytes,
@@ -407,7 +409,7 @@ pub(crate) fn install_into_store(
     }
     let destination = cipher_path(root, attachment_id);
     // No-clobber promotion: a concurrent installer may already have linked a verified object.
-    match fs::hard_link(&temporary, &destination) {
+    match promote_no_clobber(&temporary, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             if !matches_digest(&destination, expected_bytes, expected_sha256) {
@@ -511,8 +513,8 @@ pub(crate) fn encrypt_bytes_into_store(
     }
     writer.inner.sync_all().map_err(|_| Error::Storage)?;
     let destination = cipher_path(root, attachment_id);
-    fs::hard_link(&temporary, &destination).map_err(|_| Error::Storage)?;
-    drop(cleanup); // removes the temporary name; the hard link remains
+    promote_no_clobber(&temporary, &destination).map_err(|_| Error::Storage)?;
+    drop(cleanup); // removes the temporary name; the promoted ciphertext remains
     sync_dir(&root.join("cipher"));
     Ok(Encrypted {
         plaintext_bytes: bytes.len() as u64,

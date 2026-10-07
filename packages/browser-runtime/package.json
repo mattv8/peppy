@@ -1,0 +1,27 @@
+{
+  "name": "@peppy/browser-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./core": "./src/core.ts",
+    "./checkpoint": "./src/checkpoint.ts",
+    "./transport": "./src/transport.ts",
+    "./owner": "./src/owner.ts",
+    "./filesystem": "./src/filesystem.ts",
+    "./session": "./src/session.ts",
+    "./host": "./src/host.ts",
+    "./shared-worker": "./src/shared-worker.ts",
+    "./presentation": "./src/presentation.ts",
+    "./publication": "./src/publication.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

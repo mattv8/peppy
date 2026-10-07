@@ -780,7 +780,9 @@ function OnboardingView({
   onOrigin,
   onAction,
   encryption,
+  browserHost = false,
   onBack,
+  notice,
 }: {
   connected: boolean;
   canUnlock: boolean;
@@ -788,7 +790,9 @@ function OnboardingView({
   onOrigin(value: string): void;
   onAction(action: "origin" | "credentials" | "unlock"): void;
   encryption: DesktopSnapshot["encryption"]["state"];
+  browserHost?: boolean;
   onBack?: () => void;
+  notice?: string;
 }) {
   const step = (
     number: string,
@@ -820,7 +824,7 @@ function OnboardingView({
         </p>
       </header>
       <ol id="onboarding-steps" role="list">
-        {step(
+        {!browserHost && step(
           "1",
           "Configure server",
           <>
@@ -850,16 +854,13 @@ function OnboardingView({
           "2",
           "Import device credentials",
           <>
-            <p>
-              Credentials are handled entirely by the native host — this app
-              never receives them.
-            </p>
+            <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are handled entirely by the native host — this app never receives them."}</p>
             <button
               className="secondary-button"
               data-action="import-credentials"
               onClick={() => onAction("credentials")}
             >
-              Import credentials natively
+              {browserHost ? "Import credentials" : "Import credentials natively"}
             </button>
           </>,
           false,
@@ -870,23 +871,21 @@ function OnboardingView({
             "3",
             "Unlock sync encryption",
             <>
-              <p>
-                Your passphrase is handled natively. Required before messages
-                can sync.
-              </p>
+              <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Your passphrase is handled natively."} Required before messages can sync.</p>
               <button
                 className="secondary-button"
                 data-action="unlock-sync"
                 disabled={!canUnlock}
                 onClick={() => onAction("unlock")}
               >
-                Unlock sync natively
+                {browserHost ? "Unlock sync" : "Unlock sync natively"}
               </button>
             </>,
             false,
             canUnlock,
           )}
       </ol>
+      {notice && <p id="onboarding-notice" className="settings-error" role="alert">{notice}</p>}
     </section>
   );
 }
@@ -911,6 +910,8 @@ function SettingsView({
   onCreatePairingIntent,
   onPairingStatus,
   onApprovePairing,
+  onLock,
+  browserHost = false,
 }: {
   origin: string;
   onOrigin(value: string): void;
@@ -931,6 +932,8 @@ function SettingsView({
   onCreatePairingIntent(): ReturnType<typeof bridge.create_pairing_intent>;
   onPairingStatus(intentToken: string): ReturnType<typeof bridge.pairing_intent_status>;
   onApprovePairing(intentToken: string, keyDigest: string): ReturnType<typeof bridge.approve_pairing_intent>;
+  onLock?: () => Promise<void>;
+  browserHost?: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -963,12 +966,12 @@ function SettingsView({
       </section>
       <section data-settings-section="credentials">
         <h2>Device credentials</h2>
-        <p>Credentials are imported natively and are never shown here.</p>
+        <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are imported natively and are never shown here."}</p>
         <button
           className="secondary-button"
           onClick={() => onAction("credentials")}
         >
-          Import credentials natively
+          {browserHost ? "Import credentials" : "Import credentials natively"}
         </button>
       </section>
       <section data-settings-section="pair-phone">
@@ -989,7 +992,12 @@ function SettingsView({
             className="secondary-button"
             onClick={() => onAction("unlock")}
           >
-            Unlock sync natively
+            {browserHost ? "Unlock sync" : "Unlock sync natively"}
+          </button>
+        )}
+        {encryption === "unlocked" && onLock && (
+          <button id="browser-lock-all-tabs" className="secondary-button" onClick={() => void onLock()}>
+            Lock now
           </button>
         )}
       </section>
@@ -1068,8 +1076,9 @@ function StatusDetails({
 
 /* ------------------------------------------------------------------ app */
 
-export function App() {
+export function App({ hostKind = "native", fixedOrigin }: { hostKind?: "native" | "browser"; fixedOrigin?: string } = {}) {
   const platform = detectPlatform();
+  const browserHost = hostKind === "browser";
   const [composerConversation] = useState(() =>
     typeof window === "undefined"
       ? null
@@ -1079,7 +1088,7 @@ export function App() {
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
-  const [mode, setMode] = useState<"hosted" | "self-hosted">(() => savedSetupMode());
+  const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
   const [attachmentViews, setAttachmentViews] = useState<
@@ -1116,7 +1125,7 @@ export function App() {
       [suggestion.id]: { contactId: "", bookId: "", displayName: suggestion.label, photoDataUrl: suggestion.avatarUrl },
     }));
   }, []);
-  const [origin, setOrigin] = useState("");
+  const [origin, setOrigin] = useState(() => browserHost ? fixedOrigin ?? "" : "");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);
@@ -1796,6 +1805,20 @@ export function App() {
       setNotice(errorText(error));
     }
   };
+  const lock = bridge.lock_sync?.bind(bridge);
+  const lockSync = lock ? async () => {
+    const saved = await store.flushAll();
+    if (!saved.ok) {
+      setNotice(`Not locked: the draft could not be saved (${saved.error}).`);
+      return;
+    }
+    try {
+      await lock();
+      await refresh();
+    } catch (error) {
+      setNotice(`Could not lock sync: ${errorText(error)}`);
+    }
+  } : undefined;
 
   useEffect(() => {
     if (!composerConversation) return;
@@ -1827,12 +1850,9 @@ export function App() {
     return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
 
   const setupCode = snapshot?.connection.errorCode;
-  const canUnlock =
-    snapshot?.mode === "native" &&
-    snapshot.encryption.state !== "unlocked" &&
-    !["server-required", "credentials-required", "revoked"].includes(
-      setupCode ?? "",
-    );
+  const canUnlock = snapshot?.mode === "native"
+    ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
+    : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2001,7 +2021,7 @@ export function App() {
           {!headPanel && <AppTitlebar
             isComposer platform={platform} title={title}
             status={composerConnectionDot}
-            onMinimize={() => {}} onMaximize={() => {}} onClose={handlers.current.close}
+            onMinimize={browserHost ? undefined : () => {}} onMaximize={browserHost ? undefined : () => {}} onClose={browserHost ? undefined : handlers.current.close}
           />}
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
@@ -2033,9 +2053,9 @@ export function App() {
       aria-busy={loading || lifecyclePending ? "true" : undefined}
     >
       <AppTitlebar
-        onMinimize={() => void bridge.window("minimize")}
-        onMaximize={() => void bridge.window("maximize")}
-        onClose={() => void closeAfterSave(() => bridge.window("close"))}
+        onMinimize={browserHost ? undefined : () => void bridge.window("minimize")}
+        onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
+        onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
@@ -2149,15 +2169,15 @@ export function App() {
               )}
             </div>
             <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
-              <button
+              {!browserHost && <button
                 id="new-composer-window"
                 aria-label="New message window"
                 title="New message window"
                 onClick={() => void openComposerWindow()}
               >
                 <SquarePen size={16} aria-hidden />
-              </button>
-              {conversationLoaded && (
+              </button>}
+              {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
                   aria-label="Open as floating conversation"
                   title="Open as floating conversation"
@@ -2192,6 +2212,8 @@ export function App() {
               onCreatePairingIntent={() => bridge.create_pairing_intent()}
               onPairingStatus={intentToken => bridge.pairing_intent_status(intentToken)}
               onApprovePairing={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
+              onLock={browserHost ? lockSync : undefined}
+              browserHost={browserHost}
             />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2210,7 +2232,7 @@ export function App() {
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot && !selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot)) ? (
+              {snapshot && !selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")) ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
@@ -2227,8 +2249,11 @@ export function App() {
                     onOrigin={setOrigin}
                     onAction={(action) => void setup(action)}
                     encryption={snapshot.encryption.state}
+                    browserHost={browserHost}
+                    notice={notice}
                   />}
-                  onJoined={() => void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
+                  onJoined={() => browserHost ? void refresh() : void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
+                  fixedOrigin={browserHost ? fixedOrigin : undefined}
                 />
               ) : snapshot && snapshot.connection.state !== "connected" && !selected ? (
                 <OnboardingView
@@ -2238,6 +2263,8 @@ export function App() {
                   onOrigin={setOrigin}
                   onAction={(action) => void setup(action)}
                   encryption={snapshot.encryption.state}
+                  browserHost={browserHost}
+                  notice={notice}
                 />
               ) : (
                 <>

@@ -653,9 +653,9 @@ export function AppTitlebar({
   sidebarControls,
   onNewMessage,
 }: {
-  onMinimize(): void;
-  onMaximize(): void;
-  onClose(): void;
+  onMinimize?(): void;
+  onMaximize?(): void;
+  onClose?(): void;
   simulated?: boolean;
   platform?: "macos" | "windows" | "linux";
   isComposer?: boolean;
@@ -676,19 +676,19 @@ export function AppTitlebar({
       aria-label="Peppy title bar"
       data-composer={isComposer || undefined}
     >
-      {macos && <div
+      {macos && (onClose || onMinimize || onMaximize) && <div
         id="window-controls"
         className="window-controls window-controls-macos"
         role="toolbar"
         aria-label="Window controls"
       >
-        <button
+        {onClose && <button
           className="traffic-light traffic-light-close"
           aria-label={isComposer ? "Close composer" : "Close window"}
           title={isComposer ? "Close composer" : "Close window"}
           onClick={onClose}
-        ><RiCloseLine size={10} aria-hidden /></button>
-        <button
+        ><RiCloseLine size={10} aria-hidden /></button>}
+        {onMinimize && <button
           className="traffic-light traffic-light-minimize"
           aria-label="Minimize window"
           title="Minimize window"
@@ -696,8 +696,8 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><RiSubtractLine size={10} aria-hidden /></button>
-        <button
+        ><RiSubtractLine size={10} aria-hidden /></button>}
+        {onMaximize && <button
           className="traffic-light traffic-light-maximize"
           aria-label="Maximize window"
           title="Maximize window"
@@ -705,7 +705,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><RiAddLine size={10} aria-hidden /></button>
+        ><RiAddLine size={10} aria-hidden /></button>}
       </div>}
       {!isComposer && (onToggleSidebar || onNewMessage) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
         {onToggleSidebar && <button
@@ -737,7 +737,7 @@ export function AppTitlebar({
       </strong>
       <div className="titlebar-spacer" data-tauri-drag-region />
       {status && <div id="titlebar-status" className="titlebar-status">{status}</div>}
-      {!macos && <div
+      {!macos && (onClose || (!isComposer && (onMinimize || onMaximize))) && <div
         id="window-controls"
         className="window-controls window-controls-windows"
         role="toolbar"
@@ -745,30 +745,30 @@ export function AppTitlebar({
       >
         {!isComposer && (
           <>
-            <button
+            {onMinimize && <button
               aria-label="Minimize window"
               title="Minimize window"
               onClick={onMinimize}
             >
               <RiSubtractLine size={10} aria-hidden />
-            </button>
-            <button
+            </button>}
+            {onMaximize && <button
               aria-label="Maximize window"
               title="Maximize window"
               onClick={onMaximize}
             >
               <RiAddLine size={10} aria-hidden />
-            </button>
+            </button>}
           </>
         )}
-        <button
+        {onClose && <button
           aria-label={isComposer ? "Close composer" : "Close window"}
           title={isComposer ? "Close composer" : "Close window"}
           onClick={onClose}
           className="close-button"
         >
           <RiCloseLine size={10} aria-hidden />
-        </button>
+        </button>}
       </div>}
     </header>
   );

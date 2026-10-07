@@ -104,6 +104,37 @@ describe("setup landing routing", () => {
     expect(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" })).toBeInTheDocument();
   });
 
+  it("routes an unenrolled browser snapshot through fixed-origin setup without enabling unlock", async () => {
+    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    expect(await screen.findByText("https://community.example")).toBeInTheDocument();
+    expect(document.getElementById("setup-landing")).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/advanced/i));
+    expect(screen.queryByRole("button", { name: "Configure server" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unlock sync" })).toBeDisabled();
+  });
+
+  it.each(["locked", "mismatch"] as const)("reports a rejected browser %s unlock while keeping recovery available", async (state) => {
+    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state } });
+    vi.spyOn(bridge, "unlock_sync").mockRejectedValue({ message: "Unlock rejected." });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    const unlockButton = await screen.findByRole("button", { name: "Unlock sync" });
+    expect(unlockButton).toBeEnabled();
+    fireEvent.click(unlockButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unlock rejected.");
+    expect(screen.getByRole("button", { name: "Unlock sync" })).toBeEnabled();
+  });
+
+  it("refreshes after browser join approval without prompting for a second unlock", async () => {
+    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
+    vi.mocked(bridge.join_status).mockResolvedValue({ state: "approved" });
+    const unlock = vi.spyOn(bridge, "unlock_sync");
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await waitFor(() => expect(bridge.join_status).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
+    expect(unlock).not.toHaveBeenCalled();
+  });
+
   it("shows phone pairing on a connected owner desktop with no phone", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "owner" });
     vi.spyOn(bridge, "create_pairing_intent").mockResolvedValue({ httpsOrigin: "https://example.test", intentToken: "a".repeat(43), expiresInSeconds: 300 } as Awaited<ReturnType<typeof bridge.create_pairing_intent>>);
@@ -1265,6 +1296,35 @@ describe("gateway routes", () => {
 });
 
 describe("host state display", () => {
+  it("hides OS window controls immediately for the browser host while native retains them", () => {
+    const pending = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValue(pending.promise);
+    const { rerender } = render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    expect(document.getElementById("window-controls")).not.toBeInTheDocument();
+    rerender(<App />);
+    expect(document.getElementById("window-controls")).toBeInTheDocument();
+  });
+
+  it("locks browser snapshots only after saving drafts through a receiver-bound host capability", async () => {
+    const lock = vi.fn().mockResolvedValue(undefined);
+    bridge.lock_sync = function() {
+      expect(this).toBe(bridge);
+      return lock();
+    };
+    const snapshot = host.load();
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...snapshot, mode: "browser", desktop: undefined });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.change(message(), { target: { value: "save before locking" } });
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const lockButton = screen.getByRole("button", { name: "Lock now" });
+    fireEvent.click(lockButton);
+    await waitFor(() => expect(lock).toHaveBeenCalledOnce());
+    expect(bridge.save_draft).toHaveBeenCalled();
+    expect(vi.mocked(bridge.save_draft).mock.invocationCallOrder[0]).toBeLessThan(lock.mock.invocationCallOrder[0]);
+    delete bridge.lock_sync;
+  });
+
   it("supplies a neutral loading status before the native snapshot arrives", () => {
     const pending = deferred<DesktopSnapshot>();
     vi.mocked(bridge.load_state).mockReturnValue(pending.promise);

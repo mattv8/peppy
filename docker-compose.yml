@@ -55,6 +55,7 @@ services:
       VAULT_ATTACHMENT_QUOTA_BYTES: ${VAULT_ATTACHMENT_QUOTA_BYTES:-536870912}
       PUBLIC_API_URL: ${PUBLIC_API_URL:?set in .env}
       PUBLIC_ATTACHMENT_URL: ${PUBLIC_ATTACHMENT_URL:?set in .env}
+      PEPPY_WEB_CLIENT_HOST: ${WEB_CLIENT_HOST:-}
     depends_on:
       postgres:
         condition: service_healthy

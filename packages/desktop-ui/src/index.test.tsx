@@ -376,6 +376,11 @@ describe("desktop UI controls", () => {
     expect(document.getElementById("titlebar-status")).not.toBeInTheDocument();
   });
 
+  it("omits the window-control group when the host supplies no window handlers", () => {
+    render(<AppTitlebar />);
+    expect(document.getElementById("window-controls")).not.toBeInTheDocument();
+  });
+
   it("provides macOS traffic lights and keyboard resizing", () => {
     const resize = vi.fn();
     const resizeTo = vi.fn();

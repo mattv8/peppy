@@ -88,6 +88,14 @@ const SNAPSHOT_GC_BATCH: i64 = 2_000;
 pub const MAX_APPLY_BATCH: usize = 1_000;
 /// Outbox rows sealed implicitly by enqueue/unlock/import/upload; use `seal_pending_batch` for more.
 pub const MAX_SEAL_BATCH: usize = 256;
+
+/// Read-only scheduler readiness. Hosts use this before a checkpointed work mutation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncWorkStatus {
+    pub pending_seal: bool,
+    pub pending_apply: bool,
+    pub pending_snapshot: bool,
+}
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_ADDRESS_BYTES: usize = 256;
 const MAX_PROVIDER_ID_BYTES: usize = 256;
@@ -1796,6 +1804,48 @@ impl Client {
         Ok(report)
     }
 
+    /// Reports whether `seal_pending_batch` or `apply_pending` can make durable progress without
+    /// opening a write transaction. Pending records for locked epochs intentionally do not count.
+    pub fn sync_work_status(&self) -> Result<SyncWorkStatus, Error> {
+        let store = self.lock()?;
+        let pending_seal = store
+            .active_epoch
+            .is_some_and(|epoch| store.keys.contains_key(&epoch))
+            && exists(
+                &store.conn,
+                "SELECT 1 FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) LIMIT 1",
+            )?;
+        let pending_snapshot = exists(
+            &store.conn,
+            "SELECT 1 FROM snapshot_generations WHERE state='published' AND received>drained LIMIT 1",
+        )?;
+        let projection_work = exists(
+            &store.conn,
+            "SELECT 1 FROM projection_generations WHERE state IN ('draining','staging') LIMIT 1",
+        )?;
+        let pending_journal = if store.keys.is_empty() {
+            false
+        } else {
+            let epochs = store
+                .keys
+                .keys()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            exists(
+                &store.conn,
+                &format!(
+                    "SELECT 1 FROM journal WHERE status='pending' AND key_epoch IN ({epochs}) LIMIT 1"
+                ),
+            )?
+        };
+        Ok(SyncWorkStatus {
+            pending_seal,
+            pending_apply: pending_snapshot || projection_work || pending_journal,
+            pending_snapshot,
+        })
+    }
+
     pub fn quarantined(&self) -> Result<Vec<QuarantinedRecord>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
@@ -2206,6 +2256,20 @@ impl Client {
             .info(attachment_id))
     }
 
+    /// Read-only accessor for the remote object ID of a persisted attachment.
+    /// Returns `NotFound` if the attachment ID is unknown, `None` if the attachment is local/pending
+    /// (not yet uploaded), and `Some(uuid_string)` if the attachment has a persisted remote object ID.
+    /// Worker/native internal accessor used for publication after reload; not exposed to sanitized Desktop DTO.
+    pub fn attachment_remote_object_id(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<Option<String>, Error> {
+        let s = self.lock()?;
+        Ok(attachment_row(&s.conn, attachment_id)?
+            .ok_or(Error::NotFound)?
+            .remote_object_id)
+    }
+
     /// Deletes an attachment only when no message, acquisition, draft, or contact photo
     /// reference (live, restore window, pending edit, registration, unfinished reclaim) holds it.
     pub fn discard_unreferenced_attachment(
@@ -2244,6 +2308,28 @@ impl Client {
             contact_media::UPLOAD_IDS_SQL
         );
         self.cipher_objects(&sql)
+    }
+
+    /// Pages locally verified ciphertext identities for host checkpoints, including draft-only
+    /// media. Hosts must serialize the inventory with mutations; this does not read media files.
+    pub fn local_attachment_ids(
+        &self,
+        after: Option<AttachmentId>,
+        limit: usize,
+    ) -> Result<Vec<AttachmentId>, Error> {
+        if !(1..=1000).contains(&limit) {
+            return Err(Error::InvalidRequest("attachment inventory limit"));
+        }
+        let store = self.lock()?;
+        let mut query = store.conn.prepare(
+            "SELECT attachment_id FROM attachments WHERE state IN ('pending_upload','uploaded','available') AND (?1 IS NULL OR attachment_id>?1) ORDER BY attachment_id LIMIT ?2",
+        )?;
+        let rows = query.query_map(
+            params![after.map(|id| id.to_string()), limit as i64],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.map(|row| row?.parse().map_err(|_| Error::Database))
+            .collect()
     }
 
     /// Contact photo work for native hosts: uploads to reserve with `reference_tracking:true`,
@@ -4645,6 +4731,9 @@ fn parse_authenticated_payload(
 fn seal_with_store(store: &mut Store) -> Result<(), Error> {
     seal_store_batch(store, MAX_SEAL_BATCH).map(|_| ())
 }
+fn exists(conn: &Connection, query: &str) -> Result<bool, Error> {
+    Ok(conn.query_row(&format!("SELECT EXISTS({query})"), [], |row| row.get(0))?)
+}
 fn seal_store_batch(store: &mut Store, limit: usize) -> Result<usize, Error> {
     let (conn, ctx) = store.parts();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5265,6 +5354,28 @@ mod tests {
             Err(Error::InvalidDatabaseKey)
         ));
         assert!(DatabaseKey::new(&[7; 32]).is_ok());
+    }
+
+    #[test]
+    fn sync_work_status_is_read_only_and_idle_for_a_new_locked_store() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[7; 32]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            client.sync_work_status().unwrap(),
+            SyncWorkStatus {
+                pending_seal: false,
+                pending_apply: false,
+                pending_snapshot: false,
+            }
+        );
     }
 
     #[test]

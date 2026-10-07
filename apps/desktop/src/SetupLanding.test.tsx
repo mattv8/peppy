@@ -51,6 +51,17 @@ describe("SetupLanding", () => {
     expect(bridge.join_start).not.toHaveBeenCalled();
   });
 
+  it("uses a fixed self-hosted origin without hosted account calls or URL controls", async () => {
+    vi.mocked(bridge.join_status).mockResolvedValue({ state: "idle" });
+    renderLanding({ fixedOrigin: "https://community.example" });
+    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("https://community.example"));
+    expect(bridge.hosted_account).not.toHaveBeenCalled();
+    expect(document.getElementById("setup-mode-select")).not.toBeInTheDocument();
+    expect(document.getElementById("self-hosted-url-input")).not.toBeInTheDocument();
+    expect(document.getElementById("fixed-self-hosted-origin")).toHaveTextContent("https://community.example");
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+  });
+
   it("starts a hosted join only after the existing-phone choice", async () => {
     renderLanding();
     await chooseExisting();

@@ -19,6 +19,20 @@ desktop:
   - 'tests/dev/windows-desktop.Tests.ps1'
   - 'infra/dev/windows-desktop.ps1'
 
+web:
+  - 'apps/web/**'
+  - 'infra/build/build-browser-core.sh'
+  - 'infra/build/build-web-client.sh'
+  - 'apps/desktop/src/**'
+  - 'packages/browser-runtime/**'
+  - 'packages/desktop-ui/**'
+  - 'packages/contracts/**'
+  - 'packages/generated/**'
+  - 'package.json'
+  - 'pnpm-lock.yaml'
+  - 'pnpm-workspace.yaml'
+  - '.node-version'
+
 android:
   - 'apps/android/**'
   - 'packages/mobile-design/**'
@@ -59,6 +73,7 @@ unclassified:
   - '!.node-version'
   - '!tests/dev/windows-desktop.Tests.ps1'
   - '!infra/dev/windows-desktop.ps1'
+  - '!apps/web/**'
   - '!apps/android/**'
   - '!infra/compose/verify-android-native.sh'
   - '!apps/ios/**'
