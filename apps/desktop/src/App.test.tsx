@@ -104,15 +104,24 @@ describe("setup landing routing", () => {
     expect(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" })).toBeInTheDocument();
   });
 
-  it("routes an unenrolled browser snapshot through fixed-origin setup without enabling unlock", async () => {
+  it("routes an unenrolled browser snapshot through fixed-origin setup without an unlock action", async () => {
     await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
+    const unlock = vi.spyOn(bridge, "unlock_sync");
+    const exportCredentials = vi.spyOn(bridge, "export_credentials");
     render(<App hostKind="browser" fixedOrigin="https://community.example" />);
     expect(await screen.findByText("https://community.example")).toBeInTheDocument();
     expect(document.getElementById("setup-landing")).toBeInTheDocument();
     fireEvent.click(screen.getByText(/advanced/i));
     expect(document.getElementById("onboarding-view")).toHaveAttribute("data-compact", "true");
     expect(screen.queryByRole("button", { name: "Configure server" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Unlock sync" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Unlock sync" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import credentials" })).toBeEnabled();
+    const exportButton = screen.getByRole("button", { name: "Export credentials" });
+    expect(exportButton).toBeDisabled();
+    expect(exportButton).toHaveAttribute("aria-describedby", "setup-credential-export-reason");
+    expect(document.getElementById("setup-credential-export-reason")).toHaveTextContent(/pairing or import/i);
+    expect(unlock).not.toHaveBeenCalled();
+    expect(exportCredentials).not.toHaveBeenCalled();
   });
 
   it("exports an available credential from self-hosted advanced setup", async () => {
@@ -218,6 +227,51 @@ describe("setup landing routing", () => {
     fireEvent.click(unlockButton);
     expect(await screen.findByRole("alert")).toHaveTextContent("Unlock rejected.");
     expect(screen.getByRole("button", { name: "Unlock sync" })).toBeEnabled();
+  });
+
+  it("starts a browser credential download once an unlocked credential is available", async () => {
+    const exportCredentials = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    const importCredentials = vi.spyOn(bridge, "import_credentials").mockResolvedValue();
+    await landingSnapshot({
+      mode: "browser",
+      connection: { state: "offline" },
+      encryption: { state: "unlocked" },
+      credentialExportAvailable: true,
+    } as Partial<DesktopSnapshot>);
+
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Export credentials" }));
+
+    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
+    await waitFor(() => expect(document.getElementById("setup-credential-export-notice")).toBeVisible());
+    expect(document.getElementById("setup-credential-export-notice")).toHaveAttribute("role", "status");
+    fireEvent.click(screen.getByRole("button", { name: "Import credentials" }));
+    await waitFor(() => expect(importCredentials).toHaveBeenCalledOnce());
+    expect(document.getElementById("setup-credential-export-notice")).toHaveClass("visually-hidden");
+  });
+
+  it("keeps an unlocked browser export pending and reports its failure", async () => {
+    const exportPending = deferred<boolean>();
+    const exportCredentials = vi.fn().mockReturnValue(exportPending.promise);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    await landingSnapshot({
+      mode: "browser",
+      connection: { state: "offline" },
+      encryption: { state: "unlocked" },
+      credentialExportAvailable: true,
+    } as Partial<DesktopSnapshot>);
+
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    const exportButton = await screen.findByRole("button", { name: "Export credentials" });
+    fireEvent.click(exportButton);
+    fireEvent.click(exportButton);
+    expect(exportCredentials).toHaveBeenCalledOnce();
+    expect(exportButton).toBeDisabled();
+    exportPending.reject({ message: "Export rejected." });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Export rejected.");
+    expect(screen.getByRole("button", { name: "Export credentials" })).toBeEnabled();
   });
 
   it("refreshes after browser join approval without prompting for a second unlock", async () => {
@@ -1494,6 +1548,23 @@ describe("host state display", () => {
     expect(unlock).toHaveBeenCalledOnce();
   });
 
+  it("explains browser preview export prerequisites in Settings", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue({
+      ...host.load(),
+      mode: "browser",
+      encryption: { state: "preview" },
+      desktop: undefined,
+    });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const exportButton = screen.getByRole("button", { name: "Export credentials" });
+    expect(exportButton).toBeDisabled();
+    expect(exportButton).toHaveAttribute("aria-describedby", "settings-credential-export-reason");
+    expect(document.getElementById("settings-credential-export-reason")).toHaveTextContent(/pairing or import/i);
+  });
+
   it("keeps rejected credential-import feedback in the credentials section", async () => {
     localStorage.setItem("peppy.setup.mode", "self-hosted");
     vi.spyOn(bridge, "import_credentials").mockRejectedValue({ message: "Import rejected." });
@@ -1550,6 +1621,28 @@ describe("host state display", () => {
 
     await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
     expect(screen.queryByRole("button", { name: /import credentials/i })).not.toBeInTheDocument();
+    const exportNotice = document.getElementById("settings-credential-export-notice");
+    expect(exportNotice).toHaveClass("visually-hidden");
+    expect(exportNotice).toHaveTextContent("");
+  });
+
+  it("reports a browser credential download in Settings", async () => {
+    const exportCredentials = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      mode: "browser",
+      encryption: { state: "unlocked" },
+      credentialExportAvailable: true,
+    } as DesktopSnapshot));
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
+
+    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
+    await waitFor(() => expect(document.getElementById("settings-credential-export-notice")).toBeVisible());
+    expect(document.getElementById("settings-credential-export-notice")).toHaveAttribute("role", "status");
   });
 
   it("keeps export failures scoped to the settings export section", async () => {

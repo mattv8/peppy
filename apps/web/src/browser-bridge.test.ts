@@ -11,6 +11,15 @@ class TestPort {
   public reply(message: unknown): void { this.onmessage?.({ data: message } as MessageEvent); }
 }
 
+function stubShowModal(showModal = vi.fn()): () => void {
+  const original = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: showModal });
+  return () => {
+    if (original) Object.defineProperty(HTMLDialogElement.prototype, "showModal", original);
+    else delete (HTMLDialogElement.prototype as { showModal?: unknown }).showModal;
+  };
+}
+
 describe("BrowserBridge", () => {
   it("maps bridge calls to typed worker RPC and receives replies", async () => {
     const port = new TestPort();
@@ -201,6 +210,90 @@ describe("BrowserBridge", () => {
     expect(arrayBuffer).not.toHaveBeenCalled();
     expect(port.sent).toEqual([]);
     click.mockRestore();
+  });
+
+  it("submits the browser unlock dialog once with its passphrase", async () => {
+    const port = new TestPort();
+    const showModal = vi.fn();
+    const restoreShowModal = stubShowModal(showModal);
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const unlock = bridge.unlock_sync();
+      const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      input.value = "synthetic-passphrase";
+      document.getElementById("browser-unlock-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      expect(showModal).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect(port.sent).toEqual([{ id: 1, command: "unlock", args: { passphrase: "synthetic-passphrase" } }]);
+      port.reply({ id: 1, ok: true, value: undefined });
+      await expect(unlock).resolves.toBeUndefined();
+      expect(input.value).toBe("");
+      expect(input.isConnected).toBe(false);
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("cancels the browser unlock dialog without sending an RPC", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const unlock = bridge.unlock_sync();
+      const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      input.value = "synthetic-passphrase";
+      (document.getElementById("browser-unlock-cancel") as HTMLButtonElement).click();
+
+      await expect(unlock).resolves.toBeUndefined();
+      expect(port.sent).toEqual([]);
+      expect(input.value).toBe("");
+      expect(input.isConnected).toBe(false);
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("propagates a rejected browser unlock RPC", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const unlock = bridge.unlock_sync();
+      const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      input.value = "synthetic-passphrase";
+      document.getElementById("browser-unlock-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      port.reply({ id: 1, ok: false, error: { code: "invalid-passphrase", message: "Rejected" } });
+
+      await expect(unlock).rejects.toMatchObject({ code: "invalid-passphrase", message: "Rejected" });
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("cancels the browser unlock dialog on Escape without sending an RPC", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const unlock = bridge.unlock_sync();
+      const dialog = document.getElementById("browser-unlock") as HTMLDialogElement;
+      const input = document.getElementById("browser-unlock-passphrase") as HTMLInputElement;
+      input.value = "synthetic-passphrase";
+      dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+
+      await expect(unlock).resolves.toBeUndefined();
+      expect(port.sent).toEqual([]);
+      expect(input.value).toBe("");
+      expect(input.isConnected).toBe(false);
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
   });
 
   it("posts one granted browser banner and acknowledges only after the post succeeds", () => {

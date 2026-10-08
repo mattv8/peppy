@@ -798,6 +798,20 @@ function pairingAvailability(snapshot: DesktopSnapshot | null): { canStart: bool
   return { canStart: true, reason: "" };
 }
 
+const BROWSER_EXPORT_PREREQUISITE = "Complete phone pairing or import device credentials first.";
+const BROWSER_EXPORT_STARTED = "Credential file download started. Keep it private.";
+
+function credentialExportReason(
+  browserHost: boolean,
+  encryption: DesktopSnapshot["encryption"]["state"],
+): string {
+  if (browserHost && encryption === "preview")
+    return BROWSER_EXPORT_PREREQUISITE;
+  if (browserHost && encryption !== "unlocked")
+    return peppyCopy.credential_export_locked;
+  return peppyCopy.credential_export_unavailable;
+}
+
 function OnboardingView({
   connected,
   canUnlock,
@@ -827,6 +841,7 @@ function OnboardingView({
 }) {
   const [pendingAction, setPendingAction] = useState<"origin" | "credentials" | "export" | "unlock" | null>(null);
   const [exportError, setExportError] = useState("");
+  const [exportNotice, setExportNotice] = useState("");
   const ExportHeading = compact ? "h3" : "h2";
   const step = (
     number: string,
@@ -853,9 +868,15 @@ function OnboardingView({
   const runAction = async (action: "origin" | "credentials" | "export" | "unlock") => {
     if (pendingAction || (action === "export" && (!onExport || !credentialExportAvailable))) return;
     setPendingAction(action);
-    if (action === "export") setExportError("");
+    setExportNotice("");
+    if (action === "export") {
+      setExportError("");
+    }
     try {
-      if (action === "export") await onExport?.();
+      if (action === "export") {
+        await onExport?.();
+        if (browserHost) setExportNotice(BROWSER_EXPORT_STARTED);
+      }
       else await onAction(action);
     } catch (error) {
       if (action === "export") setExportError(errorText(error));
@@ -925,15 +946,21 @@ function OnboardingView({
             "Unlock sync encryption",
             <>
               <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Your passphrase is handled natively."} Required before messages can sync.</p>
-              <button
-                className="secondary-button"
-                data-action="unlock-sync"
-                disabled={!canUnlock || Boolean(pendingAction)}
-                aria-busy={pendingAction === "unlock" || undefined}
-                onClick={() => void runAction("unlock")}
-              >
-                {browserHost ? "Unlock sync" : "Unlock sync natively"}
-              </button>
+              {browserHost && encryption === "preview" ? (
+                <p id="setup-browser-preview-unlock-prerequisite">
+                  {BROWSER_EXPORT_PREREQUISITE}
+                </p>
+              ) : (
+                <button
+                  className="secondary-button"
+                  data-action="unlock-sync"
+                  disabled={!canUnlock || Boolean(pendingAction)}
+                  aria-busy={pendingAction === "unlock" || undefined}
+                  onClick={() => void runAction("unlock")}
+                >
+                  {browserHost ? "Unlock sync" : "Unlock sync natively"}
+                </button>
+              )}
             </>,
             false,
             canUnlock,
@@ -951,8 +978,11 @@ function OnboardingView({
         >
           Export credentials
         </button>
-        {!credentialExportAvailable && <p id="setup-credential-export-reason">{browserHost && encryption !== "unlocked" ? peppyCopy.credential_export_locked : peppyCopy.credential_export_unavailable}</p>}
-        {exportError && <p role="alert">{exportError}</p>}
+        {!credentialExportAvailable && <p id="setup-credential-export-reason">{credentialExportReason(browserHost, encryption)}</p>}
+        {exportError && <p id="setup-credential-export-error" className="settings-error" role="alert">{exportError}</p>}
+        <p id="setup-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
+          {credentialExportAvailable ? exportNotice : ""}
+        </p>
       </section>}
       {notice && <p id="onboarding-notice" className="settings-error" role="alert">{notice}</p>}
     </section>
@@ -1026,6 +1056,7 @@ function SettingsView({
   const [startupError, setStartupError] = useState("");
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
+  const [exportNotice, setExportNotice] = useState("");
   const syncText =
     encryption === "unlocked"
       ? "Device sync encrypted"
@@ -1037,9 +1068,12 @@ function SettingsView({
     if (pendingAction) return;
     setPendingAction(action);
     setActionError(null);
+    setExportNotice("");
     try {
       if (action === "account") await onOpenAccount();
       else await onAction(action);
+      if (action === "export" && browserHost)
+        setExportNotice(BROWSER_EXPORT_STARTED);
     } catch (error) {
       setActionError({ action, message: errorText(error) });
     } finally {
@@ -1077,8 +1111,11 @@ function SettingsView({
           <h3>Export credentials</h3>
           <p>{peppyCopy.credential_export_warning}</p>
           <button className="secondary-button" disabled={Boolean(pendingAction) || !credentialExportAvailable} aria-busy={actionPending("export") || undefined} aria-describedby={!credentialExportAvailable ? "settings-credential-export-reason" : undefined} onClick={() => void runAction("export")}>Export credentials</button>
-          {!credentialExportAvailable && <p id="settings-credential-export-reason">{browserHost && encryption !== "unlocked" ? peppyCopy.credential_export_locked : peppyCopy.credential_export_unavailable}</p>}
+          {!credentialExportAvailable && <p id="settings-credential-export-reason">{credentialExportReason(browserHost, encryption)}</p>}
           {actionAlert("export")}
+          <p id="settings-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
+            {credentialExportAvailable ? exportNotice : ""}
+          </p>
         </section>
       </section>}
       <section data-settings-section="pair-phone" data-pairing-available={pairingCanStart ? "true" : "false"}>
