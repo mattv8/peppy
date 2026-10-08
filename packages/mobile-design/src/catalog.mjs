@@ -220,7 +220,10 @@ export const desktopOverrides = Object.freeze({
   setup_join_retrying: "Reconnecting…",
   setup_self_hosted_join_body: "Enter your server address to scan a QR code from an enrolled owner device.",
   setup_self_hosted_url_hint: "Must start with https://",
-  setup_self_hosted_advanced: "Advanced: import credentials",
+  setup_self_hosted_advanced: "Advanced",
+  credential_export_warning: "This auth-only file contains a plaintext device authentication token. It does not restore local sync state. Pair a new device for a new installation. Do not use the same identity concurrently. Keep it private. Your sync passphrase is still needed to decrypt messages. It is not a message backup.",
+  credential_export_unavailable: "No active credential is available to export.",
+  credential_export_locked: "Unlock sync before exporting credentials in this browser.",
   setup_choice_existing: "I already use Peppy on my phone",
   setup_choice_existing_hint: "Scan a code with your phone to add this computer.",
   setup_choice_new: "I'm new to Peppy",
@@ -228,5 +231,5 @@ export const desktopOverrides = Object.freeze({
   setup_join_waiting: "Waiting for your phone to scan…",
   setup_join_scan_hint: "On your enrolled phone, choose Add a computer and scan this code.",
 });
-export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_join_claimed", "setup_join_confirm", "setup_join_approved", "setup_join_continue", "setup_join_retrying", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_advanced", "setup_choice_existing", "setup_choice_existing_hint", "setup_choice_new", "setup_choice_new_hint", "setup_join_waiting", "setup_join_scan_hint"]);
+export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_join_claimed", "setup_join_confirm", "setup_join_approved", "setup_join_continue", "setup_join_retrying", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_advanced", "credential_export_warning", "credential_export_unavailable", "credential_export_locked", "setup_choice_existing", "setup_choice_existing_hint", "setup_choice_new", "setup_choice_new_hint", "setup_join_waiting", "setup_join_scan_hint"]);
 export const desktopCatalog = Object.freeze({ ...catalog, ...desktopOverrides });
