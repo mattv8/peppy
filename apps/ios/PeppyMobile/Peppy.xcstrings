@@ -231,6 +231,36 @@
         }
       }
     },
+    "peppy.onboarding_mode_selector": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server"
+          }
+        }
+      }
+    },
+    "peppy.onboarding_mode_hosted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy Hosted"
+          }
+        }
+      }
+    },
+    "peppy.onboarding_mode_self_hosted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Self-hosted"
+          }
+        }
+      }
+    },
     "peppy.onboarding_hosted_cta": {
       "localizations": {
         "en": {

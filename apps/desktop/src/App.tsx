@@ -25,6 +25,8 @@ import {
   LockKeyhole,
   LockOpen,
   MessageSquare,
+  NavButtons,
+  type NavigationPosition,
   Panel,
   PairPhone,
   Radio,
@@ -33,6 +35,7 @@ import {
   ResizeHandle,
   ShieldAlert,
   SquarePen,
+  StatusPopover,
   TriangleAlert,
   X,
   type Attachment,
@@ -40,6 +43,7 @@ import {
   detectPlatform,
   installOverlayScrollbars,
   isRecipientPosition,
+  isNavigationPosition,
   formatPhoneNumber,
   type RecipientPosition,
   type RecipientSuggestion,
@@ -773,6 +777,26 @@ function ownerWithoutPhone(snapshot: DesktopSnapshot) {
   return snapshot.connection.state === "connected" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
 }
 
+type SettingsAction = "origin" | "credentials" | "unlock" | "account";
+
+function pairingAvailability(snapshot: DesktopSnapshot | null): { canStart: boolean; reason: string } {
+  if (!snapshot)
+    return { canStart: false, reason: "Pairing is unavailable while device status loads." };
+  if (snapshot.connection.state === "missing-native-host")
+    return { canStart: false, reason: "Pairing is unavailable because the native host is missing." };
+  if (["server-required", "credentials-required"].includes(snapshot.connection.errorCode ?? ""))
+    return { canStart: false, reason: "Pairing is unavailable until this device is enrolled and credentials are available." };
+  if (snapshot.connection.state === "offline")
+    return { canStart: false, reason: "Pairing is unavailable until the server reconnects." };
+  if (snapshot.connection.state === "error")
+    return { canStart: false, reason: "Pairing is unavailable until the connection error is resolved." };
+  if (!snapshot.deviceRole)
+    return { canStart: false, reason: "Pairing is unavailable while this device role is unknown." };
+  if (snapshot.deviceRole !== "owner")
+    return { canStart: false, reason: "Only the owner device can pair a phone." };
+  return { canStart: true, reason: "" };
+}
+
 function OnboardingView({
   connected,
   canUnlock,
@@ -891,13 +915,18 @@ function OnboardingView({
 }
 
 function SettingsView({
+  mode,
+  configuredOrigin,
   origin,
   onOrigin,
   onAction,
+  onOpenAccount,
   encryption,
   canUnlock,
   theme,
   onTheme,
+  navigationPosition,
+  onNavigationPosition,
   desktop,
   onStartAtLogin,
   notifications,
@@ -913,14 +942,21 @@ function SettingsView({
   onLock,
   browserHost = false,
   accountUrl,
+  pairingCanStart,
+  pairingUnavailableReason,
 }: {
+  mode: "hosted" | "self-hosted";
+  configuredOrigin?: string;
   origin: string;
   onOrigin(value: string): void;
-  onAction(action: "origin" | "credentials" | "unlock"): void;
+  onAction(action: Exclude<SettingsAction, "account">): Promise<void>;
+  onOpenAccount(): Promise<void>;
   encryption: DesktopSnapshot["encryption"]["state"];
   canUnlock: boolean;
   theme: Theme;
   onTheme(theme: Theme): void;
+  navigationPosition: NavigationPosition;
+  onNavigationPosition(position: NavigationPosition): void;
   desktop?: DesktopSnapshot["desktop"];
   onStartAtLogin(enabled: boolean): Promise<void>;
   notifications: DesktopSnapshot["notifications"];
@@ -929,16 +965,20 @@ function SettingsView({
   preferences: NotificationPreferences;
   onPreferences(preferences: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
-  onPermission(): Promise<void>;
+  onPermission(): Promise<"granted" | "denied" | "unknown" | void>;
   onCreatePairingIntent(): ReturnType<typeof bridge.create_pairing_intent>;
   onPairingStatus(intentToken: string): ReturnType<typeof bridge.pairing_intent_status>;
   onApprovePairing(intentToken: string, keyDigest: string): ReturnType<typeof bridge.approve_pairing_intent>;
   onLock?: () => Promise<void>;
   browserHost?: boolean;
   accountUrl?: string;
+  pairingCanStart: boolean;
+  pairingUnavailableReason?: string;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
+  const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
+  const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
   const syncText =
     encryption === "unlocked"
       ? "Device sync encrypted"
@@ -946,39 +986,52 @@ function SettingsView({
         ? "Device sync key mismatch"
         : "Device sync not unlocked";
 
+  const runAction = async (action: SettingsAction) => {
+    if (pendingAction) return;
+    setPendingAction(action);
+    setActionError(null);
+    try {
+      if (action === "account") await onOpenAccount();
+      else await onAction(action);
+    } catch (error) {
+      setActionError({ action, message: errorText(error) });
+    } finally {
+      setPendingAction(null);
+    }
+  };
+  const actionPending = (action: SettingsAction) => pendingAction === action;
+  const actionAlert = (action: SettingsAction) =>
+    actionError?.action === action && <p className="settings-error" role="alert">{actionError.message}</p>;
+  const connectionLabel = browserHost ? "Fixed server" : mode === "hosted" ? "Peppy Hosted" : "Self-hosted";
+
   return (
     <section id="settings-view" aria-label="Settings" role="region">
       <section data-settings-section="server">
         <h2>Server</h2>
-        <p>Choose the Peppy server this desktop app connects to.</p>
-        <div className="settings-control-row">
-          <label>
-            Server URL
-            <input
-              aria-label="Server URL"
-              value={origin}
-              onChange={(event) => onOrigin(event.target.value)}
-              placeholder="https://server.example"
-            />
-          </label>
-          <button className="primary-button" onClick={() => onAction("origin")}>
-            Configure server
-          </button>
-        </div>
+        <p id="settings-connection-summary" className="settings-connection-summary"><strong>{connectionLabel}</strong><span> · </span><span>{configuredOrigin || "No server configured"}</span></p>
+        {browserHost ? <p className="settings-note">This browser host uses its fixed server.</p> : mode === "self-hosted" ? <details className="settings-disclosure" id="settings-server-editor">
+          <summary>Change server</summary>
+          <div className="settings-control-row">
+            <label>Server URL<input aria-label="Server URL" value={origin} onChange={(event) => onOrigin(event.target.value)} placeholder="https://server.example" disabled={Boolean(pendingAction)} /></label>
+            <button className="primary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("origin") || undefined} onClick={() => void runAction("origin")}>Configure server</button>
+          </div>
+        </details> : null}
+        {actionAlert("origin")}
       </section>
-      <section data-settings-section="credentials">
+      {(browserHost || mode === "self-hosted") && <section data-settings-section="credentials">
         <h2>Device credentials</h2>
-        <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are imported natively and are never shown here."}</p>
-        <button
-          className="secondary-button"
-          onClick={() => onAction("credentials")}
-        >
-          {browserHost ? "Import credentials" : "Import credentials natively"}
-        </button>
+        {browserHost ? <><p>Your passphrase is passed directly to the browser worker and is never sent to the server.</p><button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("credentials") || undefined} onClick={() => void runAction("credentials")}>Import credentials</button></> : <details className="settings-disclosure" id="settings-credentials-recovery"><summary>Advanced setup / recovery</summary><p>Credentials are imported natively and are never shown here.</p><button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("credentials") || undefined} onClick={() => void runAction("credentials")}>Import credentials natively</button></details>}
+        {actionAlert("credentials")}
+      </section>}
+      <section data-settings-section="pair-phone" data-pairing-available={pairingCanStart ? "true" : "false"}>
+        <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} canStart={pairingCanStart} unavailableReason={pairingUnavailableReason} />
       </section>
-      <section data-settings-section="pair-phone">
-        <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} />
-      </section>
+      {!browserHost && mode === "hosted" && <section data-settings-section="account-billing">
+        <h2>Account &amp; billing</h2>
+        <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
+        <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button>
+        {actionAlert("account")}
+      </section>}
       {browserHost && accountUrl && <section data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
         <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
@@ -999,11 +1052,13 @@ function SettingsView({
         {canUnlock && (
           <button
             className="secondary-button"
-            onClick={() => onAction("unlock")}
+            disabled={Boolean(pendingAction)} aria-busy={actionPending("unlock") || undefined}
+            onClick={() => void runAction("unlock")}
           >
             {browserHost ? "Unlock sync" : "Unlock sync natively"}
           </button>
         )}
+        {actionAlert("unlock")}
         {encryption === "unlocked" && onLock && (
           <button id="browser-lock-all-tabs" className="secondary-button" onClick={() => void onLock()}>
             Lock now
@@ -1035,6 +1090,30 @@ function SettingsView({
             </select>
           </label>
         </div>
+        <fieldset id="settings-navigation-position" aria-describedby="settings-navigation-position-hint">
+          <legend>Navigation position</legend>
+          <p id="settings-navigation-position-hint" className="settings-field-hint">Choose where the navigation buttons appear.</p>
+          <label className="settings-check">
+            <input
+              type="radio"
+              name="navigation-position"
+              value="side-rail"
+              checked={navigationPosition === "side-rail"}
+              onChange={() => onNavigationPosition("side-rail")}
+            />
+            Side rail
+          </label>
+          <label className="settings-check">
+            <input
+              type="radio"
+              name="navigation-position"
+              value="title-bar"
+              checked={navigationPosition === "title-bar"}
+              onChange={() => onNavigationPosition("title-bar")}
+            />
+            Title bar
+          </label>
+        </fieldset>
       </section>
       {desktop?.startupSupported && <section data-settings-section="startup">
         <h2>Startup</h2>
@@ -1107,6 +1186,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     {},
   );
   const [theme, setTheme] = useState<Theme>("system");
+  const [navigationPosition, setNavigationPosition] = useState<NavigationPosition>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
+      return typeof stored === "object" && stored !== null && !Array.isArray(stored) &&
+          isNavigationPosition(stored.navigationPosition)
+        ? stored.navigationPosition
+        : "side-rail";
+    } catch {
+      return "side-rail";
+    }
+  });
   const [activeView, setActiveViewNow] = useState<"conversations" | "notifications" | "settings" | "contacts">(
     "conversations",
   );
@@ -1196,6 +1286,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       composerHeight?: number | null;
       headComposerHeight?: number | null;
       recipientPosition?: RecipientPosition;
+      navigationPosition?: NavigationPosition;
     } = {},
   ) => {
     try {
@@ -1209,11 +1300,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       /* Storage is optional in embedded previews. */
     }
   };
+  const changeNavigationPosition = (position: NavigationPosition) => {
+    setNavigationPosition(position);
+    persistLayout({ navigationPosition: position });
+  };
+  const railWidth = navigationPosition === "side-rail" ? RAIL_WIDTH : 0;
   const listMaxForWindow = Math.max(
     LIST_MIN_WIDTH,
     Math.min(
       LIST_MAX_WIDTH,
-      viewportWidth - RAIL_WIDTH - 1 - PANE_MIN_WIDTH,
+      viewportWidth - railWidth - 1 - PANE_MIN_WIDTH,
     ),
   );
   const renderedListWidth = Math.min(listWidth, listMaxForWindow);
@@ -1804,12 +1900,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     } catch (error) { setNotice(`Floating conversation: ${errorText(error)}`); }
   };
 
-  const setup = async (action: "origin" | "credentials" | "unlock") => {
+  const runSetupAction = async (
+    action: "origin" | "credentials" | "unlock",
+    onConfigured?: () => void,
+  ) => {
+    if (action === "origin") {
+      await bridge.configure_server(origin);
+      onConfigured?.();
+    }
+    else if (action === "credentials") await bridge.import_credentials();
+    else await bridge.unlock_sync();
+    await refresh();
+  };
+  const runOnboardingAction = async (action: "origin" | "credentials" | "unlock") => {
     try {
-      if (action === "origin") await bridge.configure_server(origin);
-      else if (action === "credentials") await bridge.import_credentials();
-      else await bridge.unlock_sync();
-      await refresh();
+      const recordSelfHosted = !browserHost && action === "origin" ? () => {
+        localStorage.setItem("peppy.setup.mode", "self-hosted");
+        setMode("self-hosted");
+      } : undefined;
+      await runSetupAction(action, recordSelfHosted);
     } catch (error) {
       setNotice(errorText(error));
     }
@@ -1862,6 +1971,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const canUnlock = snapshot?.mode === "native"
     ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
+  const pairing = pairingAvailability(snapshot);
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2007,6 +2117,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         summary: "Loading status",
         details: <StatusDetails />,
       };
+  const notificationUnread = snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0;
+  const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
   const composerConnectionDot = snapshot
     ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />
     : null;
@@ -2058,6 +2170,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       className={`theme-${theme}`}
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
+      data-navigation={navigationPosition}
       inert={lifecyclePending ? true : undefined}
       aria-busy={loading || lifecyclePending ? "true" : undefined}
     >
@@ -2070,9 +2183,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
         onNewMessage={startTitlebarMessage}
+        navigation={navigationPosition === "title-bar" ? (
+          <NavButtons
+            orientation="titlebar"
+            activeView={activeView}
+            onView={setActiveView}
+            onToggleList={() =>
+              resizeListTo(listCollapsed ? previousListWidth.current : 0)
+            }
+            listCollapsed={listCollapsed}
+            threadListId="thread-list"
+            notificationUnread={notificationUnread}
+            contactsPending={contactsPending}
+          />
+        ) : undefined}
+        status={navigationPosition === "title-bar" ? (
+          <StatusPopover tone={panelStatus.tone} summary={panelStatus.summary}>
+            {panelStatus.details}
+          </StatusPopover>
+        ) : undefined}
       />
       <div ref={desktopBodyRef} id="desktop-body" className="desktop-layout">
-        <Panel
+        {navigationPosition === "side-rail" && <Panel
           activeView={activeView}
           onView={setActiveView}
           onToggleList={() =>
@@ -2081,9 +2213,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           listCollapsed={listCollapsed}
           threadListId="thread-list"
           status={panelStatus}
-          notificationUnread={snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0}
-          contactsPending={snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0}
-        />
+          notificationUnread={notificationUnread}
+          contactsPending={contactsPending}
+        />}
         {loading ? (
           <section id="desktop-loading-state">Loading messaging state…</section>
         ) : <>
@@ -2141,7 +2273,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             const bodyLeft =
               desktopBodyRef.current?.getBoundingClientRect().left ?? 0;
             listDragWidth.current = listCollapsed
-              ? position - (bodyLeft + RAIL_WIDTH)
+              ? position - (bodyLeft + railWidth)
               : renderedListWidth;
           }}
           onResize={resizeList}
@@ -2199,13 +2331,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           </header>
           {settingsOpen ? (
             <SettingsView
+              mode={mode}
+              configuredOrigin={browserHost ? fixedOrigin ?? snapshot?.connection.origin : snapshot?.connection.origin}
               origin={origin}
               onOrigin={setOrigin}
-              onAction={(action) => void setup(action)}
+              onAction={runSetupAction}
+              onOpenAccount={() => bridge.hosted_open_billing()}
               encryption={snapshot?.encryption.state ?? "locked"}
               canUnlock={canUnlock}
               theme={theme}
               onTheme={setTheme}
+              navigationPosition={navigationPosition}
+              onNavigationPosition={changeNavigationPosition}
               desktop={snapshot?.desktop}
               onStartAtLogin={async enabled => {
                 try { await bridge.set_start_at_login(enabled); await refresh(); }
@@ -2215,15 +2352,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
               preferences={snapshot?.notificationPreferences ?? { messageBanners: true, mirroredBanners: true, preview: "full" }}
-              onPreferences={preferences => bridge.set_notification_preferences(preferences).then(() => refresh()).catch(report("Could not save notification preferences. "))}
-              onMute={filter => bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted).then(() => refresh()).catch(report("Could not save app filter. "))}
-              onPermission={() => bridge.request_notification_permission().then(result => setNotice(result === "unknown" ? "Check Peppy in your operating system notification settings; permission cannot be read here." : `Desktop notification permission: ${result}.`)).catch(report("Could not check desktop notifications. "))}
+              onPreferences={async preferences => { await bridge.set_notification_preferences(preferences); await refresh(); }}
+              onMute={async filter => { await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted); await refresh(); }}
+              onPermission={() => bridge.request_notification_permission()}
               onCreatePairingIntent={() => bridge.create_pairing_intent()}
               onPairingStatus={intentToken => bridge.pairing_intent_status(intentToken)}
               onApprovePairing={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
               onLock={browserHost ? lockSync : undefined}
               browserHost={browserHost}
               accountUrl={accountUrl}
+              pairingCanStart={pairing.canStart}
+              pairingUnavailableReason={pairing.reason || undefined}
             />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2257,7 +2396,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                     canUnlock={canUnlock}
                     origin={origin}
                     onOrigin={setOrigin}
-                    onAction={(action) => void setup(action)}
+                    onAction={(action) => void runOnboardingAction(action)}
                     encryption={snapshot.encryption.state}
                     browserHost={browserHost}
                     notice={notice}
@@ -2272,7 +2411,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   canUnlock={canUnlock}
                   origin={origin}
                   onOrigin={setOrigin}
-                  onAction={(action) => void setup(action)}
+                  onAction={(action) => void runOnboardingAction(action)}
                   encryption={snapshot.encryption.state}
                   browserHost={browserHost}
                   notice={notice}

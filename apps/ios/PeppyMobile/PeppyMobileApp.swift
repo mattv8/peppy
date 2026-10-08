@@ -51,7 +51,11 @@ struct DeviceView: View {
             if !enrollmentLoaded {
                 ProgressView().accessibilityIdentifier("enrollment-loading")
             } else if model.status.identity == nil {
-                welcome
+                if showingSelfHosted {
+                    selfHostedSetup
+                } else {
+                    welcome
+                }
             } else if model.status.databaseOpen && !model.status.keysUnlocked {
                 lockScreen
             } else {
@@ -85,31 +89,94 @@ struct DeviceView: View {
     private var colors: PeppyColorScheme { PeppyTokens.colors(for: colorScheme) }
 
     @ViewBuilder private var welcome: some View {
-        PeppyGlassSurface(colors: colors) {
-            VStack(spacing: 16) {
-                Image(decorative: "PeppyLogo").resizable().scaledToFit().frame(width: 72, height: 72)
-                    .font(.system(size: 48)).foregroundStyle(colors.Accent)
-                Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
-                Text("peppy.onboarding_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+        ScrollView {
+            PeppyGlassSurface(colors: colors) {
+                VStack(spacing: 16) {
+                    Image(decorative: "PeppyLogo").resizable().scaledToFit().frame(width: 72, height: 72)
+                        .font(.system(size: 48)).foregroundStyle(colors.Accent)
+                    Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
+                    Text("peppy.onboarding_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
 
-                Button { showingHostedEnrollment = true } label: { Text("peppy.production_hosted_cta", tableName: "Peppy") }
-                    .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText).accessibilityIdentifier("welcome-hosted-button")
+                    Picker(selection: Binding(
+                        get: { showingSelfHosted },
+                        set: { showingSelfHosted = $0 }
+                    )) {
+                        Text("peppy.onboarding_mode_hosted", tableName: "Peppy").tag(false)
+                            .accessibilityIdentifier("welcome-server-mode-hosted")
+                        Text("peppy.onboarding_mode_self_hosted", tableName: "Peppy").tag(true)
+                            .accessibilityIdentifier("welcome-server-mode-self-hosted")
+                    } label: {
+                        Text("peppy.onboarding_mode_selector", tableName: "Peppy")
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("welcome-server-mode-selector")
 
-                Button { showingPairing = true } label: { Text("peppy.scan_qr", tableName: "Peppy") }
-                    .accessibilityIdentifier("welcome-pair-qr-button")
+                    Text("peppy.onboarding_hosted_sub", tableName: "Peppy")
+                        .font(.subheadline)
+                        .foregroundStyle(colors.TextSecondary)
 
-                Button { choosingFile = true } label: { Text("peppy.use_credential_file", tableName: "Peppy") }
-                    .accessibilityIdentifier("welcome-import-credential-button")
+                    Button { showingHostedEnrollment = true } label: {
+                        Text("peppy.onboarding_hosted_cta", tableName: "Peppy")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText).accessibilityIdentifier("welcome-get-started-button")
 
-                Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) { Text("peppy.self_hosted_docs_link", tableName: "Peppy") }
-                    .accessibilityIdentifier("welcome-self-hosted-docs-link")
-
-                activityAndError
+                    activityAndError
+                }
+                .padding(24)
             }
-            .padding(24)
+            .frame(maxWidth: 460)
+            .padding(.vertical, 24)
         }
-        .frame(maxWidth: 460)
         .accessibilityIdentifier("welcome-screen")
+    }
+
+    @ViewBuilder private var selfHostedSetup: some View {
+        ScrollView {
+            PeppyGlassSurface(colors: colors) {
+                VStack(spacing: 16) {
+                    Text("peppy.self_hosted_headline", tableName: "Peppy").font(.title2).bold()
+                    Text("peppy.self_hosted_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+
+                    Button { showingPairing = true } label: {
+                        Text("peppy.scan_qr", tableName: "Peppy")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("pair-qr-button")
+
+                    Button { choosingFile = true } label: {
+                        Text("peppy.use_credential_file", tableName: "Peppy")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("import-credential-button")
+
+                    Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) {
+                        Text("peppy.self_hosted_docs_link", tableName: "Peppy")
+                            .frame(minHeight: 44)
+                    }
+                    .accessibilityIdentifier("self-hosted-docs-link")
+
+                    Button { returnToHostedWelcome() } label: {
+                        Text("peppy.back", tableName: "Peppy")
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("self-hosted-back-button")
+
+                    activityAndError
+                }
+                .padding(24)
+            }
+            .frame(maxWidth: 460)
+            .padding(.vertical, 24)
+        }
+        .accessibilityIdentifier("self-hosted-screen")
+    }
+
+    private func returnToHostedWelcome() {
+        showingSelfHosted = false
     }
 
 

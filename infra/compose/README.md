@@ -65,17 +65,18 @@ the trusted proxy in the network/firewall configuration. For the planned
 Docker2 staging deployment that interface is `10.10.0.101`; the public origin
 still uses HTTPS through Proxy, not the internal HTTP port.
 
-## Browser messaging hostname
+## Browser messaging at the public root
 
-The public server image includes the browser client at
-`/usr/share/peppy/web`. To expose it, set `WEB_CLIENT_HOST` to its HTTPS
-hostname and start the Caddy overlay with the root file first:
+The public server image includes the browser client at `/usr/share/peppy/web`.
+Community Compose enables it at `https://PUBLIC_HOST/` by default; its API shares
+that origin. Start the Caddy overlay with the root file first:
 
 ```sh
 docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml up -d
 ```
 
-`WEB_CLIENT_HOST` is passed to the server as `PEPPY_WEB_CLIENT_HOST`. Set it to
-the same value as `PUBLIC_HOST` for a single-host installation; Caddy emits one
-site block in that case. Leave it empty to keep browser hosting disabled. DNS
-and TLS configuration remain operator-managed prerequisites.
+Set `WEB_UI_ENABLED=false` to disable the browser UI while retaining the API.
+`WEB_CLIENT_HOST` is retired: it is no longer passed to the server and Caddy
+serves `PUBLIC_HOST` only. If upgrading from a separate app hostname, direct
+users to `https://PUBLIC_HOST/`, then remove `WEB_CLIENT_HOST` and that hostname's
+DNS record. DNS and TLS configuration remain operator-managed prerequisites.

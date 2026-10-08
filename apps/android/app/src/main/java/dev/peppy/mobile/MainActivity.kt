@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -59,7 +58,6 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -155,8 +153,7 @@ private fun CompanionScreen() {
     var smsCaptureEnabled by remember { mutableStateOf(GatewayPolicyHost(context).smsCaptureEnabled) }
     var destination by remember { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
-    var pairingOpen by remember { mutableStateOf(false) }
-    var hostedOpen by rememberSaveable { mutableStateOf(false) }
+    var welcomeDestination by rememberSaveable { mutableStateOf(WelcomeDestination.HOSTED) }
 
     LaunchedEffect(refresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
@@ -190,11 +187,11 @@ private fun CompanionScreen() {
         refresh++
     }
 
-    if (pairingOpen) {
+    if (welcomeDestination.isPairing) {
         PairingScreen(
-            onDismiss = { pairingOpen = false },
+            onDismiss = { welcomeDestination = pairingCancellationDestination(welcomeDestination) },
             onFinished = {
-                pairingOpen = false
+                welcomeDestination = WelcomeDestination.HOSTED
                 refresh++
             },
         )
@@ -205,11 +202,11 @@ private fun CompanionScreen() {
         CircularProgressIndicator(Modifier.padding(24.dp))
         return
     }
-    if (hostedOpen && status?.enrolled == false) {
+    if (welcomeDestination == WelcomeDestination.HOSTED_ENROLLMENT && status?.enrolled == false) {
         HostedEnrollmentScreen(
-            onDismiss = { hostedOpen = false },
-            onEnrolled = { hostedOpen = false; refresh++ },
-            onPairExisting = { hostedOpen = false; pairingOpen = true },
+            onDismiss = { welcomeDestination = WelcomeDestination.HOSTED },
+            onEnrolled = { welcomeDestination = WelcomeDestination.HOSTED; refresh++ },
+            onPairExisting = { welcomeDestination = WelcomeDestination.HOSTED_PAIRING },
         )
         return
     }
@@ -243,28 +240,30 @@ private fun CompanionScreen() {
             .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        if (status?.enrolled != true && !settingsOpen) Column(
-            Modifier.fillMaxWidth().testTag("welcome-screen"),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Column(Modifier.fillMaxWidth().testTag("self-hosted-screen"), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Image(
-                painter = painterResource(R.drawable.peppy_logo),
-                contentDescription = null,
-                modifier = Modifier.size(88.dp).testTag("pairing-hero"),
-            )
-            Button(onClick = { hostedOpen = true }, modifier = Modifier.fillMaxWidth().testTag("hosted-signup-button")) {
-                Text(stringResource(R.string.peppy_production_hosted_cta))
-            }
-            Text(stringResource(R.string.peppy_self_hosted_headline), style = MaterialTheme.typography.headlineSmall)
-            Text(stringResource(R.string.peppy_self_hosted_body), style = MaterialTheme.typography.bodyMedium)
-            OutlinedButton(onClick = { pairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("self-hosted-button")) { Text(stringResource(R.string.peppy_production_join_cta)) }
-            Button(onClick = { pairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("pair-qr-button")) { Text("Scan QR code") }
-            BusyButton("import-credential-button", "Import credential file", importBusy, enabled = !importBusy && !unlockBusy, modifier = Modifier.fillMaxWidth()) {
-                filePicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
-            }
-            importResult?.let { Text(importMessage(it), Modifier.testTag("enroll-error"), style = MaterialTheme.typography.bodySmall) }
-            OutlinedButton({ context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse("https://github.com/mattv8/peppy#readme"))) }, Modifier.testTag("self-hosted-docs-link")) { Text(stringResource(R.string.peppy_self_hosted_docs_link)) }
+        if (status?.enrolled != true && !settingsOpen) {
+            when (welcomeDestination) {
+                WelcomeDestination.HOSTED -> WelcomeScreen(
+                    onGetStarted = { welcomeDestination = WelcomeDestination.HOSTED_ENROLLMENT },
+                    onSelectSelfHosted = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
+                )
+                WelcomeDestination.SELF_HOSTED -> SelfHostedSetupScreen(
+                    importBusy = importBusy,
+                    importResult = importResult,
+                    onBack = { welcomeDestination = WelcomeDestination.HOSTED },
+                    onPair = { welcomeDestination = WelcomeDestination.SELF_HOSTED_PAIRING },
+                    onImport = {
+                        filePicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+                    },
+                    onOpenGuide = {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/mattv8/peppy#readme"),
+                            ),
+                        )
+                    },
+                )
+                else -> Unit
             }
         }
 
@@ -399,7 +398,7 @@ internal fun Section(tag: String, title: String, content: @Composable () -> Unit
 }
 
 @Composable
-private fun BusyButton(tag: String, label: String, busy: Boolean, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun BusyButton(tag: String, label: String, busy: Boolean, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Button(onClick = onClick, enabled = enabled, modifier = modifier.testTag(tag)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)

@@ -9,6 +9,7 @@ use peppy_hosted_client::{
         open_intent_token,
     },
 };
+use url::Url;
 
 fn empty(raw: &RawValue) -> Result<(), Failure> {
     match serde_json::from_str::<serde_json::Map<String, Value>>(raw.get()) {

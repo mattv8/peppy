@@ -1325,7 +1325,8 @@ describe("host state display", () => {
     delete bridge.lock_sync;
   });
 
-  it("shows account billing only for the browser host and preserves the settings order", async () => {
+  it("preserves browser account links and native hosted account actions in settings order", async () => {
+    const configure = vi.spyOn(bridge, "configure_server");
     render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -1336,13 +1337,149 @@ describe("host state display", () => {
     expect(link).toHaveAttribute("href", "https://account.example.com/account");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
+    expect(configure).not.toHaveBeenCalled();
+    expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
     expect(document.querySelector('[data-settings-section="pair-phone"]')?.compareDocumentPosition(section!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(section?.compareDocumentPosition(document.querySelector('[data-settings-section="sync"]')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     cleanup();
     render(<App accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(document.querySelector('[data-settings-section="account-billing"]')).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open account & billing/i })).toBeInTheDocument();
+  });
+
+  it("uses the selected native mode to expose only its connection controls", async () => {
+    const openBilling = vi.spyOn(bridge, "hosted_open_billing").mockResolvedValue();
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.getElementById("settings-connection-summary")).toHaveTextContent("Peppy Hosted · https://example.test");
+
+    expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /open account & billing/i }));
+    await waitFor(() => expect(openBilling).toHaveBeenCalledOnce());
+
+    cleanup();
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.queryByRole("button", { name: /open account & billing/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Change server"));
+    expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
+  });
+
+  it("keeps the configured origin separate from a rejected self-hosted draft", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
+    const configure = vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Server rejected." });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.getElementById("settings-connection-summary")).toHaveTextContent("https://example.test");
+    fireEvent.click(screen.getByText("Change server"));
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://draft.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Server rejected.");
+    expect(screen.getByLabelText("Server URL")).toHaveValue("https://draft.test");
+    expect(document.getElementById("settings-connection-summary")).toHaveTextContent("https://example.test");
+    expect(configure).toHaveBeenCalledWith("https://draft.test");
+  });
+
+  it("keeps rejected unlock feedback in the sync section", async () => {
+    host.encryption = { state: "locked" };
+    const unlock = vi.spyOn(bridge, "unlock_sync").mockRejectedValue({ message: "Unlock rejected." });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Unlock sync natively" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Unlock rejected.");
+    expect(alert.closest('[data-settings-section="sync"]')).toBeInTheDocument();
+    expect(unlock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps rejected credential-import feedback in the credentials section", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
+    vi.spyOn(bridge, "import_credentials").mockRejectedValue({ message: "Import rejected." });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByText("Advanced setup / recovery"));
+    fireEvent.click(screen.getByRole("button", { name: "Import credentials natively" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.closest('[data-settings-section="credentials"]')).toBeInTheDocument();
+  });
+
+  it("does not issue settings commands while disclosures open and prevents duplicate configuration", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
+    const configure = deferred<void>();
+    const configureServer = vi.spyOn(bridge, "configure_server").mockReturnValue(configure.promise);
+    const importCredentials = vi.spyOn(bridge, "import_credentials");
+    const unlock = vi.spyOn(bridge, "unlock_sync");
+    const openBilling = vi.spyOn(bridge, "hosted_open_billing");
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByText("Change server"));
+    fireEvent.click(screen.getByText("Advanced setup / recovery"));
+    expect(configureServer).not.toHaveBeenCalled();
+    expect(importCredentials).not.toHaveBeenCalled();
+    expect(unlock).not.toHaveBeenCalled();
+    expect(openBilling).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
+    expect(configureServer).toHaveBeenCalledOnce();
+    configure.resolve();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Configure server" })).toBeEnabled());
+  });
+
+  it("does not expose native credential import in hosted settings", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="credentials"]')).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /import credentials/i })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["owner", "connected", true],
+    ["device", "connected", false],
+    ["owner", "offline", false],
+    [undefined, "connected", false],
+  ] as const)("sets pairing availability for %s devices while %s", async (deviceRole, state, available) => {
+    host.connection = { state, origin: "https://example.test" } as DesktopSnapshot["connection"];
+    host.load = ((conversationId?: string) => ({ ...createHost().load(conversationId), connection: host.connection, deviceRole })) as typeof host.load;
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="pair-phone"]')).toHaveAttribute("data-pairing-available", String(available));
+  });
+
+  it("explains an unknown pairing role differently from a confirmed non-owner", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.getElementById("pairing-availability-note")).toHaveTextContent(/role is unknown/i);
+
+    cleanup();
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...host.load(), deviceRole: "device" });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.getElementById("pairing-availability-note")).toHaveTextContent(/only the owner/i);
+  });
+
+  it("disables QR generation with the pairing availability reason", async () => {
+    host.connection = { state: "offline", origin: "https://example.test" };
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const generate = screen.getByRole("button", { name: "Generate QR code" });
+    expect(generate).toBeDisabled();
+    expect(document.getElementById("pairing-availability-note")).toBeInTheDocument();
+    expect(generate).toHaveAccessibleDescription(/reconnect/i);
   });
 
   it("supplies a neutral loading status before the native snapshot arrives", () => {
@@ -1401,6 +1538,42 @@ describe("host state display", () => {
     await waitFor(() =>
       expect(configure).toHaveBeenCalledWith("https://server.test"),
     );
+    expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
+  });
+
+  it("does not record self-hosted mode after a failed or browser onboarding action", async () => {
+    host.conversations = [];
+    host.connection = { state: "offline", origin: "", errorCode: "credentials-required" };
+    vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Rejected" });
+    render(<App />);
+    await screen.findByRole("region", { name: "Set up Peppy" });
+    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
+    await screen.findByRole("alert");
+    expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
+
+    cleanup();
+    const browserSnapshot = { ...host.load(), mode: "browser" as const, encryption: { state: "locked" as const } };
+    vi.mocked(bridge.load_state).mockResolvedValue(browserSnapshot);
+    vi.spyOn(bridge, "import_credentials").mockResolvedValue();
+    render(<App hostKind="browser" fixedOrigin="https://fixed.example" />);
+    await screen.findByRole("region", { name: "Set up Peppy" });
+    fireEvent.click(screen.getByRole("button", { name: "Import credentials" }));
+    await waitFor(() => expect(bridge.import_credentials).toHaveBeenCalled());
+    expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
+  });
+
+  it("records self-hosted mode after configuration succeeds even if the refresh fails", async () => {
+    host.conversations = [];
+    host.connection = { state: "offline", origin: "", errorCode: "credentials-required" };
+    vi.spyOn(bridge, "configure_server").mockResolvedValue();
+    vi.mocked(bridge.load_state)
+      .mockResolvedValueOnce(host.load())
+      .mockRejectedValueOnce({ message: "Refresh failed." });
+    render(<App />);
+    await screen.findByRole("region", { name: "Set up Peppy" });
+    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
+    await waitFor(() => expect(bridge.configure_server).toHaveBeenCalled());
+    await waitFor(() => expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted"));
   });
 
   it("replaces both panes with notifications and preserves the draft when returning", async () => {
@@ -1594,6 +1767,250 @@ describe("host state display", () => {
 });
 
 describe("desktop presentation controls", () => {
+  describe("navigation position", () => {
+    it("defaults to the side rail without writing layout storage", async () => {
+      const storedLayout = localStorage.getItem("peppy.layout.v1");
+      render(<App />);
+
+      await screen.findByText("Hello from Aurora");
+      expect(document.getElementById("desktop-rail")).toBeInTheDocument();
+      expect(document.getElementById("desktop-shell")).toHaveAttribute(
+        "data-navigation",
+        "side-rail",
+      );
+      expect(document.getElementById("titlebar-navigation")).not.toBeInTheDocument();
+      expect(localStorage.getItem("peppy.layout.v1")).toBe(storedLayout);
+    });
+
+    it("restores title-bar navigation from layout storage", async () => {
+      localStorage.setItem(
+        "peppy.layout.v1",
+        JSON.stringify({ navigationPosition: "title-bar" }),
+      );
+      render(<App />);
+
+      await screen.findByText("Hello from Aurora");
+      const titlebar = document.getElementById("desktop-titlebar")!;
+      const navigation = document.getElementById("titlebar-navigation")!;
+      expect(document.getElementById("desktop-rail")).not.toBeInTheDocument();
+      expect(document.getElementById("desktop-shell")).toHaveAttribute(
+        "data-navigation",
+        "title-bar",
+      );
+      expect(titlebar).toContainElement(navigation);
+      expect(navigation).toHaveAttribute("aria-label", "Main navigation");
+      expect(document.getElementById("thread-list")).toBeVisible();
+      expect(navigation.querySelectorAll("[data-rail-item]")).toHaveLength(4);
+    });
+
+    it.each([
+      ["an invalid navigation value", JSON.stringify({ navigationPosition: "sidebar" })],
+      ["a numeric navigation value", JSON.stringify({ navigationPosition: 42 })],
+      ["corrupt layout JSON", "not-json"],
+      ["a non-object layout", "42"],
+    ])("falls back to the side rail for %s", async (_description, storedLayout) => {
+      localStorage.setItem("peppy.layout.v1", storedLayout);
+      expect(() => render(<App />)).not.toThrow();
+
+      await screen.findByText("Hello from Aurora");
+      expect(document.getElementById("desktop-rail")).toBeInTheDocument();
+      expect(document.getElementById("desktop-shell")).toHaveAttribute(
+        "data-navigation",
+        "side-rail",
+      );
+    });
+
+    it("places title-bar navigation by platform", async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+      const assertPlacement = async (
+        platform: string,
+        placement: "leading" | "trailing",
+      ) => {
+        Object.defineProperty(navigator, "platform", {
+          configurable: true,
+          value: platform,
+        });
+        localStorage.setItem(
+          "peppy.layout.v1",
+          JSON.stringify({ navigationPosition: "title-bar" }),
+        );
+        const { unmount } = render(<App />);
+        await screen.findByText("Hello from Aurora");
+        const titlebar = document.getElementById("desktop-titlebar")!;
+        const navigation = document.getElementById("titlebar-navigation")!;
+        expect(titlebar).toHaveAttribute("data-navigation-placement", placement);
+        expect(
+          placement === "leading"
+            ? titlebar.firstElementChild
+            : titlebar.lastElementChild,
+        ).toBe(navigation);
+        unmount();
+        localStorage.removeItem("peppy.layout.v1");
+      };
+
+      try {
+        await assertPlacement("MacIntel", "trailing");
+        await assertPlacement("Win32", "leading");
+        await assertPlacement("Linux x86_64", "leading");
+      } finally {
+        if (originalPlatform)
+          Object.defineProperty(navigator, "platform", originalPlatform);
+        else delete (navigator as { platform?: string }).platform;
+      }
+    });
+
+    it("keeps title-bar navigation interactive with badges and list toggling", async () => {
+      host.notifications = [{
+        target: { sourceDeviceId: "phone-1", notificationKey: "k1", lifetime: "1" },
+        packageName: "com.example.chat",
+        appName: "Chat",
+        title: "Morgan",
+        text: "Hello",
+        postedAt: Date.now(),
+        dismissible: true,
+        seen: false,
+        dismissalPending: false,
+      }];
+      vi.mocked(bridge.load_state).mockImplementation(async id => ({
+        ...host.load(id),
+        contactsPendingCount: 2,
+      }));
+      localStorage.setItem(
+        "peppy.layout.v1",
+        JSON.stringify({ navigationPosition: "title-bar" }),
+      );
+      render(<App />);
+
+      await screen.findByText("Hello from Aurora");
+      const navigation = document.getElementById("titlebar-navigation")!;
+      const conversations = within(navigation).getByRole("button", {
+        name: "Conversations",
+      });
+      const contacts = within(navigation).getByRole("button", {
+        name: "Contacts, 2 pending",
+      });
+      const notifications = within(navigation).getByRole("button", {
+        name: "Notifications, 1 unread",
+      });
+      const settings = within(navigation).getByRole("button", { name: "Settings" });
+
+      fireEvent.click(contacts);
+      expect(document.getElementById("conversation-pane")).toHaveAttribute(
+        "aria-label",
+        "Contacts pane",
+      );
+      expect(contacts).toHaveAttribute("aria-current", "page");
+
+      fireEvent.click(notifications);
+      expect(document.getElementById("conversation-pane")).toHaveAttribute(
+        "aria-label",
+        "Notifications pane",
+      );
+      expect(notifications).toHaveAttribute("aria-current", "page");
+
+      fireEvent.click(settings);
+      expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
+      expect(settings).toHaveAttribute("aria-current", "page");
+
+      fireEvent.click(conversations);
+      expect(document.getElementById("thread-list")).toBeVisible();
+      expect(conversations).toHaveAttribute("aria-current", "page");
+      fireEvent.click(conversations);
+      expect(document.getElementById("thread-list")).toHaveAttribute(
+        "data-collapsed",
+        "true",
+      );
+    });
+
+    it("persists navigation changes from Settings without changing the active view", async () => {
+      localStorage.setItem(
+        "peppy.layout.v1",
+        JSON.stringify({ listWidth: 320, composerHeight: 128 }),
+      );
+      render(<App />);
+
+      await screen.findByText("Hello from Aurora");
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      const position = document.getElementById("settings-navigation-position")!;
+      expect(within(position).getByRole("radio", { name: "Side rail" })).toBeChecked();
+      const titleBar = within(position).getByRole("radio", { name: "Title bar" });
+      fireEvent.click(titleBar);
+
+      expect(document.getElementById("desktop-rail")).not.toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
+      expect(
+        within(document.getElementById("titlebar-navigation")!).getByRole("button", {
+          name: "Settings",
+        }),
+      ).toHaveAttribute("aria-current", "page");
+      expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({
+        listWidth: 320,
+        composerHeight: 128,
+        navigationPosition: "title-bar",
+      });
+
+      fireEvent.click(screen.getByRole("radio", { name: "Side rail" }));
+      expect(document.getElementById("desktop-rail")).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
+      expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({
+        navigationPosition: "side-rail",
+      });
+    });
+
+    it("moves the status trigger between the titlebar and rail", async () => {
+      localStorage.setItem(
+        "peppy.layout.v1",
+        JSON.stringify({ navigationPosition: "title-bar" }),
+      );
+      const { unmount } = render(<App />);
+
+      await screen.findByText("Hello from Aurora");
+      expect(document.getElementById("titlebar-status")).toContainElement(
+        document.querySelector("[data-status-trigger]"),
+      );
+      expect(document.getElementById("desktop-rail")).not.toBeInTheDocument();
+      unmount();
+
+      localStorage.removeItem("peppy.layout.v1");
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      expect(document.getElementById("desktop-rail")).toContainElement(
+        document.querySelector("[data-status-trigger]"),
+      );
+    });
+
+    it("increases the thread-list resize maximum by the removed rail width", async () => {
+      const originalInnerWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: 800,
+      });
+      try {
+        const { unmount } = render(<App />);
+        await screen.findByText("Hello from Aurora");
+        const sideRailMaximum = Number(
+          document.getElementById("handle-h1")!.getAttribute("aria-valuemax"),
+        );
+        unmount();
+
+        localStorage.setItem(
+          "peppy.layout.v1",
+          JSON.stringify({ navigationPosition: "title-bar" }),
+        );
+        render(<App />);
+        await screen.findByText("Hello from Aurora");
+        const titleBarMaximum = Number(
+          document.getElementById("handle-h1")!.getAttribute("aria-valuemax"),
+        );
+        expect(titleBarMaximum - sideRailMaximum).toBe(48);
+      } finally {
+        if (originalInnerWidth)
+          Object.defineProperty(window, "innerWidth", originalInnerWidth);
+      }
+    });
+
+  });
+
   it("uses titlebar conversation actions to restore the list before starting a draft", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");

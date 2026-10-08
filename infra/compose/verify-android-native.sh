@@ -2,15 +2,55 @@
 set -euo pipefail
 
 : "${ANDROID_NDK_HOME:?ANDROID_NDK_HOME must name the installed Android NDK}"
-target_dir=${CARGO_TARGET_DIR:-target}
+caller_dir=$PWD
+normalize_caller_path() {
+    case "$1" in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$caller_dir" "$1" ;;
+    esac
+}
+
+ndk_home=$(normalize_caller_path "$ANDROID_NDK_HOME")
+target_dir=$(normalize_caller_path "${CARGO_TARGET_DIR:-target}")
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$root"
+export CARGO_TARGET_DIR="$target_dir"
 native_profile="${PEPPY_ANDROID_NATIVE_PROFILE:-debug}"
 case "$native_profile" in
   debug|release) ;;
   *) echo "PEPPY_ANDROID_NATIVE_PROFILE must be 'debug' or 'release', got '$native_profile'" >&2; exit 1 ;;
 esac
-ndk_prebuilt_root="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt"
-ndk_host=$(find "$ndk_prebuilt_root" -mindepth 1 -maxdepth 1 -type d -print -quit)
-test -n "$ndk_host" || { echo "Android NDK LLVM toolchain is missing" >&2; exit 1; }
+ndk_prebuilt_root="$ndk_home/toolchains/llvm/prebuilt"
+prebuilt_hosts=()
+for candidate in "$ndk_prebuilt_root"/*; do
+    test -d "$candidate" && prebuilt_hosts+=("$candidate")
+done
+test "${#prebuilt_hosts[@]}" -gt 0 || { echo "Android NDK LLVM toolchain is missing" >&2; exit 1; }
+
+if test "${#prebuilt_hosts[@]}" -eq 1; then
+    ndk_host=${prebuilt_hosts[0]}
+else
+    case "$(uname -s)" in
+        Darwin) host_prefix=darwin- ;;
+        Linux) host_prefix=linux- ;;
+        *) host_prefix= ;;
+    esac
+    test -n "$host_prefix" || {
+        echo "Android NDK has multiple LLVM prebuilts for an unsupported host" >&2
+        exit 1
+    }
+    ndk_host=
+    for candidate in "${prebuilt_hosts[@]}"; do
+        if [[ $(basename "$candidate") == "$host_prefix"* ]]; then
+            ndk_host=$candidate
+            break
+        fi
+    done
+    test -n "$ndk_host" || {
+        echo "Android NDK has multiple LLVM prebuilts but no usable $host_prefix host tools" >&2
+        exit 1
+    }
+fi
 ndk_bin="$ndk_host/bin"
 llvm_ar="$ndk_bin/llvm-ar"
 llvm_ranlib="$ndk_bin/llvm-ranlib"
@@ -32,6 +72,7 @@ build_target() {
     upper_target=$(printf '%s' "$cargo_target" | tr '[:lower:]' '[:upper:]')
     test -x "$clang" || { echo "Android NDK compiler is missing: $clang" >&2; exit 1; }
     (
+        unset SODIUM_USE_PKG_CONFIG
         export PATH="$ndk_bin:$PATH" CC="$clang" AR="$llvm_ar" RANLIB="$llvm_ranlib"
         export "CC_$cargo_target=$clang" "AR_$cargo_target=$llvm_ar" "RANLIB_$cargo_target=$llvm_ranlib"
         export "CARGO_TARGET_${upper_target}_LINKER=$clang" "CARGO_TARGET_${upper_target}_AR=$llvm_ar"

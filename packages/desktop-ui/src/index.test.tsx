@@ -2,11 +2,14 @@ import "@testing-library/jest-dom/vitest";
 import type { ComponentProps } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PairingStatus } from "./PairPhone";
 import {
   AppTitlebar,
   Composer,
   installOverlayScrollbars,
   isRecipientPosition,
+  NavButtons,
+  Panel,
   RecipientPanel,
   RecipientPicker,
   ResizeHandle,
@@ -190,6 +193,88 @@ describe("desktop UI controls", () => {
     fireEvent.click(within(approval).getByRole("checkbox"));
     fireEvent.click(button);
     await vi.waitFor(() => expect(approve).toHaveBeenCalledWith("A".repeat(43), "b".repeat(64)));
+  });
+
+  it("starts pairing for callers that omit availability props", async () => {
+    const createIntent = vi.fn().mockResolvedValue({ httpsOrigin: "https://example.test", intentToken: "A".repeat(43), expiresInSeconds: 300 });
+    render(<PairPhone
+      createIntent={createIntent}
+      getStatus={async () => ({ claimed: false, approved: false, expiresInSeconds: 300 })}
+      approveIntent={async () => undefined}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate QR code" }));
+
+    expect(await screen.findByTestId("pairing-qr-image")).toBeInTheDocument();
+    expect(createIntent).toHaveBeenCalledOnce();
+  });
+
+  it("blocks new pairing requests with an accessible unavailable reason", () => {
+    const createIntent = vi.fn();
+    render(<PairPhone
+      canStart={false}
+      unavailableReason="Only the owner can pair a phone."
+      createIntent={createIntent}
+      getStatus={async () => ({ claimed: false, approved: false, expiresInSeconds: 300 })}
+      approveIntent={async () => undefined}
+    />);
+
+    const generate = screen.getByRole("button", { name: "Generate QR code" });
+    const reason = document.getElementById("pairing-availability-note");
+    fireEvent.click(generate);
+
+    expect(generate).toBeDisabled();
+    expect(generate).toHaveAttribute("aria-describedby", "pairing-availability-note");
+    expect(reason).toHaveTextContent("Only the owner can pair a phone.");
+    expect(createIntent).not.toHaveBeenCalled();
+  });
+
+  it("retains an active pairing session and local cancellation when availability changes", async () => {
+    const waitingForStatus = new Promise<PairingStatus>(() => {});
+    const { rerender } = render(<PairPhone
+      createIntent={async () => ({ httpsOrigin: "https://example.test", intentToken: "A".repeat(43), expiresInSeconds: 300 })}
+      getStatus={async () => waitingForStatus}
+      approveIntent={async () => undefined}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate QR code" }));
+    expect(await screen.findByTestId("pairing-qr-image")).toBeInTheDocument();
+
+    rerender(<PairPhone
+      canStart={false}
+      unavailableReason="Pairing is temporarily unavailable."
+      createIntent={async () => ({ httpsOrigin: "https://example.test", intentToken: "A".repeat(43), expiresInSeconds: 300 })}
+      getStatus={async () => waitingForStatus}
+      approveIntent={async () => undefined}
+    />);
+
+    expect(screen.getByTestId("pairing-qr-image")).toBeInTheDocument();
+    expect(screen.getByTestId("pairing-waiting")).toBeInTheDocument();
+    const cancel = screen.getByRole("button", { name: "Cancel pairing" });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(screen.queryByTestId("pairing-qr-image")).not.toBeInTheDocument();
+  });
+
+  it("retains claimed verification details and cancellation when availability changes", async () => {
+    const getStatus = async () => ({ claimed: true, approved: false, keyDigest: "b".repeat(64), sas: "123456", expiresInSeconds: 300 });
+    const createIntent = async () => ({ httpsOrigin: "https://example.test", intentToken: "A".repeat(43), expiresInSeconds: 300 });
+    const { rerender } = render(<PairPhone createIntent={createIntent} getStatus={getStatus} approveIntent={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate QR code" }));
+    expect(await screen.findByTestId("pairing-approve-prompt")).toBeInTheDocument();
+
+    rerender(<PairPhone
+      canStart={false}
+      unavailableReason="Pairing is temporarily unavailable."
+      createIntent={createIntent}
+      getStatus={getStatus}
+      approveIntent={async () => undefined}
+    />);
+
+    expect(screen.getByTestId("pairing-qr-image")).toBeInTheDocument();
+    expect(screen.getByTestId("pairing-sas-code")).toHaveTextContent("123456");
+    expect(screen.getByRole("button", { name: "Cancel pairing" })).toBeEnabled();
   });
 
   it("never enables approval for a malformed claimed SAS", async () => {
@@ -421,6 +506,68 @@ describe("desktop UI controls", () => {
   it("does not render main-window conversation controls in the composer", () => {
     render(<AppTitlebar isComposer onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} onToggleSidebar={() => {}} onNewMessage={() => {}} />);
     expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
+  });
+
+  it.each(["rail", "titlebar"] as const)("renders %s navigation buttons with badges and view behavior", (orientation) => {
+    const onView = vi.fn();
+    const onToggleList = vi.fn();
+    render(<NavButtons
+      orientation={orientation}
+      activeView="conversations"
+      onView={onView}
+      onToggleList={onToggleList}
+      listCollapsed={false}
+      threadListId="thread-list"
+      notificationUnread={100}
+      contactsPending={100}
+    />);
+    const navigation = screen.getByRole("navigation", { name: "Main navigation" });
+    const conversations = screen.getByRole("button", { name: "Conversations" });
+    expect(navigation).toHaveAttribute("data-orientation", orientation);
+    expect(conversations).toHaveAttribute("aria-current", "page");
+    expect(conversations).toHaveAttribute("aria-expanded", "true");
+    expect(conversations).toHaveAttribute("aria-controls", "thread-list");
+    expect(screen.getByRole("button", { name: "Contacts, 100 pending" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Notifications, 100 unread" })).toBeInTheDocument();
+    expect(screen.getAllByText("99+")).toHaveLength(2);
+    fireEvent.click(conversations);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(onToggleList).toHaveBeenCalledOnce();
+    expect(onView).toHaveBeenCalledWith("settings");
+    if (orientation === "titlebar") expect(navigation).toHaveAttribute("id", "titlebar-navigation");
+    else expect(navigation).not.toHaveAttribute("id");
+  });
+
+  it("places titlebar navigation after status on macOS and first on Windows and Linux", () => {
+    const navigation = <NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />;
+    const { rerender } = render(<AppTitlebar platform="macos" status={<span>Status node</span>} navigation={navigation} />);
+    const titlebar = document.getElementById("desktop-titlebar")!;
+    const titlebarNavigation = document.getElementById("titlebar-navigation")!;
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "trailing");
+    expect(titlebar.lastElementChild).toBe(titlebarNavigation);
+    expect(titlebarNavigation.previousElementSibling).toHaveAttribute("id", "titlebar-status");
+    expect(titlebarNavigation).not.toHaveAttribute("data-tauri-drag-region");
+
+    rerender(<AppTitlebar platform="windows" navigation={navigation} />);
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "leading");
+    expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
+
+    rerender(<AppTitlebar platform="linux" navigation={navigation} />);
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "leading");
+    expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
+  });
+
+  it("ignores titlebar navigation in the composer", () => {
+    render(<AppTitlebar isComposer platform="macos" navigation={<NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />} />);
+    expect(document.getElementById("titlebar-navigation")).not.toBeInTheDocument();
+    expect(document.getElementById("desktop-titlebar")).not.toHaveAttribute("data-navigation-placement");
+  });
+
+  it("keeps the desktop rail navigation when Panel uses shared nav buttons", () => {
+    render(<Panel activeView="conversations" onView={() => {}} threadListId="thread-list" />);
+    const rail = document.getElementById("desktop-rail");
+    expect(rail).toBeInTheDocument();
+    expect(within(rail!).getByRole("navigation", { name: "Main navigation" })).toHaveAttribute("data-orientation", "rail");
   });
 
   it("does not end a drag when its parent rerenders", () => {

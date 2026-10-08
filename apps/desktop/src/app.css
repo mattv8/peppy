@@ -554,7 +554,8 @@ html[data-window-rounded="false"] #composer-shell,
   color: var(--peppy-text-strong);
   font-size: 14px;
 }
-#settings-view section > p {
+#settings-view section > p:not(.settings-error),
+#settings-view .settings-disclosure > p {
   margin: 0;
   color: var(--peppy-text-secondary);
   font-size: 12px;
@@ -563,6 +564,12 @@ html[data-window-rounded="false"] #composer-shell,
   display: flex;
   align-items: end;
   gap: 8px;
+}
+#notification-settings .settings-control-row:has(> input[role="switch"]) {
+  align-items: center;
+}
+#notification-settings .settings-control-row > input[role="switch"] {
+  margin: 0;
 }
 .settings-control-row label {
   display: grid;
@@ -630,4 +637,51 @@ html[data-window-rounded="false"] #composer-shell,
 .settings-theme-row label {
   flex: 0 0 auto;
 }
-.settings-error { color: var(--peppy-error); font-size: 12px; }
+#settings-navigation-position {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+#settings-navigation-position legend {
+  padding: 0;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+.settings-field-hint {
+  margin: 0;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+.settings-error, #settings-view .settings-error { color: var(--peppy-error); font-size: 12px; }
+.settings-connection-summary {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-control-radius);
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-secondary);
+  font-family: var(--peppy-font-mono);
+  overflow-wrap: anywhere;
+}
+.settings-disclosure {
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-control-radius);
+  background: var(--peppy-surface-widget);
+}
+.settings-disclosure > summary {
+  padding: 8px;
+  cursor: pointer;
+  color: var(--peppy-text-primary);
+  font-size: 12px;
+}
+.settings-disclosure > summary:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+.settings-disclosure[open] > :not(summary) {
+  margin: 0 8px 8px;
+}

@@ -27,10 +27,17 @@ class ComposeDevelopmentTests(unittest.TestCase):
         }
         inherited = {
             key: value for key, value in os.environ.items()
-            if key not in {'BIND_ADDR', 'API_HOST_PORT', 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES'}
+            if key not in {'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL', 'PUBLIC_ATTACHMENT_URL', 'WEB_UI_ENABLED', 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES'}
             and not key.startswith('COMPOSE_')
         }
         return inherited | values | overrides
+
+    @staticmethod
+    def fixture_env(**overrides):
+        values = os.environ.copy()
+        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED"):
+            values.pop(name, None)
+        return values | overrides
 
     def render(self, *files, profile=None, **env):
         command = ["docker", "compose", "--env-file", "/dev/null"]
@@ -57,18 +64,29 @@ class ComposeDevelopmentTests(unittest.TestCase):
             result = self.render("docker-compose.yml", "infra/compose/compose.dev.yml")
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
-        self.assertEqual(set(config["services"]), {"postgres", "seaweedfs", "dev"})
+        self.assertEqual(set(config["services"]), {"postgres", "seaweedfs", "web", "dev"})
+        web = config["services"]["web"]
+        self.assertEqual(web["build"]["dockerfile"], "infra/docker/server.Dockerfile")
+        self.assertEqual(web["build"]["target"], "web-assets")
+        self.assertEqual(web["volumes"], [{"type": "volume", "source": "dev-web", "target": "/output", "volume": {}}])
         dev = config["services"]["dev"]
         self.assertEqual(dev["build"]["context"], str(ROOT))
         self.assertEqual(dev["build"]["dockerfile"], "infra/docker/development.Dockerfile")
         self.assert_root_source_mount(dev)
         self.assertEqual(dev["command"], ["run", "serve"])
         self.assertEqual(dev["environment"]["BIND_ADDR"], "0.0.0.0:8080")
+        self.assertEqual(dev["environment"]["PEPPY_WEB_CLIENT_ROOT"], "true")
+        self.assertEqual(dev["environment"]["PEPPY_WEB_CLIENT_DIR"], "/web")
         self.assertEqual(dev["ports"], [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 8080, "published": "7000", "protocol": "tcp"}])
         self.assertEqual(dev["depends_on"], {
             "postgres": {"condition": "service_healthy", "required": True},
             "seaweedfs": {"condition": "service_healthy", "required": True},
+            "web": {"condition": "service_completed_successfully", "required": True},
         })
+        web_mount = next(volume for volume in dev["volumes"] if volume["target"] == "/web")
+        self.assertEqual(web_mount["type"], "volume")
+        self.assertEqual(web_mount["source"], "dev-web")
+        self.assertTrue(web_mount["read_only"])
         self.assertEqual(dev["healthcheck"]["test"], ["CMD", "/home/developer/.local/lib/peppy/peppy-server", "healthcheck"])
         self.assertEqual(dev["healthcheck"]["start_period"], "30m0s")
         self.assertEqual(dev["environment"]["PEPPY_REPLAY_RETENTION_DAYS"], "30")
@@ -96,6 +114,12 @@ class ComposeDevelopmentTests(unittest.TestCase):
         self.assertEqual(dev["environment"]["PEPPY_REPLAY_RETENTION_DAYS"], "90")
         self.assertEqual(dev["environment"]["VAULT_ATTACHMENT_QUOTA_BYTES"], "1234")
         self.assertEqual(dev["ports"][0]["published"], "17000")
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_dev_overlay_can_disable_root_web_serving(self):
+        result = self.render("docker-compose.yml", "infra/compose/compose.dev.yml", WEB_UI_ENABLED="false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["services"]["dev"]["environment"]["PEPPY_WEB_CLIENT_ROOT"], "false")
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_base_production_service_set_is_unchanged(self):
@@ -155,6 +179,8 @@ class ComposeDevelopmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copy(ROOT / "justfile", root / "justfile")
+            (root / "infra/dev").mkdir(parents=True)
+            shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             (root / ".env").write_text("synthetic=1\n")
             tools = root / "tools"
             tools.mkdir()
@@ -163,11 +189,12 @@ class ComposeDevelopmentTests(unittest.TestCase):
             docker.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$PEPPY_DOCKER_LOG\"\n"
+                "case \"$*\" in *' build web dev'*) exit \"${BUILD_EXIT:-0}\";; esac\n"
                 "case \"$*\" in *' rm --stop --force api migrate'*) exit \"${RM_EXIT:-0}\";; esac\n"
                 "case \"$*\" in *' run --rm --no-deps dev run build server'*) exit \"${RUN_EXIT:-0}\";; esac\n"
             )
             docker.chmod(0o755)
-            env = os.environ | {"PATH": f"{tools}:{os.environ['PATH']}", "PEPPY_DOCKER_LOG": str(log)}
+            env = self.fixture_env(PATH=f"{tools}:{os.environ['PATH']}", PEPPY_DOCKER_LOG=str(log))
 
             for recipe in ("dev-up", "dev-down", "dev-build", "dev-test"):
                 result = subprocess.run(["just", recipe], cwd=root, text=True, capture_output=True, env=env)
@@ -175,7 +202,13 @@ class ComposeDevelopmentTests(unittest.TestCase):
 
             calls = log.read_text().splitlines()
             rm = "compose --env-file .env -f docker-compose.yml rm --stop --force api migrate"
-            self.assertLess(calls.index(rm), calls.index("compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml up --build --detach --wait --wait-timeout 1800"))
+            dev_rm = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml rm --stop --force web dev"
+            build = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml build web dev"
+            dev_up = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml up --detach --wait --wait-timeout 1800 --force-recreate dev"
+            self.assertLess(calls.index(build), calls.index(rm))
+            self.assertLess(calls.index(rm), calls.index(dev_rm))
+            self.assertLess(calls.index(dev_rm), calls.index(dev_up))
+            self.assertFalse(any(call.endswith(" web") and " up " in call for call in calls))
             self.assertEqual(calls.count(rm), 2)
             down = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml down"
             self.assertLess(calls.index(rm, calls.index(rm) + 1), calls.index(down))
@@ -188,6 +221,76 @@ class ComposeDevelopmentTests(unittest.TestCase):
             self.assertEqual(log.read_text().splitlines()[-1], rm)
 
             log.unlink()
+            failure = subprocess.run(["just", "dev-up"], cwd=root, text=True, capture_output=True, env=env | {"BUILD_EXIT": "1"})
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertEqual(log.read_text().splitlines()[-1], build)
+            self.assertFalse(any(" rm --stop --force" in call for call in log.read_text().splitlines()))
+
+            log.unlink()
             failure = subprocess.run(["just", "dev-build"], cwd=root, text=True, capture_output=True, env=env | {"RUN_EXIT": "1"})
             self.assertNotEqual(failure.returncode, 0)
             self.assertEqual(log.read_text().splitlines()[-1], "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml run --rm --no-deps dev run build server")
+
+    def test_dev_up_rejects_malformed_web_ui_before_service_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy(ROOT / "justfile", root / "justfile")
+            helper_directory = root / "infra/dev"
+            helper_directory.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/dev/dev_port.py", helper_directory / "dev_port.py")
+            (root / ".env").write_text("WEB_UI_ENABLED=maybe\n")
+            tools = root / "tools"
+            tools.mkdir()
+            log = root / "docker.log"
+            docker = tools / "docker"
+            docker.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in *'compose version'*) exit 0;; esac\n"
+                "printf '%s\\n' \"$*\" >> \"$PEPPY_DOCKER_LOG\"\n"
+            )
+            docker.chmod(0o755)
+            result = subprocess.run(
+                ["just", "dev-up"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=self.fixture_env(PATH=f"{tools}:{os.environ['PATH']}", PEPPY_DOCKER_LOG=str(log)),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("WEB_UI_ENABLED must be true, false, 1, or 0", result.stderr)
+            self.assertFalse(log.exists())
+
+    def test_smoke_infra_uses_the_resolved_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy(ROOT / "justfile", root / "justfile")
+            helper_directory = root / "infra/dev"
+            helper_directory.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/dev/dev_port.py", helper_directory / "dev_port.py")
+            (root / ".env").write_text(
+                "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100\n"
+            )
+            tools = root / "tools"
+            tools.mkdir()
+            docker_log = root / "docker.log"
+            curl_log = root / "curl.log"
+            docker = tools / "docker"
+            docker.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PEPPY_DOCKER_LOG\"\n")
+            curl = tools / "curl"
+            curl.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PEPPY_CURL_LOG\"\n")
+            docker.chmod(0o755)
+            curl.chmod(0o755)
+            result = subprocess.run(
+                ["just", "smoke-infra"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                env=self.fixture_env(
+                    PATH=f"{tools}:{os.environ['PATH']}",
+                    PEPPY_DOCKER_LOG=str(docker_log),
+                    PEPPY_CURL_LOG=str(curl_log),
+                ),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("http://127.0.0.1:7100/healthz", curl_log.read_text())
+            self.assertIn("http://127.0.0.1:7100/readyz", curl_log.read_text())

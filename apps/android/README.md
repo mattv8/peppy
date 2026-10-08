@@ -44,6 +44,16 @@ For group MMS replies, the app reads the default SMS SIM's own number from the c
 
 **Rust library profile:** Set `PEPPY_ANDROID_NATIVE_PROFILE=debug` (default) or `release` to control whether the Rust-native bindings library is built with optimizations. The artifact workflow explicitly selects `release`; developer and local smoke tests default to `debug`. Profile selection does not change runtime security gates or debug origin checks.
 
+## Build backends
+
+Use `just android-build` from the repository root. With `PEPPY_ANDROID_BUILD_BACKEND` unset, empty, or set to `auto`, it builds natively on macOS and uses Docker on Linux or Windows via WSL. Set the variable to `native` or `docker` to select a backend explicitly. Native builds are supported only on macOS and fail with setup guidance on other hosts; they do not silently use Docker instead.
+
+The native macOS route requires JDK 17, the repository-pinned Rust toolchain with `aarch64-linux-android` and `x86_64-linux-android` targets, `pkg-config`, host `libsodium`, and Android SDK command-line tools with API 36, build-tools 35.0.0, platform-tools, and NDK 27.2.12479018. It resolves the SDK from `ANDROID_SDK_ROOT`, `ANDROID_HOME`, or `~/Library/Android/sdk`, and uses `JAVA_HOME` or `/usr/libexec/java_home -v 17` for JDK 17. See [Android build backends](../../CONTRIBUTING.md#android-build-backends) for the setup commands and license gate.
+
+Native `android-build` does not require Docker or `.env`. `just android-run` still starts the container backend with `just dev-up`, so it requires both. `just` reads optional backend, artifact, profile, and license settings from ignored `.opencode/dev/android.env`; direct `bash infra/dev/android.sh ...` calls require explicit shell exports instead.
+
+`just android-build` writes only `app-debug.apk`; `just android-test` routes through the Android helper with the same backend selector, runs the native verifier and five Gradle tasks, then writes the debug and instrumentation APKs. Artifacts default to `.opencode/dev/artifacts/android/` and honor `PEPPY_ANDROID_ARTIFACTS`. Native builds use the checkout `target` cache by default and regenerate tracked Rust-owned Kotlin plus ignored JNI libraries in the checkout. Inspect generated diffs after a native build. Docker keeps generation in its private workspace. Native host tooling avoids Linux QEMU, although some NDK tools can still need Rosetta.
+
 ## Generate and verify
 
 Generated Kotlin is Rust-owned output under `app/src/main/java`; do not edit it manually. From the repository root:

@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-# The Emscripten SDK only publishes Linux x86_64 tools. Build browser assets on
-# that fixed platform; the resulting JavaScript and WASM are portable and can
-# be copied into both amd64 and arm64 server-image runtimes.
-FROM --platform=linux/amd64 rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS web-build
+# Browser assets are portable, but their build toolchain must run natively on
+# the BuildKit builder platform.
+FROM --platform=$BUILDPLATFORM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS web-build
+ARG BUILDARCH
+ARG BUILDPLATFORM
 ARG EMSDK_VERSION=6.0.11
 ARG EMSDK_REVISION=dd8e25632640cfc1fb570c7fa4cc374e8a5e5a72
 ARG NODE_VERSION=24.21.0
@@ -47,10 +48,15 @@ COPY packages/contracts ./packages/contracts
 COPY packages/desktop-ui ./packages/desktop-ui
 COPY packages/generated ./packages/generated
 COPY packages/mobile-design ./packages/mobile-design
-RUN --mount=type=cache,id=peppy-browser-core-linux-amd64,target=/src/target/browser-core \
-    --mount=type=cache,id=peppy-pnpm-linux-amd64,target=/root/.cache/pnpm \
+RUN --mount=type=cache,id=peppy-browser-core-${BUILDARCH},target=/src/target/browser-core \
+    --mount=type=cache,id=peppy-pnpm-${BUILDARCH},target=/root/.cache/pnpm \
     CARGO_TARGET_DIR=/src/target/browser-core \
     bash infra/build/build-web-client.sh
+
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS web-assets
+COPY infra/dev/copy-web-assets.sh /usr/local/bin/copy-web-assets
+COPY --from=web-build /src/apps/web/dist /web
+ENTRYPOINT ["/usr/local/bin/copy-web-assets"]
 
 FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS build
 ARG TARGETPLATFORM

@@ -19,8 +19,15 @@ class AndroidHelperTests(unittest.TestCase):
 
     def run_script(self, script, *args, env=None):
         values = os.environ.copy()
-        values.pop("PEPPY_ANDROID_AVD", None)
-        values.pop("PEPPY_ANDROID_SERIAL", None)
+        for name in (
+            "PEPPY_ANDROID_AVD", "PEPPY_ANDROID_SERIAL", "PEPPY_ANDROID_BUILD_BACKEND",
+            "RUNNING_IN_CONTAINER", "PEPPY_ANDROID_CONTAINER", "ANDROID_SDK_ROOT",
+            "ANDROID_HOME", "ANDROID_NDK_HOME", "JAVA_HOME", "CARGO_TARGET_DIR",
+            "PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_DEBUG_SERVER", "API_HOST_PORT", "PUBLIC_API_URL",
+            "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
+        ):
+            values.pop(name, None)
+        values["PEPPY_ANDROID_BUILD_BACKEND"] = "docker"
         values.update(env or {})
         return subprocess.run(
             ["bash", str(script), *args],
@@ -446,6 +453,27 @@ class AndroidHelperTests(unittest.TestCase):
             self.assertIn("reverse tcp:7000 tcp:7000", calls)
             self.assertIn("shell am start -W -n dev.peppy.mobile/.MainActivity", calls)
 
+    def test_open_uses_configured_development_port_by_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp)
+            repo = temp / "repo"
+            script = repo / "infra/dev/android.sh"
+            script.parent.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
+            (repo / ".env").write_text(
+                "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100\n"
+            )
+            sdk = temp / "sdk"
+            (sdk / "platform-tools").mkdir(parents=True)
+            log = temp / "adb.log"
+            adb = sdk / "platform-tools/adb"
+            adb.write_text("#!/bin/sh\necho \"$@\" >> \"$ADB_LOG\"\ncase \"$*\" in *devices*) echo 'emulator-5554 device';; *getprop*) echo x86_64;; *'am start'*) echo 'Status: ok';; esac\n")
+            adb.chmod(0o755)
+            result = self.run_script(script, "open", env={"ANDROID_SDK_ROOT": str(sdk), "ADB_LOG": str(log), "PEPPY_DEBUG_SERVER": ""})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("reverse tcp:7100 tcp:7100", log.read_text())
+
     def test_open_refuses_am_error_even_when_adb_exits_zero(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); sdk = temp / "sdk"
@@ -500,3 +528,144 @@ class AndroidHelperTests(unittest.TestCase):
             result = self.run_helper("open", env={"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_SERIAL": "device-1", "ADB_LOG": str(log)})
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(log.exists())
+
+    def create_android_fixture(self, temp, include_test_apk=False, gradle_exit_code=0):
+        temp = pathlib.Path(temp)
+        bin_dir = temp / "bin"
+        bin_dir.mkdir()
+        artifacts = temp / "artifacts"
+        artifacts.mkdir()
+        repo = temp / "repo"
+        script = repo / "infra/dev/android.sh"
+        script.parent.mkdir(parents=True)
+        shutil.copy(ROOT / "infra/dev/android.sh", script)
+        gradle_log = temp / "gradle.log"
+        verify_log = temp / "verify.log"
+
+        sdkmanager = bin_dir / "sdkmanager"
+        sdkmanager.write_text("#!/bin/sh\nexit 0\n")
+        sdkmanager.chmod(0o755)
+
+        gradlew = repo / "apps/android/gradlew"
+        gradlew.parent.mkdir(parents=True)
+        gradle_script = "#!/bin/sh\necho \"$@\" >> \"$GRADLE_LOG\"\n"
+        if gradle_exit_code == 0:
+            gradle_script += (
+                "root=$(cd \"$(dirname \"$0\")/../..\" && pwd)\n"
+                "mkdir -p \"$root/apps/android/app/build/outputs/apk/debug\"\n"
+                "touch \"$root/apps/android/app/build/outputs/apk/debug/app-debug.apk\"\n"
+            )
+            if include_test_apk:
+                gradle_script += (
+                    "mkdir -p \"$root/apps/android/app/build/outputs/apk/androidTest/debug\"\n"
+                    "touch \"$root/apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk\"\n"
+                )
+        gradlew.write_text(f"{gradle_script}exit {gradle_exit_code}\n")
+        gradlew.chmod(0o755)
+
+        verifier = repo / "infra/compose/verify-android-native.sh"
+        verifier.parent.mkdir(parents=True)
+        verifier.write_text("#!/bin/sh\necho verify >> \"$VERIFY_LOG\"\n")
+        verifier.chmod(0o755)
+
+        return {
+            "artifacts": artifacts,
+            "gradle_log": gradle_log,
+            "script": script,
+            "verify_log": verify_log,
+            "env": {
+                "ANDROID_NDK_HOME": "/fake/ndk",
+                "GRADLE_LOG": str(gradle_log),
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "PEPPY_ACCEPT_ANDROID_LICENSES": "1",
+                "PEPPY_ANDROID_ARTIFACTS": str(artifacts),
+                "PEPPY_ANDROID_CONTAINER": "0",
+                "RUNNING_IN_CONTAINER": "1",
+                "VERIFY_LOG": str(verify_log),
+            },
+        }
+
+    def test_container_build_executes_app_only_gradle_task(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp)
+            result = self.run_script(fixture["script"], "build", env=fixture["env"])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            gradle_calls = fixture["gradle_log"].read_text()
+            self.assertIn("assembleDebug", gradle_calls)
+            self.assertNotIn("assembleDebugAndroidTest", gradle_calls)
+            self.assertNotIn("jvm-smoke", gradle_calls)
+            self.assertNotIn("testDebugUnitTest", gradle_calls)
+            self.assertNotIn("lintDebug", gradle_calls)
+            self.assertEqual(fixture["verify_log"].read_text(), "verify\n")
+            self.assertTrue((fixture["artifacts"] / "app-debug.apk").exists())
+            self.assertFalse((fixture["artifacts"] / "app-debug-androidTest.apk").exists())
+
+    def test_container_test_executes_all_ci_tasks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp, include_test_apk=True)
+            result = self.run_script(fixture["script"], "test", env=fixture["env"])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            gradle_calls = fixture["gradle_log"].read_text()
+            for task in ("jvm-smoke:run", "testDebugUnitTest", "lintDebug", "assembleDebug", "assembleDebugAndroidTest"):
+                self.assertIn(task, gradle_calls)
+            self.assertEqual(fixture["verify_log"].read_text(), "verify\n")
+            self.assertTrue((fixture["artifacts"] / "app-debug.apk").exists())
+            self.assertTrue((fixture["artifacts"] / "app-debug-androidTest.apk").exists())
+
+    def test_build_propagates_gradle_failure_without_artifact_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp, gradle_exit_code=37)
+            result = self.run_script(fixture["script"], "build", env=fixture["env"])
+
+            self.assertEqual(result.returncode, 37)
+            self.assertEqual(fixture["verify_log"].read_text(), "verify\n")
+            self.assertFalse((fixture["artifacts"] / "app-debug.apk").exists())
+
+    def test_test_propagates_gradle_failure_without_artifact_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp, gradle_exit_code=37)
+            result = self.run_script(fixture["script"], "test", env=fixture["env"])
+
+            self.assertEqual(result.returncode, 37)
+            self.assertEqual(fixture["verify_log"].read_text(), "verify\n")
+            self.assertFalse((fixture["artifacts"] / "app-debug.apk").exists())
+            self.assertFalse((fixture["artifacts"] / "app-debug-androidTest.apk").exists())
+
+    def test_host_test_dispatches_to_docker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_android_fixture(temp)
+            repo = fixture["script"].parents[2]
+            (repo / ".env").touch()
+            docker_log = pathlib.Path(temp) / "docker.log"
+            docker = pathlib.Path(temp) / "bin/docker"
+            docker.write_text("#!/bin/sh\necho \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
+            docker.chmod(0o755)
+            env = fixture["env"] | {
+                "DOCKER_LOG": str(docker_log),
+                "PEPPY_ANDROID_CONTAINER": "0",
+                "RUNNING_IN_CONTAINER": "0",
+            }
+
+            result = self.run_script(fixture["script"], "test", env=env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            docker_calls = docker_log.read_text()
+            self.assertIn("compose version", docker_calls)
+            self.assertIn("run --build --rm android run test", docker_calls)
+
+    def test_smoke_requires_explicit_test_command_for_missing_apks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp)
+            sdk = temp / "sdk"
+            (sdk / "platform-tools").mkdir(parents=True)
+            adb = sdk / "platform-tools" / "adb"
+            adb.write_text("#!/bin/sh\ncase \"$*\" in *devices*) echo 'emulator-5554 device' ;; *getprop*) echo x86_64 ;; esac\n")
+            adb.chmod(0o755)
+            artifacts = temp / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "app-debug.apk").touch()
+            result = self.run_helper("smoke", env={"ANDROID_SDK_ROOT": str(sdk), "PEPPY_ANDROID_ARTIFACTS": str(artifacts)})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bash infra/dev/android.sh test", result.stderr)

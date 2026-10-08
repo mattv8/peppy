@@ -3,6 +3,7 @@ set -euo pipefail
 umask 077
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+CALLER_CWD=$(pwd -P)
 if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
     ARTIFACTS=${PEPPY_ANDROID_ARTIFACTS:-/artifacts/android}
 else
@@ -11,9 +12,21 @@ fi
 AVD_NAME=${PEPPY_ANDROID_AVD:-}
 BOOT_TIMEOUT=${PEPPY_ANDROID_BOOT_TIMEOUT:-180}
 
-usage() { echo "Usage: bash infra/dev/android.sh {build|emulator|deploy|open|smoke|sms} [args...]" >&2; }
+usage() { echo "Usage: bash infra/dev/android.sh {build|test|emulator|deploy|open|smoke|sms} [args...]" >&2; }
 die() { echo "android: $*" >&2; exit 1; }
 is_wsl() { [[ -n ${WSL_INTEROP:-} ]] || grep -qi microsoft /proc/sys/kernel/osrelease /proc/version 2>/dev/null; }
+absolute_path() {
+    case $1 in
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s/%s\n' "$CALLER_CWD" "$1" ;;
+    esac
+}
+normalize_build_paths() {
+    if [[ -n ${PEPPY_ANDROID_ARTIFACTS:-} ]]; then ARTIFACTS=$(absolute_path "$PEPPY_ANDROID_ARTIFACTS"); fi
+    if [[ -n ${CARGO_TARGET_DIR:-} ]]; then CARGO_TARGET_DIR=$(absolute_path "$CARGO_TARGET_DIR")
+    else CARGO_TARGET_DIR="$ROOT/target"; fi
+    export CARGO_TARGET_DIR
+}
 
 windows_sdk_root() {
     # shellcheck disable=SC2016 # PowerShell variables deliberately reach powershell.exe verbatim.
@@ -55,7 +68,9 @@ adb_serial() {
 apk() { printf '%s/%s\n' "$ARTIFACTS" "$1"; }
 apk_for_adb() { if is_wsl; then wslpath -w "$(apk "$1")"; else apk "$1"; fi; }
 ensure_debug_loopback() {
-    local serial=$1 server=${PEPPY_DEBUG_SERVER:-http://127.0.0.1:7000} host port
+    local serial=$1 server host port
+    if [[ -n ${PEPPY_DEBUG_SERVER:-} ]]; then server=$PEPPY_DEBUG_SERVER
+    else server=$(python3 "$ROOT/infra/dev/dev_port.py" smoke-url "$ROOT/.env"); fi
     if [[ ! $server =~ ^http://(127\.0\.0\.1|localhost):([0-9]{1,5})$ ]]; then
         die "PEPPY_DEBUG_SERVER must be a loopback http URL with an explicit port"
     fi
@@ -69,9 +84,10 @@ ensure_debug_loopback() {
     fi
     adb -s "$serial" reverse "tcp:$port" "tcp:$port"
 }
-container_build() {
-    command -v docker >/dev/null || die "docker is required for android-build"
-    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-build"
+container_run() {
+    local cmd=$1
+    command -v docker >/dev/null || die "docker is required for android-$cmd"
+    docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-$cmd"
     test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
     mkdir -p "$ARTIFACTS"; chmod 0700 "$ARTIFACTS"
     local uid gid volume
@@ -79,35 +95,114 @@ container_build() {
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
-    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run build
+    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run "$cmd"
 }
 accept_licenses() {
     local status
     set +o pipefail
-    yes | sdkmanager --licenses >/dev/null
+    yes | run_sdkmanager --licenses >/dev/null
     status=${PIPESTATUS[1]}
     set -o pipefail
     (( status == 0 )) || die "Android SDK license acceptance failed"
 }
-prepare_sdk() {
-    : "${ANDROID_NDK_HOME:?Android NDK must be installed in the builder image}"
+require_license_approval() {
     : "${PEPPY_ACCEPT_ANDROID_LICENSES:?Set PEPPY_ACCEPT_ANDROID_LICENSES=1 after reviewing Android SDK licenses}"
     [[ $PEPPY_ACCEPT_ANDROID_LICENSES == 1 ]] || die "PEPPY_ACCEPT_ANDROID_LICENSES must equal 1"
-    accept_licenses
-    sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools" "ndk;27.2.12479018"
 }
-build() {
-    if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
-        prepare_sdk
-        bash infra/compose/verify-android-native.sh
-        (cd apps/android && ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest)
+run_sdkmanager() { "$SDKMANAGER" "$@"; }
+prepare_sdk() {
+    : "${ANDROID_NDK_HOME:?Android NDK must be installed in the builder image}"
+    require_license_approval
+    SDKMANAGER=${SDKMANAGER:-sdkmanager}
+    accept_licenses
+    run_sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools" "ndk;27.2.12479018"
+}
+find_sdkmanager() {
+    local candidate
+    for candidate in "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_SDK_ROOT"/cmdline-tools/*/bin/sdkmanager; do
+        if test -x "$candidate"; then printf '%s\n' "$candidate"; return; fi
+    done
+    command -v sdkmanager 2>/dev/null || die "Android SDK command-line tools are missing; install them under $ANDROID_SDK_ROOT/cmdline-tools/latest"
+}
+require_jdk17() {
+    local java_path
+    if [[ -n ${JAVA_HOME:-} ]]; then JAVA_HOME=$(absolute_path "$JAVA_HOME")
+    else JAVA_HOME=$(/usr/libexec/java_home -v 17 2>/dev/null || true); fi
+    test -n "$JAVA_HOME" || die "JDK 17 is required; set JAVA_HOME or install it with 'brew install openjdk@17'"
+    java_path="$JAVA_HOME/bin/java"
+    test -x "$java_path" || die "JDK 17 java executable is missing: $java_path"
+    "$java_path" -version 2>&1 | grep -Eq 'version "17\.|openjdk 17' || die "JAVA_HOME must name a JDK 17: $JAVA_HOME"
+    export JAVA_HOME
+}
+native_preflight() {
+    local sdk_root target
+    require_license_approval
+    sdk_root=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-"$HOME/Library/Android/sdk"}}
+    ANDROID_SDK_ROOT=$(absolute_path "$sdk_root")
+    ANDROID_HOME=$ANDROID_SDK_ROOT
+    export ANDROID_SDK_ROOT ANDROID_HOME
+    if [[ -n ${ANDROID_NDK_HOME:-} ]]; then ANDROID_NDK_HOME=$(absolute_path "$ANDROID_NDK_HOME")
+    else ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"; fi
+    export ANDROID_NDK_HOME
+    SDKMANAGER=$(find_sdkmanager)
+    export SDKMANAGER
+    require_jdk17
+    command -v cargo >/dev/null || die "Rust Cargo is required; install Rust with rustup"
+    command -v rustup >/dev/null || die "rustup is required; install Rust with rustup"
+    (
+        cd "$ROOT"
+        for target in aarch64-linux-android x86_64-linux-android; do
+            rustup target list --installed | grep -Fx "$target" >/dev/null || die "Rust target $target is missing; run 'rustup target add $target'"
+        done
+    )
+    command -v pkg-config >/dev/null || die "pkg-config and libsodium are required; run 'brew install pkg-config libsodium'"
+    pkg-config --exists libsodium || die "libsodium is required; run 'brew install libsodium'"
+}
+run_build_body() {
+    local command=$1
+    bash infra/compose/verify-android-native.sh
+    if [[ $command == build ]]; then
+        (cd apps/android && ./gradlew --no-daemon :app:assembleDebug)
+        mkdir -p "$ARTIFACTS"
+        install -m 0644 apps/android/app/build/outputs/apk/debug/app-debug.apk "$ARTIFACTS/app-debug.apk"
+    else
+        (cd apps/android && ./gradlew --no-daemon :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
         mkdir -p "$ARTIFACTS"
         install -m 0644 apps/android/app/build/outputs/apk/debug/app-debug.apk "$ARTIFACTS/app-debug.apk"
         install -m 0644 apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk "$ARTIFACTS/app-debug-androidTest.apk"
-    else
-        container_build
     fi
 }
+run_native() {
+    local command=$1
+    native_preflight
+    echo "android: using native Android backend; it regenerates Rust-owned Kotlin sources in this checkout" >&2
+    cd "$ROOT"
+    prepare_sdk
+    run_build_body "$command"
+}
+run_android() {
+    local command=$1 backend host
+    if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
+        echo "android: using in-container Android backend" >&2
+        prepare_sdk
+        run_build_body "$command"
+        return
+    fi
+    normalize_build_paths
+    backend=${PEPPY_ANDROID_BUILD_BACKEND:-auto}
+    case $backend in auto|native|docker) ;; *) die "PEPPY_ANDROID_BUILD_BACKEND must be auto, native, or docker" ;; esac
+    host=$(uname -s)
+    if [[ $backend == auto ]]; then [[ $host == Darwin ]] && backend=native || backend=docker; fi
+    if [[ $backend == native ]]; then
+        [[ $host == Darwin ]] || die "PEPPY_ANDROID_BUILD_BACKEND=native is supported only on macOS; use docker on $host"
+        run_native "$command"
+    else
+        echo "android: using Docker Android backend" >&2
+        container_run "$command"
+    fi
+}
+build() { run_android build; }
+test_android() { run_android test; }
 serial_matches_avd() { [[ $(adb -s "$1" shell getprop ro.boot.qemu.avd_name 2>/dev/null | tr -d '\r') == "$AVD_NAME" ]]; }
 running_avd_name() {
     local serial=$1 name
@@ -245,7 +340,7 @@ open() {
 smoke() {
     local serial output status
     serial=$(adb_serial)
-    if ! test -f "$(apk app-debug.apk)" || ! test -f "$(apk app-debug-androidTest.apk)"; then die "APK(s) missing; run android-build first"; fi
+    if ! test -f "$(apk app-debug.apk)" || ! test -f "$(apk app-debug-androidTest.apk)"; then die "APK(s) missing; run 'bash infra/dev/android.sh test' to build test APKs first"; fi
     ensure_supported_abi "$serial"
     ensure_debug_loopback "$serial"
     adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"
@@ -260,6 +355,6 @@ smoke() {
 sms() { local serial; serial=$(adb_serial); [[ $# == 2 && -n $1 && -n $2 ]] || die "Usage: android.sh sms <number> <message>"; echo "Synthetic emulator SMS simulation only; no carrier message is sent." >&2; adb -s "$serial" emu sms send "$1" "$2"; }
 
 case ${1:-} in
-    build) build ;; test) [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]] || die "test is only available inside the Android runner"; prepare_sdk; cargo build --locked -p peppy-mobile-bindings; (cd apps/android && ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug) ;;
+    build) build ;; test) test_android ;;
     emulator) emulator ;; deploy) deploy ;; open) open ;; smoke) smoke ;; sms) shift; sms "$@" ;; *) usage; exit 64 ;;
 esac

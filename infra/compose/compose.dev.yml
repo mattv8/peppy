@@ -4,6 +4,15 @@ services:
   api: !reset null
   migrate: !reset null
 
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/server.Dockerfile
+      target: web-assets
+    restart: "no"
+    volumes:
+      - dev-web:/output
+
   dev:
     image: peppy-dev:${DEV_UID:-1000}-${DEV_GID:-1000}
     build:
@@ -27,6 +36,8 @@ services:
       PUBLIC_API_URL: ${PUBLIC_API_URL:?set in synthetic environment}
       PUBLIC_ATTACHMENT_URL: ${PUBLIC_ATTACHMENT_URL:?set in synthetic environment}
       BIND_ADDR: ${BIND_ADDR:-0.0.0.0:8080}
+      PEPPY_WEB_CLIENT_ROOT: ${WEB_UI_ENABLED:-true}
+      PEPPY_WEB_CLIENT_DIR: /web
       PEPPY_REPLAY_RETENTION_DAYS: ${PEPPY_REPLAY_RETENTION_DAYS:-30}
       VAULT_ATTACHMENT_QUOTA_BYTES: ${VAULT_ATTACHMENT_QUOTA_BYTES:-536870912}
       PEPPY_SIMULATOR_PASSPHRASE: ${PEPPY_SIMULATOR_PASSPHRASE:-}
@@ -35,6 +46,8 @@ services:
         condition: service_healthy
       seaweedfs:
         condition: service_healthy
+      web:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:${API_HOST_PORT:-7000}:8080"
     healthcheck:
@@ -49,6 +62,7 @@ services:
       - dev-cargo:/home/developer/.cargo
       - dev-pnpm:/home/developer/.local/share/pnpm
       - dev-target:/workspace/target
+      - dev-web:/web:ro
     networks: [private, edge]
 
   android:
@@ -85,6 +99,7 @@ volumes:
   dev-target:
     name: peppy-dev-target-${DEV_UID:-1000}-${DEV_GID:-1000}
     external: true
+  dev-web:
   android-sdk:
     name: peppy-android-sdk-${DEV_UID:-1000}-${DEV_GID:-1000}
     external: true

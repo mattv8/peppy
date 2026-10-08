@@ -24,6 +24,9 @@
     <string name="peppy_carrier_not_encrypted">Carrier SMS/MMS not end-to-end encrypted</string>
     <string name="peppy_onboarding_headline">Welcome to Peppy</string>
     <string name="peppy_onboarding_body">Connect your devices and choose what to sync.</string>
+    <string name="peppy_onboarding_mode_selector">Server</string>
+    <string name="peppy_onboarding_mode_hosted">Peppy Hosted</string>
+    <string name="peppy_onboarding_mode_self_hosted">Self-hosted</string>
     <string name="peppy_onboarding_hosted_cta">Get started</string>
     <string name="peppy_onboarding_hosted_sub">Peppy Hosted — we run the server for you</string>
     <string name="peppy_onboarding_self_hosted_cta">Use my own server</string>

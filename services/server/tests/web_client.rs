@@ -20,11 +20,10 @@ fn app_for_host(host: &str) -> (TempDir, Router) {
     app_for_host_and_account_url(host, None)
 }
 
-fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempDir, Router) {
+fn assets() -> TempDir {
     let assets = TempDir::new().unwrap();
     fs::write(assets.path().join("index.html"), "<main>Peppy</main>").unwrap();
     fs::create_dir(assets.path().join("assets")).unwrap();
-    fs::create_dir(assets.path().join("core")).unwrap();
     fs::write(
         assets.path().join("assets/app-1234abcd.js"),
         "console.log(1)",
@@ -35,6 +34,7 @@ fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempD
         "self.onconnect = () => {};",
     )
     .unwrap();
+    fs::create_dir(assets.path().join("core")).unwrap();
     fs::write(
         assets.path().join("core/peppy_browser_core.wasm"),
         [0, 97, 115, 109],
@@ -46,6 +46,32 @@ fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempD
     )
     .unwrap();
     fs::write(assets.path().join("assets/peppy.ttf"), []).unwrap();
+    assets
+}
+
+fn app_for_config(config: WebClientConfig) -> Router {
+    let inner = Router::new()
+        .route("/v1/ping", get(|| async { "api" }))
+        .route("/healthz", get(|| async { "healthy" }))
+        .route("/readyz", get(|| async { "ready" }))
+        .route("/__release", get(|| async { "release" }))
+        .route("/file/x", get(|| async { "file" }))
+        .fallback(|| async { StatusCode::IM_A_TEAPOT });
+    wrap(inner, config)
+}
+
+fn root_app() -> (TempDir, Router) {
+    let assets = assets();
+    let config = WebClientConfig::for_all_hosts(
+        assets.path().into(),
+        Url::parse("http://localhost:7000/v1").unwrap(),
+    )
+    .unwrap();
+    (assets, app_for_config(config))
+}
+
+fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempDir, Router) {
+    let assets = assets();
     let config = WebClientConfig::new(
         host.into(),
         assets.path().into(),
@@ -58,11 +84,7 @@ fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempD
             .unwrap(),
         None => config,
     };
-    let inner = Router::new()
-        .route("/v1/ping", get(|| async { "api" }))
-        .route("/healthz", get(|| async { "healthy" }))
-        .fallback(|| async { StatusCode::IM_A_TEAPOT });
-    (assets, wrap(inner, config))
+    (assets, app_for_config(config))
 }
 
 #[tokio::test]
@@ -193,6 +215,122 @@ async fn serves_app_assets_config_and_api_only_on_the_configured_host() {
         .await
         .unwrap();
     assert_eq!(other_host.status(), StatusCode::IM_A_TEAPOT);
+}
+
+#[tokio::test]
+async fn root_mode_serves_all_hosts_without_parsing_host_and_keeps_api_errors() {
+    let (_assets, app) = root_app();
+    for host in [
+        None,
+        Some("community.example.test"),
+        Some("bad host"),
+        Some("app.example.test:99999"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("/", host, "GET"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{host:?}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            response
+                .headers()
+                .contains_key(header::CONTENT_SECURITY_POLICY)
+        );
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+    }
+
+    let config = app
+        .clone()
+        .oneshot(request("/web/config.json", None, "GET"))
+        .await
+        .unwrap();
+    assert_eq!(config.status(), StatusCode::OK);
+    assert_eq!(
+        config
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        br#"{"apiOrigin":"http://localhost:7000/","version":1}"#,
+    );
+
+    let api_error = app
+        .clone()
+        .oneshot(request("/v1/missing", None, "GET"))
+        .await
+        .unwrap();
+    assert_eq!(api_error.status(), StatusCode::IM_A_TEAPOT);
+    assert_ne!(
+        api_error.headers().get(header::CONTENT_TYPE),
+        Some(&axum::http::HeaderValue::from_static(
+            "text/html; charset=utf-8"
+        ))
+    );
+
+    for (path, method, status) in [
+        ("/v1/x", "POST", StatusCode::IM_A_TEAPOT),
+        ("/healthz", "GET", StatusCode::OK),
+        ("/readyz", "GET", StatusCode::OK),
+        ("/__release", "GET", StatusCode::OK),
+        ("/file/x", "GET", StatusCode::OK),
+        ("/account", "GET", StatusCode::NOT_FOUND),
+        ("/hosted", "GET", StatusCode::NOT_FOUND),
+        ("/signin", "GET", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(path, None, method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
+
+    let head = app
+        .clone()
+        .oneshot(request("/assets/app-1234abcd.js", None, "HEAD"))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(
+        head.headers()[header::CONTENT_TYPE],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(
+        head.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    assert!(head.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+
+    for (path, method, status) in [
+        (
+            "/assets/app-1234abcd.js",
+            "POST",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("/%2e%2e/secret", "GET", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(path, None, method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
 }
 
 #[tokio::test]

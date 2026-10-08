@@ -230,8 +230,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     });
   }, [fixedOrigin, mode, route, join.state, selfHostedOrigin]);
 
+  const recordModeChoice = (next: Mode) => {
+    if (!fixedOrigin) window.localStorage.setItem("peppy.setup.mode", next);
+  };
   const selectMode = (next: Mode) => {
-    window.localStorage.setItem("peppy.setup.mode", next);
+    recordModeChoice(next);
     if (next !== mode) {
       resetJoin();
       setHostedPath("chooser");
@@ -240,8 +243,13 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     onMode(next);
   };
   const chooseExisting = () => {
+    recordModeChoice("hosted");
     setHostedPath("existing");
     void beginJoin(null);
+  };
+  const chooseNew = () => {
+    recordModeChoice("hosted");
+    setHostedPath("new");
   };
   const backToChooser = () => {
     signInEpoch.current += 1;
@@ -254,6 +262,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     if (!account?.signedIn && mode === "hosted") setHostedPath("chooser");
   };
   const signIn = async () => {
+    recordModeChoice("hosted");
     const epoch = ++signInEpoch.current;
     setSignInError(false);
     setBusy(true);
@@ -268,6 +277,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     } finally {
       if (epoch === signInEpoch.current) setBusy(false);
     }
+  };
+  const startProvisioning = () => {
+    recordModeChoice("hosted");
+    provision();
+  };
+  const connectSelfHosted = () => {
+    recordModeChoice("self-hosted");
+    setSelfHostedOrigin(validOrigin);
+    void beginJoin(validOrigin);
   };
   const confirmJoin = async () => {
     if (!verified) return;
@@ -309,18 +327,18 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     const hostedBrowser = Boolean(fixedOrigin && accountUrl);
     const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
     const body = hostedBrowser ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
-    content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={() => { setSelfHostedOrigin(validOrigin); void beginJoin(validOrigin); }}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
+    content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
   } else if (route === "checking") {
     content = <section id="hosted-account-checking" aria-busy="true"><h2 ref={heading} tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>;
   } else if (route === "chooser") {
-    content = <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={() => setHostedPath("new")}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>;
+    content = <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>;
   } else if (route === "new") {
     content = <section id="hosted-signin-panel" data-section="signin"><h2 ref={heading} tabIndex={-1}>{copy("hosted_sign_in_headline")}</h2><p>{copy("hosted_sign_in_body")}</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" disabled={busy && join.state === "confirm"} onClick={backToChooser}>{copy("back")}</button></section>;
   } else if (route === "join") content = joinPanel;
   else if (route === "lapsed") content = <section id="hosted-lapsed-card"><h2 ref={heading} tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>;
   else if (route === "billing") content = <section id="hosted-billing-card"><h2 ref={heading} tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>;
-  else if (route === "provisioning") content = <section id="hosted-provisioning-card"><h2 ref={heading} tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={provision}>{copy("production_provision_resume")}</button>}</section>;
-  else content = <section id="hosted-passphrase-card"><h2 ref={heading} tabIndex={-1}>{copy("passphrase_create_headline")}</h2><p>{copy("passphrase_create_body")}</p><p className="setup-hint">{copy("passphrase_irrecoverable_warn")}</p><p className="setup-hint">{copy("passphrase_native_note")}</p><label className="settings-check"><input id="passphrase-ack" type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> {copy("passphrase_ack_label")}</label><button id="passphrase-native-cta-button" className="primary-button" disabled={!acknowledged || busy} onClick={provision}>{copy("passphrase_native_cta")}</button>{provisionError && <p id="hosted-passphrase-error" role="alert">{copy("production_provision_retry")}</p>}</section>;
+  else if (route === "provisioning") content = <section id="hosted-provisioning-card"><h2 ref={heading} tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>;
+  else content = <section id="hosted-passphrase-card"><h2 ref={heading} tabIndex={-1}>{copy("passphrase_create_headline")}</h2><p>{copy("passphrase_create_body")}</p><p className="setup-hint">{copy("passphrase_irrecoverable_warn")}</p><p className="setup-hint">{copy("passphrase_native_note")}</p><label className="settings-check"><input id="passphrase-ack" type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> {copy("passphrase_ack_label")}</label><button id="passphrase-native-cta-button" className="primary-button" disabled={!acknowledged || busy} onClick={startProvisioning}>{copy("passphrase_native_cta")}</button>{provisionError && <p id="hosted-passphrase-error" role="alert">{copy("production_provision_retry")}</p>}</section>;
 
   if (enrolledWithoutPhone) content = pairPhone;
   return <section id="setup-landing" aria-label="Set up Peppy"><div id="setup-landing-inner"><header id="setup-landing-header"><h1>Set up Peppy</h1>{!enrolledWithoutPhone && !fixedOrigin && <select ref={modeSelect} id="setup-mode-select" aria-label="Server mode" disabled={busy && join.state === "confirm"} value={mode} onChange={event => selectMode(event.target.value as Mode)}><option value="hosted">{copy("setup_mode_hosted")}</option><option value="self-hosted">{copy("setup_mode_self_hosted")}</option></select>}</header><div id="setup-landing-body" role="region">{content}</div></div><div id="setup-status-region" className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{join.state === "waiting" ? copy("setup_join_waiting") : join.state === "claimed" ? copy("setup_join_claimed") : join.state === "confirm" ? copy("setup_join_confirm") : join.state === "approved" ? copy("setup_join_approved") : join.state === "expired" ? copy("production_pairing_expired") : join.state === "denied" ? copy("hosted_join_denied") : join.state === "failed" ? copy("production_pairing_error") : ""}</div></section>;

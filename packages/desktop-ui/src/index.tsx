@@ -91,6 +91,12 @@ export type Attachment = {
 
 export type StatusTone = "neutral" | "ok" | "warning" | "error";
 export type PanelStatus = { tone: StatusTone; summary: string; details: ReactNode };
+export type NavigationView = "conversations" | "notifications" | "settings" | "contacts";
+export type NavigationPosition = "side-rail" | "title-bar";
+
+export function isNavigationPosition(value: unknown): value is NavigationPosition {
+  return value === "side-rail" || value === "title-bar";
+}
 
 export function StatusPopover({ tone, summary, children }: { tone: StatusTone; summary: string; children?: ReactNode }): ReactElement {
   const panelId = `status-panel-${useId()}`;
@@ -652,6 +658,7 @@ export function AppTitlebar({
   sidebarExpanded,
   sidebarControls,
   onNewMessage,
+  navigation,
 }: {
   onMinimize?(): void;
   onMaximize?(): void;
@@ -665,8 +672,10 @@ export function AppTitlebar({
   sidebarExpanded?: boolean;
   sidebarControls?: string;
   onNewMessage?(): void;
+  navigation?: ReactNode;
 }) {
   const macos = (platform ?? detectPlatform()) === "macos";
+  const renderedNavigation = !isComposer && navigation;
   return (
     <header
       id="desktop-titlebar"
@@ -675,7 +684,9 @@ export function AppTitlebar({
       role="banner"
       aria-label="Peppy title bar"
       data-composer={isComposer || undefined}
+      data-navigation-placement={renderedNavigation ? (macos ? "trailing" : "leading") : undefined}
     >
+      {!macos && renderedNavigation}
       {macos && (onClose || onMinimize || onMaximize) && <div
         id="window-controls"
         className="window-controls window-controls-macos"
@@ -770,6 +781,7 @@ export function AppTitlebar({
           <RiCloseLine size={10} aria-hidden />
         </button>}
       </div>}
+      {macos && renderedNavigation}
     </header>
   );
 }
@@ -1203,6 +1215,64 @@ export function Composer({
   );
 }
 
+export function NavButtons({
+  orientation,
+  activeView,
+  onView,
+  onToggleList,
+  listCollapsed,
+  threadListId,
+  notificationUnread = 0,
+  contactsPending = 0,
+}: {
+  orientation: "rail" | "titlebar";
+  activeView: NavigationView;
+  onView(view: NavigationView): void;
+  onToggleList?(): void;
+  listCollapsed?: boolean;
+  threadListId?: string;
+  notificationUnread?: number;
+  contactsPending?: number;
+}): ReactElement {
+  const iconSize = orientation === "rail" ? 20 : 16;
+  return <nav id={orientation === "titlebar" ? "titlebar-navigation" : undefined} aria-label="Main navigation" data-orientation={orientation}>
+    <button
+      data-rail-item="conversations"
+      aria-label="Conversations"
+      title="Conversations"
+      aria-current={activeView === "conversations" ? "page" : undefined}
+      aria-expanded={activeView === "conversations" ? !listCollapsed : undefined}
+      aria-controls={activeView === "conversations" ? threadListId : undefined}
+      onClick={() => activeView === "conversations" ? onToggleList?.() : onView("conversations")}
+    >
+      <MessageCircle size={iconSize} aria-hidden />
+    </button>
+    <button data-rail-item="contacts" aria-label={contactsPending ? `Contacts, ${contactsPending} pending` : "Contacts"} title="Contacts" aria-current={activeView === "contacts" ? "page" : undefined} onClick={() => onView("contacts")}>
+      <Users size={iconSize} aria-hidden />
+      {contactsPending > 0 && <span className="rail-notif-badge" aria-hidden>{contactsPending > 99 ? "99+" : contactsPending}</span>}
+    </button>
+    <button
+      data-rail-item="notifications"
+      aria-label={notificationUnread ? `Notifications, ${notificationUnread} unread` : "Notifications"}
+      title="Notifications"
+      aria-current={activeView === "notifications" ? "page" : undefined}
+      onClick={() => onView("notifications")}
+    >
+      <Bell size={iconSize} aria-hidden />
+      {notificationUnread > 0 && <span className="rail-notif-badge" aria-hidden>{notificationUnread > 99 ? "99+" : notificationUnread}</span>}
+    </button>
+    <button
+      data-rail-item="settings"
+      aria-label="Settings"
+      title="Settings"
+      aria-current={activeView === "settings" ? "page" : undefined}
+      onClick={() => onView("settings")}
+    >
+      <Settings size={iconSize} aria-hidden />
+    </button>
+  </nav>;
+}
+
 export function Panel({
   children,
   activeView,
@@ -1215,8 +1285,8 @@ export function Panel({
   contactsPending = 0,
 }: {
   children?: ReactNode;
-  activeView: "conversations" | "notifications" | "settings" | "contacts";
-  onView(view: "conversations" | "notifications" | "settings" | "contacts"): void;
+  activeView: NavigationView;
+  onView(view: NavigationView): void;
   status?: PanelStatus;
   onToggleList?(): void;
   listCollapsed?: boolean;
@@ -1226,42 +1296,16 @@ export function Panel({
 }) {
   return (
     <aside id="desktop-rail" aria-label="Navigation rail">
-      <nav aria-label="Main navigation">
-        <button
-          data-rail-item="conversations"
-          aria-label="Conversations"
-          title="Conversations"
-          aria-current={activeView === "conversations" ? "page" : undefined}
-          aria-expanded={activeView === "conversations" ? !listCollapsed : undefined}
-          aria-controls={activeView === "conversations" ? threadListId : undefined}
-          onClick={() => activeView === "conversations" ? onToggleList?.() : onView("conversations")}
-        >
-          <MessageCircle size={20} aria-hidden />
-        </button>
-        <button data-rail-item="contacts" aria-label={contactsPending ? `Contacts, ${contactsPending} pending` : "Contacts"} title="Contacts" aria-current={activeView === "contacts" ? "page" : undefined} onClick={() => onView("contacts")}>
-          <Users size={20} aria-hidden />
-          {contactsPending > 0 && <span className="rail-notif-badge" aria-hidden>{contactsPending > 99 ? "99+" : contactsPending}</span>}
-        </button>
-        <button
-          data-rail-item="notifications"
-          aria-label={notificationUnread ? `Notifications, ${notificationUnread} unread` : "Notifications"}
-          title="Notifications"
-          aria-current={activeView === "notifications" ? "page" : undefined}
-          onClick={() => onView("notifications")}
-        >
-          <Bell size={20} aria-hidden />
-          {notificationUnread > 0 && <span className="rail-notif-badge" aria-hidden>{notificationUnread > 99 ? "99+" : notificationUnread}</span>}
-        </button>
-        <button
-          data-rail-item="settings"
-          aria-label="Settings"
-          title="Settings"
-          aria-current={activeView === "settings" ? "page" : undefined}
-          onClick={() => onView("settings")}
-        >
-          <Settings size={20} aria-hidden />
-        </button>
-      </nav>
+      <NavButtons
+        orientation="rail"
+        activeView={activeView}
+        onView={onView}
+        onToggleList={onToggleList}
+        listCollapsed={listCollapsed}
+        threadListId={threadListId}
+        notificationUnread={notificationUnread}
+        contactsPending={contactsPending}
+      />
       <div className="rail-spacer" />
       {status && <StatusPopover tone={status.tone} summary={status.summary}>{status.details}</StatusPopover>}
       {children}

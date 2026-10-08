@@ -78,6 +78,21 @@ class DemoTests(unittest.TestCase):
         run = next(command for command in calls if "run" in command)
         self.assertIn("PEPPY_DEMO_CARGO_TIMEOUT=17", run)
 
+    def test_host_demo_runner_skips_dependencies_and_disables_root_web(self):
+        calls = []
+        original_checked, original_cleanup, original_root = demo.checked, demo.subprocess.run, demo.ROOT
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                demo.ROOT = Path(directory)
+                demo.checked = lambda command, **kwargs: calls.append(command)
+                demo.subprocess.run = lambda *args, **kwargs: None
+                demo.run_host_demo()
+            finally:
+                demo.checked, demo.subprocess.run, demo.ROOT = original_checked, original_cleanup, original_root
+        run = next(command for command in calls if "run" in command)
+        self.assertIn("--no-deps", run)
+        self.assertIn("PEPPY_WEB_CLIENT_ROOT=false", run)
+
     def test_create_owner_uses_configured_target_binary(self):
         source = (ROOT / "infra/dev/demo.py").read_text()
         self.assertIn('[server_binary, "create-owner"]', source)
