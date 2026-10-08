@@ -856,6 +856,7 @@ impl Session {
             contact_books: contacts.books,
             contacts_pending_count: contacts.pending_count,
             contact_sync: contacts.sync,
+            credential_export_available: None,
         };
         Ok((snapshot, deferred))
     }

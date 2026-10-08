@@ -6,8 +6,11 @@
 //! origin. A database key is generated exactly once per binding and is never replaced.
 use crate::{
     error::{BridgeError, BridgeResult},
-    origin::validate_origin,
+    origin::shared_origin_error,
     secure_store::SecretStore,
+};
+use peppy_hosted_client::device_credentials::{
+    parse_portable_credential, serialize_portable_credential, PortableCredentialError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,9 +20,8 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-pub const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
+pub use peppy_hosted_client::device_credentials::MAX_CREDENTIAL_BYTES;
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
-const DEVICE_TOKEN_HEX: usize = 96;
 
 /// Import format v1 (also written by the gateway simulator's `pair ... device`).
 /// Deliberately implements neither `Debug` nor `Clone`; the token is zeroized on drop.
@@ -55,37 +57,52 @@ fn import_error(message: &'static str) -> BridgeError {
 
 /// Strict, bounded parser. Errors are fixed strings and never echo the input.
 pub fn parse_credential(bytes: &[u8]) -> BridgeResult<ImportedCredential> {
-    if bytes.len() > MAX_CREDENTIAL_BYTES {
-        return Err(import_error(
-            "The credential file exceeds the 16 KiB safety limit.",
-        ));
+    let credential = parse_portable_credential(bytes).map_err(portable_import_error)?;
+    Ok(ImportedCredential {
+        version: 1,
+        origin: credential.origin().to_owned(),
+        vault_id: credential.vault_id().to_owned(),
+        device_id: credential.device_id().to_owned(),
+        device_token: credential.device_token().to_owned(),
+    })
+}
+
+fn portable_import_error(error: PortableCredentialError) -> BridgeError {
+    match error {
+        PortableCredentialError::TooLarge => {
+            import_error("The credential file exceeds the 16 KiB safety limit.")
+        }
+        PortableCredentialError::InvalidJson => {
+            import_error("The credential file is not valid Peppy credential JSON.")
+        }
+        PortableCredentialError::UnsupportedVersion => {
+            import_error("Only Peppy v1 device credentials are supported.")
+        }
+        PortableCredentialError::InvalidToken => {
+            import_error("The credential does not contain a valid device token.")
+        }
+        PortableCredentialError::InvalidVaultId => {
+            import_error("The credential vault ID is invalid.")
+        }
+        PortableCredentialError::InvalidDeviceId => {
+            import_error("The credential device ID is invalid.")
+        }
+        PortableCredentialError::InvalidOrigin(origin) => shared_origin_error(origin),
+        PortableCredentialError::Serialization => {
+            import_error("The credential file could not be serialized.")
+        }
     }
-    let mut credential: ImportedCredential = serde_json::from_slice(bytes)
-        .map_err(|_| import_error("The credential file is not valid Peppy credential JSON."))?;
-    if credential.version != 1 {
-        return Err(import_error(
-            "Only Peppy v1 device credentials are supported.",
-        ));
-    }
-    if credential.device_token.len() != DEVICE_TOKEN_HEX
-        || !credential
-            .device_token
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
-    {
-        return Err(import_error(
-            "The credential does not contain a valid device token.",
-        ));
-    }
-    let origin = validate_origin(&credential.origin)?;
-    let vault = uuid::Uuid::parse_str(&credential.vault_id)
-        .map_err(|_| import_error("The credential vault ID is invalid."))?;
-    let device = uuid::Uuid::parse_str(&credential.device_id)
-        .map_err(|_| import_error("The credential device ID is invalid."))?;
-    credential.origin = origin;
-    credential.vault_id = vault.to_string();
-    credential.device_id = device.to_string();
-    Ok(credential)
+}
+
+pub fn serialize_credential(credential: &ImportedCredential) -> BridgeResult<Zeroizing<Vec<u8>>> {
+    let portable = peppy_hosted_client::device_credentials::PortableDeviceCredential::new(
+        credential.origin.clone(),
+        credential.vault_id.clone(),
+        credential.device_id.clone(),
+        credential.device_token.clone(),
+    )
+    .map_err(portable_import_error)?;
+    serialize_portable_credential(&portable).map_err(portable_import_error)
 }
 
 /// Reads at most `MAX_CREDENTIAL_BYTES + 1` bytes so oversized files are rejected without
@@ -220,13 +237,13 @@ pub fn load_config(path: &Path) -> BridgeResult<HostConfig> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(HostConfig::default())
+            return Ok(HostConfig::default());
         }
         Err(_) => {
             return Err(BridgeError::new(
                 "host-config",
                 "Could not read the native host configuration.",
-            ))
+            ));
         }
     };
     let mut bytes = Vec::new();
@@ -406,18 +423,71 @@ pub mod tests {
         assert_eq!(parsed.vault_id, vault);
         let secret_marker = "zz-secret-marker-zz";
         for bad in [
-            format!("{{\"version\":1,\"origin\":\"https://x.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{secret_marker}\"}}"),
-            format!("{{\"version\":1,\"origin\":\"https://x.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\",\"extra\":\"{secret_marker}\"}}"),
-            format!("{{\"version\":2,\"origin\":\"https://x.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\"}}"),
-            format!("{{\"version\":1,\"origin\":\"http://{secret_marker}.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\"}}"),
-            format!("{{\"version\":1,\"origin\":\"https://x.test\",\"vaultId\":\"{secret_marker}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\"}}"),
+            format!(
+                "{{\"version\":1,\"origin\":\"https://x.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{secret_marker}\"}}"
+            ),
+            format!(
+                "{{\"version\":1,\"origin\":\"https://x.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\",\"extra\":\"{secret_marker}\"}}"
+            ),
+            format!(
+                "{{\"version\":2,\"origin\":\"https://x.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\"}}"
+            ),
+            format!(
+                "{{\"version\":1,\"origin\":\"http://{secret_marker}.test\",\"vaultId\":\"{vault}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\"}}"
+            ),
+            format!(
+                "{{\"version\":1,\"origin\":\"https://x.test\",\"vaultId\":\"{secret_marker}\",\"deviceId\":\"{device}\",\"deviceToken\":\"{TOKEN}\"}}"
+            ),
             format!("not json {secret_marker}"),
         ] {
-            let error = parse_credential(bad.as_bytes()).err().expect("malformed credential must be rejected");
-            assert!(!error.message.contains(secret_marker), "error echoed input: {}", error.message);
+            let error = parse_credential(bad.as_bytes())
+                .err()
+                .expect("malformed credential must be rejected");
+            assert!(
+                !error.message.contains(secret_marker),
+                "error echoed input: {}",
+                error.message
+            );
             assert!(!error.message.contains(TOKEN));
         }
         assert!(parse_credential(&vec![b' '; MAX_CREDENTIAL_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn parser_and_serializer_use_portable_v1_without_changing_token_bytes() {
+        let vault = uuid::Uuid::new_v4().to_string();
+        let device = uuid::Uuid::new_v4().to_string();
+        let token = TOKEN.to_uppercase();
+        let credential = parse_credential(&credential_json(
+            "HTTPS://Example.test/",
+            &vault,
+            &device,
+            &token,
+        ))
+        .unwrap();
+        let serialized = serialize_credential(&credential).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&serialized).unwrap(),
+            serde_json::json!({
+                "version": 1,
+                "origin": "https://example.test",
+                "vaultId": vault,
+                "deviceId": device,
+                "deviceToken": token,
+            })
+        );
+    }
+
+    #[test]
+    fn shared_origin_failures_keep_native_invalid_origin_error() {
+        let vault = uuid::Uuid::new_v4().to_string();
+        let device = uuid::Uuid::new_v4().to_string();
+        for origin in ["https://user@example.test", "https://example.test/path"] {
+            let error = parse_credential(&credential_json(origin, &vault, &device, TOKEN))
+                .err()
+                .expect("invalid origin must be rejected");
+            assert_eq!(error.code, "invalid-origin");
+        }
     }
 
     fn binding(origin: &str, vault: &str, device: &str) -> Binding {

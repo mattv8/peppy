@@ -69,6 +69,8 @@ pub struct Snapshot {
     /// `{repairRequired, projection?: {state, reason?}}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact_sync: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_export_available: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]

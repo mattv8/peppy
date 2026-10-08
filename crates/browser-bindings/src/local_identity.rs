@@ -189,7 +189,7 @@ fn validate_wrapped(wrapped: &WrappedIdentity) -> Result<(), IdentityError> {
     Ok(())
 }
 
-fn validate_metadata(metadata: &IdentityMetadata) -> Result<(), IdentityError> {
+pub(crate) fn validate_metadata(metadata: &IdentityMetadata) -> Result<(), IdentityError> {
     if metadata.version != VERSION
         || canonical_origin(&metadata.origin)? != metadata.origin
         || metadata.profile.vault_id != metadata.vault_id
@@ -249,7 +249,7 @@ fn map_crypto_error(error: CryptoError) -> IdentityError {
     }
 }
 
-fn validate_token(token: &str) -> Result<(), IdentityError> {
+pub(crate) fn validate_token(token: &str) -> Result<(), IdentityError> {
     if token.len() != DEVICE_TOKEN_HEX || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(IdentityError::Invalid);
     }

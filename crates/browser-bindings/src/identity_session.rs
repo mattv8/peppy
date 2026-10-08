@@ -3,6 +3,11 @@
 
 use super::*;
 use crate::local_identity::{self, IdentityMetadata, IdentitySecrets, WrappedIdentity};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use peppy_hosted_client::device_credentials::{
+    CREDENTIAL_EXPORT_FILENAME, MAX_CREDENTIAL_BYTES, PortableDeviceCredential,
+    parse_portable_credential, serialize_portable_credential,
+};
 use serde::Deserialize;
 
 pub(super) struct IdentitySession {
@@ -44,6 +49,43 @@ struct Rotate {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialFile {
+    bytes: SecretBytes,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCredentialFile {
+    metadata: IdentityMetadata,
+    device_token: SecretString,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableMetadataInput {
+    bytes: SecretBytes,
+    vault: AuthenticatedVault,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthenticatedVault {
+    vault_id: String,
+    device_id: String,
+    role: local_identity::DeviceRole,
+    public_key_profile: Value,
+    encrypted_vault_check_header: String,
+    profile_fingerprint: String,
+    key_epoch: u32,
+}
+
+enum CredentialFileFormat {
+    Portable,
+    Legacy,
+}
+
 impl BrowserCore {
     pub(super) fn identity_command(
         &mut self,
@@ -58,6 +100,9 @@ impl BrowserCore {
             "_worker_identity_metadata" => self.identity_metadata(raw),
             "_worker_transport_token" => self.transport_token(raw),
             "_worker_rotate_identity" => self.rotate_identity(raw),
+            "_worker_parse_credential_file" => self.parse_credential_file(raw),
+            "_worker_portable_identity_metadata" => self.portable_identity_metadata(raw),
+            "_worker_export_credential" => self.export_credential(raw),
             _ => Err(unknown_command()),
         }
     }
@@ -227,6 +272,249 @@ impl BrowserCore {
         session.metadata = metadata;
         session.wrapped = serialized;
         Ok(json!({"epoch": session.metadata.profile.key_epoch.to_string()}))
+    }
+
+    fn parse_credential_file(&self, raw: &RawValue) -> Result<Value, Failure> {
+        let input: CredentialFile = serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+        let origin = self.trusted_origin.as_deref().ok_or_else(invalid)?;
+        if input.bytes.0.len() > MAX_LEGACY_CREDENTIAL_BYTES {
+            return if legacy_marker(&input.bytes.0) {
+                Err(invalid_identity())
+            } else if portable_marker(&input.bytes.0) {
+                Err(portable_failure(
+                    peppy_hosted_client::device_credentials::PortableCredentialError::TooLarge,
+                ))
+            } else {
+                Err(invalid_identity())
+            };
+        }
+        match classify_credential_file(&input.bytes.0)? {
+            CredentialFileFormat::Portable => {
+                self.parse_portable_credential_file(&input.bytes.0, origin)
+            }
+            CredentialFileFormat::Legacy => {
+                self.parse_legacy_credential_file(&input.bytes.0, origin)
+            }
+        }
+    }
+
+    fn portable_identity_metadata(&self, raw: &RawValue) -> Result<Value, Failure> {
+        let input: PortableMetadataInput =
+            serde_json::from_str(raw.get()).map_err(|_| invalid_vault())?;
+        let origin = self.trusted_origin.as_deref().ok_or_else(invalid)?;
+        if input.bytes.0.len() > MAX_CREDENTIAL_BYTES {
+            return Err(portable_failure(
+                peppy_hosted_client::device_credentials::PortableCredentialError::TooLarge,
+            ));
+        }
+        let credential = parse_portable_credential(&input.bytes.0).map_err(portable_failure)?;
+        if credential.origin() != origin {
+            return Err(credential_origin_mismatch());
+        }
+        let vault_id = Uuid::parse_str(&input.vault.vault_id).map_err(|_| invalid_vault())?;
+        let device_id = Uuid::parse_str(&input.vault.device_id).map_err(|_| invalid_vault())?;
+        if vault_id.to_string() != credential.vault_id()
+            || device_id.to_string() != credential.device_id()
+        {
+            return Err(credential_vault_mismatch());
+        }
+        let profile: KeyProfile =
+            serde_json::from_value(input.vault.public_key_profile).map_err(|_| invalid_vault())?;
+        let header_bytes = Zeroizing::new(
+            STANDARD
+                .decode(input.vault.encrypted_vault_check_header.as_bytes())
+                .map_err(|_| invalid_vault())?,
+        );
+        let header: VaultCheckHeader =
+            serde_json::from_slice(&header_bytes).map_err(|_| invalid_vault())?;
+        if profile.vault_id != vault_id
+            || header.profile != profile
+            || input.vault.key_epoch != profile.key_epoch
+            || profile.fingerprint().map_err(|_| invalid_vault())?
+                != input.vault.profile_fingerprint
+        {
+            return Err(credential_vault_mismatch());
+        }
+        let metadata = IdentityMetadata {
+            version: 1,
+            origin: credential.origin().to_owned(),
+            vault_id,
+            device_id,
+            role: input.vault.role,
+            profile,
+            header,
+        };
+        local_identity::validate_metadata(&metadata).map_err(|_| invalid_vault())?;
+        serde_json::to_value(metadata).map_err(|_| invalid_vault())
+    }
+
+    fn parse_portable_credential_file(&self, bytes: &[u8], origin: &str) -> Result<Value, Failure> {
+        match parse_portable_credential(bytes) {
+            Ok(credential) => {
+                if credential.origin() != origin {
+                    return Err(Failure::new(
+                        "credential-origin-mismatch",
+                        "The credential belongs to a different server.",
+                    ));
+                }
+                Ok(json!({
+                    "format": "portable",
+                    "origin": credential.origin(),
+                    "vaultId": credential.vault_id(),
+                    "deviceId": credential.device_id(),
+                    "deviceToken": credential.device_token(),
+                }))
+            }
+            Err(error) => Err(portable_failure(error)),
+        }
+    }
+
+    fn parse_legacy_credential_file(&self, bytes: &[u8], origin: &str) -> Result<Value, Failure> {
+        let legacy: LegacyCredentialFile =
+            serde_json::from_slice(bytes).map_err(|_| invalid_identity())?;
+        if legacy.metadata.origin != origin {
+            return Err(credential_origin_mismatch());
+        }
+        local_identity::validate_metadata(&legacy.metadata).map_err(|_| invalid_identity())?;
+        local_identity::validate_token(&legacy.device_token.0).map_err(|_| invalid_identity())?;
+        Ok(json!({
+            "format": "legacy",
+            "metadata": legacy.metadata,
+            "deviceToken": &*legacy.device_token.0,
+        }))
+    }
+
+    fn export_credential(&self, raw: &RawValue) -> Result<Value, Failure> {
+        empty(raw)?;
+        let origin = self.trusted_origin.as_deref().ok_or_else(unavailable)?;
+        let session = self.identity_session.as_ref().ok_or_else(unavailable)?;
+        if session.metadata.origin != origin || self.context.origin.as_deref() != Some(origin) {
+            return Err(unavailable());
+        }
+        let keys = self.client()?.key_status().map_err(core)?;
+        if !keys
+            .active_epoch
+            .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch))
+        {
+            return Err(Failure::new(
+                "locked",
+                "Unlock sync before exporting credentials.",
+            ));
+        }
+        session.secrets.with_device_token(|token| {
+            let credential = PortableDeviceCredential::new(
+                session.metadata.origin.clone(),
+                session.metadata.vault_id.to_string(),
+                session.metadata.device_id.to_string(),
+                token.to_owned(),
+            )
+            .map_err(|_| invalid())?;
+            let bytes = serialize_portable_credential(&credential).map_err(|_| invalid())?;
+            Ok(json!({"filename": CREDENTIAL_EXPORT_FILENAME, "bytes": bytes.to_vec()}))
+        })
+    }
+}
+
+const MAX_LEGACY_CREDENTIAL_BYTES: usize = 1024 * 1024;
+
+fn classify_credential_file(bytes: &[u8]) -> Result<CredentialFileFormat, Failure> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| invalid_identity())?;
+    let object = value.as_object().ok_or_else(invalid_identity)?;
+    if object.contains_key("metadata") && object.contains_key("deviceToken") {
+        return Ok(CredentialFileFormat::Legacy);
+    }
+    if object.contains_key("version") {
+        return Ok(CredentialFileFormat::Portable);
+    }
+    Err(invalid_identity())
+}
+
+fn portable_marker(bytes: &[u8]) -> bool {
+    json_key_marker(bytes, b"\"version\"")
+}
+
+fn legacy_marker(bytes: &[u8]) -> bool {
+    json_key_marker(bytes, b"\"metadata\"") && json_key_marker(bytes, b"\"deviceToken\"")
+}
+
+fn json_key_marker(bytes: &[u8], marker: &[u8]) -> bool {
+    bytes.windows(marker.len()).any(|part| part == marker)
+}
+
+fn invalid_identity() -> Failure {
+    Failure::new("invalid-identity", "The selected identity file is invalid.")
+}
+
+fn invalid_vault() -> Failure {
+    Failure::new(
+        "credential-invalid-vault",
+        "The authenticated vault response is invalid.",
+    )
+}
+
+fn credential_vault_mismatch() -> Failure {
+    Failure::new(
+        "credential-vault-mismatch",
+        "The credential does not match the authenticated vault.",
+    )
+}
+
+fn credential_origin_mismatch() -> Failure {
+    Failure::new(
+        "credential-origin-mismatch",
+        "The credential belongs to a different server.",
+    )
+}
+
+fn portable_failure(
+    error: peppy_hosted_client::device_credentials::PortableCredentialError,
+) -> Failure {
+    use peppy_hosted_client::device_credentials::{OriginError, PortableCredentialError};
+
+    match error {
+        PortableCredentialError::TooLarge => Failure::new(
+            "credential-file-too-large",
+            "The credential file exceeds the 16 KiB safety limit.",
+        ),
+        PortableCredentialError::InvalidJson => Failure::new(
+            "credential-invalid-json",
+            "The credential file is not valid Peppy credential JSON.",
+        ),
+        PortableCredentialError::UnsupportedVersion => Failure::new(
+            "credential-unsupported-version",
+            "Only Peppy v1 device credentials are supported.",
+        ),
+        PortableCredentialError::InvalidToken => Failure::new(
+            "credential-invalid-token",
+            "The credential does not contain a valid device token.",
+        ),
+        PortableCredentialError::InvalidVaultId => Failure::new(
+            "credential-invalid-vault-id",
+            "The credential vault ID is invalid.",
+        ),
+        PortableCredentialError::InvalidDeviceId => Failure::new(
+            "credential-invalid-device-id",
+            "The credential device ID is invalid.",
+        ),
+        PortableCredentialError::InvalidOrigin(OriginError::Empty | OriginError::InvalidUrl) => {
+            Failure::new(
+                "credential-invalid-origin",
+                "The server origin is not a valid URL.",
+            )
+        }
+        PortableCredentialError::InvalidOrigin(OriginError::Credentials) => Failure::new(
+            "credential-origin-credentials",
+            "Server origin must not include credentials.",
+        ),
+        PortableCredentialError::InvalidOrigin(OriginError::PathQueryOrFragment) => Failure::new(
+            "credential-origin-path",
+            "Server origin must not include a path, query, or fragment.",
+        ),
+        PortableCredentialError::InvalidOrigin(OriginError::Insecure) => Failure::new(
+            "credential-origin-insecure",
+            "Use an HTTPS origin, or an explicit loopback HTTP origin for development.",
+        ),
+        PortableCredentialError::Serialization => invalid(),
     }
 }
 
@@ -715,5 +1003,405 @@ mod tests {
         assert!(core.client.is_none());
         assert!(core.identity_session.is_none());
         assert!(root.path().join("client.db").is_file());
+    }
+
+    #[test]
+    fn worker_exports_only_active_unlocked_portable_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = metadata(Uuid::new_v4());
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        enroll(&mut core, &metadata);
+
+        let exported = value(&mut core, "_worker_export_credential", json!({}));
+        assert_eq!(exported["filename"], CREDENTIAL_EXPORT_FILENAME);
+        let bytes: Vec<u8> = serde_json::from_value(exported["bytes"].clone()).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(TOKEN));
+        for forbidden in [
+            "databaseKey",
+            "passphrase",
+            "wrappedIdentity",
+            "profile",
+            "header",
+        ] {
+            assert!(!text.contains(forbidden), "serialized {forbidden}");
+        }
+
+        value(&mut core, "close", json!({}));
+        assert_eq!(
+            error_code(&mut core, "_worker_export_credential", json!({})),
+            "credentials-required"
+        );
+    }
+
+    #[test]
+    fn worker_rejects_wrong_origin_before_returning_a_portable_token() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        let credential = serde_json::json!({
+            "version": 1,
+            "origin": "https://other.test",
+            "vaultId": Uuid::new_v4(),
+            "deviceId": Uuid::new_v4(),
+            "deviceToken": TOKEN,
+        });
+
+        let response = dispatch(
+            &mut core,
+            "_worker_parse_credential_file",
+            json!({"bytes": credential.to_string().as_bytes()}),
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "credential-origin-mismatch");
+        assert!(!response.to_string().contains(TOKEN));
+    }
+
+    #[test]
+    fn worker_detects_legacy_identity_files_without_exposing_them_to_the_public_api() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = metadata(Uuid::new_v4());
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        let legacy = json!({"metadata": metadata, "deviceToken": TOKEN});
+
+        let parsed = value(
+            &mut core,
+            "_worker_parse_credential_file",
+            json!({"bytes": legacy.to_string().as_bytes()}),
+        );
+        assert_eq!(parsed["format"], "legacy");
+        assert_eq!(parsed["deviceToken"], TOKEN);
+        assert_eq!(
+            error_code(&mut core, "parse_credential_file", json!({"bytes": []})),
+            "unknown-command"
+        );
+    }
+
+    #[test]
+    fn worker_builds_metadata_only_from_matching_authenticated_portable_vaults() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let root = tempfile::tempdir().unwrap();
+        let metadata = metadata(Uuid::new_v4());
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        let credential = json!({
+            "version": 1,
+            "origin": ORIGIN,
+            "vaultId": metadata.vault_id,
+            "deviceId": metadata.device_id,
+            "deviceToken": TOKEN,
+        });
+        let mut vault = json!({
+            "vault_id": metadata.vault_id,
+            "device_id": metadata.device_id,
+            "role": "owner",
+            "public_key_profile": metadata.profile,
+            "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&metadata.header).unwrap()),
+            "profile_fingerprint": metadata.profile.fingerprint().unwrap(),
+            "key_epoch": metadata.profile.key_epoch,
+        });
+
+        for role in ["owner", "device", "gateway"] {
+            vault["role"] = json!(role);
+            let result = value(
+                &mut core,
+                "_worker_portable_identity_metadata",
+                json!({"bytes": credential.to_string().as_bytes(), "vault": vault}),
+            );
+            assert_eq!(result["role"], role);
+            assert_eq!(result["vaultId"], metadata.vault_id.to_string());
+            assert!(result.get("deviceToken").is_none());
+        }
+
+        vault["vault_id"] = json!(Uuid::new_v4());
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_portable_identity_metadata",
+                json!({"bytes": credential.to_string().as_bytes(), "vault": vault}),
+            ),
+            "credential-vault-mismatch"
+        );
+
+        for field in [
+            "device_id",
+            "public_key_profile",
+            "encrypted_vault_check_header",
+            "profile_fingerprint",
+            "key_epoch",
+        ] {
+            let mut invalid = json!({
+                "vault_id": metadata.vault_id,
+                "device_id": metadata.device_id,
+                "role": "device",
+                "public_key_profile": metadata.profile,
+                "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&metadata.header).unwrap()),
+                "profile_fingerprint": metadata.profile.fingerprint().unwrap(),
+                "key_epoch": metadata.profile.key_epoch,
+            });
+            invalid[field] = match field {
+                "device_id" => json!(Uuid::new_v4()),
+                "public_key_profile" => json!({}),
+                "encrypted_vault_check_header" => json!("not-base64"),
+                "profile_fingerprint" => json!("not-a-fingerprint"),
+                "key_epoch" => json!(99),
+                _ => unreachable!(),
+            };
+            assert!(
+                dispatch(
+                    &mut core,
+                    "_worker_portable_identity_metadata",
+                    json!({"bytes": credential.to_string().as_bytes(), "vault": invalid}),
+                )["ok"]
+                    == false,
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_classifies_legacy_before_portable_and_keeps_legacy_size_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let metadata = metadata(Uuid::new_v4());
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        let legacy =
+            json!({"version": 1, "metadata": metadata, "deviceToken": TOKEN, "legacyExtra": true});
+        assert_eq!(
+            value(
+                &mut core,
+                "_worker_parse_credential_file",
+                json!({"bytes": legacy.to_string().as_bytes()}),
+            )["format"],
+            "legacy"
+        );
+        let portable = format!(
+            r#"{{"version":1,"origin":"{ORIGIN}","vaultId":"{}","deviceId":"{}","deviceToken":"{}"{}}}"#,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            TOKEN,
+            " ".repeat(MAX_CREDENTIAL_BYTES)
+        );
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_parse_credential_file",
+                json!({"bytes": portable.as_bytes()})
+            ),
+            "credential-file-too-large"
+        );
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_parse_credential_file",
+                json!({"bytes": vec![b' '; MAX_LEGACY_CREDENTIAL_BYTES + 1]}),
+            ),
+            "invalid-identity"
+        );
+    }
+
+    #[test]
+    fn worker_export_requires_active_identity_session_and_rejects_closed_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let device_id = Uuid::new_v4();
+        let metadata = metadata(device_id);
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        enroll(&mut core, &metadata);
+        let _wrapped = checkpoint(&mut core);
+
+        // Verify export works when freshly enrolled with active unlocked identity
+        let exported = value(&mut core, "_worker_export_credential", json!({}));
+        assert_eq!(exported["filename"], CREDENTIAL_EXPORT_FILENAME);
+        let bytes: Vec<u8> = serde_json::from_value(exported["bytes"].clone()).unwrap();
+        assert!(!bytes.is_empty());
+
+        // Close session removes both client and identity_session
+        value(&mut core, "close", json!({}));
+        assert!(core.client.is_none());
+        assert!(core.identity_session.is_none());
+
+        // Export now fails because there is no active session (credentials-required)
+        assert_eq!(
+            error_code(&mut core, "_worker_export_credential", json!({})),
+            "credentials-required"
+        );
+    }
+
+    #[test]
+    fn worker_metadata_helper_distinguishes_vault_mismatch_from_invalid_vault() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let root = tempfile::tempdir().unwrap();
+        let metadata = metadata(Uuid::new_v4());
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+        let credential = json!({
+            "version": 1,
+            "origin": ORIGIN,
+            "vaultId": metadata.vault_id,
+            "deviceId": metadata.device_id,
+            "deviceToken": TOKEN,
+        });
+
+        let valid_vault = json!({
+            "vault_id": metadata.vault_id,
+            "device_id": metadata.device_id,
+            "role": "owner",
+            "public_key_profile": metadata.profile,
+            "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&metadata.header).unwrap()),
+            "profile_fingerprint": metadata.profile.fingerprint().unwrap(),
+            "key_epoch": metadata.profile.key_epoch,
+        });
+
+        // Success case: matching vault
+        let result = value(
+            &mut core,
+            "_worker_portable_identity_metadata",
+            json!({"bytes": credential.to_string().as_bytes(), "vault": valid_vault}),
+        );
+        assert_eq!(result["role"], "owner");
+        assert!(result.get("deviceToken").is_none());
+
+        // credential-vault-mismatch: vault/device IDs differ (authenticated mismatch)
+        let mut mismatched_vault = valid_vault.clone();
+        mismatched_vault["vault_id"] = json!(Uuid::new_v4());
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_portable_identity_metadata",
+                json!({"bytes": credential.to_string().as_bytes(), "vault": mismatched_vault}),
+            ),
+            "credential-vault-mismatch"
+        );
+
+        // credential-vault-mismatch: device_id also checked for consistency
+        let mut device_mismatch = valid_vault.clone();
+        device_mismatch["device_id"] = json!(Uuid::new_v4());
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_portable_identity_metadata",
+                json!({"bytes": credential.to_string().as_bytes(), "vault": device_mismatch}),
+            ),
+            "credential-vault-mismatch"
+        );
+
+        // credential-invalid-vault: malformed response fields that fail parsing/validation
+        // Note: fingerprint mismatch and key_epoch mismatch are caught as vault-mismatch (consistency checks),
+        // while truly malformed/unparseable fields are invalid-vault
+        for (field, bad_value) in [
+            ("public_key_profile", json!({})),
+            ("encrypted_vault_check_header", json!("not-base64")),
+        ] {
+            let mut invalid_vault = json!({
+                "vault_id": metadata.vault_id,
+                "device_id": metadata.device_id,
+                "role": "device",
+                "public_key_profile": metadata.profile,
+                "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&metadata.header).unwrap()),
+                "profile_fingerprint": metadata.profile.fingerprint().unwrap(),
+                "key_epoch": metadata.profile.key_epoch,
+            });
+            invalid_vault[field] = bad_value;
+            assert_eq!(
+                error_code(
+                    &mut core,
+                    "_worker_portable_identity_metadata",
+                    json!({"bytes": credential.to_string().as_bytes(), "vault": invalid_vault}),
+                ),
+                "credential-invalid-vault",
+                "{field} should be credential-invalid-vault"
+            );
+        }
+
+        // credential-vault-mismatch: fingerprint and epoch mismatches are consistency failures
+        let mut bad_fingerprint = valid_vault.clone();
+        bad_fingerprint["profile_fingerprint"] =
+            json!("0000000000000000000000000000000000000000000000");
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_portable_identity_metadata",
+                json!({"bytes": credential.to_string().as_bytes(), "vault": bad_fingerprint}),
+            ),
+            "credential-vault-mismatch"
+        );
+
+        let mut bad_epoch = valid_vault.clone();
+        bad_epoch["key_epoch"] = json!(99);
+        assert_eq!(
+            error_code(
+                &mut core,
+                "_worker_portable_identity_metadata",
+                json!({"bytes": credential.to_string().as_bytes(), "vault": bad_epoch}),
+            ),
+            "credential-vault-mismatch"
+        );
+    }
+
+    #[test]
+    fn worker_metadata_helper_rejects_wrong_origin_before_returning_metadata() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let root = tempfile::tempdir().unwrap();
+        let metadata = metadata(Uuid::new_v4());
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+
+        // Credential from different origin
+        let credential = json!({
+            "version": 1,
+            "origin": "https://other.test",
+            "vaultId": metadata.vault_id,
+            "deviceId": metadata.device_id,
+            "deviceToken": TOKEN,
+        });
+
+        let vault = json!({
+            "vault_id": metadata.vault_id,
+            "device_id": metadata.device_id,
+            "role": "owner",
+            "public_key_profile": metadata.profile,
+            "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&metadata.header).unwrap()),
+            "profile_fingerprint": metadata.profile.fingerprint().unwrap(),
+            "key_epoch": metadata.profile.key_epoch,
+        });
+
+        // Should reject with credential-origin-mismatch before returning metadata
+        let response = dispatch(
+            &mut core,
+            "_worker_portable_identity_metadata",
+            json!({"bytes": credential.to_string().as_bytes(), "vault": vault}),
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "credential-origin-mismatch");
+        assert!(!response.to_string().contains(TOKEN));
+    }
+
+    #[test]
+    fn worker_parses_legacy_origin_mismatch_before_returning_token() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        initialize(&mut core);
+
+        let other_metadata = metadata(Uuid::new_v4());
+        let mut wrong_origin_metadata = other_metadata.clone();
+        wrong_origin_metadata.origin = "https://other.test".into();
+
+        let legacy = json!({"metadata": wrong_origin_metadata, "deviceToken": TOKEN});
+
+        // Should reject with credential-origin-mismatch before exposing token
+        let response = dispatch(
+            &mut core,
+            "_worker_parse_credential_file",
+            json!({"bytes": legacy.to_string().as_bytes()}),
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "credential-origin-mismatch");
+        assert!(!response.to_string().contains(TOKEN));
     }
 }

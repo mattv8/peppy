@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "load_state",
     "configure_server",
     "import_credentials",
+    "export_credentials",
     "unlock_sync",
     "save_draft",
     "send_draft",
