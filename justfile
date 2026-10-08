@@ -34,16 +34,26 @@ doctor:
     @if xcode-select -p >/dev/null 2>&1 && xcrun --sdk iphonesimulator --show-sdk-path >/dev/null 2>&1; then echo "iOS SDK: available"; else echo "iOS SDK: unavailable (full Xcode is required for an iOS simulator build)"; fi
 
 dev-up:
+    python3 infra/dev/migration_repair.py dev-up
+
+_dev-up-build:
     {{ dev_prereq }}
     python3 infra/dev/dev_port.py validate .env
     {{ dev_prepare }}
     {{ dev_compose }} build web dev
+
+_dev-up-stop-writers:
     {{ compose }} rm --stop --force api migrate
     {{ dev_compose }} rm --stop --force web dev
+
+_dev-up-start:
     {{ dev_compose }} up --detach --wait --wait-timeout 1800 --force-recreate dev
     @echo "Development UI/API: $(python3 infra/dev/dev_port.py smoke-url .env)"
 
 dev-down:
+    python3 infra/dev/migration_repair.py dev-down
+
+_dev-down-raw:
     {{ dev_prereq }}
     {{ compose }} rm --stop --force api migrate
     {{ dev_compose }} down

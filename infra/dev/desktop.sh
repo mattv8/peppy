@@ -24,17 +24,18 @@ action=${1:-}
 case "$action" in dev|build|open) ;; *) usage ;; esac
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P)
+caller_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P)
+source_root=$(CDPATH='' cd -- "${PEPPY_SOURCE_TREE:-$caller_root}" && pwd -L)
 
-target_dir=${CARGO_TARGET_DIR:-"$root/apps/desktop/src-tauri/target"}
+target_dir=${CARGO_TARGET_DIR:-"$caller_root/apps/desktop/src-tauri/target"}
 if [[ "$target_dir" != /* ]]; then
-  target_dir="$root/$target_dir"
+  target_dir="$caller_root/$target_dir"
 fi
 
 check_native_pins() {
   local expected_node expected_rust node_version pnpm_version rust_version
-  expected_node=$(tr -d '[:space:]' < "$root/.node-version")
-  expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$root/rust-toolchain.toml")
+  expected_node=$(tr -d '[:space:]' < "$source_root/.node-version")
+  expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$source_root/rust-toolchain.toml")
   command -v node >/dev/null || die "Node $expected_node is required."
   command -v pnpm >/dev/null || die "pnpm 12.8.1 is required."
   command -v rustc >/dev/null || die "Rust $expected_rust is required."
@@ -48,8 +49,8 @@ check_native_pins() {
 
 select_macos_pinned_tools() {
   local expected_node expected_rust brew prefix
-  expected_node=$(tr -d '[:space:]' < "$root/.node-version")
-  expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$root/rust-toolchain.toml")
+  expected_node=$(tr -d '[:space:]' < "$source_root/.node-version")
+  expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$source_root/rust-toolchain.toml")
 
   if ! command -v node >/dev/null 2>&1 || [[ "$(node --version 2>/dev/null)" != "v$expected_node" ]]; then
     if command -v brew >/dev/null 2>&1; then
@@ -99,7 +100,7 @@ verify_macos_signing_identity() {
 }
 
 macos() {
-  local dev_config="$root/apps/desktop/src-tauri/tauri.dev.conf.json"
+  local dev_config="$source_root/apps/desktop/src-tauri/tauri.dev.conf.json"
   local app_bundle="$target_dir/release/bundle/macos/Peppy_dev.app"
   case "$action" in
     open)
@@ -107,14 +108,14 @@ macos() {
       open -n "$app_bundle"
       ;;
     dev)
-      (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri dev --config "$dev_config" -- --locked)
+      (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri dev --config "$dev_config" -- --locked)
       ;;
     build)
       if [[ ${PEPPY_MACOS_SIGNING_IDENTITY+set} == set ]]; then
         verify_macos_signing_identity "$PEPPY_MACOS_SIGNING_IDENTITY"
-        (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" APPLE_SIGNING_IDENTITY="$PEPPY_MACOS_SIGNING_IDENTITY" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
+        (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" APPLE_SIGNING_IDENTITY="$PEPPY_MACOS_SIGNING_IDENTITY" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
       else
-        (cd "$root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
+        (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
       fi
       [[ -d "$app_bundle" ]] || die "Tauri completed without the expected bundle: $app_bundle"
       ;;
@@ -122,10 +123,12 @@ macos() {
 }
 
 wsl_windows() {
-  local root_windows target_windows powershell
+  local caller_windows source_windows target_windows powershell
   command -v wslpath >/dev/null || die "WSL interop is unavailable; run this from WSL backed by a Windows NTFS drive."
-  root_windows=$(wslpath -w "$root")
-  [[ "$root_windows" =~ ^[A-Za-z]:\\ ]] || die "Native Windows builds require this checkout on a drive-letter NTFS path; ext4 and UNC paths are unsupported."
+  caller_windows=$(wslpath -w "$caller_root")
+  source_windows=$(wslpath -w "$source_root")
+  [[ "$caller_windows" =~ ^[A-Za-z]:\\ ]] || die "Native Windows builds require the calling checkout on a drive-letter NTFS path; ext4 and UNC paths are unsupported."
+  [[ "$source_windows" =~ ^[A-Za-z]:\\ ]] || die "Native Windows builds require this checkout on a drive-letter NTFS path; ext4 and UNC paths are unsupported."
   target_windows=$(wslpath -w "$target_dir")
   [[ "$target_windows" =~ ^[A-Za-z]:\\ ]] || die "CARGO_TARGET_DIR must resolve to a drive-letter Windows path."
   if command -v powershell.exe >/dev/null; then
@@ -135,8 +138,8 @@ wsl_windows() {
   else
     die "Windows PowerShell was not found through WSL interop."
   fi
-  "$powershell" -NoProfile -ExecutionPolicy Bypass -File "${root_windows}\\infra\\dev\\windows-desktop.ps1" \
-    -Action "$action" -RepoPath "$root_windows" -CargoTargetDir "$target_windows"
+  "$powershell" -NoProfile -ExecutionPolicy Bypass -File "${caller_windows}\\infra\\dev\\windows-desktop.ps1" \
+    -Action "$action" -RepoPath "$source_windows" -CargoTargetDir "$target_windows"
 }
 
 case "$(uname -s)" in

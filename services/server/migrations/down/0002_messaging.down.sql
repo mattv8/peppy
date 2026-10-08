@@ -1,0 +1,10 @@
+DROP TABLE outbox_jobs;
+DROP TABLE device_cursors;
+DROP TABLE command_receipts;
+DROP TABLE commands;
+DROP TABLE encrypted_records;
+DROP TABLE event_log;
+DROP TABLE pairing_challenges;
+DROP TABLE device_credentials;
+DROP TABLE devices;
+DROP TABLE vaults;

@@ -39,6 +39,15 @@ class ComposeDevelopmentTests(unittest.TestCase):
             values.pop(name, None)
         return values | overrides
 
+    @staticmethod
+    def install_migration_controller(root):
+        controller = root / "infra/dev/migration_repair.py"
+        controller.write_text(
+            "import subprocess, sys\n"
+            "recipes = ('_dev-up-build', '_dev-up-stop-writers', '_dev-up-start') if sys.argv[1] == 'dev-up' else ('_dev-down-raw',)\n"
+            "for recipe in recipes: subprocess.run(['just', recipe], check=True)\n"
+        )
+
     def render(self, *files, profile=None, **env):
         command = ["docker", "compose", "--env-file", "/dev/null"]
         for file in files:
@@ -48,10 +57,10 @@ class ComposeDevelopmentTests(unittest.TestCase):
         command.extend(["config", "--format", "json"])
         return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, env=self.synthetic_env(**env))
 
-    def assert_root_source_mount(self, service):
+    def assert_source_mount(self, service, source=ROOT):
         source_mount = next(volume for volume in service["volumes"] if volume["target"] == "/source")
         self.assertEqual(source_mount["type"], "bind")
-        self.assertEqual(source_mount["source"], str(ROOT))
+        self.assertEqual(source_mount["source"], str(source))
         self.assertTrue(source_mount["read_only"])
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
@@ -72,7 +81,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
         dev = config["services"]["dev"]
         self.assertEqual(dev["build"]["context"], str(ROOT))
         self.assertEqual(dev["build"]["dockerfile"], "infra/docker/development.Dockerfile")
-        self.assert_root_source_mount(dev)
+        self.assert_source_mount(dev)
         self.assertEqual(dev["command"], ["run", "serve"])
         self.assertEqual(dev["environment"]["BIND_ADDR"], "0.0.0.0:8080")
         self.assertEqual(dev["environment"]["PEPPY_WEB_CLIENT_ROOT"], "true")
@@ -96,10 +105,33 @@ class ComposeDevelopmentTests(unittest.TestCase):
         android_service = json.loads(android.stdout)["services"]["android"]
         self.assertEqual(android_service["build"]["context"], str(ROOT))
         self.assertEqual(android_service["build"]["dockerfile"], "infra/docker/android.Dockerfile")
-        self.assert_root_source_mount(android_service)
+        self.assert_source_mount(android_service)
         self.assertEqual(android_service["profiles"], ["android"])
         self.assertEqual(android_service["platform"], "linux/amd64")
         self.assertNotIn("ports", android_service)
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_dev_overlay_selects_an_absolute_source_tree_without_container_environment_leakage(self):
+        with tempfile.TemporaryDirectory(prefix="selected source ") as directory:
+            source = Path(directory).resolve()
+            result = self.render(
+                "docker-compose.yml", "infra/compose/compose.dev.yml", PEPPY_SOURCE_TREE=str(source)
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)
+        for name in ("web", "dev"):
+            self.assertEqual(config["services"][name]["build"]["context"], str(source))
+        self.assert_source_mount(config["services"]["dev"], source)
+        self.assertNotIn("PEPPY_SOURCE_TREE", config["services"]["dev"].get("environment", {}))
+
+        android = self.render(
+            "docker-compose.yml", "infra/compose/compose.dev.yml", profile="android", PEPPY_SOURCE_TREE=str(source)
+        )
+        self.assertEqual(android.returncode, 0, android.stderr)
+        android_service = json.loads(android.stdout)["services"]["android"]
+        self.assertEqual(android_service["build"]["context"], str(source))
+        self.assert_source_mount(android_service, source)
+        self.assertNotIn("PEPPY_SOURCE_TREE", android_service.get("environment", {}))
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_dev_overlay_honors_bind_and_server_environment_overrides(self):
@@ -181,6 +213,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             tools = root / "tools"
             tools.mkdir()
@@ -238,6 +271,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             helper_directory = root / "infra/dev"
             helper_directory.mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/dev_port.py", helper_directory / "dev_port.py")
+            self.install_migration_controller(root)
             (root / ".env").write_text("WEB_UI_ENABLED=maybe\n")
             tools = root / "tools"
             tools.mkdir()

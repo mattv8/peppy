@@ -93,6 +93,35 @@ class DesktopHelperTests(unittest.TestCase):
             self.assertIn("drive-letter NTFS", result.stderr)
             self.assertFalse(called.exists())
 
+    def test_wsl_rejects_unsupported_caller_path_before_starting_powershell(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = pathlib.Path(temporary)
+            fake_bin = temporary_path / "bin"
+            fake_bin.mkdir()
+            source = temporary_path / "selected source"
+            source.mkdir()
+            called = fake_bin / "called"
+            self.fake_command(fake_bin, "uname", "echo Linux")
+            self.fake_command(
+                fake_bin,
+                "wslpath",
+                "case \"$2\" in *'selected source') echo 'C:\\\\Users\\\\Peppy Source' ;; *) echo '\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\peppy' ;; esac",
+            )
+            self.fake_command(fake_bin, "powershell.exe", f"touch '{called}'")
+
+            result = self.run_helper(
+                "build",
+                env={
+                    "WSL_INTEROP": "1",
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PEPPY_SOURCE_TREE": str(source),
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("calling checkout", result.stderr)
+            self.assertFalse(called.exists())
+
     def test_macos_changes_to_repository_before_version_probe(self):
         with tempfile.TemporaryDirectory() as temporary:
             fake_bin = pathlib.Path(temporary)
@@ -392,6 +421,39 @@ class DesktopHelperTests(unittest.TestCase):
                 env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target), "PEPPY_MACOS_SIGNING_IDENTITY": "Apple Development: test@example.com (ABCDEF1234)"}
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_macos_build_uses_selected_source_tree_and_caller_target_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = pathlib.Path(temporary)
+            fake_bin = temporary_path / "bin"
+            fake_bin.mkdir()
+            source = temporary_path / "selected source"
+            config = source / "apps/desktop/src-tauri/tauri.dev.conf.json"
+            config.parent.mkdir(parents=True)
+            config.write_text("{}")
+            (source / ".node-version").write_text("24.21.0\n")
+            (source / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.98.1"\n')
+            target = temporary_path / "caller target"
+            command_cwd = temporary_path / "pnpm-cwd"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(
+                fake_bin,
+                "pnpm",
+                f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else pwd > '{command_cwd}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi",
+            )
+
+            result = self.run_helper(
+                "build",
+                env={
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PEPPY_SOURCE_TREE": str(source),
+                    "CARGO_TARGET_DIR": str(target),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(command_cwd.read_text().strip(), str(source))
+            self.assertTrue((target / "release/bundle/macos/Peppy_dev.app").is_dir())
 
 
 if __name__ == "__main__":

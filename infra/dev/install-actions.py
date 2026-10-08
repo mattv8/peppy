@@ -166,7 +166,8 @@ def install_actions(root: Path) -> tuple[str, int]:
     existing_actions = existing.get("projectActions", [])
     if not isinstance(existing_actions, list):
         raise InstallError("OpenChamber shared configuration projectActions must be an array")
-    template_by_id = {action["id"]: action for action in template["projectActions"]}
+    managed_actions = [dict(action) for action in template["projectActions"]]
+    template_by_id = {action["id"]: action for action in managed_actions}
     merged_actions: list[Any] = []
     for action in existing_actions:
         if not isinstance(action, dict):
@@ -178,6 +179,8 @@ def install_actions(root: Path) -> tuple[str, int]:
             if not is_retired_legacy_action(action):
                 merged_actions.append(action)
         elif is_recognized_owned_action(action, template_action):
+            if "runIn" in action:
+                template_action["runIn"] = action["runIn"]
             # Append all managed actions below in the canonical toolbar order.
             continue
         else:
@@ -185,7 +188,7 @@ def install_actions(root: Path) -> tuple[str, int]:
                 f"OpenChamber action '{action_id}' has a customized command and will not be overwritten. "
                 "Rename the local action to a different ID to keep it, or restore the template command."
             )
-    merged_actions.extend(template["projectActions"])
+    merged_actions.extend(managed_actions)
 
     merged = dict(existing)
     merged.setdefault("version", 1)

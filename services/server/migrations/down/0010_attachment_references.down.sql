@@ -1,0 +1,2 @@
+DROP INDEX upload_reservations_reference_tracked;
+ALTER TABLE upload_reservations DROP COLUMN reference_tracked;

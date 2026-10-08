@@ -4,6 +4,7 @@ umask 077
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CALLER_CWD=$(pwd -P)
+SOURCE_ROOT=$(cd "${PEPPY_SOURCE_TREE:-$ROOT}" && pwd -L)
 if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
     ARTIFACTS=${PEPPY_ANDROID_ARTIFACTS:-/artifacts/android}
 else
@@ -95,7 +96,7 @@ container_run() {
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
-    DEV_UID=$uid DEV_GID=$gid docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run "$cmd"
+    DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run "$cmd"
 }
 accept_licenses() {
     local status
@@ -179,7 +180,7 @@ native_preflight() {
     command -v cargo >/dev/null || die "Rust Cargo is required; install Rust with rustup"
     command -v rustup >/dev/null || die "rustup is required; install Rust with rustup"
     (
-        cd "$ROOT"
+        cd "$SOURCE_ROOT"
         for target in aarch64-linux-android x86_64-linux-android; do
             rustup target list --installed | grep -Fx "$target" >/dev/null || die "Rust target $target is missing; run 'rustup target add $target'"
         done
@@ -189,23 +190,23 @@ native_preflight() {
 }
 run_build_body() {
     local command=$1
-    bash infra/compose/verify-android-native.sh
+    bash "$SOURCE_ROOT/infra/compose/verify-android-native.sh"
     if [[ $command == build ]]; then
-        (cd apps/android && ./gradlew --no-daemon :app:assembleDebug)
+        (cd "$SOURCE_ROOT/apps/android" && ./gradlew --no-daemon :app:assembleDebug)
         mkdir -p "$ARTIFACTS"
-        install -m 0644 apps/android/app/build/outputs/apk/debug/app-debug.apk "$ARTIFACTS/app-debug.apk"
+        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/debug/app-debug.apk" "$ARTIFACTS/app-debug.apk"
     else
-        (cd apps/android && ./gradlew --no-daemon :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
+        (cd "$SOURCE_ROOT/apps/android" && ./gradlew --no-daemon :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
         mkdir -p "$ARTIFACTS"
-        install -m 0644 apps/android/app/build/outputs/apk/debug/app-debug.apk "$ARTIFACTS/app-debug.apk"
-        install -m 0644 apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk "$ARTIFACTS/app-debug-androidTest.apk"
+        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/debug/app-debug.apk" "$ARTIFACTS/app-debug.apk"
+        install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" "$ARTIFACTS/app-debug-androidTest.apk"
     fi
 }
 run_native() {
     local command=$1
     native_preflight
     echo "android: using native Android backend; it regenerates Rust-owned Kotlin sources in this checkout" >&2
-    cd "$ROOT"
+    cd "$SOURCE_ROOT"
     prepare_sdk
     run_build_body "$command"
 }

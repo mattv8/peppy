@@ -25,6 +25,15 @@ class DevScriptTests(unittest.TestCase):
             capture_output=True, env=env,
         )
 
+    @staticmethod
+    def install_migration_controller(root):
+        controller = root / "infra/dev/migration_repair.py"
+        controller.write_text(
+            "import subprocess, sys\n"
+            "recipes = ('_dev-up-build', '_dev-up-stop-writers', '_dev-up-start') if sys.argv[1] == 'dev-up' else ('_dev-down-raw',)\n"
+            "for recipe in recipes: subprocess.run(['just', recipe], check=True)\n"
+        )
+
     def test_unknown_recipe_fails_without_evaluating_argument(self):
         result = self.run_script("not-a-recipe; touch SHOULD_NOT_EXIST")
         self.assertNotEqual(result.returncode, 0)
@@ -208,6 +217,7 @@ class DevScriptTests(unittest.TestCase):
             (root / "infra/dev").mkdir(parents=True)
             for name in ("dev.sh", "android.sh"):
                 shutil.copy(ROOT / "infra/dev" / name, root / "infra/dev" / name)
+            self.install_migration_controller(root)
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev/install-actions.py").write_text(
@@ -236,6 +246,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory)
             (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
+            self.install_migration_controller(root)
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev/install-actions.py").write_text("from pathlib import Path\nPath(__import__('os').environ['PEPPY_ORDER']).open('a').write('setup\\n')\n")
@@ -270,6 +281,7 @@ class DevScriptTests(unittest.TestCase):
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             (root / ".opencode/dev/android.env").write_text(
                 "PEPPY_ACCEPT_ANDROID_LICENSES=1\nPEPPY_ANDROID_AVD=from-file\n"
@@ -298,6 +310,7 @@ class DevScriptTests(unittest.TestCase):
             (root / ".opencode/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             sentinel, marker = root / "SENTINEL", root / "effects"
             (root / ".opencode/dev/android.env").write_text(
@@ -334,6 +347,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory); (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             helper = root / "infra/dev/android.sh"
             helper.write_text(
@@ -354,6 +368,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory); (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             order = root / "order"; tools = root / "tools"; tools.mkdir()
             docker = tools / "docker"; docker.write_text("#!/bin/sh\ncase \"$*\" in *' up '*) echo dev-up >> \"$PEPPY_ORDER\";; esac\n"); docker.chmod(0o755)
@@ -371,6 +386,28 @@ class DevScriptTests(unittest.TestCase):
                     result = self.run_script(recipe, env=self.shortcut_env(PATH=f"{bin_dir}:{os.environ['PATH']}", PEPPY_JUST_LOG=str(log)))
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(log.read_text(), f"{recipe}\n")
+
+    def test_dev_script_selects_source_once_and_inherits_it_for_build_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "infra/dev").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
+            picker = root / "infra/dev/worktree_source.py"
+            picker.write_text("import os\nprint(os.environ['PEPPY_PICKED_SOURCE'])\n")
+            bin_dir = root / "bin"; bin_dir.mkdir()
+            log = root / "just.log"
+            just = bin_dir / "just"
+            just.write_text("#!/bin/sh\nprintf '%s:%s\\n' \"$1\" \"$PEPPY_SOURCE_TREE\" > \"$PEPPY_JUST_LOG\"\n")
+            just.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", "infra/dev/dev.sh", "dev-build"], cwd=root, text=True, capture_output=True,
+                env=self.shortcut_env(PATH=f"{bin_dir}:{os.environ['PATH']}", PEPPY_JUST_LOG=str(log), PEPPY_PICKED_SOURCE="/chosen/source"),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(log.read_text(), "dev-build:/chosen/source\n")
 
     def test_ios_action_routes_to_native_run_and_propagates_failure(self):
         with tempfile.TemporaryDirectory() as directory:

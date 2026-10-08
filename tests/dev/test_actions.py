@@ -38,6 +38,13 @@ EXPECTED_ACTIONS = [
     ("peppy.ci-test", "CI: Run all tests", "bash infra/dev/dev.sh ci-test", "checkbox-circle"),
     ("peppy.dev-down", "Dev: Stop backend", "bash infra/dev/dev.sh dev-down", "stop-circle"),
 ]
+PARENT_RUN_ACTION_IDS = {
+    "peppy.dev-start",
+    "peppy.desktop-run",
+    "peppy.android-run",
+    "peppy.ios-run",
+    "peppy.dev-down",
+}
 
 
 def load_installer():
@@ -106,7 +113,14 @@ class InstallActionsTests(unittest.TestCase):
         template = json.loads(TEMPLATE_PATH.read_text())
         tasks = json.loads(TASKS_PATH.read_text())["tasks"]
         expected_actions = [
-            {"id": action_id, "name": name, "command": command, "icon": icon, "platforms": ["macos"] if action_id in {"peppy.ios-run", "peppy.ci-test"} else ["macos", "linux"]}
+            {
+                "id": action_id,
+                "name": name,
+                "command": command,
+                "icon": icon,
+                "platforms": ["macos"] if action_id in {"peppy.ios-run", "peppy.ci-test"} else ["macos", "linux"],
+                **({"runIn": "parent"} if action_id in PARENT_RUN_ACTION_IDS else {}),
+            }
             for action_id, name, command, icon in EXPECTED_ACTIONS
         ]
 
@@ -145,6 +159,15 @@ class InstallActionsTests(unittest.TestCase):
 
         self.assertEqual(self.install(), "updated")
         self.assertEqual(self.read_config()["projectActions"], json.loads(TEMPLATE_PATH.read_text())["projectActions"])
+
+    def test_preserves_existing_run_in_preference_for_recognized_action(self):
+        self.write_config({"version": 1, "projectActions": [
+            {"id": "peppy.dev-down", "name": "Dev: Stop services", "command": "bash infra/dev/dev.sh dev-down", "icon": "old", "runIn": "project"},
+        ]})
+
+        self.assertEqual(self.install(), "updated")
+        action = next(action for action in self.read_config()["projectActions"] if action["id"] == "peppy.dev-down")
+        self.assertEqual(action["runIn"], "project")
 
     def test_rejects_active_command_collision_without_changing_file(self):
         config = {"version": 1, "projectActions": [
