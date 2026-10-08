@@ -154,7 +154,7 @@ export const fixtureBridge: DesktopBridge = {
   },
   configure_server: async () => undefined,
   import_credentials: async () => undefined,
-  export_credentials: async () => false,
+  export_credentials: async () => { throw fixtureError("preview-unavailable", "Preview cannot export device credentials. Use an enrolled native or browser session to export."); },
   unlock_sync: async () => undefined,
   create_pairing_intent: async () => ({ httpsOrigin: "https://push.example.com", intentToken: "A".repeat(43), expiresInSeconds: 300 }),
   pairing_intent_status: async () => ({ claimed: false, approved: false, expiresInSeconds: 300 }),
