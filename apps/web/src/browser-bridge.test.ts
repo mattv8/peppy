@@ -154,6 +154,55 @@ describe("BrowserBridge", () => {
     vi.useRealTimers();
   });
 
+  it("starts a credential download from a Worker capability without revoking it immediately", async () => {
+    const port = new TestPort();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const download = bridge.export_credentials();
+    port.reply({ id: 1, ok: true, value: { url: `blob:${location.origin}/credential`, filename: "peppy-credentials.json" } });
+
+    await expect(download).resolves.toBe(true);
+    expect(click).toHaveBeenCalledOnce();
+    expect(port.sent).toEqual([{ id: 1, command: "export_credentials", args: {} }]);
+    click.mockRestore();
+  });
+
+  it("rejects credential download responses that are not Worker Blob capabilities", async () => {
+    const port = new TestPort();
+    const download = new BrowserBridge(port as unknown as MessagePort).export_credentials();
+    port.reply({ id: 1, ok: true, value: { url: "https://example.test/credential.json", filename: "peppy-credentials.json" } });
+
+    await expect(download).rejects.toMatchObject({ code: "unavailable" });
+  });
+
+  it("disconnects synchronously on disposal so an in-flight export cannot succeed later", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const download = bridge.export_credentials();
+    const rejection = expect(download).rejects.toMatchObject({ code: "disconnected" });
+    bridge.dispose();
+    expect(port.sent).toEqual([
+      { id: 1, command: "export_credentials", args: {} },
+      { id: 2, command: "disconnect", args: {} },
+    ]);
+    port.reply({ id: 1, ok: true, value: { url: `blob:${location.origin}/credential`, filename: "peppy-credentials.json" } });
+    await rejection;
+    expect(port.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an oversized credential file before it is read", async () => {
+    const port = new TestPort();
+    const arrayBuffer = vi.fn();
+    const click = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (this: HTMLInputElement) {
+      Object.defineProperty(this, "files", { configurable: true, value: [{ size: 1024 * 1024 + 1, arrayBuffer }] });
+      this.dispatchEvent(new Event("change"));
+    });
+    await expect(new BrowserBridge(port as unknown as MessagePort).import_credentials()).rejects.toMatchObject({ code: "invalid-identity" });
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(port.sent).toEqual([]);
+    click.mockRestore();
+  });
+
   it("posts one granted browser banner and acknowledges only after the post succeeds", () => {
     const port = new TestPort();
     const original = globalThis.Notification;

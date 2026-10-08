@@ -104,17 +104,11 @@ function chooseFile(accept: string, multiple = false): Promise<File[]> {
   });
 }
 
-async function chooseIdentityFile(): Promise<{ metadata: unknown; deviceToken: string } | null> {
+async function chooseCredentialFile(): Promise<ArrayBuffer | null> {
   const [file] = await chooseFile("application/json");
   if (!file) return null;
   if (file.size > MAX_IDENTITY_BYTES) throw new BrowserBridgeError("invalid-identity", "The identity file is invalid.");
-  let identity: unknown;
-  try { identity = JSON.parse(await file.text()); }
-  catch { throw new BrowserBridgeError("invalid-identity", "The identity file is invalid."); }
-  if (typeof identity !== "object" || identity === null || !("metadata" in identity) || !("deviceToken" in identity) || typeof identity.deviceToken !== "string") {
-    throw new BrowserBridgeError("invalid-identity", "The identity file is invalid.");
-  }
-  return { metadata: identity.metadata, deviceToken: identity.deviceToken };
+  return file.arrayBuffer();
 }
 
 async function readContactPhoto(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null> {
@@ -144,6 +138,7 @@ export class BrowserBridge implements DesktopBridge {
   private readonly readyListeners = new Set<() => void>();
   private readonly stoppedListeners = new Set<(reason: string) => void>();
   private readonly blobUrls = new Set<string>();
+  private readonly credentialExportUrls = new Set<string>();
   private readonly banners = new Set<Notification>();
   private notificationContext?: { view: "conversations" | "notifications" | "settings" | "contacts"; conversationId?: string };
   private accountUrl?: string;
@@ -241,7 +236,13 @@ export class BrowserBridge implements DesktopBridge {
       void this.call("display_ack", { ids: [candidate.id] }).catch(() => undefined);
     } catch { /* The worker retains the candidate when a browser post throws. */ }
   }
-  public dispose(): void { activeSecretDialog?.(); this.stop("disconnected"); }
+  public dispose(): void {
+    activeSecretDialog?.();
+    if (!this.stopped) {
+      try { this.port.postMessage({ id: this.nextId++, command: "disconnect", args: {} }); } catch {}
+    }
+    this.stop("disconnected");
+  }
   public load_state(conversationId?: string): Promise<DesktopSnapshot> { return this.call("load_state", { conversationId }); }
   public save_draft(input: DraftInput): Promise<Draft> { return this.call("save_draft", { input }); }
   public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }
@@ -270,7 +271,27 @@ export class BrowserBridge implements DesktopBridge {
   public lock_sync(): Promise<void> { return this.call("lock_sync"); }
 
   public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your device sync passphrase to access your messages.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "current-password" }] }); if (secret) await this.call("unlock", secret); }
-  public async import_credentials(): Promise<void> { const identity = await chooseIdentityFile(); if (!identity) return; const secret = await secretDialog({ id: "browser-import", title: "Import credentials", description: "Enter the passphrase for this encrypted identity file.", confirm: "Import", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "new-password" }] }); if (secret) await this.call("import_identity", { ...identity, ...secret }); }
+  public async import_credentials(): Promise<void> {
+    const bytes = await chooseCredentialFile();
+    if (!bytes) return;
+    const secret = await secretDialog({ id: "browser-import", title: "Import credentials", description: "Enter the device sync passphrase to import these credentials.", confirm: "Import", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "new-password" }] });
+    if (secret) await this.call("import_credential_file", { bytes, ...secret }, [bytes]);
+  }
+  public async export_credentials(): Promise<boolean> {
+    const value = await this.call<unknown>("export_credentials");
+    const exported = validCredentialExport(value);
+    this.credentialExportUrls.add(exported.url);
+    try {
+      const link = document.createElement("a");
+      link.href = exported.url;
+      link.download = exported.filename;
+      link.click();
+      return true;
+    } catch (error: unknown) {
+      await this.releaseCredentialExport(exported.url);
+      throw error;
+    }
+  }
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
   public create_pairing_intent(): Promise<PairingIntent> { return this.call("create_pairing_intent"); }
   public pairing_intent_status(intentToken: string): Promise<PairingStatus> { return this.call("pairing_intent_status", { intentToken }); }
@@ -306,4 +327,20 @@ export class BrowserBridge implements DesktopBridge {
     return Promise.resolve();
   }
   public hosted_provision(): Promise<void> { return unsupported("Hosted provisioning"); }
+
+  private async releaseCredentialExport(url: string): Promise<void> {
+    if (!this.credentialExportUrls.delete(url) || this.stopped) return;
+    await this.call("release_exported_credential", { url });
+  }
+
+}
+
+function validCredentialExport(value: unknown): { url: string; filename: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download.");
+  const { url, filename } = value as Record<string, unknown>;
+  if (typeof url !== "string" || typeof filename !== "string" || filename !== "peppy-credentials.json") throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download.");
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download."); }
+  if (parsed.protocol !== "blob:" || parsed.origin !== location.origin) throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download.");
+  return { url, filename };
 }

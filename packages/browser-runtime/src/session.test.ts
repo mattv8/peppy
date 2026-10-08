@@ -34,6 +34,7 @@ class TrustedCore {
   public attachmentIds: string[] = [];
   public unlockFailure?: Error;
   public mutationFailure?: Error;
+  public exportResponse: unknown = { filename: "peppy-credentials.json", bytes: [1] };
   public async invoke({ command }: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
     if (command === "_worker_unlock_identity" && this.unlockFailure) throw this.unlockFailure;
     if (command === "mutate" && this.mutationFailure) throw this.mutationFailure;
@@ -42,6 +43,7 @@ class TrustedCore {
     if (command === "_worker_transport_token") { this.tokenCalls++; return { deviceToken: "private-token" }; }
     if (command === "preview_attachment") return { previewUrl: "data:image/png;base64,cHJldmlldw==" };
     if (command === "_worker_rotate_identity") this.envelope = "rotated-envelope";
+    if (command === "_worker_export_credential") return this.exportResponse as CoreResult;
     return {};
   }
 }
@@ -85,6 +87,25 @@ describe("BrowserSession", () => {
     expect(session.phase).toBe("ready");
     expect(session.tokenForTransport()).toBe("private-token");
     expect(core.tokenCalls).toBe(1);
+  });
+
+  it("keeps credential helpers private to their valid lifecycle phases and validates export output", async () => {
+    const fs = new MemoryFs();
+    const core = new TrustedCore();
+    const session = await BrowserSession.boot(sessionOptions(core, fs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
+    await expect(session.exportCredential()).rejects.toMatchObject({ code: "not-ready" });
+    await expect(session.parseCredentialFile(new Uint8Array([1]))).rejects.toMatchObject({ code: "core-error" });
+    fs.seedDatabase();
+    await session.enroll({}, "device-token", "passphrase");
+    core.exportResponse = { filename: "wrong.json", bytes: [1] };
+    await expect(session.exportCredential()).rejects.toMatchObject({ code: "core-error" });
+    const secondFs = new MemoryFs();
+    const secondCore = new TrustedCore();
+    const secondSession = await BrowserSession.boot(sessionOptions(secondCore, secondFs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
+    secondFs.seedDatabase();
+    await secondSession.enroll({}, "device-token", "passphrase");
+    secondCore.exportResponse = { filename: "peppy-credentials.json", bytes: [256] };
+    await expect(secondSession.exportCredential()).rejects.toMatchObject({ code: "core-error" });
   });
 
   it("keeps an old checkpoint after a rejected unlock and permits a retry", async () => {
