@@ -827,6 +827,7 @@ function OnboardingView({
 }) {
   const [pendingAction, setPendingAction] = useState<"origin" | "credentials" | "export" | "unlock" | null>(null);
   const [exportError, setExportError] = useState("");
+  const ExportHeading = compact ? "h3" : "h2";
   const step = (
     number: string,
     title: string,
@@ -838,9 +839,11 @@ function OnboardingView({
       data-step={number}
       data-step-state={done ? "done" : active ? "active" : "pending"}
     >
-      <span className="step-number" aria-hidden>
-        {done ? <CheckCircle /> : number}
-      </span>
+      {!compact && (
+        <span className="step-number" aria-hidden>
+          {done ? <CheckCircle /> : number}
+        </span>
+      )}
       <div className="step-body">
         <strong>{title}</strong>
         {body}
@@ -861,7 +864,7 @@ function OnboardingView({
     }
   };
   return (
-    <section id="onboarding-view" aria-label="Set up Peppy" role="region">
+    <section id="onboarding-view" aria-label="Set up Peppy" role="region" data-compact={compact || undefined}>
       {!compact && <header id="onboarding-header">
         {onBack && <button id="onboarding-back" className="secondary-button" onClick={onBack}>Back</button>}
         <h1>Set up Peppy</h1>
@@ -937,7 +940,7 @@ function OnboardingView({
           )}
       </ol>
       {onExport && <section id="setup-credential-export" data-credential-action="export">
-        <h2>Export credentials</h2>
+        <ExportHeading>Export credentials</ExportHeading>
         <p>{peppyCopy.credential_export_warning}</p>
         <button
           className="secondary-button"
