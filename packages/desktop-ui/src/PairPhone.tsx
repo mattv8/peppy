@@ -33,10 +33,14 @@ export function PairPhone({
   createIntent,
   getStatus,
   approveIntent,
+  canStart = true,
+  unavailableReason,
 }: {
   createIntent(): Promise<PairingIntent>;
   getStatus(intentToken: string): Promise<PairingStatus>;
   approveIntent(intentToken: string, keyDigest: string): Promise<void>;
+  canStart?: boolean;
+  unavailableReason?: string;
 }) {
   const [state, setState] = useState<State>("idle");
   const [intent, setIntent] = useState<PairingIntent>();
@@ -108,7 +112,8 @@ export function PairPhone({
   return <section id="pairing-panel" aria-label="Pair phone" data-pairing-state={state}>
     <h2>Pair phone</h2>
     <p>Generate a short-lived QR code, then scan it from the Peppy phone app.</p>
-    {(state === "idle" || state === "error" || state === "expired") && <button type="button" className="secondary-button" data-testid="pairing-new-qr-button" onClick={() => void begin()}>Generate QR code</button>}
+    {!canStart && <p id="pairing-availability-note">{unavailableReason ?? "Pairing is currently unavailable."}</p>}
+    {(state === "idle" || state === "error" || state === "expired") && <button type="button" className="secondary-button" data-testid="pairing-new-qr-button" disabled={!canStart} aria-describedby={canStart ? undefined : "pairing-availability-note"} onClick={() => void begin()}>Generate QR code</button>}
     {qr && <img data-testid="pairing-qr-image" src={qr} alt="QR code for pairing a phone" />}
     {state === "pending" && <p data-testid="pairing-waiting" role="status">Waiting for phone scan…</p>}
     {state === "claimed" && <div data-testid="pairing-approve-prompt">

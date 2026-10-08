@@ -24,6 +24,8 @@ const deferred = <T,>() => {
   return { promise, resolve, reject };
 };
 
+let setStorageItem: ReturnType<typeof vi.fn>;
+
 function renderLanding(props: Partial<React.ComponentProps<typeof SetupLanding>> = {}) {
   return render(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} pairPhone={<div>Pair phone</div>} selfHostedFallback={<div>Fallback setup</div>} onJoined={vi.fn()} {...props} />);
 }
@@ -52,7 +54,8 @@ function mockNextJoinPoll(next: JoinView) {
 describe("SetupLanding", () => {
   beforeEach(() => {
     const values = new Map<string, string>();
-    Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), clear: () => values.clear() } });
+    setStorageItem = vi.fn((key: string, value: string) => values.set(key, value));
+    Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => values.get(key) ?? null, setItem: setStorageItem, removeItem: (key: string) => values.delete(key), clear: () => values.clear() } });
     vi.restoreAllMocks();
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account());
     vi.spyOn(bridge, "join_start").mockResolvedValue(join());
@@ -107,6 +110,17 @@ describe("SetupLanding", () => {
     await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("secret-qr-payload");
+  });
+
+  it("records the default Hosted choice when starting either hosted path", async () => {
+    renderLanding();
+    await chooseExisting();
+    expect(window.localStorage.getItem("peppy.setup.mode")).toBe("hosted");
+
+    cleanup();
+    renderLanding();
+    fireEvent.click(await screen.findByRole("button", { name: /i'm new to peppy/i }));
+    expect(window.localStorage.getItem("peppy.setup.mode")).toBe("hosted");
   });
 
   it("shows only sign-in after the new-user choice", async () => {
@@ -368,6 +382,14 @@ describe("SetupLanding", () => {
     await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledTimes(2));
   });
 
+  it("records Hosted when an explicit passphrase provision begins", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
+    renderLanding();
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /enter passphrase securely/i }));
+    expect(window.localStorage.getItem("peppy.setup.mode")).toBe("hosted");
+  });
+
   it("refreshes the account after a failed passphrase provision", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     vi.spyOn(bridge, "hosted_provision").mockRejectedValue({ code: "network" });
@@ -408,12 +430,41 @@ describe("SetupLanding", () => {
     expect(document.querySelector("#self-hosted-advanced")).toHaveTextContent("Fallback setup");
   });
 
+  it("records Self-hosted only when an explicit connection begins", async () => {
+    renderLanding({ mode: "self-hosted" });
+    expect(setStorageItem).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://example.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(window.localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
+  });
+
+  it("does not record a choice for automatic resumable provisioning or fixed-origin joining", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write", resumable: true }));
+    renderLanding();
+    await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalled());
+    expect(setStorageItem).not.toHaveBeenCalled();
+
+    cleanup();
+    vi.mocked(bridge.join_status).mockResolvedValue({ state: "idle" });
+    renderLanding({ fixedOrigin: "https://community.example" });
+    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("https://community.example"));
+    expect(setStorageItem).not.toHaveBeenCalled();
+  });
+
   it("persists the selected server mode and notifies the parent", () => {
     const onMode = vi.fn();
     renderLanding({ onMode });
     fireEvent.change(screen.getByRole("combobox", { name: "Server mode" }), { target: { value: "self-hosted" } });
     expect(onMode).toHaveBeenCalledWith("self-hosted");
     expect(window.localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
+  });
+
+  it("does not reset an active join when Hosted is selected again", async () => {
+    renderLanding();
+    await chooseExisting();
+    await waitFor(() => expect(bridge.join_start).toHaveBeenCalled());
+    fireEvent.change(screen.getByRole("combobox", { name: "Server mode" }), { target: { value: "hosted" } });
+    expect(bridge.join_cancel).not.toHaveBeenCalled();
   });
 
   it("keeps the setup heading while routing enrolled desktops to phone pairing", () => {
