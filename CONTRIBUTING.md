@@ -99,13 +99,26 @@ Install JDK 17, the repository-pinned Rust toolchain, `pkg-config`, and host `li
 rustup target add aarch64-linux-android x86_64-linux-android
 ```
 
-Install Android SDK command-line tools and make available `platforms;android-36`, `build-tools;35.0.0`, `platform-tools`, and `ndk;27.2.12479018`. The SDK resolves from `ANDROID_SDK_ROOT`, then `ANDROID_HOME`, then `~/Library/Android/sdk`; set either SDK variable to use another location. Set `JAVA_HOME` to JDK 17, or on macOS derive it with:
+Install Android SDK command-line tools and make available `platforms;android-36`, `build-tools;35.0.0`, `platform-tools`, and `ndk;27.2.12479018`. The SDK resolves from `ANDROID_SDK_ROOT`, then `ANDROID_HOME`, then `~/Library/Android/sdk`; set either SDK variable to use another location.
+
+#### JDK 17 discovery
+
+Set `JAVA_HOME` to JDK 17, or let the native helper discover it automatically. If `JAVA_HOME` is not set, the helper checks for a registered JDK 17 using `/usr/libexec/java_home -F -v 17`, then falls back to an already-installed Homebrew `openjdk@17` package without requiring global registration. An explicit non-empty `JAVA_HOME` takes precedence and must point to a valid JDK; the helper reports an error if the path is invalid rather than silently using another JDK.
 
 ```sh
-export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+# Optional: set explicitly if needed
+export JAVA_HOME="$(/usr/libexec/java_home -F -v 17)"
 ```
 
-The native helper locates SDK command-line tools from that SDK and provisions the pinned SDK packages only after explicit license approval. It does not install global packages, Rust toolchains, or Rust targets. After reviewing the SDK licenses, make the approval explicit before building:
+#### Cargo and Rustup shims
+
+The native helper locates Cargo and Rustup using the current `PATH`. If not found on `PATH`, it appends fallback discovery directories to the builder process PATH without modifying your shell or global environment: `$CARGO_HOME/bin` (if `CARGO_HOME` is set), then `~/.cargo/bin`, then the installed Homebrew rustup prefix. Existing visible tools remain authoritative; fallback discovery only adds to the builder's PATH when still needed.
+
+The native helper only discovers already-installed tools. It does not install Homebrew packages, register global symlinks, modify shell profiles, or change your environment outside the build process itself.
+
+#### Building with automatic discovery
+
+The native helper provisions the pinned SDK packages only after explicit license approval and does not install global packages, Rust toolchains, or Rust targets. After reviewing the SDK licenses, make the approval explicit before building:
 
 ```sh
 PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-build

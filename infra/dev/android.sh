@@ -125,14 +125,42 @@ find_sdkmanager() {
     command -v sdkmanager 2>/dev/null || die "Android SDK command-line tools are missing; install them under $ANDROID_SDK_ROOT/cmdline-tools/latest"
 }
 require_jdk17() {
-    local java_path
+    local java_path brew_prefix
     if [[ -n ${JAVA_HOME:-} ]]; then JAVA_HOME=$(absolute_path "$JAVA_HOME")
-    else JAVA_HOME=$(/usr/libexec/java_home -v 17 2>/dev/null || true); fi
+    else
+        JAVA_HOME=$(/usr/libexec/java_home -F -v 17 2>/dev/null || true)
+        if [[ -z $JAVA_HOME ]] && command -v brew >/dev/null; then
+            brew_prefix=$(brew --prefix --installed openjdk@17 2>/dev/null || true)
+            if [[ -n $brew_prefix ]]; then JAVA_HOME="$brew_prefix/libexec/openjdk.jdk/Contents/Home"; fi
+        fi
+    fi
     test -n "$JAVA_HOME" || die "JDK 17 is required; set JAVA_HOME or install it with 'brew install openjdk@17'"
     java_path="$JAVA_HOME/bin/java"
     test -x "$java_path" || die "JDK 17 java executable is missing: $java_path"
     "$java_path" -version 2>&1 | grep -Eq 'version "17\.|openjdk 17' || die "JAVA_HOME must name a JDK 17: $JAVA_HOME"
     export JAVA_HOME
+}
+have_rust_tools() { command -v cargo >/dev/null && command -v rustup >/dev/null; }
+append_rust_tool_path() {
+    local tool_dir
+    tool_dir=$(absolute_path "$1")
+    if [[ -x $tool_dir/cargo || -x $tool_dir/rustup ]]; then PATH="$PATH:$tool_dir"; export PATH; fi
+}
+prepare_native_rust_path() {
+    local brew_prefix
+    have_rust_tools && return
+    if [[ -n ${CARGO_HOME:-} ]]; then
+        CARGO_HOME=$(absolute_path "$CARGO_HOME")
+        export CARGO_HOME
+        append_rust_tool_path "$CARGO_HOME/bin"
+    fi
+    have_rust_tools && return
+    append_rust_tool_path "$HOME/.cargo/bin"
+    have_rust_tools && return
+    if command -v brew >/dev/null; then
+        brew_prefix=$(brew --prefix --installed rustup 2>/dev/null || true)
+        if [[ -n $brew_prefix ]]; then append_rust_tool_path "$brew_prefix/bin"; fi
+    fi
 }
 native_preflight() {
     local sdk_root target
@@ -147,6 +175,7 @@ native_preflight() {
     SDKMANAGER=$(find_sdkmanager)
     export SDKMANAGER
     require_jdk17
+    prepare_native_rust_path
     command -v cargo >/dev/null || die "Rust Cargo is required; install Rust with rustup"
     command -v rustup >/dev/null || die "rustup is required; install Rust with rustup"
     (
