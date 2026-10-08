@@ -110,6 +110,7 @@ describe("setup landing routing", () => {
     expect(await screen.findByText("https://community.example")).toBeInTheDocument();
     expect(document.getElementById("setup-landing")).toBeInTheDocument();
     fireEvent.click(screen.getByText(/advanced/i));
+    expect(document.getElementById("onboarding-view")).toHaveAttribute("data-compact", "true");
     expect(screen.queryByRole("button", { name: "Configure server" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Unlock sync" })).toBeDisabled();
   });

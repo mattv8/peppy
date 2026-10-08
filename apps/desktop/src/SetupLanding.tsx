@@ -315,10 +315,12 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
       {join.state === "denied" && <p id="join-state-message">{copy("hosted_join_denied")}</p>}
       {join.state === "failed" && <p id="join-state-message">{copy("production_pairing_error")} {join.errorCode && <span>{join.errorCode}</span>}</p>}
       {join.errorCode === "join-retrying" && <p className="join-retrying-hint">{copy("setup_join_retrying")}</p>}
-      {(join.state === "waiting" || join.state === "claimed") && <button id="join-cancel-button" className="secondary-button" onClick={cancelJoin}>{copy("cancel")}</button>}
-      {["expired", "denied", "failed"].includes(join.state) && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(fixedOrigin ?? (mode === "hosted" ? null : selfHostedOrigin))}>{copy("try_again")}</button>}
-      {account?.signedIn && join.state === "idle" && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(null)}>{copy("try_again")}</button>}
-      {!account?.signedIn && mode === "hosted" && <button id="setup-back-button" className="secondary-button" disabled={busy && join.state === "confirm"} onClick={backToChooser}>{copy("back")}</button>}
+      <div id="join-actions">
+        {(join.state === "waiting" || join.state === "claimed") && <button id="join-cancel-button" className="secondary-button" onClick={cancelJoin}>{copy("cancel")}</button>}
+        {["expired", "denied", "failed"].includes(join.state) && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(fixedOrigin ?? (mode === "hosted" ? null : selfHostedOrigin))}>{copy("try_again")}</button>}
+        {account?.signedIn && join.state === "idle" && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(null)}>{copy("try_again")}</button>}
+        {!account?.signedIn && mode === "hosted" && <button id="setup-back-button" className="secondary-button" disabled={busy && join.state === "confirm"} onClick={backToChooser}>{copy("back")}</button>}
+      </div>
     </section>
   );
 
@@ -326,7 +328,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
   if (fixedOrigin || mode === "self-hosted") {
     const hostedBrowser = Boolean(fixedOrigin && accountUrl);
     const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
-    const body = hostedBrowser ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
+    const body = fixedOrigin ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
     content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
   } else if (route === "checking") {
     content = <section id="hosted-account-checking" aria-busy="true"><h2 ref={heading} tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>;
