@@ -430,6 +430,37 @@ class AndroidHelperTests(unittest.TestCase):
                 self.assertIn(f"volume create peppy-{volume}-", calls)
             self.assertIn("run --build --rm android run build", calls)
 
+    def test_host_docker_build_passes_selected_source_tree_with_spaces_to_compose(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp)
+            bin_dir = temp / "bin"
+            bin_dir.mkdir()
+            repo = temp / "caller"
+            script = repo / "infra/dev/android.sh"
+            script.parent.mkdir(parents=True)
+            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            (repo / ".env").write_text("synthetic=1\n")
+            source = temp / "selected source"
+            source.mkdir()
+            log = temp / "docker.log"
+            docker = bin_dir / "docker"
+            docker.write_text("#!/bin/sh\nprintf '%s|%s\\n' \"$PEPPY_SOURCE_TREE\" \"$*\" >> \"$DOCKER_LOG\"\n")
+            docker.chmod(0o755)
+
+            result = self.run_script(
+                script,
+                "build",
+                env={
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "DOCKER_LOG": str(log),
+                    "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts"),
+                    "PEPPY_SOURCE_TREE": str(source),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"{source}|compose", log.read_text())
+
     def test_host_build_missing_env_has_setup_hint(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); bin_dir = temp / "bin"; bin_dir.mkdir()

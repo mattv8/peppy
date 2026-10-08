@@ -6,7 +6,7 @@ services:
 
   web:
     build:
-      context: .
+      context: ${PEPPY_SOURCE_TREE:-.}
       dockerfile: infra/docker/server.Dockerfile
       target: web-assets
     restart: "no"
@@ -16,7 +16,7 @@ services:
   dev:
     image: peppy-dev:${DEV_UID:-1000}-${DEV_GID:-1000}
     build:
-      context: .
+      context: ${PEPPY_SOURCE_TREE:-.}
       dockerfile: infra/docker/development.Dockerfile
       args:
         DEV_UID: ${DEV_UID:-1000}
@@ -57,7 +57,7 @@ services:
       retries: 20
       start_period: 30m
     volumes:
-      - ./:/source:ro
+      - ${PEPPY_SOURCE_TREE:-.}:/source:ro
       - ./.opencode/dev/artifacts:/artifacts
       - dev-cargo:/home/developer/.cargo
       - dev-pnpm:/home/developer/.local/share/pnpm
@@ -69,7 +69,7 @@ services:
     platform: linux/amd64
     profiles: [android]
     build:
-      context: .
+      context: ${PEPPY_SOURCE_TREE:-.}
       dockerfile: infra/docker/android.Dockerfile
       args:
         DEV_UID: ${DEV_UID:-1000}
@@ -80,7 +80,7 @@ services:
     environment:
       PEPPY_ACCEPT_ANDROID_LICENSES: ${PEPPY_ACCEPT_ANDROID_LICENSES:-}
     volumes:
-      - ./:/source:ro
+      - ${PEPPY_SOURCE_TREE:-.}:/source:ro
       - ./.opencode/dev/artifacts:/artifacts
       - android-sdk:/opt/android-sdk
       - android-gradle:/home/peppy/.gradle

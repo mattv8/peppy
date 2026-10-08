@@ -1,0 +1,2 @@
+DROP INDEX pairing_join_requests_expires_idx;
+DROP TABLE pairing_join_requests;
