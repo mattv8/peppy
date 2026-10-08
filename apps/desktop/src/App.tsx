@@ -798,15 +798,12 @@ function pairingAvailability(snapshot: DesktopSnapshot | null): { canStart: bool
   return { canStart: true, reason: "" };
 }
 
-const BROWSER_EXPORT_PREREQUISITE = "Complete phone pairing or import device credentials first.";
 const BROWSER_EXPORT_STARTED = "Credential file download started. Keep it private.";
 
 function credentialExportReason(
   browserHost: boolean,
   encryption: DesktopSnapshot["encryption"]["state"],
 ): string {
-  if (browserHost && encryption === "preview")
-    return BROWSER_EXPORT_PREREQUISITE;
   if (browserHost && encryption !== "unlocked")
     return peppyCopy.credential_export_locked;
   return peppyCopy.credential_export_unavailable;
@@ -815,6 +812,7 @@ function credentialExportReason(
 function OnboardingView({
   connected,
   canUnlock,
+  showServerConfig,
   origin,
   onOrigin,
   onAction,
@@ -828,6 +826,7 @@ function OnboardingView({
 }: {
   connected: boolean;
   canUnlock: boolean;
+  showServerConfig: boolean;
   origin: string;
   onOrigin(value: string): void;
   onAction(action: "origin" | "credentials" | "unlock"): Promise<void>;
@@ -894,7 +893,7 @@ function OnboardingView({
         </p>
       </header>}
       <ol id="onboarding-steps" role="list">
-        {!browserHost && step(
+        {showServerConfig && step(
           "1",
           "Configure server",
           <>
@@ -923,7 +922,7 @@ function OnboardingView({
           !origin,
         )}
         {step(
-          "2",
+          showServerConfig ? "2" : "1",
           "Import device credentials",
           <section id="setup-credential-import" data-credential-action="import">
             <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are handled entirely by the native host — this app never receives them."}</p>
@@ -938,29 +937,23 @@ function OnboardingView({
             </button>
           </section>,
           false,
-          Boolean(origin),
+          !showServerConfig || Boolean(origin),
         )}
-        {encryption !== "unlocked" &&
+        {canUnlock &&
           step(
-            "3",
+            showServerConfig ? "3" : "2",
             "Unlock sync encryption",
             <>
               <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Your passphrase is handled natively."} Required before messages can sync.</p>
-              {browserHost && encryption === "preview" ? (
-                <p id="setup-browser-preview-unlock-prerequisite">
-                  {BROWSER_EXPORT_PREREQUISITE}
-                </p>
-              ) : (
-                <button
-                  className="secondary-button"
-                  data-action="unlock-sync"
-                  disabled={!canUnlock || Boolean(pendingAction)}
-                  aria-busy={pendingAction === "unlock" || undefined}
-                  onClick={() => void runAction("unlock")}
-                >
-                  {browserHost ? "Unlock sync" : "Unlock sync natively"}
-                </button>
-              )}
+              <button
+                className="secondary-button"
+                data-action="unlock-sync"
+                disabled={Boolean(pendingAction)}
+                aria-busy={pendingAction === "unlock" || undefined}
+                onClick={() => void runAction("unlock")}
+              >
+                {browserHost ? "Unlock sync" : "Unlock sync natively"}
+              </button>
             </>,
             false,
             canUnlock,
@@ -1020,6 +1013,7 @@ function SettingsView({
   pairingCanStart,
   pairingUnavailableReason,
   credentialExportAvailable,
+  credentialExportVisible,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -1051,6 +1045,7 @@ function SettingsView({
   pairingCanStart: boolean;
   pairingUnavailableReason?: string;
   credentialExportAvailable: boolean;
+  credentialExportVisible: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -1107,7 +1102,7 @@ function SettingsView({
           <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("credentials") || undefined} onClick={() => void runAction("credentials")}>{browserHost ? "Import credentials" : "Import credentials natively"}</button>
           {actionAlert("credentials")}
         </section>}
-        <section id="settings-credential-export" data-credential-action="export">
+        {credentialExportVisible && <section id="settings-credential-export" data-credential-action="export">
           <h3>Export credentials</h3>
           <p>{peppyCopy.credential_export_warning}</p>
           <button className="secondary-button" disabled={Boolean(pendingAction) || !credentialExportAvailable} aria-busy={actionPending("export") || undefined} aria-describedby={!credentialExportAvailable ? "settings-credential-export-reason" : undefined} onClick={() => void runAction("export")}>Export credentials</button>
@@ -1116,7 +1111,7 @@ function SettingsView({
           <p id="settings-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
             {credentialExportAvailable ? exportNotice : ""}
           </p>
-        </section>
+        </section>}
       </section>}
       <section data-settings-section="pair-phone" data-pairing-available={pairingCanStart ? "true" : "false"}>
         <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} canStart={pairingCanStart} unavailableReason={pairingUnavailableReason} />
@@ -2067,6 +2062,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const canUnlock = snapshot?.mode === "native"
     ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
+  const hasDeviceCredential = snapshot
+    ? snapshot.mode === "browser"
+      ? snapshot.encryption.state !== "preview"
+      : !["server-required", "credentials-required"].includes(setupCode ?? "")
+    : false;
   const credentialExportAvailable = Boolean(snapshot?.credentialExportAvailable) &&
     (!browserHost || snapshot?.encryption.state === "unlocked");
   const pairing = pairingAvailability(snapshot);
@@ -2462,6 +2462,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               pairingCanStart={pairing.canStart}
               pairingUnavailableReason={pairing.reason || undefined}
               credentialExportAvailable={credentialExportAvailable}
+              credentialExportVisible={hasDeviceCredential}
             />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2493,10 +2494,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   selfHostedFallback={<OnboardingView
                     connected={false}
                     canUnlock={canUnlock}
+                    showServerConfig={false}
                     origin={origin}
                     onOrigin={setOrigin}
                     onAction={runOnboardingAction}
-                    onExport={() => runSetupAction("export")}
+                    onExport={hasDeviceCredential ? () => runSetupAction("export") : undefined}
                     encryption={snapshot.encryption.state}
                     browserHost={browserHost}
                     credentialExportAvailable={credentialExportAvailable}
@@ -2511,10 +2513,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <OnboardingView
                   connected={false}
                   canUnlock={canUnlock}
+                  showServerConfig={!browserHost && mode === "self-hosted"}
                   origin={origin}
                   onOrigin={setOrigin}
                   onAction={runOnboardingAction}
-                  onExport={() => runSetupAction("export")}
+                  onExport={hasDeviceCredential ? () => runSetupAction("export") : undefined}
                   encryption={snapshot.encryption.state}
                   browserHost={browserHost}
                   credentialExportAvailable={credentialExportAvailable}

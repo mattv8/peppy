@@ -116,28 +116,9 @@ describe("setup landing routing", () => {
     expect(screen.queryByRole("button", { name: "Configure server" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Unlock sync" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Import credentials" })).toBeEnabled();
-    const exportButton = screen.getByRole("button", { name: "Export credentials" });
-    expect(exportButton).toBeDisabled();
-    expect(exportButton).toHaveAttribute("aria-describedby", "setup-credential-export-reason");
-    expect(document.getElementById("setup-credential-export-reason")).toHaveTextContent(/pairing or import/i);
+    expect(screen.queryByRole("button", { name: "Export credentials" })).not.toBeInTheDocument();
     expect(unlock).not.toHaveBeenCalled();
     expect(exportCredentials).not.toHaveBeenCalled();
-  });
-
-  it("exports an available credential from self-hosted advanced setup", async () => {
-    const exportCredentials = vi.fn().mockResolvedValue(true);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    await landingSnapshot({
-      connection: { state: "offline", errorCode: "server-required" },
-      credentialExportAvailable: true,
-    } as unknown as Partial<DesktopSnapshot>);
-
-    render(<App />);
-    fireEvent.change(await screen.findByRole("combobox", { name: /server mode/i }), { target: { value: "self-hosted" } });
-    fireEvent.click(screen.getByText("Advanced"));
-    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
-
-    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
   });
 
   it("wires export through standalone disconnected setup", async () => {
@@ -163,10 +144,12 @@ describe("setup landing routing", () => {
   });
 
   it("blocks conflicting standalone setup actions while exporting", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
     const exportPending = deferred<boolean>();
     Object.assign(bridge, { export_credentials: vi.fn().mockReturnValue(exportPending.promise) });
     await landingSnapshot({
       activeConversationId: undefined,
+      mode: "native",
       connection: { state: "offline" },
       encryption: { state: "locked" },
       credentialExportAvailable: true,
@@ -199,6 +182,7 @@ describe("setup landing routing", () => {
   });
 
   it("reports rejected standalone server configuration through the onboarding notice", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
     vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Server rejected." });
     await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
 
@@ -1548,7 +1532,7 @@ describe("host state display", () => {
     expect(unlock).toHaveBeenCalledOnce();
   });
 
-  it("explains browser preview export prerequisites in Settings", async () => {
+  it("hides browser preview export in Settings", async () => {
     vi.mocked(bridge.load_state).mockResolvedValue({
       ...host.load(),
       mode: "browser",
@@ -1559,10 +1543,7 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    const exportButton = screen.getByRole("button", { name: "Export credentials" });
-    expect(exportButton).toBeDisabled();
-    expect(exportButton).toHaveAttribute("aria-describedby", "settings-credential-export-reason");
-    expect(document.getElementById("settings-credential-export-reason")).toHaveTextContent(/pairing or import/i);
+    expect(screen.queryByRole("button", { name: "Export credentials" })).not.toBeInTheDocument();
   });
 
   it("keeps rejected credential-import feedback in the credentials section", async () => {
@@ -1780,6 +1761,7 @@ describe("host state display", () => {
   });
 
   it("shows guided onboarding when disconnected with no selection and invokes native setup actions", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
     host.conversations = [];
     host.connection = {
       state: "offline",
@@ -1793,7 +1775,7 @@ describe("host state display", () => {
       name: "Set up Peppy",
     });
     expect(onboarding).toBeInTheDocument();
-    expect(within(onboarding).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(onboarding).getAllByRole("listitem")).toHaveLength(2);
     fireEvent.change(screen.getByLabelText("Server URL"), {
       target: { value: "https://server.test" },
     });
@@ -1804,7 +1786,8 @@ describe("host state display", () => {
     expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
   });
 
-  it("does not record self-hosted mode after a failed or browser onboarding action", async () => {
+  it("retains self-hosted mode after a failed configuration and does not record browser onboarding", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
     host.conversations = [];
     host.connection = { state: "offline", origin: "", errorCode: "credentials-required" };
     vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Rejected" });
@@ -1812,9 +1795,10 @@ describe("host state display", () => {
     await screen.findByRole("region", { name: "Set up Peppy" });
     fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
     await screen.findByRole("alert");
-    expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
+    expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
 
     cleanup();
+    localStorage.removeItem("peppy.setup.mode");
     const browserSnapshot = { ...host.load(), mode: "browser" as const, encryption: { state: "locked" as const } };
     vi.mocked(bridge.load_state).mockResolvedValue(browserSnapshot);
     vi.spyOn(bridge, "import_credentials").mockResolvedValue();
@@ -1826,6 +1810,7 @@ describe("host state display", () => {
   });
 
   it("records self-hosted mode after configuration succeeds even if the refresh fails", async () => {
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
     host.conversations = [];
     host.connection = { state: "offline", origin: "", errorCode: "credentials-required" };
     vi.spyOn(bridge, "configure_server").mockResolvedValue();
