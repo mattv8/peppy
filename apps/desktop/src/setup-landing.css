@@ -49,6 +49,11 @@
   margin: 0;
 }
 
+/* Headings receive programmatic focus for screen-reader route announcements, not interactive navigation */
+#setup-landing-body h2[tabindex="-1"]:focus {
+  outline: none;
+}
+
 #hosted-path-chooser {
   display: grid;
   gap: 12px;
