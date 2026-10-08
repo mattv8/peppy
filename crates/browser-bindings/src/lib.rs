@@ -41,10 +41,8 @@ struct Request<'a> {
     args: Option<&'a RawValue>,
 }
 
-#[cfg(test)]
 struct SecretBytes(Zeroizing<Vec<u8>>);
 
-#[cfg(test)]
 impl<'de> Deserialize<'de> for SecretBytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Vec::<u8>::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
@@ -186,7 +184,10 @@ impl BrowserCore {
             | "_worker_checkpoint_identity"
             | "_worker_identity_metadata"
             | "_worker_transport_token"
-            | "_worker_rotate_identity" => {
+            | "_worker_rotate_identity"
+            | "_worker_parse_credential_file"
+            | "_worker_portable_identity_metadata"
+            | "_worker_export_credential" => {
                 self.identity_command(command, raw_args.ok_or_else(invalid)?)
             }
             "_worker_join_start"
@@ -469,6 +470,7 @@ impl BrowserCore {
             contact_books: None,
             contacts_pending_count: None,
             contact_sync: None,
+            credential_export_available: Some(unlocked && self.identity_session.is_some()),
         })
         .map_err(|_| core(CoreError::Database))
     }

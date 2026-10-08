@@ -14,6 +14,7 @@
     "allow-load-state",
     "allow-configure-server",
     "allow-import-credentials",
+    "allow-export-credentials",
     "allow-unlock-sync",
     "allow-save-draft",
     "allow-send-draft",

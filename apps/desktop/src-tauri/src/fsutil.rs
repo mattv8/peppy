@@ -52,6 +52,34 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Publishes bytes at a new path only. `create_new` rejects existing files and symlinks, and a
+/// failed write removes only the file opened by this call.
+pub fn write_private_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("save path has no parent"))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
 fn copy_fallback_new_with<F>(
     source: &Path,
     destination: &Path,
@@ -236,5 +264,50 @@ mod tests {
         );
         assert!(copy_new_atomic(&source, &dir.path().join("wrong"), 7).is_err());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn write_private_new_rejects_existing_and_creates_owner_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("credentials.json");
+        write_private_new(&destination, b"credential").unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"credential");
+        assert_eq!(
+            write_private_new(&destination, b"replacement")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_new_rejects_existing_and_dangling_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        let existing_link = dir.path().join("existing-link");
+        let dangling_link = dir.path().join("dangling-link");
+        fs::write(&existing, b"keep").unwrap();
+        symlink(&existing, &existing_link).unwrap();
+        symlink(dir.path().join("missing"), &dangling_link).unwrap();
+        for destination in [&existing_link, &dangling_link] {
+            assert_eq!(
+                write_private_new(destination, b"credential")
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+        }
+        assert_eq!(fs::read(existing).unwrap(), b"keep");
     }
 }

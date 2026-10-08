@@ -17,6 +17,7 @@ use peppy_client_core::{Cursor, RawSnapshotRecord, SnapshotPurpose};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU16, AtomicUsize, Ordering},
         Arc,
@@ -25,6 +26,227 @@ use std::{
 };
 
 const TOKEN2: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+struct CountingStore {
+    inner: MemoryStore,
+    gets: AtomicUsize,
+}
+
+impl SecretStore for CountingStore {
+    fn get(
+        &self,
+        account: &str,
+    ) -> crate::error::BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &[u8]) -> crate::error::BridgeResult<()> {
+        self.inner.set(account, secret)
+    }
+}
+
+struct FailingStore;
+
+impl SecretStore for FailingStore {
+    fn get(
+        &self,
+        _account: &str,
+    ) -> crate::error::BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        Err(crate::error::BridgeError::new(
+            "secure-store-unavailable",
+            "unavailable",
+        ))
+    }
+
+    fn set(&self, _account: &str, _secret: &[u8]) -> crate::error::BridgeResult<()> {
+        Err(crate::error::BridgeError::new(
+            "secure-store-unavailable",
+            "unavailable",
+        ))
+    }
+}
+
+fn export_state(root: PathBuf, store: Arc<MemoryStore>) -> (AppState, crate::credentials::Binding) {
+    let vault = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let credential = parse_credential(&credential_json(
+        "http://127.0.0.1:9",
+        &vault,
+        &device,
+        TOKEN,
+    ))
+    .unwrap();
+    let binding = credential.binding();
+    crate::credentials::store_credential(&*store, &credential).unwrap();
+    let state = AppState::new(root, store, noop());
+    state
+        .update_config(|config| {
+            config.select_origin(&binding.origin);
+            config.remember(&binding);
+            config.active = Some(binding.clone());
+        })
+        .unwrap();
+    (state, binding)
+}
+
+// ---- Native credential export --------------------------------------------------------------
+
+#[tokio::test]
+async fn credential_export_helper_cancels_without_store_or_filesystem_work() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let state = AppState::new(root.path().to_path_buf(), store, noop());
+    let binding = crate::credentials::Binding {
+        origin: "https://example.test".into(),
+        vault_id: uuid::Uuid::new_v4().to_string(),
+        device_id: uuid::Uuid::new_v4().to_string(),
+    };
+    assert!(!crate::export_after_selection(&state, binding, None)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn credential_export_helper_writes_active_credential_without_key_mutation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let (state, binding) = export_state(root.path().to_path_buf(), store.clone());
+    let before = store.0.lock().unwrap().clone();
+    let destination = root.path().join("credentials.json");
+    assert!(
+        crate::export_after_selection(&state, binding.clone(), Some(destination.clone()))
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.0.lock().unwrap().clone(), before);
+    assert!(store.get(&binding.db_key_account()).unwrap().is_none());
+    assert!(store.get(&binding.key_cache_account(1)).unwrap().is_none());
+    assert!(parse_credential(&std::fs::read(destination).unwrap()).is_ok());
+}
+
+#[tokio::test]
+async fn credential_export_helper_rejects_missing_or_failing_store_without_secret_text() {
+    let root = tempfile::tempdir().unwrap();
+    let binding = crate::credentials::Binding {
+        origin: "https://example.test".into(),
+        vault_id: uuid::Uuid::new_v4().to_string(),
+        device_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let missing = AppState::new(
+        root.path().to_path_buf(),
+        Arc::new(MemoryStore::default()),
+        noop(),
+    );
+    missing
+        .update_config(|config| {
+            config.select_origin(&binding.origin);
+            config.active = Some(binding.clone());
+        })
+        .unwrap();
+    let error = crate::export_after_selection(
+        &missing,
+        binding.clone(),
+        Some(root.path().join("missing.json")),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "credential-export");
+    assert!(!error.message.contains(TOKEN));
+
+    let failing = AppState::new(root.path().to_path_buf(), Arc::new(FailingStore), noop());
+    failing
+        .update_config(|config| {
+            config.select_origin(&binding.origin);
+            config.active = Some(binding.clone());
+        })
+        .unwrap();
+    let error =
+        crate::export_after_selection(&failing, binding, Some(root.path().join("failing.json")))
+            .await
+            .unwrap_err();
+    assert_eq!(error.code, "secure-store-unavailable");
+    assert!(!error.message.contains(TOKEN));
+}
+
+#[tokio::test]
+async fn credential_export_helper_rejects_binding_change_and_write_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let (state, binding) = export_state(root.path().to_path_buf(), store);
+    state
+        .update_config(|config| config.select_origin("https://other.example"))
+        .unwrap();
+    let destination = root.path().join("changed.json");
+    assert_eq!(
+        crate::export_after_selection(&state, binding, Some(destination.clone()))
+            .await
+            .unwrap_err()
+            .code,
+        "credential-export"
+    );
+    assert!(!destination.exists());
+
+    let store = Arc::new(MemoryStore::default());
+    let (state, binding) = export_state(root.path().to_path_buf(), store);
+    let destination = root.path().join("missing-parent").join("credentials.json");
+    assert_eq!(
+        crate::export_after_selection(&state, binding, Some(destination.clone()))
+            .await
+            .unwrap_err()
+            .code,
+        "credential-export"
+    );
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn cached_native_session_does_not_reread_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(CountingStore {
+        inner: MemoryStore::default(),
+        gets: AtomicUsize::new(0),
+    });
+    let vault = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let state = AppState::new(root.path().to_path_buf(), store.clone(), noop());
+    crate::activate_import(
+        &state,
+        credential("http://127.0.0.1:9", &vault, &device, TOKEN),
+    )
+    .await
+    .unwrap();
+    let before = store.gets.load(Ordering::SeqCst);
+    assert!(state.session().await.unwrap().is_some());
+    assert_eq!(store.gets.load(Ordering::SeqCst), before);
+}
+
+#[tokio::test]
+async fn snapshot_loading_propagates_secure_store_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let binding = crate::credentials::Binding {
+        origin: "https://example.test".into(),
+        vault_id: uuid::Uuid::new_v4().to_string(),
+        device_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let state = AppState::new(root.path().to_path_buf(), Arc::new(FailingStore), noop());
+    state
+        .update_config(|config| {
+            config.select_origin(&binding.origin);
+            config.remember(&binding);
+            config.active = Some(binding);
+        })
+        .unwrap();
+
+    assert_eq!(
+        crate::snapshot_session(&state)
+            .await
+            .err()
+            .expect("expected store error")
+            .code,
+        "secure-store-unavailable"
+    );
+}
 
 async fn serve(router: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

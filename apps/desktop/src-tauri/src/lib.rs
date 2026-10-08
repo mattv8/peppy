@@ -43,7 +43,7 @@ mod windows;
 
 use credentials::{
     check_origin_binding, ensure_database_key, load_config, parse_credential, read_credential_file,
-    save_config, store_credential, HostConfig,
+    save_config, serialize_credential, store_credential, stored_credential, HostConfig,
 };
 use dto::{DraftView, Head, PublicCopyView, SendResultView, Snapshot};
 use error::{core_error, BridgeError, BridgeResult};
@@ -66,8 +66,7 @@ pub struct AppState {
     store: Arc<dyn SecretStore>,
     config_lock: Mutex<()>,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
-    /// Serializes credential import: origin check, key initialization, credential storage,
-    /// config activation and session replacement happen as one unit.
+    /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
     notifier: Notifier,
     notifications: Arc<NotificationSettings>,
@@ -230,7 +229,7 @@ fn head() -> Head {
     }
 }
 
-fn empty_snapshot(origin: Option<String>) -> Snapshot {
+fn empty_snapshot(origin: Option<String>, credential_export_available: bool) -> Snapshot {
     let code = if origin.is_some() {
         "credentials-required"
     } else {
@@ -264,7 +263,13 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         contact_books: None,
         contacts_pending_count: None,
         contact_sync: None,
+        credential_export_available: Some(credential_export_available),
     }
+}
+
+/// Opens the current binding for state snapshots, preserving secure-store and session failures.
+async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>> {
+    state.session().await
 }
 
 #[tauri::command]
@@ -276,8 +281,8 @@ async fn load_state(
 ) -> BridgeResult<Snapshot> {
     check_conversation_scope(window.label(), conversation_id.as_deref())?;
     let origin = state.config()?.origin;
-    let Some(session) = state.session().await? else {
-        return Ok(empty_snapshot(origin));
+    let Some(session) = snapshot_session(&state).await? else {
+        return Ok(empty_snapshot(origin, false));
     };
     let s = session.clone();
     let preferences = state.notifications.preferences();
@@ -293,10 +298,88 @@ async fn load_state(
         startup_supported: cfg!(any(target_os = "macos", target_os = "windows")),
         background: startup::background_requested(std::env::args()),
     });
+    snapshot.credential_export_available = Some(true);
     if deferred {
         session.notify();
     }
     Ok(snapshot)
+}
+
+fn credential_export_error(message: &'static str) -> BridgeError {
+    BridgeError::new("credential-export", message)
+}
+
+fn changed_export_binding() -> BridgeError {
+    credential_export_error(
+        "The active device changed while choosing a destination. Choose Export credentials again.",
+    )
+}
+
+fn write_exported_credential(destination: &std::path::Path, bytes: &[u8]) -> BridgeResult<()> {
+    crate::fsutil::write_private_new(destination, bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            credential_export_error(
+                "That file already exists. Choose a new filename; Peppy never overwrites credential files.",
+            )
+        } else {
+            credential_export_error("Could not save the credential file safely.")
+        }
+    })
+}
+
+#[tauri::command]
+async fn export_credentials(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> BridgeResult<bool> {
+    require_main(window.label())?;
+    let intended = state.config()?.active_binding().cloned().ok_or_else(|| {
+        credential_export_error("There is no active device credential to export.")
+    })?;
+    let store = state.store.clone();
+    let intended_for_check = intended.clone();
+    let has_credential =
+        blocking(move || Ok(stored_credential(&*store, &intended_for_check)?.is_some())).await?;
+    if !has_credential {
+        return Err(credential_export_error(
+            "There is no active device credential to export.",
+        ));
+    }
+    let destination = dialogs::save_file(
+        &app,
+        "Export Peppy device credential",
+        peppy_hosted_client::device_credentials::CREDENTIAL_EXPORT_FILENAME,
+    )
+    .await?;
+
+    export_after_selection(&state, intended, destination).await
+}
+
+async fn export_after_selection(
+    state: &AppState,
+    intended: credentials::Binding,
+    destination: Option<std::path::PathBuf>,
+) -> BridgeResult<bool> {
+    let Some(destination) = destination else {
+        return Ok(false);
+    };
+    let _import = state.import_lock.lock().await;
+    let current = state.config()?.active_binding().cloned();
+    if current.as_ref() != Some(&intended) {
+        return Err(changed_export_binding());
+    }
+    let store = state.store.clone();
+    let bytes = blocking(move || {
+        let credential = stored_credential(&*store, &intended)?.ok_or_else(|| {
+            credential_export_error("There is no active device credential to export.")
+        })?;
+        serialize_credential(&credential)
+            .map_err(|_| credential_export_error("Could not serialize the credential file."))
+    })
+    .await?;
+    blocking(move || write_exported_credential(&destination, &bytes)).await?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -1502,6 +1585,7 @@ pub fn run() {
         load_state,
         configure_server,
         import_credentials,
+        export_credentials,
         unlock_sync,
         create_pairing_intent,
         pairing_intent_status,

@@ -8,10 +8,13 @@ import { BrowserScheduler } from "./scheduler.js";
 import { OriginTransport } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
+import { credentialFileBytes, importCredentialFile, type ParsedCredentialFile } from "./credential-files.js";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
 const OWNER_NAME = "peppy-browser-v1";
+const CREDENTIAL_EXPORT_TTL_MS = 300_000;
+const CREDENTIAL_EXPORT_FILENAME = "peppy-credentials.json";
 
 export type RpcError = { code: string; message: string; currentRevision?: string };
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
@@ -31,6 +34,9 @@ export interface HostSession {
   mutate(command: string, args: Record<string, unknown>): Promise<CoreResult>;
   unlock(passphrase: string): Promise<void>;
   enroll(metadata: unknown, deviceToken: string, passphrase: string): Promise<void>;
+  parseCredentialFile?(bytes: Uint8Array): Promise<ParsedCredentialFile>;
+  portableIdentityMetadata?(bytes: Uint8Array, vault: Record<string, unknown>): Promise<unknown>;
+  exportCredential?(): Promise<{ filename: string; bytes: Uint8Array }>;
   shutdown(): void;
   drain?(): Promise<void>;
   tokenForTransport?(): string;
@@ -66,6 +72,8 @@ export interface BrowserHostDependencies {
   settings?: NotificationSettings;
   publisher?: PublicCopyTransport & { origin: string };
   notification?: NotificationAdapter;
+  credentialOrigin?: string;
+  credentialFetch?: typeof fetch;
 }
 
 type Invocation = { coreCommand: string; mutation: boolean };
@@ -106,7 +114,7 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
     version: "1", mode: "browser", connection: { state: "offline" },
     encryption: { state: phase === "unenrolled" ? "preview" : "locked" }, gateways: [], conversations: [],
     head: { enabled: false, capability: "unsupported" }, pendingCount: 0, quarantineCount: 0,
-    notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
+    notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" }, credentialExportAvailable: false,
   };
 }
 
@@ -115,10 +123,33 @@ function errorFor(error: unknown): RpcError {
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const revision = "details" in error && typeof error.details === "object" && error.details !== null &&
       "currentRevision" in error.details && typeof error.details.currentRevision === "string" ? error.details.currentRevision : undefined;
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "credential-mismatch", "credentials-required", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported"]);
-    return { code: codes.has(error.code) ? error.code : "unavailable", message: "Browser operation failed.", currentRevision: revision };
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "credential-mismatch", "credentials-required", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "invalid-identity", "credential-file-too-large", "credential-invalid-json", "credential-unsupported-version", "credential-invalid-token", "credential-invalid-vault-id", "credential-invalid-device-id", "credential-invalid-origin", "credential-origin-credentials", "credential-origin-path", "credential-origin-insecure", "credential-origin-mismatch", "credential-vault-mismatch", "credential-invalid-vault", "credential-network"]);
+    const code = codes.has(error.code) ? error.code : "unavailable";
+    const message = credentialErrorMessage(code);
+    return { code, message, currentRevision: revision };
   }
   return { code: "unavailable", message: "Browser operation failed." };
+}
+
+function credentialErrorMessage(code: string): string {
+  const messages: Readonly<Record<string, string>> = {
+    "credential-file-too-large": "The credential file is too large.",
+    "credential-origin-mismatch": "The credential belongs to a different server.",
+    "credential-unsupported-version": "This credential file version is unsupported.",
+    "credential-invalid-json": "The credential file is not valid JSON.",
+    "credential-invalid-token": "The credential file has an invalid device token.",
+    "credential-invalid-vault-id": "The credential file has an invalid vault ID.",
+    "credential-invalid-device-id": "The credential file has an invalid device ID.",
+    "credential-invalid-origin": "The credential file has an invalid server origin.",
+    "credential-origin-credentials": "The credential file has an invalid server origin.",
+    "credential-origin-path": "The credential file has an invalid server origin.",
+    "credential-origin-insecure": "The credential file has an invalid server origin.",
+    "credential-vault-mismatch": "The credential does not match the authenticated vault.",
+    "credential-invalid-vault": "The authenticated vault response is invalid.",
+    "credential-network": "The credential server is unavailable.",
+    "invalid-identity": "The selected identity file is invalid.",
+  };
+  return messages[code] ?? "Browser operation failed.";
 }
 
 function requestId(value: unknown): number {
@@ -149,7 +180,7 @@ function coreArgs(command: string, args: Record<string, unknown>): Record<string
 }
 
 /** Dispatches a renderer request without exposing a generic Rust command or worker-private APIs. */
-export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }): Promise<RpcResponse> {
+export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }, credentialOrigin?: string, credentialFetch?: typeof fetch): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
   const { id, command, args } = request;
   try {
@@ -161,7 +192,7 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
        if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
        const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
        if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-       return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+        return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>), ...contacts as Record<string, unknown>, credentialExportAvailable: (snapshot as Record<string, unknown>).credentialExportAvailable === true, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
     }
     if (command === "unlock") {
       const passphrase = secretString(args, "passphrase");
@@ -169,11 +200,10 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
       await session.unlock(passphrase);
       return { id, ok: true, value: undefined };
     }
-    if (command === "import_identity") {
+    if (command === "import_credential_file") {
       const passphrase = secretString(args, "passphrase");
-      const deviceToken = secretString(args, "deviceToken");
-      if (!passphrase || !deviceToken || !("metadata" in args)) throw { code: "invalid-request" };
-      await session.enroll(args.metadata, deviceToken, passphrase);
+      if (!passphrase || !session.parseCredentialFile || !session.portableIdentityMetadata || !credentialOrigin) throw { code: "invalid-request" };
+      await importCredentialFile(session as Required<Pick<HostSession, "parseCredentialFile" | "portableIdentityMetadata" | "enroll">>, credentialFileBytes(args.bytes), credentialOrigin, passphrase, credentialFetch);
       return { id, ok: true, value: undefined };
     }
     if (command === "prepare_attachment") return { id, ok: true, value: await addAttachmentPreview(session, await prepareAttachment(session, args)) };
@@ -314,6 +344,7 @@ export class BrowserWorkerHost {
   private unsubscribeNetwork?: () => void;
   private presenter?: BannerPresenter;
   private presentationPort?: BrowserPort;
+  private readonly credentialExports = new Map<BrowserPort, Map<string, ReturnType<typeof setTimeout>>>();
 
   public constructor(private readonly dependencies: BrowserHostDependencies) {}
 
@@ -348,6 +379,7 @@ export class BrowserWorkerHost {
       try { await this.dependencies.network?.stop(); } catch {}
       this.unsubscribeNetwork?.();
       this.presenter?.clear();
+      this.releaseCredentialExports();
       this.owner?.owner.shutdown();
       try { await this.owner?.owner.drain?.(); } catch {}
       acknowledge?.();
@@ -380,10 +412,23 @@ export class BrowserWorkerHost {
       return;
     }
     if (validRequest(request) && request.command === "disconnect") {
+      this.releaseCredentialExports(port);
       this.ports.delete(port);
       if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
       port.postMessage({ event: "stopped", reason: "disconnected" });
       port.close();
+      return;
+    }
+    if (validRequest(request) && request.command === "release_exported_credential") {
+      const url = request.args.url;
+      if (typeof url !== "string") { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
+      this.releaseCredentialExport(port, url);
+      port.postMessage({ id: request.id, ok: true, value: undefined });
+      return;
+    }
+    if (validRequest(request) && request.command === "export_credentials") {
+      const response = await this.exportCredential(port, request.id);
+      port.postMessage(response);
       return;
     }
     if (validRequest(request) && request.command === "set_notification_context") {
@@ -416,11 +461,11 @@ export class BrowserWorkerHost {
     }
     const generation = this.owner.owner.generation;
     const command = validRequest(request) ? request.command : undefined;
-    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher);
+    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.dependencies.credentialOrigin, this.dependencies.credentialFetch);
     if (response.ok && command === "load_state" && this.dependencies.network?.epochStatus?.()) {
       const value = response.value;
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-        response = { ...response, value: { ...value as Record<string, unknown>, encryption: { ...(value as Record<string, unknown>).encryption as Record<string, unknown>, state: "mismatch" } } };
+        response = { ...response, value: { ...value as Record<string, unknown>, credentialExportAvailable: false, encryption: { ...(value as Record<string, unknown>).encryption as Record<string, unknown>, state: "mismatch" } } };
       }
     }
     port.postMessage(response);
@@ -428,9 +473,9 @@ export class BrowserWorkerHost {
       await this.stop("closed");
       return;
     }
-    if ((response.ok && command !== undefined && (INVOCATIONS[command]?.mutation || command === "unlock" || command === "import_identity" || command === "publish_attachment" || command === "retry_attachment")) || generation !== this.owner.owner.generation) {
+    if ((response.ok && command !== undefined && (INVOCATIONS[command]?.mutation || command === "unlock" || command === "import_credential_file" || command === "publish_attachment" || command === "retry_attachment")) || generation !== this.owner.owner.generation) {
       this.changed();
-      if (command === "unlock" || command === "import_identity") await this.dependencies.network?.start();
+      if (command === "unlock" || command === "import_credential_file") await this.dependencies.network?.start();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment") this.dependencies.network?.wake?.();
     }
@@ -463,6 +508,42 @@ export class BrowserWorkerHost {
   }
 
   private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
+
+  private async exportCredential(port: BrowserPort, id: number): Promise<RpcResponse> {
+    try {
+      if (!this.owner || this.stopping || this.owner.owner.phase !== "ready" || !this.owner.owner.exportCredential) throw { code: "credentials-required" };
+      const exported = await this.owner.owner.exportCredential();
+      if (this.stopping || !this.ports.has(port) || this.owner.owner.phase !== "ready") throw { code: "locked" };
+      if (exported.filename !== CREDENTIAL_EXPORT_FILENAME) throw { code: "core" };
+      const payload = new Uint8Array(exported.bytes.byteLength);
+      payload.set(exported.bytes);
+      const url = URL.createObjectURL(new Blob([payload.buffer], { type: "application/json" }));
+      payload.fill(0);
+      this.trackCredentialExport(port, url);
+      return { id, ok: true, value: { url, filename: CREDENTIAL_EXPORT_FILENAME } };
+    } catch (error: unknown) { return { id, ok: false, error: errorFor(error) }; }
+  }
+
+  private trackCredentialExport(port: BrowserPort, url: string): void {
+    const exports = this.credentialExports.get(port) ?? new Map<string, ReturnType<typeof setTimeout>>();
+    this.credentialExports.set(port, exports);
+    exports.set(url, setTimeout(() => this.releaseCredentialExport(port, url), CREDENTIAL_EXPORT_TTL_MS));
+  }
+
+  private releaseCredentialExport(port: BrowserPort, url: string): void {
+    const exports = this.credentialExports.get(port);
+    const timer = exports?.get(url);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    exports?.delete(url);
+    if (exports?.size === 0) this.credentialExports.delete(port);
+    URL.revokeObjectURL(url);
+  }
+
+  private releaseCredentialExports(port?: BrowserPort): void {
+    const ports = port ? [port] : [...this.credentialExports.keys()];
+    for (const owner of ports) for (const url of this.credentialExports.get(owner)?.keys() ?? []) this.releaseCredentialExport(owner, url);
+  }
 }
 
 function notificationContext(args: Record<string, unknown>): BannerContext | undefined {
@@ -555,5 +636,6 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         return publicTransport.postPublicCopy(path, bytes, request);
       },
     },
+    credentialOrigin: self.location.origin,
   };
 }

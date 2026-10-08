@@ -114,6 +114,100 @@ describe("setup landing routing", () => {
     expect(screen.getByRole("button", { name: "Unlock sync" })).toBeDisabled();
   });
 
+  it("exports an available credential from self-hosted advanced setup", async () => {
+    const exportCredentials = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    await landingSnapshot({
+      connection: { state: "offline", errorCode: "server-required" },
+      credentialExportAvailable: true,
+    } as unknown as Partial<DesktopSnapshot>);
+
+    render(<App />);
+    fireEvent.change(await screen.findByRole("combobox", { name: /server mode/i }), { target: { value: "self-hosted" } });
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
+
+    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
+  });
+
+  it("wires export through standalone disconnected setup", async () => {
+    const exportCredentials = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    await landingSnapshot({
+      activeConversationId: undefined,
+      connection: { state: "offline" },
+      credentialExportAvailable: true,
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Export credentials" }));
+
+    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
+  });
+
+  it("disables standalone export when readiness is omitted", async () => {
+    await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
+
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Export credentials" })).toBeDisabled();
+  });
+
+  it("blocks conflicting standalone setup actions while exporting", async () => {
+    const exportPending = deferred<boolean>();
+    Object.assign(bridge, { export_credentials: vi.fn().mockReturnValue(exportPending.promise) });
+    await landingSnapshot({
+      activeConversationId: undefined,
+      connection: { state: "offline" },
+      encryption: { state: "locked" },
+      credentialExportAvailable: true,
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Export credentials" }));
+    expect(screen.getByRole("button", { name: "Configure server" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Import credentials natively" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Unlock sync natively" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Export credentials" })).toBeDisabled();
+    exportPending.resolve(true);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Export credentials" })).toBeEnabled());
+  });
+
+  it("blocks setup export while importing credentials", async () => {
+    const importPending = deferred<void>();
+    vi.spyOn(bridge, "import_credentials").mockReturnValue(importPending.promise);
+    await landingSnapshot({
+      activeConversationId: undefined,
+      connection: { state: "offline" },
+      credentialExportAvailable: true,
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Import credentials natively" }));
+    expect(screen.getByRole("button", { name: "Export credentials" })).toBeDisabled();
+    importPending.resolve();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Export credentials" })).toBeEnabled());
+  });
+
+  it("reports rejected standalone server configuration through the onboarding notice", async () => {
+    vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Server rejected." });
+    await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Configure server" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Server rejected.");
+  });
+
+  it("reports rejected standalone credential import through the onboarding notice", async () => {
+    vi.spyOn(bridge, "import_credentials").mockRejectedValue({ message: "Import rejected." });
+    await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Import credentials natively" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Import rejected.");
+  });
+
   it.each(["locked", "mismatch"] as const)("reports a rejected browser %s unlock while keeping recovery available", async (state) => {
     await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state } });
     vi.spyOn(bridge, "unlock_sync").mockRejectedValue({ message: "Unlock rejected." });
@@ -1405,7 +1499,6 @@ describe("host state display", () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByText("Advanced setup / recovery"));
     fireEvent.click(screen.getByRole("button", { name: "Import credentials natively" }));
     const alert = await screen.findByRole("alert");
     expect(alert.closest('[data-settings-section="credentials"]')).toBeInTheDocument();
@@ -1422,7 +1515,6 @@ describe("host state display", () => {
     await screen.findByText("Hello from Aurora");
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByText("Change server"));
-    fireEvent.click(screen.getByText("Advanced setup / recovery"));
     expect(configureServer).not.toHaveBeenCalled();
     expect(importCredentials).not.toHaveBeenCalled();
     expect(unlock).not.toHaveBeenCalled();
@@ -1441,6 +1533,83 @@ describe("host state display", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(document.querySelector('[data-settings-section="credentials"]')).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /import credentials/i })).not.toBeInTheDocument();
+  });
+
+  it("exports hosted native credentials when the host reports availability", async () => {
+    const exportCredentials = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      credentialExportAvailable: true,
+    } as unknown as DesktopSnapshot));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
+
+    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("button", { name: /import credentials/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps export failures scoped to the settings export section", async () => {
+    Object.assign(bridge, { export_credentials: vi.fn().mockRejectedValue({ message: "Export rejected." }) });
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      credentialExportAvailable: true,
+    }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.closest("#settings-credential-export")).toBeInTheDocument();
+  });
+
+  it("returns to idle without an export alert after native cancellation", async () => {
+    Object.assign(bridge, { export_credentials: vi.fn().mockResolvedValue(false) });
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      credentialExportAvailable: true,
+    }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const exportButton = screen.getByRole("button", { name: "Export credentials" });
+    fireEvent.click(exportButton);
+
+    await waitFor(() => expect(exportButton).toBeEnabled());
+    expect(document.querySelector("#settings-credential-export [role=alert]")).not.toBeInTheDocument();
+  });
+
+  it("hides hosted native export when readiness is explicitly false", async () => {
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      credentialExportAvailable: false,
+    }));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(document.querySelector('[data-settings-section="credentials"]')).not.toBeInTheDocument();
+  });
+
+  it("blocks browser export while locked even when availability is stale", async () => {
+    const exportCredentials = vi.fn().mockResolvedValue(true);
+    Object.assign(bridge, { export_credentials: exportCredentials });
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      mode: "browser",
+      encryption: { state: "locked" },
+      credentialExportAvailable: true,
+    } as unknown as DesktopSnapshot));
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const exportButton = screen.getByRole("button", { name: "Export credentials" });
+    expect(exportButton).toBeDisabled();
+    fireEvent.click(exportButton);
+    expect(exportCredentials).not.toHaveBeenCalled();
   });
 
   it.each([

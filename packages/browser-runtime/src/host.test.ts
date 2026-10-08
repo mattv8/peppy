@@ -55,6 +55,77 @@ describe("browser host RPC", () => {
   });
 
   it.each([
+    ["credential-origin-mismatch", "The credential belongs to a different server."],
+    ["credential-unsupported-version", "This credential file version is unsupported."],
+    ["credential-invalid-json", "The credential file is not valid JSON."],
+    ["credential-invalid-token", "The credential file has an invalid device token."],
+    ["credential-invalid-vault-id", "The credential file has an invalid vault ID."],
+    ["credential-invalid-device-id", "The credential file has an invalid device ID."],
+    ["credential-invalid-origin", "The credential file has an invalid server origin."],
+    ["credential-vault-mismatch", "The credential does not match the authenticated vault."],
+    ["credential-invalid-vault", "The authenticated vault response is invalid."],
+    ["credential-network", "The credential server is unavailable."],
+    ["credential-file-too-large", "The credential file is too large."],
+  ])("maps %s to a fixed useful credential-import message", async (code, message) => {
+    const session = new FakeSession();
+    session.mutate = async () => { throw { code, message: "secret server detail" }; };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: {} } }))
+      .resolves.toEqual({ id: 1, ok: false, error: { code, message } });
+  });
+
+  it("exports credentials only as a per-port Blob capability and releases only owned URLs", async () => {
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const create = vi.fn(() => "blob:https://peppy.test/credential");
+    const revoke = vi.fn();
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+    try {
+      const session = new FakeSession();
+      (session as HostSession).exportCredential = async () => ({ filename: "peppy-credentials.json", bytes: new Uint8Array([1]) });
+      const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+      const owner = port();
+      const other = port();
+      await host.attach(owner);
+      await host.attach(other);
+      owner.emit({ id: 1, command: "export_credentials", args: {} });
+      await eventually(() => owner.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+      expect(owner.messages).toContainEqual({ id: 1, ok: true, value: { url: "blob:https://peppy.test/credential", filename: "peppy-credentials.json" } });
+      expect(revoke).not.toHaveBeenCalled();
+      other.emit({ id: 2, command: "release_exported_credential", args: { url: "blob:https://peppy.test/credential" } });
+      await eventually(() => other.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+      expect(revoke).not.toHaveBeenCalled();
+      owner.emit({ id: 3, command: "release_exported_credential", args: { url: "blob:https://peppy.test/credential" } });
+      await eventually(() => revoke.mock.calls.length === 1);
+    } finally {
+      Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+    }
+  });
+
+  it("expires a Worker-owned credential URL after five minutes", async () => {
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const revoke = vi.fn();
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:https://peppy.test/ttl"), revokeObjectURL: revoke });
+    vi.useFakeTimers();
+    try {
+      const session = new FakeSession();
+      (session as HostSession).exportCredential = async () => ({ filename: "peppy-credentials.json", bytes: new Uint8Array([1]) });
+      const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+      const owner = port();
+      await host.attach(owner);
+      owner.emit({ id: 1, command: "export_credentials", args: {} });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(revoke).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(revoke).toHaveBeenCalledWith("blob:https://peppy.test/ttl");
+    } finally {
+      vi.useRealTimers();
+      Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+    }
+  });
+
+  it.each([
     ["unenrolled", "preview"],
     ["locked", "locked"],
     ["closed", "locked"],
@@ -78,6 +149,7 @@ describe("browser host RPC", () => {
         notifications: [],
         appFilters: [],
         notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
+        credentialExportAvailable: false,
       },
     });
     expect(JSON.stringify(response)).not.toContain("do-not-expose");
@@ -93,6 +165,13 @@ describe("browser host RPC", () => {
       { command: "contact_snapshot", args: { addresses: [] }, mutation: false },
       { command: "save_draft", args: { text: "hello" }, mutation: true },
     ]);
+  });
+
+  it("preserves Rust readiness instead of inferring export availability from a ready phase", async () => {
+    const session = new FakeSession();
+    session.snapshot = { credentialExportAvailable: false };
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "load_state", args: {} });
+    expect(response).toMatchObject({ ok: true, value: { credentialExportAvailable: false } });
   });
 
   it("uses the Rust contact_snapshot address contract after loading the snapshot", async () => {
@@ -177,6 +256,7 @@ describe("browser host RPC", () => {
 
   it("overlays a pending epoch mismatch and routes a ready-session passphrase to manual rotation", async () => {
     const session = new FakeSession();
+    session.snapshot = { credentialExportAvailable: true };
     const unlockNewEpoch = vi.fn(async () => undefined);
     const network = {
       start: async () => undefined, stop: async () => undefined, joinStart: async () => ({ state: "idle" as const }), joinPoll: async () => ({ state: "idle" as const }), joinCancel: () => undefined, joinConfirm: async () => ({ state: "idle" as const }),
@@ -187,7 +267,7 @@ describe("browser host RPC", () => {
     await host.attach(attached);
     attached.emit({ id: 1, command: "load_state", args: {} });
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
-    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ encryption: { state: "mismatch" } }) }));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ encryption: { state: "mismatch" }, credentialExportAvailable: false }) }));
     expect(session.phase).toBe("ready");
     attached.emit({ id: 2, command: "unlock", args: { passphrase: "manual-passphrase" } });
     await eventually(() => unlockNewEpoch.mock.calls.length === 1);

@@ -1,10 +1,25 @@
 //! Server origin validation. Credentials are bound to exactly one normalized origin; the host
 //! never forwards them elsewhere (redirects are disabled for every request).
 use crate::error::{BridgeError, BridgeResult};
+use peppy_hosted_client::device_credentials::{canonical_credential_origin, OriginError};
 use url::{Host, Url};
 
 fn invalid(message: &'static str) -> BridgeError {
     BridgeError::new("invalid-origin", message)
+}
+
+pub fn shared_origin_error(error: OriginError) -> BridgeError {
+    match error {
+        OriginError::Empty => invalid("Enter a server origin such as https://messages.example."),
+        OriginError::InvalidUrl => invalid("The server origin is not a valid URL."),
+        OriginError::Credentials => invalid("Server origin must not include credentials."),
+        OriginError::PathQueryOrFragment => {
+            invalid("Server origin must not include a path, query, or fragment.")
+        }
+        OriginError::Insecure => {
+            invalid("Use an HTTPS origin, or an explicit loopback HTTP origin for development.")
+        }
+    }
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -19,31 +34,7 @@ fn is_loopback(url: &Url) -> bool {
 /// Returns the normalized `scheme://host[:port]` origin. HTTPS is required except for explicit
 /// loopback development origins (`127.0.0.0/8`, `::1`, `localhost`).
 pub fn validate_origin(value: &str) -> BridgeResult<String> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > 2048 {
-        return Err(invalid(
-            "Enter a server origin such as https://messages.example.",
-        ));
-    }
-    let url = Url::parse(value).map_err(|_| invalid("The server origin is not a valid URL."))?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid("Server origin must not include credentials."));
-    }
-    if url.query().is_some() || url.fragment().is_some() || !matches!(url.path(), "" | "/") {
-        return Err(invalid(
-            "Server origin must not include a path, query, or fragment.",
-        ));
-    }
-    match url.scheme() {
-        "https" if url.host().is_some() => {}
-        "http" if is_loopback(&url) => {}
-        _ => {
-            return Err(invalid(
-                "Use an HTTPS origin, or an explicit loopback HTTP origin for development.",
-            ))
-        }
-    }
-    Ok(url.origin().ascii_serialization())
+    canonical_credential_origin(value).map_err(shared_origin_error)
 }
 
 /// True when plaintext HTTP is permitted for this (already validated) origin.
@@ -110,5 +101,31 @@ mod tests {
         assert!(websocket_url("http://example.test").is_err());
         assert!(is_loopback_http("http://127.0.0.1:8080"));
         assert!(!is_loopback_http("https://example.test"));
+    }
+
+    #[test]
+    fn shared_origin_errors_keep_native_codes_and_messages() {
+        for (input, message) in [
+            (
+                "",
+                "Enter a server origin such as https://messages.example.",
+            ),
+            (
+                "https://user@example.test",
+                "Server origin must not include credentials.",
+            ),
+            (
+                "https://example.test/path",
+                "Server origin must not include a path, query, or fragment.",
+            ),
+            (
+                "http://example.test",
+                "Use an HTTPS origin, or an explicit loopback HTTP origin for development.",
+            ),
+        ] {
+            let error = validate_origin(input).unwrap_err();
+            assert_eq!(error.code, "invalid-origin");
+            assert_eq!(error.message, message);
+        }
     }
 }

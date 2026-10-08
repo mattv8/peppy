@@ -1,6 +1,7 @@
 import { type CheckpointInput, CheckpointError, IndexedDbCheckpointStore, SerializedRuntime } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError, type CoreResult } from "./core.js";
 import { captureFilesystemCheckpoint, hydrateCipher, restoreFilesystemCheckpoint, type EmscriptenFilesystem } from "./filesystem.js";
+import type { ParsedCredentialFile } from "./credential-files.js";
 
 const ROOT = "/peppy";
 const MAX_PLAINTEXT_MEDIA_BYTES = 32 * 1024 * 1024;
@@ -80,6 +81,43 @@ export class BrowserSession {
       await this.loadTransportToken();
       this.throwIfAborted(signal);
       this.phaseValue = "ready";
+    });
+  }
+
+  /** Worker-private parse; the renderer never receives its token-bearing result. */
+  public async parseCredentialFile(bytes: Uint8Array): Promise<ParsedCredentialFile> {
+    this.requirePhase("unenrolled");
+    const value = await this.options.core.invoke({ command: "_worker_parse_credential_file", args: { bytes: [...bytes] } });
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
+    const parsed = value as Record<string, unknown>;
+    if (parsed.format === "legacy" && typeof parsed.deviceToken === "string" && "metadata" in parsed) {
+      return { format: "legacy", metadata: parsed.metadata, deviceToken: parsed.deviceToken };
+    }
+    if (parsed.format === "portable" && typeof parsed.deviceToken === "string") {
+      return { format: "portable", deviceToken: parsed.deviceToken };
+    }
+    throw new BrowserCoreError("core-error");
+  }
+
+  /** Rust verifies the fetched portable vault before returning token-free enrollment metadata. */
+  public async portableIdentityMetadata(bytes: Uint8Array, vault: Record<string, unknown>): Promise<unknown> {
+    this.requirePhase("unenrolled");
+    return this.options.core.invoke({ command: "_worker_portable_identity_metadata", args: { bytes: [...bytes], vault } });
+  }
+
+  /** Produces a Worker-only credential payload for a transient browser download capability. */
+  public async exportCredential(): Promise<{ filename: string; bytes: Uint8Array }> {
+    this.requireReady();
+    return this.runtime.read(async () => {
+      this.requireReady();
+      const value = await this.options.core.invoke({ command: "_worker_export_credential", args: {} });
+      this.requireReady();
+      if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
+      const output = value as Record<string, unknown>;
+      const bytes = output.bytes;
+      if (output.filename !== "peppy-credentials.json") throw new BrowserCoreError("core-error");
+      if (!Array.isArray(bytes) || bytes.length === 0 || bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) throw new BrowserCoreError("core-error");
+      return { filename: output.filename, bytes: Uint8Array.from(bytes) };
     });
   }
 

@@ -18,6 +18,8 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod device_credentials;
+
 const MAX_JSON: usize = 16 * 1024;
 const MAX_CHECKPOINT: usize = 64 * 1024;
 
@@ -482,7 +484,16 @@ impl HostedProvisioning {
         {
             return invalid();
         }
-        serde_json::to_string(&serde_json::json!({"version": 1, "origin": self.origin, "vaultId": self.vault_id.to_string(), "deviceId": self.device_id.to_string(), "deviceToken": self.token.to_string()})).map_err(|_| HostedClientError::Crypto)
+        let credential = device_credentials::PortableDeviceCredential::new(
+            self.origin.clone(),
+            self.vault_id.to_string(),
+            self.device_id.to_string(),
+            self.token.to_string(),
+        )
+        .map_err(|_| HostedClientError::InvalidRequest)?;
+        let bytes = device_credentials::serialize_portable_credential(&credential)
+            .map_err(|_| HostedClientError::Crypto)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| HostedClientError::Crypto)
     }
     pub fn passphrase_matches(&self, passphrase: &str) -> Result<bool, HostedClientError> {
         let passphrase = Zeroizing::new(passphrase.to_owned());
