@@ -9,19 +9,18 @@ import {
   Loader,
   MessageCircle,
   MessageSquarePlus,
+  Minus,
   Paperclip,
+  PanelLeft,
+  Plus,
   SendHorizontal,
   Settings,
+  Smartphone,
+  Square,
+  SquarePen,
   Users,
   X,
 } from "lucide-react";
-import {
-  RiAddLine,
-  RiChatNewLine,
-  RiCloseLine,
-  RiLayoutLeftLine,
-  RiSubtractLine,
-} from "@remixicon/react";
 import {
   formatPhoneInput,
   formatPhoneNumber,
@@ -53,10 +52,14 @@ export {
   LockOpen,
   MessageSquare,
   MessageSquarePlus,
+  Minus,
+  Plus,
   Radio,
   ShieldAlert,
+  Smartphone,
   SquarePen,
   TriangleAlert,
+  UserPlus,
   X,
 } from "lucide-react";
 
@@ -698,7 +701,9 @@ export function AppTitlebar({
           aria-label={isComposer ? "Close composer" : "Close window"}
           title={isComposer ? "Close composer" : "Close window"}
           onClick={onClose}
-        ><RiCloseLine size={10} aria-hidden /></button>}
+        >
+          <X size={10} strokeWidth={1.75} aria-hidden />
+        </button>}
         {onMinimize && <button
           className="traffic-light traffic-light-minimize"
           aria-label="Minimize window"
@@ -707,7 +712,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><RiSubtractLine size={10} aria-hidden /></button>}
+        ><Minus size={10} strokeWidth={1.75} aria-hidden /></button>}
         {onMaximize && <button
           className="traffic-light traffic-light-maximize"
           aria-label="Maximize window"
@@ -716,7 +721,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><RiAddLine size={10} aria-hidden /></button>}
+        ><Plus size={10} strokeWidth={1.75} aria-hidden /></button>}
       </div>}
       {!isComposer && (onToggleSidebar || onNewMessage) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
         {onToggleSidebar && <button
@@ -727,14 +732,14 @@ export function AppTitlebar({
           aria-expanded={sidebarExpanded}
           aria-controls={sidebarControls}
           onClick={onToggleSidebar}
-        ><RiLayoutLeftLine size={16} aria-hidden /></button>}
+        ><PanelLeft size={16} strokeWidth={1.75} aria-hidden /></button>}
         {onNewMessage && <button
           type="button"
           data-action="new-message"
           aria-label="New conversation"
           title="New conversation"
           onClick={onNewMessage}
-        ><RiChatNewLine size={16} aria-hidden /></button>}
+        ><MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden /></button>}
       </div>}
       <span className="titlebar-product" aria-hidden>
         <img src={logoUrl} alt="" draggable={false} />
@@ -761,14 +766,14 @@ export function AppTitlebar({
               title="Minimize window"
               onClick={onMinimize}
             >
-              <RiSubtractLine size={10} aria-hidden />
+              <Minus size={10} strokeWidth={1.75} aria-hidden />
             </button>}
             {onMaximize && <button
               aria-label="Maximize window"
               title="Maximize window"
               onClick={onMaximize}
             >
-              <RiAddLine size={10} aria-hidden />
+              <Square size={10} strokeWidth={1.75} aria-hidden />
             </button>}
           </>
         )}
@@ -778,7 +783,7 @@ export function AppTitlebar({
           onClick={onClose}
           className="close-button"
         >
-          <RiCloseLine size={10} aria-hidden />
+          <X size={10} strokeWidth={1.75} aria-hidden />
         </button>}
       </div>}
       {macos && renderedNavigation}
@@ -1245,10 +1250,10 @@ export function NavButtons({
       aria-controls={activeView === "conversations" ? threadListId : undefined}
       onClick={() => activeView === "conversations" ? onToggleList?.() : onView("conversations")}
     >
-      <MessageCircle size={iconSize} aria-hidden />
+      <MessageCircle size={iconSize} strokeWidth={1.75} aria-hidden />
     </button>
     <button data-rail-item="contacts" aria-label={contactsPending ? `Contacts, ${contactsPending} pending` : "Contacts"} title="Contacts" aria-current={activeView === "contacts" ? "page" : undefined} onClick={() => onView("contacts")}>
-      <Users size={iconSize} aria-hidden />
+      <Users size={iconSize} strokeWidth={1.75} aria-hidden />
       {contactsPending > 0 && <span className="rail-notif-badge" aria-hidden>{contactsPending > 99 ? "99+" : contactsPending}</span>}
     </button>
     <button
@@ -1258,7 +1263,7 @@ export function NavButtons({
       aria-current={activeView === "notifications" ? "page" : undefined}
       onClick={() => onView("notifications")}
     >
-      <Bell size={iconSize} aria-hidden />
+      <Bell size={iconSize} strokeWidth={1.75} aria-hidden />
       {notificationUnread > 0 && <span className="rail-notif-badge" aria-hidden>{notificationUnread > 99 ? "99+" : notificationUnread}</span>}
     </button>
     <button
@@ -1268,7 +1273,7 @@ export function NavButtons({
       aria-current={activeView === "settings" ? "page" : undefined}
       onClick={() => onView("settings")}
     >
-      <Settings size={iconSize} aria-hidden />
+      <Settings size={iconSize} strokeWidth={1.75} aria-hidden />
     </button>
   </nav>;
 }

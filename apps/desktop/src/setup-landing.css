@@ -5,16 +5,17 @@
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  background: radial-gradient(circle at top, var(--peppy-surface-widget), var(--peppy-surface-desk) 56%);
 }
 
 #setup-landing-inner {
   box-sizing: border-box;
   display: grid;
-  gap: 24px;
+  gap: 20px;
   width: 100%;
-  max-width: 600px;
+  max-width: 640px;
   margin: 0 auto;
-  padding: 28px 24px;
+  padding: 32px 24px;
 }
 
 #setup-landing-header {
@@ -46,6 +47,16 @@
   display: grid;
   gap: 16px;
   min-width: 0;
+}
+
+#setup-landing-body > section,
+#hosted-signin-panel,
+#hosted-join-panel {
+  padding: 16px;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-radius-md, 8px);
+  background: var(--peppy-surface-panel);
+  box-shadow: var(--peppy-shadow-2, none);
 }
 
 #setup-landing-body > section > h2 {
@@ -91,8 +102,8 @@
   min-width: 0;
   padding: 14px 16px;
   border: 1px solid var(--peppy-border-strong);
-  border-radius: var(--peppy-control-radius);
-  background: transparent;
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius));
+  background: var(--peppy-surface-widget);
   color: var(--peppy-text-primary);
   cursor: pointer;
   text-align: left;
@@ -149,7 +160,7 @@
 
 #join-countdown {
   padding: 4px 8px;
-  border-radius: var(--peppy-control-radius);
+  border-radius: var(--peppy-radius-pill, var(--peppy-control-radius));
   background: var(--peppy-surface-widget);
   color: var(--peppy-text-secondary);
   font-size: 12px;

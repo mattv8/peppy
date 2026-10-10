@@ -26,7 +26,6 @@
     "vitest": "catalog:"
   },
   "dependencies": {
-    "@remixicon/react": "catalog:",
     "libphonenumber-js": "^1.13.14",
     "lucide-react": "^0.468.0",
     "qrcode": "catalog:"

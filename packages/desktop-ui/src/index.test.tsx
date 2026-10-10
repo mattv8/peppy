@@ -499,6 +499,7 @@ describe("desktop UI controls", () => {
     expect(toggle).toHaveAttribute("aria-controls", "thread-list");
     fireEvent.click(toggle);
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(screen.getByRole("button", { name: "New conversation" }).querySelector("svg")).toHaveClass("lucide-message-square-plus");
     expect(toggleSidebar).toHaveBeenCalledOnce();
     expect(newMessage).toHaveBeenCalledOnce();
   });

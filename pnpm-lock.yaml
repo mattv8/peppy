@@ -164,9 +164,6 @@ settings:
 
 catalogs:
   default:
-    '@remixicon/react':
-      specifier: ^4.9.0
-      version: 4.9.0
     '@testing-library/jest-dom':
       specifier: ^6.6.3
       version: 6.9.1
@@ -210,9 +207,6 @@ importers:
       '@peppy/desktop-ui':
         specifier: workspace:*
         version: link:../../packages/desktop-ui
-      '@remixicon/react':
-        specifier: 'catalog:'
-        version: 4.9.0(react@19.3.0)
       '@tauri-apps/api':
         specifier: ^2.0.0
         version: 2.12.0
@@ -271,9 +265,6 @@ importers:
       '@peppy/desktop-ui':
         specifier: workspace:*
         version: link:../../packages/desktop-ui
-      '@remixicon/react':
-        specifier: 'catalog:'
-        version: 4.9.0(react@19.3.0)
       qrcode:
         specifier: 'catalog:'
         version: 1.5.4
@@ -328,9 +319,6 @@ importers:
 
   packages/desktop-ui:
     dependencies:
-      '@remixicon/react':
-        specifier: 'catalog:'
-        version: 4.9.0(react@19.3.0)
       libphonenumber-js:
         specifier: ^1.13.14
         version: 1.13.14
@@ -677,11 +665,6 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [glibc]
-
-  '@remixicon/react@4.9.0':
-    resolution: {integrity: sha512-5/jLDD4DtKxH2B4QVXTobvV1C2uL8ab9D5yAYNtFt+w80O0Ys1xFOrspqROL3fjrZi+7ElFUWE37hBfaAl6U+Q==}
-    peerDependencies:
-      react: '>=18.2.0'
 
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
@@ -1848,10 +1831,6 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
-
-  '@remixicon/react@4.9.0(react@19.3.0)':
-    dependencies:
-      react: 19.3.0
 
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
