@@ -102,20 +102,36 @@ verify_macos_signing_identity() {
 macos() {
   local dev_config="$source_root/apps/desktop/src-tauri/tauri.dev.conf.json"
   local app_bundle="$target_dir/release/bundle/macos/Peppy_dev.app"
+  local dev_tls_enabled dev_tls_cert
+  local -a cargo_args=(--locked)
+  if [[ "$action" != open ]]; then
+    dev_tls_enabled=$(python3 "$caller_root/infra/dev/dev_tls.py" enabled) || die "Could not read the DEBUG TLS setting."
+    case "$dev_tls_enabled" in
+      true)
+        python3 "$caller_root/infra/dev/dev_tls.py" prepare || die "Could not prepare local development TLS."
+        dev_tls_cert=$(python3 "$caller_root/infra/dev/dev_tls.py" ca-path) || die "Could not locate the local development TLS CA."
+        [[ "$dev_tls_cert" == /* ]] || die "The local development TLS helper returned a non-absolute CA path."
+        [[ -f "$dev_tls_cert" ]] || die "Local development TLS did not produce its public CA."
+        cargo_args+=(--features dev-local-tls)
+        ;;
+      false) ;;
+      *) die "The local development TLS helper returned an invalid DEBUG setting." ;;
+    esac
+  fi
   case "$action" in
     open)
       [[ -d "$app_bundle" ]] || die "No current macOS bundle at $app_bundle; run desktop-bundle first."
       open -n "$app_bundle"
       ;;
     dev)
-      (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri dev --config "$dev_config" -- --locked)
+      (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" PEPPY_DEV_TLS_CERT="${dev_tls_cert:-}" pnpm --dir apps/desktop exec tauri dev --config "$dev_config" -- "${cargo_args[@]}")
       ;;
     build)
       if [[ ${PEPPY_MACOS_SIGNING_IDENTITY+set} == set ]]; then
         verify_macos_signing_identity "$PEPPY_MACOS_SIGNING_IDENTITY"
-        (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" APPLE_SIGNING_IDENTITY="$PEPPY_MACOS_SIGNING_IDENTITY" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
+        (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" PEPPY_DEV_TLS_CERT="${dev_tls_cert:-}" APPLE_SIGNING_IDENTITY="$PEPPY_MACOS_SIGNING_IDENTITY" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- "${cargo_args[@]}")
       else
-        (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- --locked)
+        (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" PEPPY_DEV_TLS_CERT="${dev_tls_cert:-}" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- "${cargo_args[@]}")
       fi
       [[ -d "$app_bundle" ]] || die "Tauri completed without the expected bundle: $app_bundle"
       ;;

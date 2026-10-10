@@ -1131,10 +1131,14 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
     let config = WebSocketConfig::default()
         .max_message_size(Some(WS_MAX_MESSAGE))
         .max_frame_size(Some(WS_MAX_MESSAGE));
+    let connector = match crate::tls::websocket_connector(session.api.origin()) {
+        Ok(connector) => connector,
+        Err(_) => return ended("local-tls-config"),
+    };
     // Plain `ws://` is only produced for validated loopback origins; redirects are never followed.
     let connected = tokio::select! {
         _ = session.cancel.cancelled() => return WsEnd::Cancelled,
-        result = timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async_with_config(request, Some(config), true)) => result,
+        result = timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, connector)) => result,
     };
     let mut socket = match connected {
         Ok(Ok((socket, _))) => socket,

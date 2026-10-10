@@ -210,7 +210,7 @@ function iosIconContents() {
 async function outputs() {
   const [css, sourceMark] = await Promise.all([readFile(paths.css, "utf8"), readFile(paths.mark, "utf8")]);
   const mark = parseMark(sourceMark);
-  const theme = { dark: selected(extractTheme(css, ":root,")), light: selected(extractTheme(css, ".theme-light")) };
+  const theme = { dark: selected(extractTheme(css, ":root,")), light: selected(extractTheme(css, ".theme-light {")) };
   const icon = squareIcon(mark, "#FFFFFF", mark.fill);
   return new Map([
     [paths.appIcon, icon], [paths.darkAppIcon, squareIcon(mark, "#1A1A1A", theme.dark.brand.replace("FF", "#"))], [paths.tintedAppIcon, squareIcon(mark, "#FFFFFF", "#000000")],

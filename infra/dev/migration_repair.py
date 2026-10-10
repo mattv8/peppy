@@ -263,7 +263,7 @@ def docker_endpoint(environment: dict[str, str]) -> str:
 
 
 def compose_command(root: Path) -> list[str]:
-    return ["docker", "compose", "--env-file", str(root / ".env"), "-f", str(root / "docker-compose.yml"), "-f", str(root / "infra/compose/compose.dev.yml")]
+    return [sys.executable, str(root / "infra/dev/dev_tls.py"), "compose"]
 
 
 def database_credentials(root: Path) -> tuple[str, str]:

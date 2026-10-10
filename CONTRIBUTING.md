@@ -177,6 +177,33 @@ cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen 
 
 ## Native desktop workflow
 
+### Local HTTPS for native development
+
+Set `DEBUG=true` in your local `.env` (or export it in the shell) to enable
+development HTTPS on the configured `API_HOST_PORT`, defaulting to
+`https://127.0.0.1:7000`. Restart the backend and rebuild both native apps after
+changing this setting; opening an existing bundle does not update its certificate
+trust.
+
+Use `just dev-up`, `just desktop-bundle`, and `just android-build` to apply that
+setting on macOS. The macOS and Android build helpers pass the resolved flag and
+public certificate path to their build tools. A direct Android Gradle invocation does not read
+`.env`; export `DEBUG=true` and `PEPPY_DEV_TLS_CERT` yourself in that case.
+
+The development helpers generate a local certificate authority and a server
+certificate under ignored `.opencode/dev/tls/`. Only the public CA certificate is
+included in the Android debug app and the explicitly enabled `Peppy_dev` build.
+They trust it only for local endpoints and still verify certificate hostnames.
+Production trust is unchanged; `DEBUG=true` cannot enable this trust in an
+already-built production app. No certificate is installed in the operating
+system's trust store, so a browser visiting the development server may warn.
+
+Use the same `https://127.0.0.1:7000` origin on the Mac and Android emulator.
+Android deployment/open helpers reverse-forward the configured port through ADB.
+Keep `.opencode/dev/tls/` private and preserve its CA across restarts. Replacing
+the CA requires rebuilding the native apps. Unset `DEBUG` or set `DEBUG=false`
+and restart/rebuild to return to the existing loopback HTTP workflow.
+
 On macOS, `desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory. `desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`.
 
 Development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources. Development uses a separate Keychain namespace. The first dev launch creates an empty profile. Any prior app data and Keychain records stored under the production identity `org.peppy.desktop` remain unchanged; there is no automatic migration. Legacy Keychain records copy only within the current namespace, never from production into dev.

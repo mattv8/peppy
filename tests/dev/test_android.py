@@ -25,9 +25,11 @@ class AndroidHelperTests(unittest.TestCase):
             "ANDROID_HOME", "ANDROID_NDK_HOME", "JAVA_HOME", "CARGO_TARGET_DIR",
             "PEPPY_ACCEPT_ANDROID_LICENSES", "PEPPY_DEBUG_SERVER", "API_HOST_PORT", "PUBLIC_API_URL",
             "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED",
+            "DEBUG",
         ):
             values.pop(name, None)
         values["PEPPY_ANDROID_BUILD_BACKEND"] = "docker"
+        values["DEBUG"] = "false"
         values.update(env or {})
         return subprocess.run(
             ["bash", str(script), *args],
@@ -135,7 +137,27 @@ class AndroidHelperTests(unittest.TestCase):
             artifacts = temp / "artifacts"; artifacts.mkdir(); (artifacts / "app-debug.apk").touch()
             result = self.run_helper("deploy", env={"WSL_INTEROP": "1", "ANDROID_SDK_ROOT": r"C:\\Sdk", "FAKE_SDK": str(sdk), "POWERSHELL_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(artifacts), "PATH": f"{bin_dir}:{os.environ['PATH']}"})
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Invoke-WebRequest", log.read_text())
+            self.assertIn("curl.exe --fail", log.read_text())
+
+    def test_wsl_https_health_uses_ca_and_best_effort_revocation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = pathlib.Path(temp); repo = temp / "repo"; script = repo / "infra/dev/android.sh"
+            script.parent.mkdir(parents=True)
+            for name in ("android.sh", "dev_tls.py", "dev_port.py"):
+                shutil.copy(ROOT / "infra/dev" / name, script.parent / name)
+            (repo / ".env").write_text("DEBUG=true\n")
+            sdk = temp / "sdk"; tools = temp / "bin"; tools.mkdir(); (sdk / "platform-tools").mkdir(parents=True)
+            log = temp / "powershell.log"; artifacts = temp / "artifacts"; artifacts.mkdir(); (artifacts / "app-debug.apk").touch()
+            adb = sdk / "platform-tools/adb.exe"
+            adb.write_text("#!/bin/sh\ncase \"$*\" in *devices*) echo 'emulator-5554 device' ;; *getprop*) echo x86_64 ;; esac\n")
+            wslpath = tools / "wslpath"; wslpath.write_text("#!/bin/sh\n[ \"$1\" = -u ] && echo \"$FAKE_SDK\" || echo \"WIN:$2\"\n")
+            powershell = tools / "powershell.exe"; powershell.write_text("#!/bin/sh\necho \"$@\" > \"$POWERSHELL_LOG\"\n")
+            for path in (adb, wslpath, powershell): path.chmod(0o755)
+            result = self.run_script(script, "deploy", env={"WSL_INTEROP": "1", "ANDROID_SDK_ROOT": r"C:\\Sdk", "FAKE_SDK": str(sdk), "POWERSHELL_LOG": str(log), "PEPPY_ANDROID_ARTIFACTS": str(artifacts), "PEPPY_DEV_TLS_DIR": str(temp / "tls"), "PATH": f"{tools}:{os.environ['PATH']}"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            command = log.read_text()
+            self.assertIn("--ssl-revoke-best-effort", command)
+            self.assertIn("--cacert", command)
 
     def test_emulator_timeout_terminates_only_started_process(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -417,7 +439,7 @@ class AndroidHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); bin_dir = temp / "bin"; bin_dir.mkdir(); log = temp / "docker.log"
             repo = temp / "repo"; script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
             (repo / ".env").write_text("synthetic=1\n")
             docker = bin_dir / "docker"
             docker.write_text("#!/bin/sh\necho \"$@\" >> \"$DOCKER_LOG\"\nexit 0\n")
@@ -438,7 +460,7 @@ class AndroidHelperTests(unittest.TestCase):
             repo = temp / "caller"
             script = repo / "infra/dev/android.sh"
             script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
             (repo / ".env").write_text("synthetic=1\n")
             source = temp / "selected source"
             source.mkdir()
@@ -465,7 +487,7 @@ class AndroidHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp); bin_dir = temp / "bin"; bin_dir.mkdir()
             repo = temp / "repo"; script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script.parent.mkdir(parents=True); shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
             docker = bin_dir / "docker"; docker.write_text("#!/bin/sh\nexit 0\n"); docker.chmod(0o755)
             result = self.run_script(script, "build", env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "PEPPY_ANDROID_ARTIFACTS": str(temp / "artifacts")})
             self.assertNotEqual(result.returncode, 0)
@@ -491,6 +513,7 @@ class AndroidHelperTests(unittest.TestCase):
             script = repo / "infra/dev/android.sh"
             script.parent.mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/android.sh", script)
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py")
             shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
             (repo / ".env").write_text(
                 "API_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100\n"
@@ -569,7 +592,7 @@ class AndroidHelperTests(unittest.TestCase):
         repo = temp / "repo"
         script = repo / "infra/dev/android.sh"
         script.parent.mkdir(parents=True)
-        shutil.copy(ROOT / "infra/dev/android.sh", script)
+        shutil.copy(ROOT / "infra/dev/android.sh", script); shutil.copy(ROOT / "infra/dev/dev_tls.py", script.parent / "dev_tls.py"); shutil.copy(ROOT / "infra/dev/dev_port.py", script.parent / "dev_port.py")
         gradle_log = temp / "gradle.log"
         verify_log = temp / "verify.log"
 

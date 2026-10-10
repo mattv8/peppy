@@ -114,6 +114,27 @@ def ensure_loopback_urls_match(port: int, values: dict[str, str]) -> None:
             )
 
 
+def development_tls_enabled(values: dict[str, str]) -> bool:
+    return strict_boolean("DEBUG", configured_value("DEBUG", values), False)
+
+
+def strict_boolean(name: str, value: Optional[str], default: bool) -> bool:
+    if value is None or value == "" or value in {"false", "0"}:
+        return default
+    if value in {"true", "1"}:
+        return True
+    raise ValueError(f"{name} must be true, false, 1, or 0")
+
+
+def rewrite_loopback_url(value: str, port: int, tls_enabled: bool) -> str:
+    parsed = urlparse(value)
+    if parsed.hostname not in LOOPBACK_HOSTS:
+        return value
+    host = parsed.hostname if ":" not in parsed.hostname else f"[{parsed.hostname}]"
+    scheme = "https" if tls_enabled else "http"
+    return parsed._replace(scheme=scheme, netloc=f"{host}:{port}").geturl()
+
+
 def resolved_values(dotenv: Path) -> tuple[int, dict[str, str]]:
     values = dotenv_values(dotenv)
     port = development_port(values)
@@ -133,6 +154,7 @@ def web_ui_enabled(values: dict[str, str]) -> bool:
 
 def public_api_origin(port: int, values: dict[str, str]) -> str:
     value = configured_value("PUBLIC_API_URL", values) or f"http://127.0.0.1:{port}"
+    value = rewrite_loopback_url(value, port, development_tls_enabled(values))
     return configured_origin(value, "PUBLIC_API_URL")
 
 
@@ -207,7 +229,8 @@ def main() -> int:
     if arguments.command == "port":
         print(port)
     elif arguments.command == "smoke-url":
-        print(f"http://127.0.0.1:{port}")
+        scheme = "https" if development_tls_enabled(values) else "http"
+        print(f"{scheme}://127.0.0.1:{port}")
     elif arguments.command == "web-enabled":
         print("true" if web_ui_enabled(values) else "false")
     return 0

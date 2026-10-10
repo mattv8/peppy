@@ -38,6 +38,7 @@ mod startup;
 mod sync;
 #[cfg(test)]
 mod tests;
+mod tls;
 mod tray;
 mod window_chrome;
 mod windows;

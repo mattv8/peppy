@@ -4,7 +4,7 @@ set dotenv-path := ".opencode/dev/android.env"
 set dotenv-required := false
 
 compose := "docker compose --env-file .env -f docker-compose.yml"
-dev_compose := "DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml"
+dev_compose := "python3 infra/dev/dev_tls.py compose"
 dev_prepare := "mkdir -p .opencode/dev/artifacts && chmod 700 .opencode/dev/artifacts && for cache in cargo pnpm target; do docker volume create peppy-dev-${cache}-$(id -u)-$(id -g) >/dev/null; done"
 dev_prereq := "command -v docker >/dev/null || { echo 'docker is required for container development' >&2; exit 1; }; docker compose version >/dev/null || { echo 'docker compose is required for container development' >&2; exit 1; }; test -f .env || { echo '.env is required; run bash infra/dev/dev.sh dev-setup' >&2; exit 1; }"
 
@@ -39,12 +39,13 @@ dev-up:
 _dev-up-build:
     {{ dev_prereq }}
     python3 infra/dev/dev_port.py validate .env
+    python3 infra/dev/dev_tls.py prepare .env
     {{ dev_prepare }}
     {{ dev_compose }} build web dev
 
 _dev-up-stop-writers:
     {{ compose }} rm --stop --force api migrate
-    {{ dev_compose }} rm --stop --force web dev
+    {{ dev_compose }} --teardown rm --stop --force web dev caddy
 
 _dev-up-start:
     {{ dev_compose }} up --detach --wait --wait-timeout 1800 --force-recreate dev
@@ -56,7 +57,7 @@ dev-down:
 _dev-down-raw:
     {{ dev_prereq }}
     {{ compose }} rm --stop --force api migrate
-    {{ dev_compose }} down
+    {{ dev_compose }} --teardown down
 
 dev-setup:
     bash infra/dev/dev.sh dev-setup
@@ -137,7 +138,7 @@ smoke-infra:
     @test -f .env || { echo ".env is required; copy .env.example and set synthetic development credentials" >&2; exit 1; }
     python3 infra/dev/dev_port.py validate .env
     {{ compose }} up --detach --wait
-    @base_url=$(python3 infra/dev/dev_port.py smoke-url .env); curl --fail --silent --show-error "$base_url/healthz"; curl --fail --silent --show-error "$base_url/readyz"
+    @base_url=http://127.0.0.1:$(python3 infra/dev/dev_port.py port .env); curl --fail --silent --show-error "$base_url/healthz"; curl --fail --silent --show-error "$base_url/readyz"
     {{ compose }} run --rm api storage-check
 
 cargo-fmt:
