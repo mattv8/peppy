@@ -1474,7 +1474,7 @@ describe("host state display", () => {
     expect(configure).not.toHaveBeenCalled();
     expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
     expect(document.querySelector('[data-settings-section="pair-phone"]')?.compareDocumentPosition(section!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(section?.compareDocumentPosition(document.querySelector('[data-settings-section="sync"]')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(document.querySelector('[data-settings-section="sync"]')?.compareDocumentPosition(document.querySelector('[data-settings-section="pair-phone"]')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     cleanup();
     render(<App accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
@@ -1555,6 +1555,7 @@ describe("host state display", () => {
     fireEvent.click(screen.getByRole("button", { name: "Import credentials natively" }));
     const alert = await screen.findByRole("alert");
     expect(alert.closest('[data-settings-section="credentials"]')).toBeInTheDocument();
+    expect(document.getElementById("settings-credential-import-disclosure")).toHaveProperty("open", true);
   });
 
   it("does not issue settings commands while disclosures open and prevents duplicate configuration", async () => {
@@ -1626,6 +1627,30 @@ describe("host state display", () => {
     expect(document.getElementById("settings-credential-export-notice")).toHaveAttribute("role", "status");
   });
 
+  it("reopens a pending browser credential export when its success notice arrives", async () => {
+    const exportPending = deferred<boolean>();
+    Object.assign(bridge, { export_credentials: vi.fn().mockReturnValue(exportPending.promise) });
+    vi.mocked(bridge.load_state).mockImplementation(async id => ({
+      ...host.load(id),
+      mode: "browser",
+      encryption: { state: "unlocked" },
+      credentialExportAvailable: true,
+    } as DesktopSnapshot));
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
+    const disclosure = document.getElementById("settings-credential-export-disclosure") as HTMLDetailsElement;
+    await waitFor(() => expect(screen.getByRole("button", { name: "Export credentials" })).toHaveAttribute("aria-busy", "true"));
+    fireEvent.click(disclosure.querySelector("summary")!);
+    await waitFor(() => expect(disclosure.open).toBe(false));
+    await act(async () => exportPending.resolve(true));
+
+    await waitFor(() => expect(disclosure.open).toBe(true));
+    expect(document.getElementById("settings-credential-export-notice")).toBeVisible();
+  });
+
   it("keeps export failures scoped to the settings export section", async () => {
     Object.assign(bridge, { export_credentials: vi.fn().mockRejectedValue({ message: "Export rejected." }) });
     vi.mocked(bridge.load_state).mockImplementation(async id => ({
@@ -1639,6 +1664,7 @@ describe("host state display", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.closest("#settings-credential-export")).toBeInTheDocument();
+    expect(document.getElementById("settings-credential-export-disclosure")).toHaveProperty("open", true);
   });
 
   it("returns to idle without an export alert after native cancellation", async () => {
@@ -1880,6 +1906,58 @@ describe("host state display", () => {
     expect(screen.getByText("Hello from Aurora")).toBeInTheDocument();
   });
 
+  it("uses only rendered settings categories and updates the active category from navigation", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const navigation = screen.getByRole("navigation", { name: "Settings categories" });
+    expect(within(navigation).getByRole("link", { name: "Server" })).toHaveAttribute("aria-current", "location");
+    expect(within(navigation).queryByRole("link", { name: "Advanced" })).not.toBeInTheDocument();
+    const account = within(navigation).getByRole("link", { name: "Account" });
+    fireEvent.click(account);
+
+    expect(account).toHaveAttribute("aria-current", "location");
+    expect(document.getElementById("settings-account-billing")).toHaveAttribute("data-settings-section", "account-billing");
+  });
+
+  it("keeps a titlebar compose fallback when the thread list is hidden by another view", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeVisible());
+    expect(document.getElementById("draft-recipients")).toBeInTheDocument();
+  });
+
+  it("keeps a titlebar compose fallback when the conversation list is collapsed", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+
+    expect(document.getElementById("thread-list")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeVisible());
+    expect(document.getElementById("draft-recipients")).toBeInTheDocument();
+  });
+
+  it("resets the active settings category when a conditional section is removed", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("link", { name: "Startup" }));
+    expect(screen.getByRole("link", { name: "Startup" })).toHaveAttribute("aria-current", "location");
+
+    host.desktop = { ...host.desktop, startupSupported: false };
+    await act(async () => hint?.());
+
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Startup" })).not.toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "Server" })).toHaveAttribute("aria-current", "location");
+  });
+
   it("rolls back and re-enables start at login after a failed change", async () => {
     const pending = deferred<void>();
     vi.mocked(bridge.set_start_at_login).mockImplementation(() => pending.promise);
@@ -2049,6 +2127,21 @@ describe("desktop presentation controls", () => {
       expect(navigation).toHaveAttribute("aria-label", "Main navigation");
       expect(document.getElementById("thread-list")).toBeVisible();
       expect(navigation.querySelectorAll("[data-rail-item]")).toHaveLength(4);
+    });
+
+    it("places the in-place compose action in only the active navigation location", async () => {
+      const { unmount } = render(<App />);
+      await screen.findByText("Hello from Aurora");
+      expect(document.querySelector("#thread-list-toolbar [data-action=new-message]")).toBeInTheDocument();
+      expect(document.querySelector("#desktop-titlebar [data-action=new-message]")).not.toBeInTheDocument();
+      unmount();
+
+      localStorage.setItem("peppy.layout.v1", JSON.stringify({ navigationPosition: "title-bar" }));
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      expect(document.querySelector("#thread-list-toolbar [data-action=new-message]")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+      expect(document.getElementById("draft-recipients")).toBeInTheDocument();
     });
 
     it.each([

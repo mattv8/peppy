@@ -12,7 +12,6 @@
   "dependencies": {
     "@peppy/browser-runtime": "workspace:*",
     "@peppy/desktop-ui": "workspace:*",
-    "@remixicon/react": "catalog:",
     "qrcode": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"

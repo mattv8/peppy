@@ -27,6 +27,7 @@ const mockContactBook: ContactBookView = {
     canDelete: true,
     supportsNotes: true,
     supportsPhoto: true,
+    supportsBirthday: true,
   },
   contactCount: 2,
   defaultAccountLabel: "Google",
@@ -103,6 +104,7 @@ describe("ContactsView", () => {
   ])("keeps remaining field identity after removing an earlier row: %s", async (add, remove, list) => {
     const { container } = render(<ContactsView />);
     fireEvent.click(await screen.findByLabelText("New contact"));
+    if (add === "Add address") fireEvent.click(container.querySelector('[data-form-disclosure="addresses"] > summary')!);
     fireEvent.click(screen.getByLabelText(add));
     fireEvent.click(screen.getByLabelText(add));
     const second = container.querySelectorAll(`${list} > li`)[1];
@@ -197,6 +199,59 @@ describe("ContactsView", () => {
   });
 
   describe("creating contacts", () => {
+    it("keeps empty optional contact fields collapsed until their disclosure is opened", async () => {
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByLabelText("New contact"));
+
+      const organization = container.querySelector<HTMLDetailsElement>('[data-form-disclosure="organization"]');
+      expect(organization).not.toHaveAttribute("open");
+
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      expect(organization).toHaveAttribute("open");
+    });
+
+    it("reveals and focuses birthday after the native host rejects it", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({
+        state: "rejected",
+        reason: "The birthday is invalid.",
+      });
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.click(container.querySelector('[data-form-disclosure="birthday"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Month"), { target: { value: "2" } });
+      fireEvent.click(container.querySelector('[data-form-disclosure="birthday"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      await waitFor(() => {
+        expect(container.querySelector('[data-form-disclosure="birthday"]')).toHaveAttribute("open");
+        expect(document.activeElement).toBe(screen.getByLabelText("Month"));
+      });
+      const givenName = screen.getByLabelText("Given name");
+      givenName.focus();
+      fireEvent.change(givenName, { target: { value: "Avery Lynn" } });
+      expect(document.activeElement).toBe(givenName);
+    });
+
+    it("reveals populated disclosures for a thrown native validation error without stealing focus", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockRejectedValue({ message: "A contact value is too long." });
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Organization"), { target: { value: "Northstar" } });
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByText("Save"));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("A contact value is too long.");
+      expect(container.querySelector('[data-form-disclosure="organization"]')).toHaveAttribute("open");
+      expect(document.activeElement).not.toBe(screen.getByLabelText("Organization"));
+    });
+
     it("opens create form on new contact button", async () => {
       render(<ContactsView />);
 
@@ -302,6 +357,16 @@ describe("ContactsView", () => {
       await waitFor(() => {
         expect(screen.getByDisplayValue("Aurora")).toBeDefined();
       });
+    });
+
+    it("opens populated optional fields in the editor", async () => {
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Edit contact"));
+
+      expect(container.querySelector('[data-form-disclosure="organization"]')).toHaveAttribute("open");
+      expect(container.querySelector('[data-form-disclosure="title"]')).toHaveAttribute("open");
     });
 
     it("sends update kind with contact id and revision", async () => {
@@ -485,7 +550,7 @@ describe("ContactsView", () => {
     it("displays rejection error from server", async () => {
       vi.mocked(bridge.submit_contact_edit).mockResolvedValue({
         state: "rejected",
-        reason: "Invalid contact data",
+        reason: "A contact value is invalid.",
       });
 
       render(<ContactsView />);
@@ -503,7 +568,7 @@ describe("ContactsView", () => {
       fireEvent.click(screen.getByText("Save"));
 
       await waitFor(() => {
-        expect(screen.getByText(/Invalid contact data/)).toBeInTheDocument();
+        expect(screen.getByText(/A contact value is invalid/)).toBeInTheDocument();
       });
     });
   });

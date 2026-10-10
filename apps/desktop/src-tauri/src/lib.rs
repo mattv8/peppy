@@ -25,6 +25,7 @@ mod heads_runtime;
 mod hosted;
 mod join;
 mod lifecycle;
+mod material_state;
 mod media;
 mod net;
 mod notifications;
@@ -1424,6 +1425,7 @@ pub fn run() {
                 .query_pairs()
                 .any(|(key, value)| key == "head" && value == "1");
             window_chrome::sync_webview(webview, head_panel);
+            window_chrome::page_loaded(webview);
         })
         // Must precede setup: a second manual launch activates the resident
         // main window before it can open another database/session.
@@ -1524,6 +1526,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                window_chrome::forget_material(window.label());
+            }
             heads_runtime::panel_window_event(window, event);
             if matches!(
                 event,

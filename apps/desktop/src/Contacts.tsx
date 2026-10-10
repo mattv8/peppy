@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ContactAvatar, Clock, MessageSquarePlus, X, formatPhoneNumber } from "@peppy/desktop-ui";
+import { ContactAvatar, Clock, Smartphone, UserPlus, X, formatPhoneNumber } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactSyncStatus, type ContactView, type RestorableContact } from "./bridge";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import "./contacts.css";
@@ -18,6 +18,13 @@ const EDIT_STATE_LABELS: Record<string, string> = {
 };
 export const editStateLabel = (state: string) => EDIT_STATE_LABELS[state] ?? state;
 
+const contactErrorText = (error: unknown): string =>
+  error instanceof Error
+    ? error.message
+    : typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+      ? error.message
+      : String(error);
+
 export type ContactNavigationGuard = (navigate: () => void) => void;
 
 export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard }: {
@@ -34,6 +41,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [restore, setRestore] = useState<RestorableContact[] | null>(null);
   const [editing, setEditing] = useState<ContactView | null | "create">(null);
   const [error, setError] = useState("");
+  const [validationError, setValidationError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmForget, setConfirmForget] = useState<string | null>(null);
   const [forgetting, setForgetting] = useState<string | null>(null);
@@ -101,6 +109,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const handleSave = async (draft: ContactEditDraft) => {
     if (!book || !editing) return;
     setError("");
+    setValidationError("");
     setBusy(true);
 
     try {
@@ -183,6 +192,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
       if (outcome.state === "rejected") {
         setError(outcome.reason);
+        setValidationError(outcome.reason);
         setBusy(false);
         return;
       }
@@ -198,6 +208,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       setDirty(false);
       setSelected(null);
       setError("");
+      setValidationError("");
       setNotice(outcome.state === "pending" ? `Sent to ${book.deviceName}. Waiting for the phone to apply it.` : "");
       loadPage(false);
       if (pendingNavigation) {
@@ -205,7 +216,9 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         pendingNavigation();
       }
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      const message = contactErrorText(e);
+      setError(message);
+      setValidationError(message);
     } finally {
       setBusy(false);
     }
@@ -300,12 +313,14 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     setDirty(false);
     setConfirmDelete(false);
     setError("");
+    setValidationError("");
   });
 
   const handleEditCancel = () => requestNavigation(() => {
     setEditing(null);
     setDirty(false);
     setError("");
+    setValidationError("");
   });
 
   const handleForget = (id: string) => {
@@ -351,7 +366,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                 aria-current={item.id === bookId ? "location" : undefined}
                 onClick={() => handleSelectBook(item.id)}
               >
-                <span>📱</span>
+                  <Smartphone aria-hidden="true" size={16} strokeWidth={1.75} />
                 <span>
                   <b>{item.deviceName}</b>
                   <small data-book-state={item.state}>
@@ -427,13 +442,15 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           <button
             data-action="create-contact"
             aria-label="New contact"
+            title="Create new contact"
             onClick={() => handleEditStart()}
           >
-            <MessageSquarePlus size={16} />
+            <UserPlus size={16} strokeWidth={1.75} />
           </button>
           <button
             ref={restoreTriggerRef}
             aria-label="Recently deleted contacts"
+            title="View recently deleted contacts"
             onClick={() => {
               setConfirmDelete(false);
               void bridge
@@ -537,6 +554,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
               onSave={handleSave}
               onDirtyChange={setDirty}
               error={error}
+              validationError={validationError}
               busy={busy}
               bookCapabilities={book?.capabilities}
             />

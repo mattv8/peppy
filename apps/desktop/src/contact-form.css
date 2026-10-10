@@ -2,6 +2,7 @@
   height: 100%;
   display: flex;
   flex-direction: column;
+  background: var(--peppy-surface-panel);
 }
 
 #contact-edit-form[inert] {
@@ -12,7 +13,7 @@
   display: flex;
   gap: 8px;
   align-items: center;
-  padding: 8px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--peppy-border);
   flex-shrink: 0;
 }
@@ -34,7 +35,8 @@
   padding: 8px;
   background: var(--peppy-error-surface);
   color: var(--peppy-error-text);
-  border-radius: 4px;
+  border: 1px solid var(--peppy-error);
+  border-radius: var(--peppy-radius-sm, 4px);
   font-size: 12px;
 }
 
@@ -46,6 +48,48 @@
 [data-form-section] {
   padding: 8px 12px;
   border-bottom: 1px solid var(--peppy-border);
+}
+
+[data-form-disclosure] {
+  border-bottom: 1px solid var(--peppy-border);
+}
+
+[data-form-disclosure] > summary {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  color: var(--peppy-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  list-style: none;
+}
+
+[data-form-disclosure] > summary::-webkit-details-marker {
+  display: none;
+}
+
+[data-form-disclosure] > summary::before {
+  content: "›";
+  width: 12px;
+  color: var(--peppy-text-muted);
+  font-size: 16px;
+  transition: transform var(--peppy-duration-fast, 80ms) var(--peppy-ease-out, ease-out);
+}
+
+[data-form-disclosure][open] > summary::before {
+  transform: rotate(90deg);
+}
+
+[data-form-disclosure] > summary:focus-visible {
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: -2px;
+}
+
+[data-form-disclosure] [data-form-section] {
+  border: 0;
+  padding-top: 0;
 }
 
 [data-form-section] label {
@@ -89,10 +133,10 @@
   gap: 8px;
   background: transparent;
   border: 2px dashed var(--peppy-border);
-  border-radius: 8px;
+  border-radius: var(--peppy-radius-md, 8px);
   padding: 16px;
   cursor: pointer;
-  transition: border-color 150ms;
+  transition: border-color var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
   position: relative;
 }
 
@@ -105,6 +149,10 @@
   left: 50%;
   transform: translateX(-50%);
   white-space: nowrap;
+}
+
+#contact-photo-picker[data-has-photo="false"]::after {
+  content: "Add";
 }
 
 #contact-photo-picker:hover {
@@ -196,15 +244,24 @@
 }
 
 [data-contact-phone-row] > select,
-[data-contact-phone-row] > input,
 [data-contact-email-row] > select,
-[data-contact-email-row] > input,
 [data-contact-address-row] > select,
 [data-contact-address-row] > input {
   flex: 1;
   min-width: 0;
   padding: 4px 6px;
   font-size: 12px;
+}
+
+[data-contact-phone-row] > select,
+[data-contact-email-row] > select {
+  flex: 0 1 96px;
+}
+
+[data-contact-phone-row] > input,
+[data-contact-email-row] > input {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 [data-contact-address-row] input {
@@ -283,14 +340,16 @@
   width: 500px;
   height: auto;
   border: 1px solid var(--peppy-border);
-  border-radius: 8px;
-  background: var(--peppy-surface-panel);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: var(--peppy-radius-md, 8px);
+  background: var(--peppy-glass-surface);
+  backdrop-filter: var(--peppy-glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
+  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
   z-index: 1000;
 }
 
 #photo-crop-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--peppy-backdrop, rgba(0, 0, 0, 0.4));
 }
 
 #photo-crop-container {

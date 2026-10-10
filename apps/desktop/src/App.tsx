@@ -25,6 +25,8 @@ import {
   LockKeyhole,
   LockOpen,
   MessageSquare,
+  MessageSquarePlus,
+  Minus,
   NavButtons,
   type NavigationPosition,
   Panel,
@@ -48,7 +50,8 @@ import {
   type RecipientPosition,
   type RecipientSuggestion,
 } from "@peppy/desktop-ui";
-import { RiChatNewLine } from "@remixicon/react";
+import "./settings.css";
+import "./vibrancy.css";
 import {
   bridge,
   type AttachmentView,
@@ -1052,6 +1055,12 @@ function SettingsView({
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
   const [exportNotice, setExportNotice] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const settingsContentRef = useRef<HTMLDivElement>(null);
+  const pendingSectionRef = useRef<string | null>(null);
+  const scrollEndTimer = useRef<number | undefined>(undefined);
+  const [activeSection, setActiveSection] = useState("server");
   const syncText =
     encryption === "unlocked"
       ? "Device sync encrypted"
@@ -1064,12 +1073,17 @@ function SettingsView({
     setPendingAction(action);
     setActionError(null);
     setExportNotice("");
+    if (action === "export") setExportOpen(true);
     try {
       if (action === "account") await onOpenAccount();
       else await onAction(action);
-      if (action === "export" && browserHost)
-        setExportNotice(BROWSER_EXPORT_STARTED);
+      if (action === "export") {
+        setExportOpen(true);
+        if (browserHost) setExportNotice(BROWSER_EXPORT_STARTED);
+      }
     } catch (error) {
+      if (action === "credentials") setImportOpen(true);
+      if (action === "export") setExportOpen(true);
       setActionError({ action, message: errorText(error) });
     } finally {
       setPendingAction(null);
@@ -1079,10 +1093,96 @@ function SettingsView({
   const actionAlert = (action: SettingsAction) =>
     actionError?.action === action && <p className="settings-error" role="alert">{actionError.message}</p>;
   const connectionLabel = browserHost ? "Fixed server" : mode === "hosted" ? "Peppy Hosted" : "Self-hosted";
+  const hasCredentials = browserHost || mode === "self-hosted" || credentialExportAvailable;
+  const hasAccount = (!browserHost && mode === "hosted") || Boolean(browserHost && accountUrl);
+  const sections = [
+    { id: "server", label: "Server" },
+    { id: "sync", label: "Sync encryption" },
+    { id: "pair-phone", label: "Devices & pairing" },
+    { id: "notifications", label: "Notifications" },
+    { id: "theme", label: "Appearance" },
+    ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
+    ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
+    ...(hasCredentials ? [{ id: "credentials", label: "Advanced" }] : []),
+  ];
+  const sectionElementId = (id: string) => {
+    if (id === "notifications") return "notification-settings";
+    if (id === "credentials") return "settings-advanced";
+    return `settings-${id}`;
+  };
+  const sectionIds = sections.map((section) => section.id).join(",");
+  useEffect(() => {
+    if (!sections.some((section) => section.id === activeSection)) {
+      setActiveSection(sections[0]?.id ?? "server");
+    }
+  }, [activeSection, sectionIds]);
+  const selectSection = (id: string) => {
+    const section = document.getElementById(sectionElementId(id));
+    setActiveSection(id);
+    pendingSectionRef.current = id;
+    if (scrollEndTimer.current) window.clearTimeout(scrollEndTimer.current);
+    scrollEndTimer.current = window.setTimeout(() => {
+      pendingSectionRef.current = null;
+    }, 100);
+    section?.scrollIntoView?.({
+      block: "start",
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  };
+
+  useEffect(() => {
+    const root = settingsContentRef.current;
+    if (!root) return;
+    const updateActiveSection = () => {
+      if (pendingSectionRef.current) return;
+      if (root.scrollHeight <= root.clientHeight) return;
+      const atBottom = root.scrollHeight > root.clientHeight &&
+        root.scrollTop + root.clientHeight >= root.scrollHeight - 1;
+      if (atBottom) return setActiveSection(sections.at(-1)?.id ?? "server");
+      const rootTop = root.getBoundingClientRect().top;
+      const visible = sections.reduce<string>((current, section) => {
+        const element = document.getElementById(sectionElementId(section.id));
+        return element && element.getBoundingClientRect().top <= rootTop + 24
+          ? section.id
+          : current;
+      }, sections[0]?.id ?? "server");
+      setActiveSection(visible);
+    };
+    const onScroll = () => {
+      if (scrollEndTimer.current) window.clearTimeout(scrollEndTimer.current);
+      scrollEndTimer.current = window.setTimeout(() => {
+        pendingSectionRef.current = null;
+      }, 100);
+      updateActiveSection();
+    };
+    root.addEventListener("scroll", onScroll, { passive: true });
+    updateActiveSection();
+    return () => {
+      root.removeEventListener("scroll", onScroll);
+      if (scrollEndTimer.current) window.clearTimeout(scrollEndTimer.current);
+    };
+  }, [sectionIds]);
 
   return (
     <section id="settings-view" aria-label="Settings" role="region">
-      <section data-settings-section="server">
+      <div id="settings-layout">
+      <nav id="settings-navigation" aria-label="Settings categories">
+        <label className="settings-category-selector">
+          <span className="visually-hidden">Settings category</span>
+          <select value={activeSection} onChange={(event) => selectSection(event.target.value)}>
+            {sections.map((section) => <option key={section.id} value={section.id}>{section.label}</option>)}
+          </select>
+        </label>
+        <div className="settings-category-links">
+          {sections.map((section) => (
+            <a key={section.id} href={`#${sectionElementId(section.id)}`} aria-current={activeSection === section.id ? "location" : undefined} onClick={(event) => { event.preventDefault(); selectSection(section.id); }}>
+              {section.label}
+            </a>
+          ))}
+        </div>
+      </nav>
+      <div id="settings-content" ref={settingsContentRef}>
+      <section id="settings-server" className="settings-card" data-settings-section="server">
         <h2>Server</h2>
         <p id="settings-connection-summary" className="settings-connection-summary"><strong>{connectionLabel}</strong><span> · </span><span>{configuredOrigin || "No server configured"}</span></p>
         {browserHost ? <p className="settings-note">This browser host uses its fixed server.</p> : mode === "self-hosted" ? <details className="settings-disclosure" id="settings-server-editor">
@@ -1094,42 +1194,7 @@ function SettingsView({
         </details> : null}
         {actionAlert("origin")}
       </section>
-      {(browserHost || mode === "self-hosted" || credentialExportAvailable) && <section data-settings-section="credentials">
-        <h2>Advanced</h2>
-        {(browserHost || mode === "self-hosted") && <section id="settings-credential-import" data-credential-action="import">
-          <h3>Import credentials</h3>
-          <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are imported natively and are never shown here."}</p>
-          <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("credentials") || undefined} onClick={() => void runAction("credentials")}>{browserHost ? "Import credentials" : "Import credentials natively"}</button>
-          {actionAlert("credentials")}
-        </section>}
-        {credentialExportVisible && <section id="settings-credential-export" data-credential-action="export">
-          <h3>Export credentials</h3>
-          <p>{peppyCopy.credential_export_warning}</p>
-          <button className="secondary-button" disabled={Boolean(pendingAction) || !credentialExportAvailable} aria-busy={actionPending("export") || undefined} aria-describedby={!credentialExportAvailable ? "settings-credential-export-reason" : undefined} onClick={() => void runAction("export")}>Export credentials</button>
-          {!credentialExportAvailable && <p id="settings-credential-export-reason">{credentialExportReason(browserHost, encryption)}</p>}
-          {actionAlert("export")}
-          <p id="settings-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
-            {credentialExportAvailable ? exportNotice : ""}
-          </p>
-        </section>}
-      </section>}
-      <section data-settings-section="pair-phone" data-pairing-available={pairingCanStart ? "true" : "false"}>
-        <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} canStart={pairingCanStart} unavailableReason={pairingUnavailableReason} />
-      </section>
-      {!browserHost && mode === "hosted" && <section data-settings-section="account-billing">
-        <h2>Account &amp; billing</h2>
-        <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
-        <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button>
-        {actionAlert("account")}
-      </section>}
-      {browserHost && accountUrl && <section data-settings-section="account-billing">
-        <h2>Account &amp; billing</h2>
-        <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
-        <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">
-          Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span>
-        </a>
-      </section>}
-      <section data-settings-section="sync">
+      <section id="settings-sync" className="settings-card" data-settings-section="sync">
         <h2>Sync encryption</h2>
         <p className="settings-sync-state">
           {encryption === "unlocked" ? (
@@ -1155,6 +1220,9 @@ function SettingsView({
           </button>
         )}
       </section>
+      <section id="settings-pair-phone" className="settings-card" data-settings-section="pair-phone" data-pairing-available={pairingCanStart ? "true" : "false"}>
+        <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} canStart={pairingCanStart} unavailableReason={pairingUnavailableReason} />
+      </section>
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -1164,7 +1232,7 @@ function SettingsView({
         onMute={onMute}
         onPermission={onPermission}
       />
-      <section data-settings-section="theme">
+      <section id="settings-theme" className="settings-card" data-settings-section="theme">
         <h2>Appearance</h2>
         <p>Choose how Peppy follows your system appearance.</p>
         <div className="settings-control-row settings-theme-row">
@@ -1205,7 +1273,7 @@ function SettingsView({
           </label>
         </fieldset>
       </section>
-      {desktop?.startupSupported && <section data-settings-section="startup">
+      {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup">
         <h2>Startup</h2>
         <label className="settings-check"><input id="start-at-login" type="checkbox" checked={desktop.startAtLogin} disabled={savingStartup} onChange={async event => {
           setSavingStartup(true); setStartupError("");
@@ -1215,6 +1283,41 @@ function SettingsView({
         }} /> Start at login</label>
         {startupError && <p className="settings-error" role="alert">Start at login was not changed: {startupError}</p>}
       </section>}
+      {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
+        <h2>Account &amp; billing</h2>
+        <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
+        {!browserHost ? <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button> : <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a>}
+        {actionAlert("account")}
+      </section>}
+      {hasCredentials && <section id="settings-advanced" className="settings-card" data-settings-section="credentials">
+        <h2>Advanced</h2>
+        {(browserHost || mode === "self-hosted") && <section id="settings-credential-import" data-credential-action="import">
+          <details id="settings-credential-import-disclosure" className="settings-disclosure" open={importOpen} onToggle={(event) => setImportOpen(event.currentTarget.open)}>
+            <summary>Import credentials</summary>
+            <div>
+              <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are imported natively and are never shown here."}</p>
+              <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("credentials") || undefined} onClick={() => void runAction("credentials")}>{browserHost ? "Import credentials" : "Import credentials natively"}</button>
+              {actionAlert("credentials")}
+            </div>
+          </details>
+        </section>}
+        {credentialExportVisible && <section id="settings-credential-export" data-credential-action="export">
+          <details id="settings-credential-export-disclosure" className="settings-disclosure" open={exportOpen} onToggle={(event) => setExportOpen(event.currentTarget.open)}>
+            <summary>Export credentials</summary>
+            <div>
+              <p>{peppyCopy.credential_export_warning}</p>
+              <button className="secondary-button" disabled={Boolean(pendingAction) || !credentialExportAvailable} aria-busy={actionPending("export") || undefined} aria-describedby={!credentialExportAvailable ? "settings-credential-export-reason" : undefined} onClick={() => void runAction("export")}>Export credentials</button>
+              {!credentialExportAvailable && <p id="settings-credential-export-reason">{credentialExportReason(browserHost, encryption)}</p>}
+              {actionAlert("export")}
+              <p id="settings-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
+                {credentialExportAvailable ? exportNotice : ""}
+              </p>
+            </div>
+          </details>
+        </section>}
+      </section>}
+      </div>
+      </div>
     </section>
   );
 }
@@ -2245,8 +2348,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           {headPanel && <header id="head-panel-header" aria-label={`Floating conversation with ${title ?? "Conversation"}`} data-tauri-drag-region>
             <strong data-tauri-drag-region>{title ?? "Conversation"}</strong>
             <span className="head-panel-status">{composerConnectionDot}</span>
-            <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}>−</button>
-            <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} aria-hidden /></button>
+            <button id="head-panel-collapse" type="button" aria-label="Collapse to bubble" title="Collapse" onClick={handlers.current.collapse}><Minus size={14} strokeWidth={1.75} aria-hidden /></button>
+            <button id="head-panel-close" type="button" aria-label={closingHead ? "Closing…" : "Close bubble"} title="Close" disabled={closingHead} aria-busy={closingHead || undefined} onClick={handlers.current.closeHead}><X size={14} strokeWidth={1.75} aria-hidden /></button>
           </header>}
           <div
             id="conversation-stage"
@@ -2280,7 +2383,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
-        onNewMessage={startTitlebarMessage}
+        onNewMessage={navigationPosition === "title-bar" || activeView !== "conversations" || listCollapsed ? startTitlebarMessage : undefined}
         navigation={navigationPosition === "title-bar" ? (
           <NavButtons
             orientation="titlebar"
@@ -2341,7 +2444,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onNewRecipient={startNewMessage}
               searchContacts={snapshot ? (query) => searchRecipientSuggestions(query) : undefined}
             />
-            <button
+            {navigationPosition === "side-rail" && <button
               aria-label="New message"
               title="New message"
               data-action="new-message"
@@ -2349,8 +2452,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 document.getElementById("recipient-search")?.focus()
               }
             >
-              <RiChatNewLine size={18} aria-hidden />
-            </button>
+              <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden />
+            </button>}
           </div>
           <ConversationList
             conversations={conversations}

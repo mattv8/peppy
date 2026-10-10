@@ -5,7 +5,7 @@
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background: var(--peppy-surface-editor, #1f1f1f);
+  background: radial-gradient(circle at top, var(--peppy-surface-widget, #202020), var(--peppy-surface-desk, #252526) 58%);
   color: var(--peppy-text-primary, #ccc);
 }
 
@@ -13,7 +13,13 @@
 #browser-stopped > section,
 #browser-startup-failure > section {
   max-width: 520px;
-  padding: 20px 16px;
+  padding: 24px;
+  border: 1px solid var(--peppy-border, #555);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius, 4px));
+  background: var(--peppy-glass-surface);
+  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
+  backdrop-filter: var(--peppy-glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
 }
 
 #browser-stopped > section,
@@ -21,10 +27,6 @@
   display: grid;
   gap: 16px;
   padding: 28px;
-  border: 1px solid var(--peppy-border, #555);
-  border-radius: var(--peppy-control-radius, 4px);
-  box-shadow: var(--peppy-shadow-floating);
-  background: var(--peppy-surface-panel, #292929);
 }
 
 #browser-stopped h1,
@@ -45,10 +47,12 @@
 dialog[data-browser-screen] {
   width: min(100% - 32px, 420px);
   color: var(--peppy-text-primary, #ccc);
-  background: var(--peppy-surface-editor, #1f1f1f);
+  background: var(--peppy-glass-surface);
   border: 1px solid var(--peppy-border, #555);
-  border-radius: var(--peppy-control-radius, 4px);
-  box-shadow: var(--peppy-shadow-floating);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius, 4px));
+  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
+  backdrop-filter: var(--peppy-glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
 }
 
 dialog[data-browser-screen] form,

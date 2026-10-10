@@ -3,11 +3,12 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  background: var(--peppy-surface-desk);
 }
 
 #contacts-book-list {
-  width: 240px;
-  flex: 0 0 240px;
+  width: 220px;
+  flex: 0 0 220px;
   background: var(--peppy-surface-panel);
   border-right: 1px solid var(--peppy-border);
   overflow: auto;
@@ -47,7 +48,8 @@
   display: flex;
   gap: 4px;
   align-items: center;
-  padding: 4px 8px;
+  padding: 6px 8px;
+  background: var(--peppy-surface-panel);
   border-bottom: 1px solid var(--peppy-border);
   flex-shrink: 0;
 }
@@ -97,17 +99,26 @@
   align-items: center;
   text-align: left;
   border: 0;
+  border-left: 2px solid transparent;
   border-bottom: 1px solid var(--peppy-border);
   background: transparent;
   color: var(--peppy-text-primary);
   padding: 8px;
   cursor: pointer;
-  transition: background-color 150ms;
+  transition: background-color var(--peppy-duration-base, 150ms) var(--peppy-ease-out, ease-out);
 }
 
 .contacts-book-row:hover,
 .contacts-row:hover {
   background: var(--peppy-surface-hover);
+}
+
+.contacts-book-row:focus-visible,
+.contacts-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--peppy-focus-ring);
+  outline-offset: -2px;
 }
 
 .contacts-book-row > span:last-child {
@@ -125,6 +136,28 @@
 .contacts-book-row[aria-current],
 .contacts-row[aria-current] {
   background: var(--peppy-surface-active);
+}
+
+.contacts-book-row[aria-current] {
+  border-left-color: var(--peppy-accent);
+}
+
+[data-book-forget][data-confirm-forget] {
+  background: var(--peppy-error-surface);
+  color: var(--peppy-error-text);
+  border-color: var(--peppy-error);
+}
+
+@media (forced-colors: active) {
+  .contacts-book-row[aria-current] {
+    border-left-color: Highlight;
+  }
+
+  [data-book-forget][data-confirm-forget] {
+    background: Canvas;
+    color: CanvasText;
+    border-color: Highlight;
+  }
 }
 
 .contacts-row-state-badge {
@@ -155,6 +188,7 @@
   gap: 8px;
   align-items: flex-start;
   padding: 12px;
+  background: linear-gradient(135deg, var(--peppy-surface-panel), var(--peppy-surface-widget));
   border-bottom: 1px solid var(--peppy-border);
   flex-shrink: 0;
 }
@@ -269,6 +303,7 @@
   position: absolute;
   inset: 0;
   background: var(--peppy-surface-panel);
+  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
   z-index: 2;
   display: flex;
   flex-direction: column;

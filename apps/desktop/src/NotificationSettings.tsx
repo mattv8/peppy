@@ -47,21 +47,27 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     ? "Check Peppy in your operating system notification settings; permission cannot be read here."
     : permissionStatus && `Desktop notification permission: ${permissionStatus}.`;
   return (
-    <section id="notification-settings" data-settings-section="notifications" aria-busy={busy}>
+    <section id="notification-settings" className="settings-card" data-settings-section="notifications" aria-busy={busy}>
       <h2>Notification mirroring</h2>
       <p>Mirrored app notifications use encrypted device sync. Carrier SMS/MMS has separate security boundaries.</p>
       <h3>Desktop banners</h3>
       <div className="settings-control-row">
         <label htmlFor="notification-message-banners">SMS/MMS banners</label>
-        <input id="notification-message-banners" type="checkbox" role="switch"
-          checked={preferences.messageBanners} aria-checked={preferences.messageBanners} disabled={busy}
-          onChange={event => void save(() => onPreferences({ ...preferences, messageBanners: event.target.checked }))} />
+        <span className="settings-switch">
+          <input id="notification-message-banners" type="checkbox" role="switch"
+            checked={preferences.messageBanners} aria-checked={preferences.messageBanners} disabled={busy}
+            onChange={event => void save(() => onPreferences({ ...preferences, messageBanners: event.target.checked }))} />
+          <span aria-hidden />
+        </span>
       </div>
       <div className="settings-control-row">
         <label htmlFor="notification-mirrored-banners">App notification banners</label>
-        <input id="notification-mirrored-banners" type="checkbox" role="switch"
-          checked={preferences.mirroredBanners} aria-checked={preferences.mirroredBanners} disabled={busy}
-          onChange={event => void save(() => onPreferences({ ...preferences, mirroredBanners: event.target.checked }))} />
+        <span className="settings-switch">
+          <input id="notification-mirrored-banners" type="checkbox" role="switch"
+            checked={preferences.mirroredBanners} aria-checked={preferences.mirroredBanners} disabled={busy}
+            onChange={event => void save(() => onPreferences({ ...preferences, mirroredBanners: event.target.checked }))} />
+          <span aria-hidden />
+        </span>
       </div>
       {hasDesktopBanners && <>
         <div className="settings-control-row">
@@ -91,9 +97,12 @@ export function NotificationSettings({ notifications, filters, sources, preferen
                 <li key={id} data-device-id={filter.sourceDeviceId} data-package={filter.packageName} className="notif-app-filter-row">
                   <span className="notif-app-letter-avatar" aria-hidden>{filter.appName.slice(0, 1).toUpperCase()}</span>
                   <span className="notif-app-filter-label"><b>{filter.appName}</b><small>{phone}</small></span>
-                  <input id={`filter-${id}`} type="checkbox" role="switch" disabled={busy}
-                    aria-label={`Mirror ${filter.appName} from ${phone}`} checked={!filter.muted} aria-checked={!filter.muted}
-                    onChange={event => void save(() => onMute({ ...filter, muted: !event.target.checked }))} />
+                  <span className="settings-switch">
+                    <input id={`filter-${id}`} type="checkbox" role="switch" disabled={busy}
+                      aria-label={`Mirror ${filter.appName} from ${phone}`} checked={!filter.muted} aria-checked={!filter.muted}
+                      onChange={event => void save(() => onMute({ ...filter, muted: !event.target.checked }))} />
+                    <span aria-hidden />
+                  </span>
                 </li>
               );
             })}

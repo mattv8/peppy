@@ -157,9 +157,8 @@ pub fn show_main(app: &AppHandle) {
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     }
     if let Some(window) = app.get_webview_window(MAIN) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        crate::window_chrome::prepare_material(&window, false);
+        let _ = crate::window_chrome::show_when_ready(&window);
     }
 }
 
@@ -186,12 +185,8 @@ pub fn open_composer_mode(
     let label = format!("{COMPOSER_PREFIX}{conversation}");
     if let Some(window) = app.get_webview_window(&label) {
         configure_composer(&window, effective_panel);
-        window
-            .show()
+        crate::window_chrome::show_when_ready(&window)
             .map_err(|_| BridgeError::new("window", "Could not show the composer window."))?;
-        window
-            .set_focus()
-            .map_err(|_| BridgeError::new("window", "Could not focus the composer window."))?;
         return Ok(());
     }
     let url = composer_url(conversation, effective_panel);
@@ -202,7 +197,10 @@ pub fn open_composer_mode(
         .min_inner_size(320.0, 360.0)
         .decorations(false)
         .resizable(true)
+        .visible(false)
         .focused(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder.transparent(true);
     let builder = if effective_panel {
         builder.always_on_top(true)
     } else {
@@ -211,7 +209,9 @@ pub fn open_composer_mode(
     let window = builder
         .build()
         .map_err(|_| BridgeError::new("window", "Could not open the composer window."))?;
-    crate::window_chrome::sync_webview_window(&window, effective_panel);
+    crate::window_chrome::prepare_material(&window, effective_panel);
+    crate::window_chrome::show_when_ready(&window)
+        .map_err(|_| BridgeError::new("window", "Could not show the composer window."))?;
     Ok(())
 }
 
@@ -258,6 +258,7 @@ fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
     }
     let _ = window.set_always_on_top(head_panel);
+    crate::window_chrome::prepare_material(window, head_panel);
     crate::window_chrome::sync_webview_window(window, head_panel);
 }
 

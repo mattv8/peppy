@@ -1,0 +1,30 @@
+/* Native success is per window. Browser/fixture hosts never receive this marker. */
+html[data-vibrancy="active"] #desktop-shell.theme-system,
+html[data-vibrancy="active"] #composer-shell.theme-system:not(.head-panel-shell),
+html[data-vibrancy="active"] #composer-shell.theme-system:not(.head-panel-shell) .conversation-pane {
+  background: transparent;
+}
+
+html[data-vibrancy="active"] .theme-system #desktop-titlebar,
+html[data-vibrancy="active"] .theme-system #desktop-rail {
+  background: var(--peppy-surface-native-chrome);
+}
+
+/* Keep message text, composer gutters and read visibility geometry opaque. */
+html[data-vibrancy="active"] #desktop-loading-state,
+html[data-vibrancy="active"] #composer-shell.theme-system #conversation-stage {
+  background: var(--peppy-surface-editor);
+}
+
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  html[data-vibrancy="active"] #desktop-shell.theme-system,
+  html[data-vibrancy="active"] #composer-shell.theme-system:not(.head-panel-shell),
+  html[data-vibrancy="active"] #composer-shell.theme-system:not(.head-panel-shell) .conversation-pane {
+    background: var(--peppy-surface-desk);
+  }
+
+  html[data-vibrancy="active"] .theme-system #desktop-titlebar,
+  html[data-vibrancy="active"] .theme-system #desktop-rail {
+    background: var(--peppy-surface-chrome);
+  }
+}
