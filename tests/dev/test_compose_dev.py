@@ -27,7 +27,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
         }
         inherited = {
             key: value for key, value in os.environ.items()
-            if key not in {'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL', 'PUBLIC_ATTACHMENT_URL', 'WEB_UI_ENABLED', 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES'}
+            if key not in {'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL', 'PUBLIC_ATTACHMENT_URL', 'WEB_UI_ENABLED', 'DEBUG', 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES'}
             and not key.startswith('COMPOSE_')
         }
         return inherited | values | overrides
@@ -35,7 +35,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
     @staticmethod
     def fixture_env(**overrides):
         values = os.environ.copy()
-        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED"):
+        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL", "WEB_UI_ENABLED", "DEBUG"):
             values.pop(name, None)
         return values | overrides
 
@@ -213,6 +213,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             tools = root / "tools"
@@ -235,18 +236,21 @@ class ComposeDevelopmentTests(unittest.TestCase):
 
             calls = log.read_text().splitlines()
             rm = "compose --env-file .env -f docker-compose.yml rm --stop --force api migrate"
-            dev_rm = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml rm --stop --force web dev"
-            build = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml build web dev"
-            dev_up = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml up --detach --wait --wait-timeout 1800 --force-recreate dev"
+            resolved_root = root.resolve()
+            dev_prefix = f"compose --env-file {resolved_root / '.env'} -f {resolved_root / 'docker-compose.yml'} -f {resolved_root / 'infra/compose/compose.dev.yml'}"
+            teardown_prefix = f"{dev_prefix} -f {resolved_root / 'infra/compose/compose.dev-tls.yml'}"
+            dev_rm = f"{teardown_prefix} rm --stop --force web dev caddy"
+            build = f"{dev_prefix} build web dev"
+            dev_up = f"{dev_prefix} up --detach --wait --wait-timeout 1800 --force-recreate dev"
             self.assertLess(calls.index(build), calls.index(rm))
             self.assertLess(calls.index(rm), calls.index(dev_rm))
             self.assertLess(calls.index(dev_rm), calls.index(dev_up))
             self.assertFalse(any(call.endswith(" web") and " up " in call for call in calls))
             self.assertEqual(calls.count(rm), 2)
-            down = "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml down"
+            down = f"{teardown_prefix} down"
             self.assertLess(calls.index(rm, calls.index(rm) + 1), calls.index(down))
-            self.assertIn("compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml run --rm --no-deps dev run build server", calls)
-            self.assertIn("compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml run --rm --no-deps dev run test rust", calls)
+            self.assertIn(f"{dev_prefix} run --rm --no-deps dev run build server", calls)
+            self.assertIn(f"{dev_prefix} run --rm --no-deps dev run test rust", calls)
 
             log.unlink()
             failure = subprocess.run(["just", "dev-up"], cwd=root, text=True, capture_output=True, env=env | {"RM_EXIT": "1"})
@@ -262,7 +266,7 @@ class ComposeDevelopmentTests(unittest.TestCase):
             log.unlink()
             failure = subprocess.run(["just", "dev-build"], cwd=root, text=True, capture_output=True, env=env | {"RUN_EXIT": "1"})
             self.assertNotEqual(failure.returncode, 0)
-            self.assertEqual(log.read_text().splitlines()[-1], "compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml run --rm --no-deps dev run build server")
+            self.assertEqual(log.read_text().splitlines()[-1], f"{dev_prefix} run --rm --no-deps dev run build server")
 
     def test_dev_up_rejects_malformed_web_ui_before_service_mutation(self):
         with tempfile.TemporaryDirectory() as directory:

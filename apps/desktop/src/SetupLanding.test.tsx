@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge, type HostedAccountView, type JoinView } from "./bridge";
+import { peppyCopy } from "./generated/peppyCopy";
 import { SetupLanding } from "./SetupLanding";
 
 const account = (overrides: Partial<HostedAccountView> = {}): HostedAccountView => ({
@@ -563,5 +564,97 @@ describe("SetupLanding", () => {
     await act(async () => status.resolve(join({ state: "claimed", sas: "123456" })));
     expect(document.getElementById("hosted-join-panel")).not.toBeInTheDocument();
     expect(screen.getByText("Pair phone hero")).toBeInTheDocument();
+  });
+
+  describe("self-hosted server URL validation", () => {
+    function renderSelfHosted() {
+      renderLanding({ mode: "self-hosted" });
+      return { input: screen.getByLabelText("Server URL"), connect: screen.getByRole("button", { name: "Connect" }) };
+    }
+
+    it.each(["http://127.0.0.1:7000", "http://localhost:3000", "http://[::1]:8080", "http://127.8.9.10:7000"])("enables Connect for explicit loopback HTTP %s", value => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value } });
+      expect(connect).toBeEnabled();
+      expect(document.getElementById("self-hosted-url-error")).not.toBeInTheDocument();
+    });
+
+    it("connects loopback HTTP with its origin", async () => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value: "http://127.0.0.1:7000" } });
+      fireEvent.click(connect);
+      await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("http://127.0.0.1:7000"));
+    });
+
+    it("keeps a root slash on an otherwise valid HTTPS origin", () => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value: "https://server.example/" } });
+      expect(connect).toBeEnabled();
+    });
+
+    it.each(["https://server.example/?", "https://server.example/#", "HTTPS://SERVER.EXAMPLE/?", "http://127.0.0.1:7000/?", "http://localhost:3000/#"])("rejects a bare query or fragment delimiter in %s", value => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value } });
+      fireEvent.blur(input);
+      expect(connect).toBeDisabled();
+      expect(document.getElementById("self-hosted-url-error")).toHaveTextContent(peppyCopy.setup_self_hosted_url_path);
+    });
+
+    it("normalizes the uppercase loopback origin before connecting", async () => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value: "HTTP://LOCALHOST:3000" } });
+      expect(connect).toBeEnabled();
+      fireEvent.click(connect);
+      await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("http://localhost:3000"));
+    });
+
+    it("does not show an error while the field is still being typed in", () => {
+      const { input } = renderSelfHosted();
+      fireEvent.change(input, { target: { value: "http://example.test" } });
+      expect(document.getElementById("self-hosted-url-error")).not.toBeInTheDocument();
+    });
+
+    it("does not show an error for an empty field after blur", () => {
+      const { input } = renderSelfHosted();
+      fireEvent.blur(input);
+      expect(document.getElementById("self-hosted-url-error")).not.toBeInTheDocument();
+      expect(input).not.toHaveAttribute("aria-invalid", "true");
+    });
+
+    it.each([
+      ["non-loopback HTTP", "http://example.test", "setup_self_hosted_url_https_required"],
+      ["lookalike loopback host", "http://localhost.evil.test:8080", "setup_self_hosted_url_https_required"],
+      ["lookalike 127.0.0.1 host", "http://127.0.0.1.evil.test:7000", "setup_self_hosted_url_https_required"],
+      ["credentials", "https://user:pass@server.example", "setup_self_hosted_url_credentials"],
+      ["loopback HTTP with credentials", "http://user@127.0.0.1:7000", "setup_self_hosted_url_credentials"],
+      ["HTTPS path", "https://server.example/api/v1", "setup_self_hosted_url_path"],
+      ["loopback HTTP path", "http://127.0.0.1:7000/path", "setup_self_hosted_url_path"],
+      ["query", "https://server.example/?x=1", "setup_self_hosted_url_path"],
+      ["fragment", "http://localhost:3000/#top", "setup_self_hosted_url_path"],
+      ["unsupported scheme", "ftp://server.example", "setup_self_hosted_url_invalid"],
+      ["unparseable text", "not a url", "setup_self_hosted_url_invalid"],
+    ] as const)("rejects %s with a visible error after blur", (_label, value, errorKey) => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value } });
+      fireEvent.blur(input);
+      expect(connect).toBeDisabled();
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      const error = document.getElementById("self-hosted-url-error");
+      expect(error).toHaveTextContent(peppyCopy[errorKey]);
+      expect(error).toHaveAttribute("aria-live", "polite");
+      expect(input).toHaveAttribute("aria-describedby", "self-hosted-url-error self-hosted-url-hint");
+      expect(input).toHaveAccessibleDescription(expect.stringContaining(peppyCopy[errorKey]));
+    });
+
+    it("keeps the error live and clears it once the value is corrected", () => {
+      const { input, connect } = renderSelfHosted();
+      fireEvent.change(input, { target: { value: "https://server.example/api" } });
+      fireEvent.blur(input);
+      expect(document.getElementById("self-hosted-url-error")).toHaveTextContent(peppyCopy.setup_self_hosted_url_path);
+      fireEvent.change(input, { target: { value: "https://server.example" } });
+      expect(document.getElementById("self-hosted-url-error")).not.toBeInTheDocument();
+      expect(input).not.toHaveAttribute("aria-invalid", "true");
+      expect(connect).toBeEnabled();
+    });
   });
 });

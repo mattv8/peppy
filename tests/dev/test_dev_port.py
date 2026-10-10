@@ -137,6 +137,19 @@ class DevelopmentPortTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "false\n")
 
+    def test_loopback_urls_follow_debug_scheme_without_losing_attachment_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = Path(directory) / ".env"
+            dotenv.write_text("DEBUG=true\nAPI_HOST_PORT=7100\nPUBLIC_API_URL=http://127.0.0.1:7100\nPUBLIC_ATTACHMENT_URL=http://127.0.0.1:7100/files?version=1\n")
+            result = self.run_helper("public-api-origin", dotenv)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "https://127.0.0.1:7100\n")
+            dotenv.write_text("DEBUG=false\nAPI_HOST_PORT=7100\nPUBLIC_API_URL=https://127.0.0.1:7100\n")
+            result = self.run_helper("public-api-origin", dotenv)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "http://127.0.0.1:7100\n")
+
+
     def test_web_ui_enabled_matches_runtime_boolean_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             dotenv = Path(directory) / ".env"

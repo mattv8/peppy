@@ -52,6 +52,7 @@ class CredentialParserTest {
     fun cleartextOnlyForDebugLoopback() {
         assertNull(parse(credentialJson(origin = "http://10.0.2.2:8080", vaultId = vault, deviceId = device), debug = false))
         assertEquals("http://10.0.2.2:8080", parse(credentialJson(origin = "http://10.0.2.2:8080", vaultId = vault, deviceId = device), debug = true)?.origin)
+        assertEquals("http://[::1]:8080", parse(credentialJson(origin = "http://[::1]:8080", vaultId = vault, deviceId = device), debug = true)?.origin)
         assertNull(parse(credentialJson(origin = "http://192.168.1.2", vaultId = vault, deviceId = device), debug = true))
     }
 }

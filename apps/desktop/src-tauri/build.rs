@@ -50,9 +50,63 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=PEPPY_DEV_TLS_CERT");
+    #[cfg(feature = "dev-local-tls")]
+    embed_development_tls_ca();
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("failed to run tauri-build");
+}
+
+#[cfg(feature = "dev-local-tls")]
+fn embed_development_tls_ca() {
+    use std::{env, fs, path::PathBuf};
+
+    let certificate = env::var_os("PEPPY_DEV_TLS_CERT").unwrap_or_else(|| {
+        panic!("dev-local-tls requires PEPPY_DEV_TLS_CERT to name the local development CA")
+    });
+    let certificate = PathBuf::from(certificate);
+    if !certificate.is_absolute() {
+        panic!("PEPPY_DEV_TLS_CERT must be an absolute path to the local development CA");
+    }
+    println!("cargo:rerun-if-changed={}", certificate.display());
+    let pem = fs::read(&certificate).unwrap_or_else(|_| {
+        panic!(
+            "could not read the local development CA at {}",
+            certificate.display()
+        )
+    });
+    let pem = std::str::from_utf8(&pem)
+        .unwrap_or_else(|_| panic!("the local development CA must be UTF-8 PEM certificate data"));
+    let pem = pem.trim();
+    if !pem.starts_with("-----BEGIN CERTIFICATE-----")
+        || !pem.ends_with("-----END CERTIFICATE-----")
+        || pem.matches("-----BEGIN").count() != 1
+        || pem.matches("-----END").count() != 1
+    {
+        panic!("the local development CA must contain exactly one certificate and no extra data");
+    }
+    let mut items = rustls_pemfile::read_all(&mut pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|_| panic!("the local development CA is not valid PEM certificate data"));
+    if items.len() != 1 {
+        panic!("the local development CA must contain exactly one certificate");
+    }
+    let rustls_pemfile::Item::X509Certificate(certificate) = items.pop().expect("checked length")
+    else {
+        panic!("the local development CA must not contain non-certificate PEM data");
+    };
+    // `dev_tls.py prepare` owns CA basic-constraints and expiry validation. This build input
+    // check ensures that the resulting public certificate is a Rustls trust anchor.
+    rustls::RootCertStore::empty()
+        .add(certificate.clone())
+        .unwrap_or_else(|_| panic!("the local development CA is not a valid trust anchor"));
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"))
+            .join("dev-local-tls-ca.der"),
+        certificate.as_ref(),
+    )
+    .expect("could not embed the local development CA");
 }

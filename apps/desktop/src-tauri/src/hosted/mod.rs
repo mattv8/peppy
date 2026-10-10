@@ -188,7 +188,7 @@ fn decode_session(bytes: &[u8]) -> Option<HostedSessionRecord> {
     })
 }
 fn http(origin: &str) -> BridgeResult<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::tls::http_builder(origin)?
         .redirect(reqwest::redirect::Policy::none())
         .https_only(!crate::origin::is_loopback_http(origin))
         .connect_timeout(Duration::from_secs(5))

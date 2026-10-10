@@ -190,7 +190,7 @@ fn view(session: &JoinSession, expires: Option<i64>) -> JoinView {
 }
 
 fn client(origin: &str) -> BridgeResult<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::tls::http_builder(origin)?
         .redirect(redirect::Policy::none())
         .https_only(!crate::origin::is_loopback_http(origin))
         .connect_timeout(Duration::from_secs(5))

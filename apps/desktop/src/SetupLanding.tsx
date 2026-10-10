@@ -12,6 +12,30 @@ const copy = (key: PeppyCopyKey) => peppyCopy[key];
 const joinStates = new Set<JoinView["state"]>(["waiting", "claimed", "confirm"]);
 const qrOptions = { errorCorrectionLevel: "M" as const, margin: 1, width: 256 };
 
+type SelfHostedUrlError = "setup_self_hosted_url_invalid" | "setup_self_hosted_url_credentials" | "setup_self_hosted_url_path" | "setup_self_hosted_url_https_required";
+type SelfHostedUrlCheck = { origin: string | null; error: SelfHostedUrlError | null };
+
+const loopbackIpv4Host = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const isLoopbackHost = (host: string) => host === "localhost" || host === "[::1]" || loopbackIpv4Host.test(host);
+const rejectSelfHostedUrl = (error: SelfHostedUrlError): SelfHostedUrlCheck => ({ origin: null, error });
+
+// Mirrors the native origin policy: HTTPS anywhere, plain HTTP only for explicit loopback hosts,
+// and origin-only values (no credentials, path, query, or fragment) for every scheme.
+function checkSelfHostedUrl(value: string): SelfHostedUrlCheck {
+  if (!value.trim()) return { origin: null, error: null };
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return rejectSelfHostedUrl("setup_self_hosted_url_invalid");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return rejectSelfHostedUrl("setup_self_hosted_url_invalid");
+  if (url.username || url.password) return rejectSelfHostedUrl("setup_self_hosted_url_credentials");
+  if (url.pathname !== "/" || url.search || url.hash || /[?#]/.test(value.trim())) return rejectSelfHostedUrl("setup_self_hosted_url_path");
+  if (url.protocol === "http:" && !isLoopbackHost(url.hostname)) return rejectSelfHostedUrl("setup_self_hosted_url_https_required");
+  return { origin: url.origin, error: null };
+}
+
 export const savedSetupMode = (): Mode => window.localStorage.getItem("peppy.setup.mode") === "self-hosted" ? "self-hosted" : "hosted";
 
 export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, selfHostedFallback, onJoined, fixedOrigin, accountUrl }: {
@@ -33,6 +57,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
   const [qr, setQr] = useState("");
   const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
   const [selfHostedOrigin, setSelfHostedOrigin] = useState<string | null>(fixedOrigin ?? null);
+  const [selfHostedUrlBlurred, setSelfHostedUrlBlurred] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -125,6 +150,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     setAccountError(false);
     setAccountLoading(mode === "hosted");
     setSelfHostedOrigin(null);
+    setSelfHostedUrlBlurred(false);
   }, [fixedOrigin, mode]);
   useEffect(() => {
     if (fixedOrigin || mode !== "hosted" || enrolledWithoutPhone) return;
@@ -300,7 +326,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
       if (epoch === joinEpoch.current) setBusy(false);
     }
   };
-  const validOrigin = fixedOrigin ?? (() => { try { const url = new URL(selfHostedUrl); return url.protocol === "https:" ? url.origin : null; } catch { return null; } })();
+  const selfHostedCheck = checkSelfHostedUrl(selfHostedUrl);
+  const validOrigin = fixedOrigin ?? selfHostedCheck.origin;
+  const selfHostedUrlError = selfHostedUrlBlurred ? selfHostedCheck.error : null;
 
   const joinPanel = (
     <section id="hosted-join-panel" data-join-state={join.state} aria-label={copy("hosted_join_headline")}>
@@ -329,7 +357,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     const hostedBrowser = Boolean(fixedOrigin && accountUrl);
     const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
     const body = fixedOrigin ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
-    content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-describedby="self-hosted-url-hint" onChange={event => setSelfHostedUrl(event.target.value)} /></label><span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
+    content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><div id="self-hosted-url-field" className="setup-url-field"><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-invalid={selfHostedUrlError ? "true" : undefined} aria-describedby={selfHostedUrlError ? "self-hosted-url-error self-hosted-url-hint" : "self-hosted-url-hint"} onChange={event => setSelfHostedUrl(event.target.value)} onBlur={() => setSelfHostedUrlBlurred(true)} /></label>{selfHostedUrlError && <span id="self-hosted-url-error" className="setup-field-error" aria-live="polite">{copy(selfHostedUrlError)}</span>}<span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span></div><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
   } else if (route === "checking") {
     content = <section id="hosted-account-checking" aria-busy="true"><h2 ref={heading} tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>;
   } else if (route === "chooser") {

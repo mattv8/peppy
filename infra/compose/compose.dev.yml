@@ -78,6 +78,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
+      DEBUG: ${DEBUG:-false}
       PEPPY_ACCEPT_ANDROID_LICENSES: ${PEPPY_ACCEPT_ANDROID_LICENSES:-}
     volumes:
       - ${PEPPY_SOURCE_TREE:-.}:/source:ro

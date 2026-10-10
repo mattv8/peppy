@@ -42,6 +42,11 @@ pub fn is_loopback_http(origin: &str) -> bool {
     Url::parse(origin).is_ok_and(|url| url.scheme() == "http" && is_loopback(&url))
 }
 
+/// True when an HTTPS origin is one of the explicit local development hosts.
+pub fn is_loopback_https(origin: &str) -> bool {
+    Url::parse(origin).is_ok_and(|url| url.scheme() == "https" && is_loopback(&url))
+}
+
 /// WebSocket endpoint for a validated origin (`wss` for HTTPS, `ws` for loopback HTTP only).
 pub fn websocket_url(origin: &str) -> BridgeResult<String> {
     let origin = validate_origin(origin)?;

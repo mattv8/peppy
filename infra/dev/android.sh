@@ -68,20 +68,41 @@ adb_serial() {
 }
 apk() { printf '%s/%s\n' "$ARTIFACTS" "$1"; }
 apk_for_adb() { if is_wsl; then wslpath -w "$(apk "$1")"; else apk "$1"; fi; }
+prepare_debug_tls() {
+    local enabled
+    enabled=$(python3 "$ROOT/infra/dev/dev_tls.py" enabled "$ROOT/.env") || die "could not resolve DEBUG"
+    case $enabled in true|false) ;; *) die "invalid DEBUG result: $enabled" ;; esac
+    DEBUG=$enabled
+    export DEBUG
+    if [[ $enabled == true ]]; then
+        python3 "$ROOT/infra/dev/dev_tls.py" prepare "$ROOT/.env"
+        PEPPY_DEV_TLS_CERT=$(python3 "$ROOT/infra/dev/dev_tls.py" ca-path)
+        export PEPPY_DEV_TLS_CERT
+    else
+        unset PEPPY_DEV_TLS_CERT
+    fi
+}
 ensure_debug_loopback() {
-    local serial=$1 server host port
+    local serial=$1 server host port certificate
+    prepare_debug_tls
     if [[ -n ${PEPPY_DEBUG_SERVER:-} ]]; then server=$PEPPY_DEBUG_SERVER
     else server=$(python3 "$ROOT/infra/dev/dev_port.py" smoke-url "$ROOT/.env"); fi
-    if [[ ! $server =~ ^http://(127\.0\.0\.1|localhost):([0-9]{1,5})$ ]]; then
-        die "PEPPY_DEBUG_SERVER must be a loopback http URL with an explicit port"
+    if [[ ! $server =~ ^(http|https)://(127\.0\.0\.1|localhost):([0-9]{1,5})$ ]]; then
+        die "PEPPY_DEBUG_SERVER must be a loopback http or https URL with an explicit port"
     fi
-    host=${BASH_REMATCH[1]}; port=${BASH_REMATCH[2]}
+    local scheme=${BASH_REMATCH[1]}
+    host=${BASH_REMATCH[2]}; port=${BASH_REMATCH[3]}
     (( 10#$port > 0 && 10#$port < 65536 )) || die "PEPPY_DEBUG_SERVER port is invalid"
+    if [[ $scheme == https ]]; then certificate=${PEPPY_DEV_TLS_CERT:?local TLS certificate is missing}; fi
     if is_wsl; then
         # The Windows adb host, not WSL curl, must be able to reach the debug server.
-        local wslenv=${WSLENV:+$WSLENV:}
-        # shellcheck disable=SC2016 # PowerShell reads its own environment variable literally.
-        PEPPY_HEALTH_URL="http://$host:$port/healthz" WSLENV="${wslenv}PEPPY_HEALTH_URL/w" powershell.exe -NoProfile -Command '$response=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri $env:PEPPY_HEALTH_URL; if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 300) { exit 1 }' >/dev/null || die "Windows localhost server is not reachable from Windows: http://$host:$port/healthz"
+        local wslenv=${WSLENV:+$WSLENV:} windows_certificate=
+        if [[ $scheme == https ]]; then windows_certificate=$(wslpath -w "$certificate"); fi
+        PEPPY_HEALTH_URL="$scheme://$host:$port/healthz" PEPPY_TLS_CERT="$windows_certificate" WSLENV="${wslenv}PEPPY_HEALTH_URL/w:PEPPY_TLS_CERT/w" powershell.exe -NoProfile -Command 'if ($env:PEPPY_TLS_CERT) { curl.exe --fail --silent --show-error --ssl-revoke-best-effort --cacert $env:PEPPY_TLS_CERT $env:PEPPY_HEALTH_URL } else { curl.exe --fail --silent --show-error $env:PEPPY_HEALTH_URL }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' >/dev/null || die "Windows localhost server is not reachable from Windows: $scheme://$host:$port/healthz"
+    elif [[ $scheme == https ]]; then
+        local curl_args=(--fail --silent --show-error)
+        curl_args+=(--cacert "$certificate")
+        curl "${curl_args[@]}" "$scheme://$host:$port/healthz" >/dev/null || die "local server is not reachable: $scheme://$host:$port/healthz"
     fi
     adb -s "$serial" reverse "tcp:$port" "tcp:$port"
 }
@@ -96,7 +117,8 @@ container_run() {
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
-    DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT docker compose --env-file "$ROOT/.env" -f "$ROOT/docker-compose.yml" -f "$ROOT/infra/compose/compose.dev.yml" --profile android run --build --rm android run "$cmd"
+    prepare_debug_tls
+    DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" compose --profile android run --build --rm android run "$cmd"
 }
 accept_licenses() {
     local status
@@ -204,6 +226,7 @@ run_build_body() {
 }
 run_native() {
     local command=$1
+    prepare_debug_tls
     native_preflight
     echo "android: using native Android backend; it regenerates Rust-owned Kotlin sources in this checkout" >&2
     cd "$SOURCE_ROOT"
