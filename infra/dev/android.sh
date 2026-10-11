@@ -98,6 +98,7 @@ ensure_debug_loopback() {
         # The Windows adb host, not WSL curl, must be able to reach the debug server.
         local wslenv=${WSLENV:+$WSLENV:} windows_certificate=
         if [[ $scheme == https ]]; then windows_certificate=$(wslpath -w "$certificate"); fi
+        # shellcheck disable=SC2016 # PowerShell expands its own environment variables.
         PEPPY_HEALTH_URL="$scheme://$host:$port/healthz" PEPPY_TLS_CERT="$windows_certificate" WSLENV="${wslenv}PEPPY_HEALTH_URL/w:PEPPY_TLS_CERT/w" powershell.exe -NoProfile -Command 'if ($env:PEPPY_TLS_CERT) { curl.exe --fail --silent --show-error --ssl-revoke-best-effort --cacert $env:PEPPY_TLS_CERT $env:PEPPY_HEALTH_URL } else { curl.exe --fail --silent --show-error $env:PEPPY_HEALTH_URL }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' >/dev/null || die "Windows localhost server is not reachable from Windows: $scheme://$host:$port/healthz"
     elif [[ $scheme == https ]]; then
         local curl_args=(--fail --silent --show-error)
