@@ -382,7 +382,7 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
         (
             "POST",
             "/v1/vault/key-profiles".to_owned(),
-            json!({"key_epoch": 2, "public_key_profile": {}, "encrypted_vault_check_header": "", "profile_fingerprint": "invalid"}),
+            json!({"key_epoch": 2, "public_key_profile": {}, "encrypted_vault_check_header": "", "profile_fingerprint": "invalid", "admission_public_key": "not-a-key"}),
         ),
     ];
     for (method, path, body) in denied {

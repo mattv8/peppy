@@ -16,6 +16,16 @@ fn argon2id_verifier_rejects_wrong_password() {
 }
 
 #[test]
+fn argon2id_verifier_accepts_a_hash_slice_without_a_null_terminated_backing_buffer() {
+    let mut hash_with_suffix = password_hash("administrator password").unwrap();
+    let hash_length = hash_with_suffix.len();
+    hash_with_suffix.push('x');
+    let hash = &hash_with_suffix[..hash_length];
+
+    assert!(password_matches(hash, "administrator password"));
+}
+
+#[test]
 fn setup_and_session_digests_are_fixed_length() {
     assert_eq!(digest(b"setup-token").len(), 32);
 }
