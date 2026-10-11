@@ -94,16 +94,15 @@ fn embed_development_tls_ca() {
     {
         panic!("the local development CA must contain exactly one certificate and no extra data");
     }
-    let mut items = rustls_pemfile::read_all(&mut pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
+    use rustls_pki_types::{pem::PemObject, CertificateDer};
+    let mut certificates = CertificateDer::pem_slice_iter(pem.as_bytes());
+    let certificate = certificates
+        .next()
+        .unwrap_or_else(|| panic!("the local development CA must contain exactly one certificate"))
         .unwrap_or_else(|_| panic!("the local development CA is not valid PEM certificate data"));
-    if items.len() != 1 {
+    if certificates.next().is_some() {
         panic!("the local development CA must contain exactly one certificate");
     }
-    let rustls_pemfile::Item::X509Certificate(certificate) = items.pop().expect("checked length")
-    else {
-        panic!("the local development CA must not contain non-certificate PEM data");
-    };
     // `dev_tls.py prepare` owns CA basic-constraints and expiry validation. This build input
     // check ensures that the resulting public certificate is a Rustls trust anchor.
     rustls::RootCertStore::empty()

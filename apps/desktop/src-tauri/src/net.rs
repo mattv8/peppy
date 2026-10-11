@@ -453,37 +453,38 @@ pub mod tests {
         let certificate = directory.path().join("certificate.pem");
         let key = directory.path().join("key.pem");
         let request = directory.path().join("certificate.csr");
-        let serial = directory.path().join("certificate.srl");
+        let ca_config = directory.path().join("ca.cnf");
+        std::fs::write(
+            &ca_config,
+            "[req]\nprompt=no\ndistinguished_name=subject\nx509_extensions=extensions\n[subject]\nCN=Peppy test CA\n[extensions]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n",
+        )
+        .unwrap();
         assert!(Command::new("openssl")
             .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout"])
             .arg(&ca_key)
             .arg("-out")
             .arg(&ca)
-            .args([
-                "-subj",
-                "/CN=localhost",
-                "-days",
-                "1",
-                "-addext",
-                "basicConstraints=critical,CA:TRUE",
-            ])
+            .args(["-days", "1", "-sha256", "-config"])
+            .arg(&ca_config)
             .status()
             .unwrap()
             .success());
+        let server_config = directory.path().join("server.cnf");
+        std::fs::write(
+            &server_config,
+            "[req]\nprompt=no\ndistinguished_name=subject\n[subject]\nCN=localhost\n[extensions]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n",
+        )
+        .unwrap();
         assert!(Command::new("openssl")
             .args(["req", "-newkey", "rsa:2048", "-nodes", "-keyout"])
             .arg(&key)
             .arg("-out")
             .arg(&request)
-            .args(["-subj", "/CN=localhost"])
+            .args(["-config"])
+            .arg(&server_config)
             .status()
             .unwrap()
             .success());
-        std::fs::write(
-            directory.path().join("extensions.cnf"),
-            "[v3]\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n",
-        )
-        .unwrap();
         assert!(Command::new("openssl")
             .args(["x509", "-req", "-in"])
             .arg(&request)
@@ -491,13 +492,11 @@ pub mod tests {
             .arg(&ca)
             .arg("-CAkey")
             .arg(&ca_key)
-            .args(["-CAserial"])
-            .arg(&serial)
-            .args(["-CAcreateserial", "-out"])
+            .args(["-set_serial", "1", "-out"])
             .arg(&certificate)
-            .args(["-days", "1", "-extfile"])
-            .arg(directory.path().join("extensions.cnf"))
-            .args(["-extensions", "v3"])
+            .args(["-days", "1", "-sha256", "-extfile"])
+            .arg(&server_config)
+            .args(["-extensions", "extensions"])
             .status()
             .unwrap()
             .success());
@@ -505,27 +504,20 @@ pub mod tests {
     }
 
     fn certificate_der(directory: &Path) -> Vec<u8> {
-        rustls_pemfile::certs(&mut std::io::BufReader::new(
-            std::fs::File::open(directory.join("ca.pem")).unwrap(),
-        ))
-        .next()
-        .unwrap()
-        .unwrap()
-        .as_ref()
-        .to_vec()
+        use rustls_pki_types::{pem::PemObject, CertificateDer};
+        CertificateDer::from_pem_file(directory.join("ca.pem"))
+            .unwrap()
+            .as_ref()
+            .to_vec()
     }
 
     async fn tls_server(directory: &Path, websocket: bool) -> String {
-        let certificates = rustls_pemfile::certs(&mut std::io::BufReader::new(
-            std::fs::File::open(directory.join("certificate.pem")).unwrap(),
-        ))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(
-            std::fs::File::open(directory.join("key.pem")).unwrap(),
-        ))
-        .unwrap()
-        .unwrap();
+        use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+        let certificates = CertificateDer::pem_file_iter(directory.join("certificate.pem"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = PrivateKeyDer::from_pem_file(directory.join("key.pem")).unwrap();
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certificates, key)
