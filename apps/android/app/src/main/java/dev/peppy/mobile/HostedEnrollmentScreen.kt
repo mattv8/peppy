@@ -74,7 +74,7 @@ internal class HostedEnrollmentDraft : ViewModel() {
 internal fun HostedEnrollmentScreen(
     onDismiss: () -> Unit,
     onEnrolled: () -> Unit,
-    onPairExisting: () -> Unit,
+    onEnrollExisting: () -> Unit,
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -253,7 +253,7 @@ internal fun HostedEnrollmentScreen(
                 }, modifier = Modifier.testTag("hosted-existing-manage-account")) {
                     Text(stringResource(R.string.peppy_production_manage_account))
                 }
-                Button(onClick = onPairExisting, modifier = Modifier.testTag("hosted-pair-existing-button")) {
+                Button(onClick = onEnrollExisting, modifier = Modifier.testTag("hosted-pair-existing-button")) {
                     Text(stringResource(R.string.peppy_production_join_cta))
                 }
                 OutlinedButton(onClick = ::dismiss, modifier = Modifier.testTag("hosted-cancel-button")) { Text(stringResource(R.string.peppy_back)) }

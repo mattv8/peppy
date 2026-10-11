@@ -4,9 +4,10 @@
 const COMMANDS: &[&str] = &[
     "load_state",
     "configure_server",
-    "import_credentials",
-    "export_credentials",
     "unlock_sync",
+    "get_app_lock_status",
+    "unlock_app",
+    "set_app_lock",
     "save_draft",
     "send_draft",
     "mark_seen",
@@ -43,10 +44,15 @@ const COMMANDS: &[&str] = &[
     "hosted_sign_out",
     "hosted_open_billing",
     "hosted_provision",
-    "join_start",
-    "join_status",
-    "join_cancel",
-    "join_confirm",
+    "enrollment_discover",
+    "enrollment_create_owner",
+    "enrollment_sign_in",
+    "enrollment_connect_shared_secret",
+    "enrollment_add_phone",
+    "enrollment_approve",
+    "enrollment_status",
+    "enrollment_cancel",
+    "enrollment_sign_out",
 ];
 
 fn main() {

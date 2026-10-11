@@ -30,7 +30,6 @@ import {
   NavButtons,
   type NavigationPosition,
   Panel,
-  PairPhone,
   Radio,
   RecipientPicker,
   RecipientPanel,
@@ -65,11 +64,13 @@ import {
   type NotificationPreferences,
   type PublicCopy,
   type ContactResolutionMap,
+  type AppLockStatus,
 } from "./bridge";
 import { NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
+import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
 import { peppyCopy } from "./generated/peppyCopy";
 
@@ -781,209 +782,7 @@ function ownerWithoutPhone(snapshot: DesktopSnapshot) {
   return snapshot.connection.state === "connected" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
 }
 
-type SettingsAction = "origin" | "credentials" | "export" | "unlock" | "account";
-
-function pairingAvailability(snapshot: DesktopSnapshot | null): { canStart: boolean; reason: string } {
-  if (!snapshot)
-    return { canStart: false, reason: "Pairing is unavailable while device status loads." };
-  if (snapshot.connection.state === "missing-native-host")
-    return { canStart: false, reason: "Pairing is unavailable because the native host is missing." };
-  if (["server-required", "credentials-required"].includes(snapshot.connection.errorCode ?? ""))
-    return { canStart: false, reason: "Pairing is unavailable until this device is enrolled and credentials are available." };
-  if (snapshot.connection.state === "offline")
-    return { canStart: false, reason: "Pairing is unavailable until the server reconnects." };
-  if (snapshot.connection.state === "error")
-    return { canStart: false, reason: "Pairing is unavailable until the connection error is resolved." };
-  if (!snapshot.deviceRole)
-    return { canStart: false, reason: "Pairing is unavailable while this device role is unknown." };
-  if (snapshot.deviceRole !== "owner")
-    return { canStart: false, reason: "Only the owner device can pair a phone." };
-  return { canStart: true, reason: "" };
-}
-
-const BROWSER_EXPORT_STARTED = "Credential file download started. Keep it private.";
-
-function credentialExportReason(
-  browserHost: boolean,
-  encryption: DesktopSnapshot["encryption"]["state"],
-): string {
-  if (browserHost && encryption !== "unlocked")
-    return peppyCopy.credential_export_locked;
-  return peppyCopy.credential_export_unavailable;
-}
-
-function OnboardingView({
-  connected,
-  canUnlock,
-  showServerConfig,
-  origin,
-  onOrigin,
-  onAction,
-  onExport,
-  encryption,
-  browserHost = false,
-  credentialExportAvailable = false,
-  compact = false,
-  onBack,
-  notice,
-}: {
-  connected: boolean;
-  canUnlock: boolean;
-  showServerConfig: boolean;
-  origin: string;
-  onOrigin(value: string): void;
-  onAction(action: "origin" | "credentials" | "unlock"): Promise<void>;
-  onExport?(): Promise<void>;
-  encryption: DesktopSnapshot["encryption"]["state"];
-  browserHost?: boolean;
-  credentialExportAvailable: boolean;
-  compact?: boolean;
-  onBack?: () => void;
-  notice?: string;
-}) {
-  const [pendingAction, setPendingAction] = useState<"origin" | "credentials" | "export" | "unlock" | null>(null);
-  const [exportError, setExportError] = useState("");
-  const [exportNotice, setExportNotice] = useState("");
-  const ExportHeading = compact ? "h3" : "h2";
-  const step = (
-    number: string,
-    title: string,
-    body: React.ReactNode,
-    done: boolean,
-    active: boolean,
-  ) => (
-    <li
-      data-step={number}
-      data-step-state={done ? "done" : active ? "active" : "pending"}
-    >
-      {!compact && (
-        <span className="step-number" aria-hidden>
-          {done ? <CheckCircle /> : number}
-        </span>
-      )}
-      <div className="step-body">
-        <strong>{title}</strong>
-        {body}
-      </div>
-    </li>
-  );
-  const runAction = async (action: "origin" | "credentials" | "export" | "unlock") => {
-    if (pendingAction || (action === "export" && (!onExport || !credentialExportAvailable))) return;
-    setPendingAction(action);
-    setExportNotice("");
-    if (action === "export") {
-      setExportError("");
-    }
-    try {
-      if (action === "export") {
-        await onExport?.();
-        if (browserHost) setExportNotice(BROWSER_EXPORT_STARTED);
-      }
-      else await onAction(action);
-    } catch (error) {
-      if (action === "export") setExportError(errorText(error));
-    } finally {
-      setPendingAction(null);
-    }
-  };
-  return (
-    <section id="onboarding-view" aria-label="Set up Peppy" role="region" data-compact={compact || undefined}>
-      {!compact && <header id="onboarding-header">
-        {onBack && <button id="onboarding-back" className="secondary-button" onClick={onBack}>Back</button>}
-        <h1>Set up Peppy</h1>
-        <p id="onboarding-subtitle">
-          {connected ? "Connected" : "Connection setup is needed"}
-        </p>
-      </header>}
-      <ol id="onboarding-steps" role="list">
-        {showServerConfig && step(
-          "1",
-          "Configure server",
-          <>
-            <p>Enter your Peppy server URL and apply it.</p>
-            <label>
-              Server URL{" "}
-              <input
-                id="onboarding-server-url"
-                aria-label="Server URL"
-                value={origin}
-                onChange={(event) => onOrigin(event.target.value)}
-                placeholder="https://server.example"
-              />
-            </label>
-            <button
-              className="primary-button"
-              data-action="configure-server"
-               disabled={Boolean(pendingAction)}
-               aria-busy={pendingAction === "origin" || undefined}
-               onClick={() => void runAction("origin")}
-            >
-              Configure server
-            </button>
-          </>,
-          Boolean(origin),
-          !origin,
-        )}
-        {step(
-          showServerConfig ? "2" : "1",
-          "Import device credentials",
-          <section id="setup-credential-import" data-credential-action="import">
-            <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are handled entirely by the native host — this app never receives them."}</p>
-            <button
-              className="secondary-button"
-              data-action="import-credentials"
-               disabled={Boolean(pendingAction)}
-               aria-busy={pendingAction === "credentials" || undefined}
-               onClick={() => void runAction("credentials")}
-            >
-              {browserHost ? "Import credentials" : "Import credentials natively"}
-            </button>
-          </section>,
-          false,
-          !showServerConfig || Boolean(origin),
-        )}
-        {canUnlock &&
-          step(
-            showServerConfig ? "3" : "2",
-            "Unlock sync encryption",
-            <>
-              <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Your passphrase is handled natively."} Required before messages can sync.</p>
-              <button
-                className="secondary-button"
-                data-action="unlock-sync"
-                disabled={Boolean(pendingAction)}
-                aria-busy={pendingAction === "unlock" || undefined}
-                onClick={() => void runAction("unlock")}
-              >
-                {browserHost ? "Unlock sync" : "Unlock sync natively"}
-              </button>
-            </>,
-            false,
-            canUnlock,
-          )}
-      </ol>
-      {onExport && <section id="setup-credential-export" data-credential-action="export">
-        <ExportHeading>Export credentials</ExportHeading>
-        <p>{peppyCopy.credential_export_warning}</p>
-        <button
-          className="secondary-button"
-          disabled={Boolean(pendingAction) || !credentialExportAvailable}
-          aria-busy={pendingAction === "export" || undefined}
-          aria-describedby={!credentialExportAvailable ? "setup-credential-export-reason" : undefined}
-          onClick={() => void runAction("export")}
-        >
-          Export credentials
-        </button>
-        {!credentialExportAvailable && <p id="setup-credential-export-reason">{credentialExportReason(browserHost, encryption)}</p>}
-        {exportError && <p id="setup-credential-export-error" className="settings-error" role="alert">{exportError}</p>}
-        <p id="setup-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
-          {credentialExportAvailable ? exportNotice : ""}
-        </p>
-      </section>}
-      {notice && <p id="onboarding-notice" className="settings-error" role="alert">{notice}</p>}
-    </section>
-  );
-}
+type SettingsAction = "origin" | "unlock" | "account";
 
 function SettingsView({
   mode,
@@ -1007,16 +806,11 @@ function SettingsView({
   onPreferences,
   onMute,
   onPermission,
-  onCreatePairingIntent,
-  onPairingStatus,
-  onApprovePairing,
   onLock,
+  appLock,
+  onAppLock,
   browserHost = false,
   accountUrl,
-  pairingCanStart,
-  pairingUnavailableReason,
-  credentialExportAvailable,
-  credentialExportVisible,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -1039,24 +833,16 @@ function SettingsView({
   onPreferences(preferences: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
   onPermission(): Promise<"granted" | "denied" | "unknown" | void>;
-  onCreatePairingIntent(): ReturnType<typeof bridge.create_pairing_intent>;
-  onPairingStatus(intentToken: string): ReturnType<typeof bridge.pairing_intent_status>;
-  onApprovePairing(intentToken: string, keyDigest: string): ReturnType<typeof bridge.approve_pairing_intent>;
   onLock?: () => Promise<void>;
+  appLock: AppLockStatus | null;
+  onAppLock(enabled: boolean): Promise<boolean>;
   browserHost?: boolean;
   accountUrl?: string;
-  pairingCanStart: boolean;
-  pairingUnavailableReason?: string;
-  credentialExportAvailable: boolean;
-  credentialExportVisible: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
-  const [exportNotice, setExportNotice] = useState("");
-  const [importOpen, setImportOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
   const settingsContentRef = useRef<HTMLDivElement>(null);
   const pendingSectionRef = useRef<string | null>(null);
   const scrollEndTimer = useRef<number | undefined>(undefined);
@@ -1072,18 +858,10 @@ function SettingsView({
     if (pendingAction) return;
     setPendingAction(action);
     setActionError(null);
-    setExportNotice("");
-    if (action === "export") setExportOpen(true);
     try {
       if (action === "account") await onOpenAccount();
       else await onAction(action);
-      if (action === "export") {
-        setExportOpen(true);
-        if (browserHost) setExportNotice(BROWSER_EXPORT_STARTED);
-      }
     } catch (error) {
-      if (action === "credentials") setImportOpen(true);
-      if (action === "export") setExportOpen(true);
       setActionError({ action, message: errorText(error) });
     } finally {
       setPendingAction(null);
@@ -1093,21 +871,18 @@ function SettingsView({
   const actionAlert = (action: SettingsAction) =>
     actionError?.action === action && <p className="settings-error" role="alert">{actionError.message}</p>;
   const connectionLabel = browserHost ? "Fixed server" : mode === "hosted" ? "Peppy Hosted" : "Self-hosted";
-  const hasCredentials = browserHost || mode === "self-hosted" || credentialExportAvailable;
   const hasAccount = (!browserHost && mode === "hosted") || Boolean(browserHost && accountUrl);
   const sections = [
     { id: "server", label: "Server" },
     { id: "sync", label: "Sync encryption" },
-    { id: "pair-phone", label: "Devices & pairing" },
     { id: "notifications", label: "Notifications" },
     { id: "theme", label: "Appearance" },
     ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
+    ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
-    ...(hasCredentials ? [{ id: "credentials", label: "Advanced" }] : []),
   ];
   const sectionElementId = (id: string) => {
     if (id === "notifications") return "notification-settings";
-    if (id === "credentials") return "settings-advanced";
     return `settings-${id}`;
   };
   const sectionIds = sections.map((section) => section.id).join(",");
@@ -1220,9 +995,6 @@ function SettingsView({
           </button>
         )}
       </section>
-      <section id="settings-pair-phone" className="settings-card" data-settings-section="pair-phone" data-pairing-available={pairingCanStart ? "true" : "false"}>
-        <PairPhone createIntent={onCreatePairingIntent} getStatus={onPairingStatus} approveIntent={onApprovePairing} canStart={pairingCanStart} unavailableReason={pairingUnavailableReason} />
-      </section>
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -1283,38 +1055,12 @@ function SettingsView({
         }} /> Start at login</label>
         {startupError && <p className="settings-error" role="alert">Start at login was not changed: {startupError}</p>}
       </section>}
+      {!browserHost && <AppLockSettings status={appLock} onChange={onAppLock} />}
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
         <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
         {!browserHost ? <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button> : <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {actionAlert("account")}
-      </section>}
-      {hasCredentials && <section id="settings-advanced" className="settings-card" data-settings-section="credentials">
-        <h2>Advanced</h2>
-        {(browserHost || mode === "self-hosted") && <section id="settings-credential-import" data-credential-action="import">
-          <details id="settings-credential-import-disclosure" className="settings-disclosure" open={importOpen} onToggle={(event) => setImportOpen(event.currentTarget.open)}>
-            <summary>Import credentials</summary>
-            <div>
-              <p>{browserHost ? "Your passphrase is passed directly to the browser worker and is never sent to the server." : "Credentials are imported natively and are never shown here."}</p>
-              <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("credentials") || undefined} onClick={() => void runAction("credentials")}>{browserHost ? "Import credentials" : "Import credentials natively"}</button>
-              {actionAlert("credentials")}
-            </div>
-          </details>
-        </section>}
-        {credentialExportVisible && <section id="settings-credential-export" data-credential-action="export">
-          <details id="settings-credential-export-disclosure" className="settings-disclosure" open={exportOpen} onToggle={(event) => setExportOpen(event.currentTarget.open)}>
-            <summary>Export credentials</summary>
-            <div>
-              <p>{peppyCopy.credential_export_warning}</p>
-              <button className="secondary-button" disabled={Boolean(pendingAction) || !credentialExportAvailable} aria-busy={actionPending("export") || undefined} aria-describedby={!credentialExportAvailable ? "settings-credential-export-reason" : undefined} onClick={() => void runAction("export")}>Export credentials</button>
-              {!credentialExportAvailable && <p id="settings-credential-export-reason">{credentialExportReason(browserHost, encryption)}</p>}
-              {actionAlert("export")}
-              <p id="settings-credential-export-notice" className={credentialExportAvailable && exportNotice ? undefined : "visually-hidden"} role="status">
-                {credentialExportAvailable ? exportNotice : ""}
-              </p>
-            </div>
-          </details>
-        </section>}
       </section>}
       </div>
       </div>
@@ -1369,6 +1115,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [appLock, setAppLock] = useState<AppLockStatus | null>(null);
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
@@ -1408,6 +1155,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const contactsOpen = activeView === "contacts";
   const notificationSettingsRequested = useRef(false);
   const [notice, setNotice] = useState("");
+  const [addingPhone, setAddingPhone] = useState(false);
   // Names of contacts picked from search, shown on chips until the next native snapshot
   // resolves the same addresses. Display only; recipient IDs stay phone addresses.
   const [chosenContacts, setChosenContacts] = useState<ContactResolutionMap>({});
@@ -1713,6 +1461,23 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       .finally(() => setLoading(false));
     return bridge.subscribe(() => void refresh().catch(report("")));
   }, []);
+  useEffect(() => {
+    if (browserHost) return;
+    void bridge.get_app_lock_status().then(setAppLock).catch(() => setAppLock(null));
+  }, [browserHost]);
+  const changeAppLock = async (enabled: boolean): Promise<boolean> => {
+    const changed = await bridge.set_app_lock(enabled);
+    setAppLock(await bridge.get_app_lock_status());
+    return changed;
+  };
+  const unlockApp = async (): Promise<boolean> => {
+    const unlocked = await bridge.unlock_app();
+    if (unlocked) {
+      setAppLock(await bridge.get_app_lock_status());
+      await refresh();
+    }
+    return unlocked;
+  };
 
   /* Only rows that are actually visible while the window is focused are marked seen. */
   const slotKey = store.resolve(selected);
@@ -2094,28 +1859,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   const runSetupAction = async (
-    action: "origin" | "credentials" | "export" | "unlock",
+    action: "origin" | "unlock",
     onConfigured?: () => void,
   ) => {
     if (action === "origin") {
       await bridge.configure_server(origin);
       onConfigured?.();
     }
-    else if (action === "credentials") await bridge.import_credentials();
-    else if (action === "export") await bridge.export_credentials();
     else await bridge.unlock_sync();
     await refresh();
-  };
-  const runOnboardingAction = async (action: "origin" | "credentials" | "unlock") => {
-    try {
-      const recordSelfHosted = !browserHost && action === "origin" ? () => {
-        localStorage.setItem("peppy.setup.mode", "self-hosted");
-        setMode("self-hosted");
-      } : undefined;
-      await runSetupAction(action, recordSelfHosted);
-    } catch (error) {
-      setNotice(errorText(error));
-    }
   };
   const lock = bridge.lock_sync?.bind(bridge);
   const lockSync = lock ? async () => {
@@ -2158,6 +1910,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     })),
   ];
 
+  /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
+  const lockCode = snapshot?.connection.errorCode;
+  if (!browserHost && (lockCode === "app-locked" || lockCode === "secure-store-unavailable"))
+    return (
+      <AppLockScreen
+        storageUnavailable={lockCode === "secure-store-unavailable"}
+        onUnlock={unlockApp}
+        onRetry={() => refresh()}
+      />
+    );
+
   if (loading && composerConversation)
     return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
 
@@ -2165,14 +1928,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const canUnlock = snapshot?.mode === "native"
     ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
-  const hasDeviceCredential = snapshot
-    ? snapshot.mode === "browser"
-      ? snapshot.encryption.state !== "preview"
-      : !["server-required", "credentials-required"].includes(setupCode ?? "")
-    : false;
-  const credentialExportAvailable = Boolean(snapshot?.credentialExportAvailable) &&
-    (!browserHost || snapshot?.encryption.state === "unlocked");
-  const pairing = pairingAvailability(snapshot);
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2519,6 +2274,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               >
                 <SquarePen size={16} aria-hidden />
               </button>}
+              {snapshot?.deviceRole === "owner" && (
+                <button id="add-phone-action" onClick={() => setAddingPhone(true)}>Add phone</button>
+              )}
               {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
                   aria-label="Open as floating conversation"
@@ -2554,19 +2312,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               sources={snapshot?.gateways ?? []}
               preferences={snapshot?.notificationPreferences ?? { messageBanners: true, mirroredBanners: true, preview: "full" }}
               onPreferences={async preferences => { await bridge.set_notification_preferences(preferences); await refresh(); }}
-              onMute={async filter => { await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted); await refresh(); }}
-              onPermission={() => bridge.request_notification_permission()}
-              onCreatePairingIntent={() => bridge.create_pairing_intent()}
-              onPairingStatus={intentToken => bridge.pairing_intent_status(intentToken)}
-              onApprovePairing={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
-              onLock={browserHost ? lockSync : undefined}
-              browserHost={browserHost}
-              accountUrl={accountUrl}
-              pairingCanStart={pairing.canStart}
-              pairingUnavailableReason={pairing.reason || undefined}
-              credentialExportAvailable={credentialExportAvailable}
-              credentialExportVisible={hasDeviceCredential}
-            />
+               onMute={async filter => { await bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, filter.muted); await refresh(); }}
+               onPermission={() => bridge.request_notification_permission()}
+               onLock={browserHost ? lockSync : undefined}
+               appLock={appLock}
+               onAppLock={changeAppLock}
+               browserHost={browserHost}
+               accountUrl={accountUrl}
+             />
           ) : notificationsOpen ? (
             <NotificationsView
               notifications={snapshot?.notifications ?? []}
@@ -2584,47 +2337,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot && !selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")) ? (
+              {snapshot && (addingPhone || (!selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview") || (snapshot.connection.state !== "connected" && !canUnlock)))) ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
                   enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
-                  pairPhone={<PairPhone
-                    createIntent={() => bridge.create_pairing_intent()}
-                    getStatus={intentToken => bridge.pairing_intent_status(intentToken)}
-                    approveIntent={(intentToken, keyDigest) => bridge.approve_pairing_intent(intentToken, keyDigest)}
-                  />}
-                  selfHostedFallback={<OnboardingView
-                    connected={false}
-                    canUnlock={canUnlock}
-                    showServerConfig={false}
-                    origin={origin}
-                    onOrigin={setOrigin}
-                    onAction={runOnboardingAction}
-                    onExport={hasDeviceCredential ? () => runSetupAction("export") : undefined}
-                    encryption={snapshot.encryption.state}
-                    browserHost={browserHost}
-                    credentialExportAvailable={credentialExportAvailable}
-                    compact
-                    notice={notice}
-                  />}
-                  onJoined={() => browserHost ? void refresh() : void bridge.unlock_sync().then(() => refresh()).catch(report("Could not unlock sync. "))}
+                  addingPhone={addingPhone}
+                  onExit={() => setAddingPhone(false)}
+                  onJoined={() => { setAddingPhone(false); void refresh(); }}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
-                />
-              ) : snapshot && snapshot.connection.state !== "connected" && !selected ? (
-                <OnboardingView
-                  connected={false}
-                  canUnlock={canUnlock}
-                  showServerConfig={!browserHost && mode === "self-hosted"}
-                  origin={origin}
-                  onOrigin={setOrigin}
-                  onAction={runOnboardingAction}
-                  onExport={hasDeviceCredential ? () => runSetupAction("export") : undefined}
-                  encryption={snapshot.encryption.state}
-                  browserHost={browserHost}
-                  credentialExportAvailable={credentialExportAvailable}
-                  notice={notice}
                 />
               ) : (
                 <>

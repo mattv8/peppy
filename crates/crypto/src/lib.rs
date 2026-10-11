@@ -1,4 +1,5 @@
 //! Generic cryptographic building blocks. Protocol envelope integration is deliberately external.
+pub mod enrollment;
 pub mod filesystem;
 pub mod passphrase;
 use hmac::{Hmac, Mac};
@@ -53,6 +54,8 @@ pub enum CryptoError {
     InvalidStream,
     #[error("I/O failed")]
     Io,
+    #[error("invalid enrollment data")]
+    InvalidEnrollment,
 }
 impl From<io::Error> for CryptoError {
     fn from(_: io::Error) -> Self {
@@ -456,7 +459,7 @@ fn sync_parent_directory(destination: &Path) -> io::Result<()> {
 fn sync_parent_directory(_: &Path) -> io::Result<()> {
     Ok(())
 }
-fn profile_fingerprint_bytes(profile: &KeyProfile) -> Result<[u8; 32], CryptoError> {
+pub fn profile_fingerprint_bytes(profile: &KeyProfile) -> Result<[u8; 32], CryptoError> {
     profile.validate()?;
     let mut h = Sha256::new();
     h.update(b"peppy-key-profile-v1\0");

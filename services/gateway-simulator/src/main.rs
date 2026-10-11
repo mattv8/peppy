@@ -8,13 +8,10 @@ use std::{
     time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey};
 use peppy_client_core::{
     Client, ClientConfig, DatabaseKey, IncomingSms, KeyProfile, PermitDecision, SendResult,
     VaultCheckHeader,
 };
-use peppy_crypto::{create_vault_check_header, derive_root_key};
 use peppy_domain::{DeviceId, VaultId};
 use peppy_gateway_simulator::{
     BOOTSTRAP_FILE, CREDENTIAL_FILE, DESKTOP_IMPORT_FILE, DEVELOPER_KEY_FILE, SimulatorError,
@@ -22,10 +19,10 @@ use peppy_gateway_simulator::{
     publish_capabilities, read_bounded_json, read_or_create_route, read_state,
     run_one_carrier_effect_for_route, sync_http, upload_pending, write_state,
 };
-use peppy_protocol::pairing_proof_message;
+use peppy_hosted_client::newenrollment::{ClientKind, EnrollmentClient};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[derive(Serialize, Deserialize)]
 struct Bootstrap {
@@ -53,7 +50,7 @@ enum DatabaseBootstrap {
 
 fn usage() {
     eprintln!(
-        "SIMULATED gateway: prepare-vault STATE_DIR | pair STATE_DIR OWNER_CREDENTIAL_FILE [gateway|device] | run STATE_DIR\nSecrets are read from protected files, stdin, or PEPPY_SIMULATOR_PASSPHRASE; never argv."
+        "SIMULATED gateway: claim-owner STATE_DIR | admit-gateway STATE_DIR | admit-device STATE_DIR | run STATE_DIR\nSecrets are read from protected files, stdin, or PEPPY_SIMULATOR_PASSPHRASE; never argv."
     );
 }
 fn protected(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -217,7 +214,51 @@ fn load_bootstrap(dir: &Path) -> Result<Bootstrap, String> {
     .map_err(|_| "invalid SIMULATED vault bootstrap".into())
 }
 
-fn prepare(dir: PathBuf) -> Result<(), String> {
+fn enrollment_origin() -> Result<String, String> {
+    env::var("PUBLIC_API_URL").map_err(|_| "SIMULATED PUBLIC_API_URL is required".into())
+}
+
+fn demo_setup_token() -> Result<String, String> {
+    match env::var("PEPPY_DEMO_SETUP_TOKEN") {
+        Ok(token) if !token.is_empty() => Ok(token),
+        _ => Err("SIMULATED isolated demo setup token is required".into()),
+    }
+}
+
+fn demo_admin_password() -> Result<String, String> {
+    match env::var("PEPPY_DEMO_ADMIN_PASSWORD") {
+        Ok(password) if !password.is_empty() => Ok(password),
+        _ => Err("SIMULATED isolated demo administrator password is required".into()),
+    }
+}
+
+async fn post_enrollment_request(
+    origin: &str,
+    path: &str,
+    request: String,
+) -> Result<String, String> {
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "SIMULATED enrollment HTTP client failed")?
+        .post(format!("{origin}{path}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(request)
+        .send()
+        .await
+        .map_err(|_| "SIMULATED enrollment request failed")?;
+    let response = read_bounded_json(response)
+        .await
+        .map_err(|_| "SIMULATED enrollment response invalid")?;
+    serde_json::to_string(&response).map_err(|_| "SIMULATED enrollment response invalid".into())
+}
+
+fn store_enrollment_identity(
+    dir: &Path,
+    identity: peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
+    credential_file: &str,
+) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|_| "SIMULATED state directory failed")?;
     #[cfg(unix)]
     {
@@ -225,11 +266,11 @@ fn prepare(dir: PathBuf) -> Result<(), String> {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
             .map_err(|_| "SIMULATED state permissions failed")?;
     }
-    let profile = KeyProfile::new(VaultId::new().0, 1).map_err(|_| "SIMULATED crypto failed")?;
-    let root =
-        derive_root_key(&phrase()?, &profile).map_err(|_| "SIMULATED passphrase rejected")?;
-    let header =
-        create_vault_check_header(&root, profile.clone()).map_err(|_| "SIMULATED header failed")?;
+    let metadata = identity.metadata().clone();
+    let vault_id = metadata.vault_id;
+    let device_id = metadata.device_id;
+    let profile = metadata.profile;
+    let header = metadata.header;
     let bootstrap = Bootstrap {
         fingerprint: profile
             .fingerprint()
@@ -243,73 +284,75 @@ fn prepare(dir: PathBuf) -> Result<(), String> {
             .map_err(|_| "SIMULATED bootstrap encoding failed")?,
     )?;
     let _ = key_file(&dir)?;
-    let _ = read_or_create_route(&dir).map_err(|_| "SIMULATED route setup failed")?;
-    println!(
-        "SIMULATED vault bootstrap prepared: {}",
-        dir.join(BOOTSTRAP_FILE).display()
-    );
+    if credential_file == CREDENTIAL_FILE {
+        let _ = read_or_create_route(&dir).map_err(|_| "SIMULATED route setup failed")?;
+    }
+    let credentials = SimulatorState {
+        version: 1,
+        origin: identity.origin().to_owned(),
+        vault_id: vault_id.to_string(),
+        device_id: device_id.to_string(),
+        device_token: identity.device_credential_for_native_secure_store(),
+    };
+    write_state(&dir.join(credential_file), &credentials)
+        .map_err(|_| "SIMULATED credential write failed")?;
     Ok(())
 }
 
-async fn pair(dir: PathBuf, owner: PathBuf, role: String) -> Result<(), String> {
-    if !matches!(role.as_str(), "gateway" | "device") {
-        return Err("role must be gateway or device".into());
-    }
-    let owner = read_state(&owner).map_err(|_| "invalid owner credential file")?;
-    let bootstrap = load_bootstrap(&dir)?;
-    let mut signing_bytes = [0; 32];
-    rand::RngCore::fill_bytes(&mut OsRng, &mut signing_bytes);
-    let key = SigningKey::from_bytes(&signing_bytes);
-    let device = DeviceId::new();
-    let public =
-        json!({"ed25519_public_key":URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| "SIMULATED HTTP client failed")?;
-    let challenge:Value=read_bounded_json(http.post(format!("{}/v1/pairing",owner.origin)).bearer_auth(&owner.device_token).json(&json!({"device_id":device.0,"public_key":public,"profile_fingerprint":bootstrap.fingerprint,"key_epoch":bootstrap.profile.key_epoch,"requested_role":role})).send().await.map_err(|_|"SIMULATED pairing request failed")?).await.map_err(|_|"SIMULATED pairing response invalid")?;
-    let token = challenge["challenge_token"]
-        .as_str()
-        .ok_or("SIMULATED pairing token missing")?;
-    let raw: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(token)
-        .map_err(|_| "SIMULATED pairing token invalid")?
-        .try_into()
-        .map_err(|_| "SIMULATED pairing token invalid")?;
-    let proof = pairing_proof_message(
-        &raw,
-        VaultId(bootstrap.profile.vault_id),
-        device,
-        &bootstrap.fingerprint,
-        bootstrap.profile.key_epoch,
-        &role,
-    );
-    let response:Value=read_bounded_json(http.post(format!("{}/v1/pairing/consume",owner.origin)).json(&json!({"challenge_token":token,"device_id":device.0,"public_key":public,"profile_fingerprint":bootstrap.fingerprint,"key_epoch":bootstrap.profile.key_epoch,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())})).send().await.map_err(|_|"SIMULATED pairing consume failed")?).await.map_err(|_|"SIMULATED pairing response invalid")?;
-    let credentials = SimulatorState {
-        version: 1,
-        origin: owner.origin,
-        vault_id: bootstrap.profile.vault_id.to_string(),
-        device_id: device.0.to_string(),
-        device_token: response["device_token"]
-            .as_str()
-            .ok_or("SIMULATED credential missing")?
-            .to_owned(),
-    };
-    let name = if role == "device" {
-        DESKTOP_IMPORT_FILE
-    } else {
-        CREDENTIAL_FILE
-    };
-    write_state(&dir.join(name), &credentials).map_err(|_| "SIMULATED credential write failed")?;
-    protected(
-        &dir.join("SIMULATED-device-signing-key.hex"),
-        hex::encode(key.to_bytes()).as_bytes(),
-    )?;
-    println!(
-        "SIMULATED {} pairing complete; protected import written",
-        role
-    );
+async fn claim_owner(dir: PathBuf) -> Result<(), String> {
+    let origin = enrollment_origin()?;
+    let passphrase = phrase()?;
+    let mut enrollment = EnrollmentClient::new(
+        origin.clone(),
+        ClientKind::Android,
+        "Simulated owner".into(),
+    )
+    .map_err(|_| "SIMULATED owner enrollment setup failed")?;
+    let request = enrollment
+        .create_owner_request(
+            demo_setup_token()?,
+            demo_admin_password()?,
+            passphrase.clone(),
+        )
+        .map_err(|_| "SIMULATED owner enrollment request failed")?;
+    let response = post_enrollment_request(&origin, "/v1/instance/claim", request).await?;
+    let identity = enrollment
+        .finish_owner_admission(response, passphrase)
+        .map_err(|_| "SIMULATED owner enrollment completion failed")?;
+    store_enrollment_identity(&dir, identity, CREDENTIAL_FILE)?;
+    println!("SIMULATED owner enrollment complete; protected state written");
+    Ok(())
+}
+
+async fn admit(
+    dir: PathBuf,
+    kind: ClientKind,
+    name: &str,
+    credential_file: &str,
+) -> Result<(), String> {
+    let origin = enrollment_origin()?;
+    let passphrase = phrase()?;
+    let mut enrollment = EnrollmentClient::new(origin.clone(), kind, name.into())
+        .map_err(|_| "SIMULATED enrollment setup failed")?;
+    let challenge_request = enrollment
+        .manual_challenge_request(None)
+        .map_err(|_| "SIMULATED enrollment challenge request failed")?;
+    let challenge =
+        post_enrollment_request(&origin, "/v1/enrollment/challenges", challenge_request).await?;
+    let completion_request = enrollment
+        .complete_manual_challenge_request(challenge, passphrase.clone())
+        .map_err(|_| "SIMULATED enrollment proof failed")?;
+    let response = post_enrollment_request(
+        &origin,
+        "/v1/enrollment/challenges/complete",
+        completion_request,
+    )
+    .await?;
+    let identity = enrollment
+        .finish_manual_admission(response, passphrase)
+        .map_err(|_| "SIMULATED enrollment completion failed")?;
+    store_enrollment_identity(&dir, identity, credential_file)?;
+    println!("SIMULATED device enrollment complete; protected state written");
     Ok(())
 }
 
@@ -457,19 +500,34 @@ async fn run(dir: PathBuf) -> Result<(), String> {
 async fn main() {
     let mut args = env::args().skip(1);
     let result: Result<(), String> = match args.next().as_deref() {
-        Some("prepare-vault") => match args.next() {
-            Some(dir) => prepare(PathBuf::from(dir)),
+        Some("claim-owner") => match args.next() {
+            Some(dir) => claim_owner(PathBuf::from(dir)).await,
             None => Err("STATE_DIR required".into()),
         },
-        Some("pair") => {
-            let d = args.next().map(PathBuf::from);
-            let o = args.next().map(PathBuf::from);
-            let r = args.next().unwrap_or_else(|| "gateway".into());
-            match (d, o) {
-                (Some(d), Some(o)) => pair(d, o, r).await,
-                _ => Err("STATE_DIR and OWNER_CREDENTIAL_FILE required".into()),
+        Some("admit-gateway") => match args.next() {
+            Some(dir) => {
+                admit(
+                    PathBuf::from(dir),
+                    ClientKind::Android,
+                    "Simulated gateway",
+                    CREDENTIAL_FILE,
+                )
+                .await
             }
-        }
+            None => Err("STATE_DIR required".into()),
+        },
+        Some("admit-device") => match args.next() {
+            Some(dir) => {
+                admit(
+                    PathBuf::from(dir),
+                    ClientKind::Desktop,
+                    "Simulated desktop",
+                    DESKTOP_IMPORT_FILE,
+                )
+                .await
+            }
+            None => Err("STATE_DIR required".into()),
+        },
         Some("run") => match args.next() {
             Some(d) => run(PathBuf::from(d)).await,
             None => Err("STATE_DIR required".into()),

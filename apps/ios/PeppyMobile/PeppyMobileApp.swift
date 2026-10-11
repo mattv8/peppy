@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 #if canImport(PeppyNative)
 import PeppyNative
 #endif
@@ -33,17 +32,15 @@ struct DeviceView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @State private var passphrase = ""
-    @State private var choosingFile = false
-    @State private var showingPairing = false
     @State private var showingSettings = false
     @State private var confirmingDisconnect = false
     @State private var devicePendingRemoval: DeviceRosterItem?
     @State private var vaultDeleteText = ""
     @State private var showingVaultDelete = false
     @State private var showingSelfHosted = false
+    @State private var showingSelfHostedEnrollment = false
+    @State private var showingPhoneEnrollment = false
     @State private var showingHostedEnrollment = false
-    @State private var presentPairingAfterHostedEnrollment = false
-    @State private var showingOwnerPairing = false
     @State private var enrollmentLoaded = false
 
     var body: some View {
@@ -71,18 +68,14 @@ struct DeviceView: View {
             model.observeContactChanges(phase == .active)
             if phase == .background { model.scheduleContactsBackgroundWork() }
         }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.json]) { result in
-            Task { await model.importCredential(from: result) }
+        .fullScreenCover(isPresented: $showingHostedEnrollment) {
+            HostedEnrollmentView(model: model) {}
         }
-        .sheet(isPresented: $showingPairing) { PairingView(model: model, isPresented: $showingPairing) }
-        .sheet(isPresented: $showingOwnerPairing) { OwnerPairingView(model: model, isPresented: $showingOwnerPairing) }
-        .fullScreenCover(isPresented: $showingHostedEnrollment, onDismiss: {
-            if presentPairingAfterHostedEnrollment {
-                presentPairingAfterHostedEnrollment = false
-                showingPairing = true
-            }
-        }) {
-            HostedEnrollmentView(model: model) { presentPairingAfterHostedEnrollment = true }
+        .fullScreenCover(isPresented: $showingSelfHostedEnrollment) {
+            SelfHostedEnrollmentView(model: model, isPresented: $showingSelfHostedEnrollment)
+        }
+        .sheet(isPresented: $showingPhoneEnrollment) {
+            PhoneEnrollmentView(model: model, isPresented: $showingPhoneEnrollment)
         }
     }
 
@@ -138,19 +131,14 @@ struct DeviceView: View {
                     Text("peppy.self_hosted_headline", tableName: "Peppy").font(.title2).bold()
                     Text("peppy.self_hosted_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
 
-                    Button { showingPairing = true } label: {
-                        Text("peppy.scan_qr", tableName: "Peppy")
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("pair-qr-button")
-
-                    Button { choosingFile = true } label: {
-                        Text("peppy.use_credential_file", tableName: "Peppy")
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("import-credential-button")
+                    Button("Set up or connect to a server") { showingSelfHostedEnrollment = true }
+                        .buttonStyle(.borderedProminent)
+                        .tint(colors.Accent)
+                        .foregroundStyle(colors.AccentText)
+                        .accessibilityIdentifier("self-hosted-enrollment-button")
+                    Button("Scan phone enrollment QR") { showingPhoneEnrollment = true }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("phone-enrollment-button")
 
                     Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) {
                         Text("peppy.self_hosted_docs_link", tableName: "Peppy")
@@ -199,10 +187,6 @@ struct DeviceView: View {
                 } label: { Text("peppy.hosted_unlock_cta", tableName: "Peppy") }.disabled(passphrase.isEmpty || model.activity != .idle)
                     .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText)
                     .accessibilityIdentifier("unlock-button")
-                if model.enrollmentBlocked {
-                    Button("Replace credential file…") { choosingFile = true }
-                        .accessibilityIdentifier("replace-credential-button")
-                }
                 activityAndError
             }
             .padding(24)
@@ -299,21 +283,12 @@ struct DeviceView: View {
                 Section("Session") {
                     Button("Refresh from server") { Task { await model.refresh() } }
                         .disabled(model.activity != .idle).accessibilityIdentifier("refresh-enrollment-button")
-                    Button("Replace credential file…") { choosingFile = true }.accessibilityIdentifier("replace-credential-button")
                     Button("Disconnect this device…", role: .destructive) { confirmingDisconnect = true }
                         .disabled(model.activity != .idle).accessibilityIdentifier("disconnect-button")
                 }
                 devicesSection
                 relaySection
-                if model.status.role == "owner" {
-                    Section {
-                        Button { showingOwnerPairing = true } label: {
-                            Text("peppy.production_add_device", tableName: "Peppy")
-                        }
-                        .disabled(!model.status.keysUnlocked || model.activity != .idle).accessibilityIdentifier("add-device-button")
-                    }
-                    vaultSection
-                }
+                if model.status.role == "owner" { vaultSection }
                 if let identity = model.status.identity, identity.origin == "https://peppy.pro" {
                     Section {
                         Link(destination: URL(string: "https://peppy.pro/account")!) {

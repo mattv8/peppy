@@ -15,31 +15,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .await?;
         return Ok(());
     }
-    if command.as_deref() == Some("create-owner") {
-        let profile = std::env::var("PEPPY_OWNER_PUBLIC_KEY_PROFILE")
-            .map_err(|_| "PEPPY_OWNER_PUBLIC_KEY_PROFILE JSON is required")?;
-        let header = std::env::var("PEPPY_OWNER_VAULT_CHECK_HEADER_HEX")
-            .map_err(|_| "PEPPY_OWNER_VAULT_CHECK_HEADER_HEX is required")?;
-        let fingerprint = std::env::var("PEPPY_OWNER_PROFILE_FINGERPRINT")
-            .map_err(|_| "PEPPY_OWNER_PROFILE_FINGERPRINT is required")?;
-        let epoch = std::env::var("PEPPY_OWNER_KEY_EPOCH")
-            .unwrap_or_else(|_| "1".into())
-            .parse()?;
-        let credential = peppy_server::api::create_owner(
-            &sqlx::PgPool::connect(&config.database_url).await?,
-            serde_json::from_str(&profile)?,
-            hex::decode(header)?,
-            fingerprint,
-            epoch,
-        )
-        .await
-        .map_err(std::io::Error::other)?;
-        println!(
-            "vault_id={}\ndevice_id={}\ndevice_token={}",
-            credential.vault_id, credential.device_id, credential.device_token
-        );
-        return Ok(());
-    }
     if command.as_deref() == Some("storage-check") {
         return peppy_server::health::storage_contract_check(&config).await;
     }
@@ -57,9 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(config) => peppy_server::web_client::wrap(server.router(), config),
         None => server.router(),
     };
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    peppy_server::serve(listener, router, shutdown_signal()).await?;
     Ok(())
 }
 

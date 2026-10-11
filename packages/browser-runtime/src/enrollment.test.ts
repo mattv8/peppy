@@ -1,117 +1,384 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserEnrollment } from "./enrollment.js";
+import { BrowserEnrollment, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
 
-const APP = "https://app.example.test";
-const API = "https://api.example.test";
-const requestId = "11111111-2222-4333-8444-555555555555";
-const deviceId = "22222222-2222-4333-8444-555555555555";
-const vaultId = "33333333-2222-4333-8444-555555555555";
-const fingerprint = "a".repeat(64);
-const token = "b".repeat(96);
+const origin = "https://peppy.test";
+const vaultId = "00000000-0000-0000-0000-000000000001";
+const deviceId = "00000000-0000-0000-0000-000000000002";
+const invitationId = "00000000-0000-0000-0000-000000000003";
+const challengeId = "00000000-0000-0000-0000-000000000004";
 
-function core() {
-  return { invoke: vi.fn(async ({ command }: { command: string }) => {
-    if (command === "_worker_join_start") return { qrPayload: "qr-with-api-origin" };
-    if (command === "_worker_join_request") return { joinRequestId: requestId, deviceId };
-    if (command === "_worker_join_open_offer") return { intent: "intent", deviceId, publicKey: { ed25519_public_key: "public" } };
-    if (command === "_worker_join_confirm") return { apiOrigin: API, challengeToken: "challenge", deviceId, publicKey: { ed25519_public_key: "public" }, vaultId, keyEpoch: 1, profileFingerprint: fingerprint, signature: "signature" };
-    return {};
-  }) };
+class TestSession implements EnrollmentSession {
+  public phase: "unenrolled" | "locked" | "ready" = "unenrolled";
+  public identity?: EnrollmentIdentity;
+  public readonly finishEnrollment = vi.fn(async (_command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual", responseJson: string) => {
+    const response = JSON.parse(responseJson) as Record<string, unknown>;
+    this.phase = "ready";
+    this.identity = { role: response.role === "gateway" ? "gateway" : response.role === "device" ? "device" : "owner" };
+  });
+  public readonly unlock = vi.fn(async () => {
+    this.phase = "ready";
+    this.identity = { role: "owner" };
+  });
+  public tokenForTransport(): string { return "device-token"; }
+  public publicIdentity(): EnrollmentIdentity | undefined { return this.identity; }
 }
 
-function vault(): Record<string, unknown> {
-  return { vault_id: vaultId, device_id: deviceId, role: "device", key_epoch: 1, profile_fingerprint: fingerprint, public_key_profile: { crypto_suite: 1 }, encrypted_vault_check_header: btoa(JSON.stringify({ profile: {}, check: {} })) };
+function instanceInfo(claimed: boolean, mode: "community" | "hosted" = "community") {
+  return { mode, claimed, setup_required: !claimed, password_auth: true, qr_pairing: true, shared_secret_pairing: true };
+}
+
+function json(value: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(value), { headers: { "content-type": "application/json" }, ...init });
+}
+
+function pathOf(input: RequestInfo | URL): string { return new URL(String(input)).pathname; }
+
+class LifecycleCore {
+  public state: "none" | "fresh" | "owner" | "owner-draft" | "owner-invitation" = "none";
+  public readonly invoke = vi.fn(async ({ command }: { command: string; args: Record<string, unknown> }) => {
+    if (command === "_worker_enrollment_new") {
+      if (this.state !== "none") throw new Error("invalid-request");
+      this.state = "fresh";
+      return {};
+    }
+    if (command === "_worker_enrollment_create_owner") {
+      if (this.state !== "fresh") throw new Error("unavailable");
+      return { request: JSON.stringify({ operation_id: vaultId }) };
+    }
+    if (command === "_worker_enrollment_manual_challenge") {
+      if (this.state !== "fresh") throw new Error("unavailable");
+      return { request: JSON.stringify({ device: { device_id: deviceId } }) };
+    }
+    if (command === "_worker_enrollment_complete_manual_challenge") return { request: JSON.stringify({ admission_signature: "proof" }) };
+    if (command === "_worker_enrollment_new_owner_from_identity") {
+      this.state = "owner";
+      return {};
+    }
+    if (command === "_worker_enrollment_create_phone_invitation") {
+      if (this.state !== "owner") throw new Error("unavailable");
+      this.state = "owner-draft";
+      return { request: JSON.stringify({ method: "transfer", transfer_public_key: "key", invitation_token_digest: "digest" }) };
+    }
+    if (command === "_worker_enrollment_consume_created_phone_invitation") {
+      if (this.state !== "owner-draft") throw new Error("unavailable");
+      this.state = "owner-invitation";
+      return {};
+    }
+    if (command === "_worker_enrollment_get_phone_qr") {
+      if (this.state !== "owner-invitation") throw new Error("unavailable");
+      return { qr: "local-secret-qr" };
+    }
+    return {};
+  });
+
+  public clearAfterFinish(): void { this.state = "none"; }
+}
+
+function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const path = pathOf(input);
+    if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+    if (path === "/v1/instance") return json(instanceInfo(statuses.length > 0));
+    if (path === "/v1/instance/claim") return json({ vault_id: vaultId, device_id: deviceId, replayed: false, session: { csrf_token: "csrf", expires_in_seconds: 43_200 } });
+    if (path === "/v1/enrollment/challenges") return json({ enrollment_id: challengeId });
+    if (path.endsWith("/complete")) return json({ vault_id: vaultId, device_id: deviceId, role: "owner", material: {} });
+    if (path === "/v1/enrollment/invitations" && init?.method === "POST") return json({ invitation_id: invitationId, expires_in_seconds: 300 });
+    if (path === `/v1/enrollment/invitations/${invitationId}` && init?.method === "DELETE") return new Response(null, { status: 204 });
+    if (path === `/v1/enrollment/invitations/${invitationId}`) return json(statuses.shift() ?? { state: "waiting", expires_in_seconds: 300 });
+    throw new Error(`unexpected ${path}`);
+  });
 }
 
 describe("BrowserEnrollment", () => {
-  it("uses the canonical origin only in the QR while every request remains worker same-origin", async () => {
-    const calls: string[] = [];
-    let challenge = 0;
+  it("completes the self-hosted owner and phone contract without trusting server QR material", async () => {
+    const statuses = [
+      { state: "claimed", expires_in_seconds: 290, claim: {}, transcript: {}, encrypted_key_package: null, transfer_nonce: null, profile: null },
+      { state: "claimed", expires_in_seconds: 285, claim: {}, transcript: {}, encrypted_key_package: null, transfer_nonce: null, profile: null },
+      { state: "approved", expires_in_seconds: 280, claim: null, transcript: {}, encrypted_key_package: "cipher", transfer_nonce: "nonce", profile: null },
+      { state: "consumed", expires_in_seconds: 275, claim: null, transcript: {}, encrypted_key_package: "cipher", transfer_nonce: "nonce", profile: null },
+    ];
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_create_owner") return { request: JSON.stringify({ operation_id: vaultId, setup_token: "opaque" }) };
+      if (command === "_worker_enrollment_create_phone_invitation") return { request: JSON.stringify({ method: "transfer", transfer_public_key: "key", invitation_token_digest: "digest" }) };
+      if (command === "_worker_enrollment_get_phone_qr") return { qr: "local-secret-qr" };
+      if (command === "_worker_enrollment_phone_status") return { sas: "123 456" };
+      if (command === "_worker_enrollment_approve_phone_invitation") return { request: JSON.stringify({ transcript_hash: "hash", encrypted_key_package: "cipher", transfer_nonce: "nonce" }) };
+      return {};
+    }) };
+    const session = new TestSession();
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
-      calls.push(String(input));
-      const path = new URL(String(input)).pathname;
-      if (path === "/web/config.json") return json({ version: 1, apiOrigin: API });
-      if (path === "/v1/pairing/join-requests" && init?.method === "POST") return json({ join_request_id: requestId, poll_secret: "secret", expires_in_seconds: 300 });
-      if (path.endsWith(requestId)) return json({ state: "offered", sealed_intent_token: "sealed", intent_digest: "digest", expires_in_seconds: 200 });
-      if (path.endsWith("/claim")) return json({ key_digest: "digest", sas: "123456", claim_secret: "claim", expires_in_seconds: 180 });
-      if (path.endsWith("/challenge")) return challenge++ === 0 ? json({ code: "pairing_challenge_unavailable" }, 401) : json({ challenge_token: "challenge", vault_id: vaultId, key_epoch: 1, profile_fingerprint: fingerprint, requested_role: "device", expires_in_seconds: 120 });
-      if (path === "/v1/pairing/consume") return json({ device_token: token, vault_id: vaultId, device_id: deviceId });
-      if (path === "/v1/vault") return json(vault());
-      throw new Error(path);
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ code: "not_found" }, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(false));
+      if (path === "/v1/instance/claim") return json({ vault_id: vaultId, device_id: deviceId, replayed: false, session: { csrf_token: "claim-csrf", expires_in_seconds: 43_200 } });
+      if (path === "/v1/enrollment/invitations" && init?.method === "POST") return json({ invitation_id: invitationId, expires_in_seconds: 300 });
+      if (path.endsWith("/approve")) return json({});
+      if (path === `/v1/enrollment/invitations/${invitationId}`) return json(statuses.shift());
+      throw new Error(`unexpected ${path}`);
     });
-    const activate = vi.fn(async () => undefined);
-    const instance = new BrowserEnrollment(core(), APP, activate, fetcher);
-    expect(await instance.start()).toMatchObject({ state: "waiting", origin: API, qrPayload: "qr-with-api-origin" });
-    expect(await instance.poll()).toMatchObject({ state: "claimed", sas: "123456" });
-    expect(await instance.poll()).toMatchObject({ state: "claimed" });
-    expect(await instance.poll()).toMatchObject({ state: "confirm" });
-    expect(await instance.confirm("phrase")).toEqual({ state: "approved" });
-    expect(activate).toHaveBeenCalledOnce();
-    expect(calls.every(url => new URL(url).origin === APP)).toBe(true);
-    expect(JSON.stringify(instance.view())).not.toContain("secret");
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "community", stage: "setup" });
+    await expect(enrollment.createOwner({ setupToken: "setup", adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready", owner: true });
+    await expect(enrollment.addPhone("transfer")).resolves.toMatchObject({ stage: "waiting_phone", qrPayload: "local-secret-qr", expiresInSeconds: 300 });
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "verify_phone", verificationCode: "123 456" });
+    await expect(enrollment.approve("secret")).resolves.toMatchObject({ stage: "waiting_phone" });
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "waiting_phone" });
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "phone_connected" });
+
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_get_phone_qr", args: {} });
+    expect(session.finishEnrollment).toHaveBeenCalledWith("_worker_enrollment_finish_owner", expect.stringContaining('"session"'), "secret");
+    const invitationCall = fetcher.mock.calls.find(([input, init]) => pathOf(input) === "/v1/enrollment/invitations" && init?.method === "POST");
+    expect(invitationCall?.[1]).toMatchObject({ headers: expect.objectContaining({ Authorization: "Bearer device-token", "X-Peppy-CSRF-Token": "claim-csrf" }) });
   });
 
-  it("maps the snake-case server challenge into the Rust camel-case deny-unknown-fields contract", async () => {
-    const trustedCore = core();
-    let challenge = 0;
-    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      if (path === "/web/config.json") return json({ version: 1, apiOrigin: API });
-      if (path === "/v1/pairing/join-requests" && init?.method === "POST") return json({ join_request_id: requestId, poll_secret: "secret", expires_in_seconds: 300 });
-      if (path.endsWith(requestId)) return json({ state: "offered", sealed_intent_token: "sealed", intent_digest: "digest", expires_in_seconds: 200 });
-      if (path.endsWith("/claim")) return json({ key_digest: "digest", sas: "123456", claim_secret: "claim", expires_in_seconds: 180 });
-      if (path.endsWith("/challenge")) { challenge += 1; return json({ challenge_token: "challenge", vault_id: vaultId, key_epoch: 1, profile_fingerprint: fingerprint, requested_role: "device", expires_in_seconds: 120 }); }
-      throw new Error(path);
-    });
-    const instance = new BrowserEnrollment(trustedCore, APP, async () => undefined, fetcher);
-    await instance.start(); await instance.poll(); await instance.poll();
-    expect(challenge).toBe(1);
-    expect(trustedCore.invoke).toHaveBeenCalledWith({ command: "_worker_join_challenge", args: { challengeToken: "challenge", vaultId, keyEpoch: 1, profileFingerprint: fingerprint, requestedRole: "device" } });
+  it("reinitializes an owner invitation client after first-owner activation clears the fresh Rust client", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.finishEnrollment.mockImplementationOnce(async () => { core.clearAfterFinish(); session.phase = "ready"; session.identity = { role: "owner" }; });
+    const fetcher = lifecycleFetcher();
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.createOwner({ setupToken: "setup", adminPassword: "password-password", passphrase: "secret" });
+    await expect(enrollment.addPhone("transfer")).resolves.toMatchObject({ stage: "waiting_phone", qrPayload: "local-secret-qr" });
+
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new_owner_from_identity", args: { deviceName: "Peppy Browser" } });
+    expect(fetcher.mock.calls.filter(([input, init]) => pathOf(input) === "/v1/enrollment/invitations" && init?.method === "POST")).toHaveLength(1);
   });
 
-  it("keeps a consumed private identity for a wrong-phrase activation retry", async () => {
-    let activation = 0;
-    let consume = 0;
-    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      if (path === "/web/config.json") return json({ version: 1, apiOrigin: API });
-      if (path === "/v1/pairing/join-requests" && init?.method === "POST") return json({ join_request_id: requestId, poll_secret: "secret", expires_in_seconds: 300 });
-      if (path.endsWith(requestId)) return json({ state: "offered", sealed_intent_token: "sealed", intent_digest: "digest", expires_in_seconds: 200 });
-      if (path.endsWith("/claim")) return json({ key_digest: "digest", sas: "123456", claim_secret: "claim", expires_in_seconds: 180 });
-      if (path.endsWith("/challenge")) return json({ challenge_token: "challenge", vault_id: vaultId, key_epoch: 1, profile_fingerprint: fingerprint, requested_role: "device", expires_in_seconds: 120 });
-      if (path === "/v1/pairing/consume") { consume += 1; return json({ device_token: token, vault_id: vaultId, device_id: deviceId }); }
-      if (path === "/v1/vault") return json(vault());
-      throw new Error(path);
-    });
-    const instance = new BrowserEnrollment(core(), APP, async () => { if (activation++ === 0) throw new Error("wrong phrase"); }, fetcher);
-    await instance.start(); await instance.poll(); await instance.poll();
-    await expect(instance.confirm("wrong")).rejects.toThrow("wrong phrase");
-    expect(instance.view()).toMatchObject({ state: "confirm" });
-    await instance.confirm("right");
-    expect(consume).toBe(1);
-    expect(instance.view()).toEqual({ state: "approved" });
+  it("reinitializes an owner invitation client after manual owner activation", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.finishEnrollment.mockImplementationOnce(async () => { core.clearAfterFinish(); session.phase = "ready"; session.identity = { role: "owner" }; });
+    const fetcher = lifecycleFetcher([{ claimed: true }]);
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.connectSharedSecret("secret");
+    await expect(enrollment.addPhone("transfer")).resolves.toMatchObject({ stage: "waiting_phone" });
+
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new_owner_from_identity", args: { deviceName: "Peppy Browser" } });
   });
 
-  it("does not let an aborted stale start overwrite a newer QR and rejects oversized responses", async () => {
-    let release!: () => void;
-    const wait = new Promise<void>(resolve => { release = resolve; });
-    let starts = 0;
-    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      if (path === "/web/config.json") return json({ version: 1, apiOrigin: API });
-      if (path === "/v1/pairing/join-requests") { starts += 1; if (starts === 1) await wait; return json({ join_request_id: requestId, poll_secret: "secret", expires_in_seconds: 300 }); }
-      throw new Error(String(init?.method));
+  it.each(["cancelled", "expired"] as const)("creates a fresh owner invitation client after a %s invitation", async terminal => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = lifecycleFetcher(terminal === "expired" ? [{ state: "expired", expires_in_seconds: 0 }] : []);
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.addPhone("transfer");
+    if (terminal === "cancelled") await enrollment.cancel();
+    else await enrollment.status();
+    await expect(enrollment.addPhone("transfer")).resolves.toMatchObject({ stage: "waiting_phone" });
+
+    expect(core.invoke.mock.calls.filter(([request]) => request.command === "_worker_enrollment_new_owner_from_identity")).toHaveLength(2);
+    expect(fetcher.mock.calls.filter(([input, init]) => pathOf(input) === "/v1/enrollment/invitations" && init?.method === "POST")).toHaveLength(2);
+  });
+
+  it("coalesces concurrent Add phone requests and rejects non-owners before Rust or HTTP", async () => {
+    const ownerCore = new LifecycleCore();
+    const ownerSession = new TestSession();
+    ownerSession.phase = "ready";
+    ownerSession.identity = { role: "owner" };
+    let releaseInvitation!: () => void;
+    const invitationGate = new Promise<void>(resolve => { releaseInvitation = resolve; });
+    const ownerFetcher = lifecycleFetcher();
+    ownerFetcher.mockImplementation(async (input, init) => {
+      if (pathOf(input) === "/v1/enrollment/invitations" && init?.method === "POST") {
+        await invitationGate;
+        return json({ invitation_id: invitationId, expires_in_seconds: 300 });
+      }
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      throw new Error(`unexpected ${path}`);
     });
-    const instance = new BrowserEnrollment(core(), APP, async () => undefined, fetcher);
-    const first = instance.start();
-    const second = instance.start();
-    release();
+    const owner = new BrowserEnrollment(ownerCore, ownerSession, origin, ownerFetcher);
+    await owner.discover();
+    const first = owner.addPhone("transfer");
+    const second = owner.addPhone("transfer");
+    releaseInvitation();
     await Promise.all([first, second]);
-    expect(instance.view()).toMatchObject({ state: "waiting", qrPayload: "qr-with-api-origin" });
+    expect(ownerFetcher.mock.calls.filter(([input, init]) => pathOf(input) === "/v1/enrollment/invitations" && init?.method === "POST")).toHaveLength(1);
 
-    const oversized = new BrowserEnrollment(core(), APP, async () => undefined, vi.fn<typeof fetch>(async () => new Response("x".repeat(64 * 1024 + 1))));
-    expect(await oversized.start()).toMatchObject({ state: "failed", errorCode: "join-network" });
+    const deviceCore = new LifecycleCore();
+    const deviceSession = new TestSession();
+    deviceSession.phase = "ready";
+    deviceSession.identity = { role: "device" };
+    const deviceFetcher = lifecycleFetcher();
+    const device = new BrowserEnrollment(deviceCore, deviceSession, origin, deviceFetcher);
+    await device.discover();
+    await expect(device.addPhone("transfer")).resolves.toMatchObject({ stage: "error", errorCode: "enrollment-state" });
+    expect(deviceCore.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_create_phone_invitation" }));
+    expect(deviceFetcher.mock.calls.some(([input]) => pathOf(input) === "/v1/enrollment/invitations")).toBe(false);
+  });
+
+  it("keeps community enrollment HTTP on the app-origin proxy while preserving the configured API identity", async () => {
+    const logicalOrigin = "https://api.peppy.test";
+    const fetchBase = "https://app.peppy.test";
+    const requestedUrls: string[] = [];
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) =>
+      command === "_worker_enrollment_create_owner" ? { request: JSON.stringify({ operation_id: vaultId }) } : {}) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const url = new URL(String(input));
+      requestedUrls.push(url.href);
+      if (url.pathname === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (url.pathname === "/v1/instance") return json(instanceInfo(false));
+      if (url.pathname === "/v1/instance/claim") return json({ vault_id: vaultId, device_id: deviceId, replayed: false, session: { csrf_token: "csrf", expires_in_seconds: 43_200 } });
+      throw new Error(`unexpected ${url.pathname}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, logicalOrigin, fetcher, fetchBase);
+
+    await enrollment.discover();
+    await enrollment.createOwner({ setupToken: "setup", adminPassword: "password-password", passphrase: "secret" });
+
+    expect(requestedUrls).toEqual([
+      `${fetchBase}/hosted/v1/enrollment/config`,
+      `${fetchBase}/v1/instance`,
+      `${fetchBase}/v1/instance/claim`,
+    ]);
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new", args: { origin: logicalOrigin, deviceName: "Peppy Browser" } });
+  });
+
+  it("initializes a fresh Rust client for a claimed server and derives the completed role from verified session metadata", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_manual_challenge") return { request: JSON.stringify({ device: { device_id: deviceId }, vault_id: null, credential_digest: "digest" }) };
+      if (command === "_worker_enrollment_complete_manual_challenge") return { request: JSON.stringify({ admission_signature: "proof", device_signature: "proof", credential_digest: "digest" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishEnrollment.mockImplementationOnce(async () => { session.phase = "ready"; session.identity = { role: "device" }; });
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/enrollment/challenges") return json({ enrollment_id: challengeId, origin, vault_id: vaultId, profile: {}, fingerprint: "a".repeat(64), key_epoch: 1, device: {}, requested_role: "device", nonce: "nonce", credential_digest: "digest", expires_in_seconds: 300 });
+      return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: { profile: {}, check_header: "header", fingerprint: "a".repeat(64), key_epoch: 1, admission_public_key: "key" } });
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "signin" });
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new", args: { origin, deviceName: "Peppy Browser" } });
+    await expect(enrollment.connectSharedSecret("secret")).resolves.toEqual(expect.objectContaining({ stage: "ready", owner: false }));
+    expect(enrollment.view()).not.toHaveProperty("hasGateway");
+  });
+
+  it("reuses an unlocked owner and unlocks a locked local identity without starting new-device admission", async () => {
+    const readyCore = { invoke: vi.fn(async () => ({})) };
+    const readySession = new TestSession();
+    readySession.phase = "ready";
+    readySession.identity = { role: "owner" };
+    const fetcher = vi.fn<typeof fetch>(async input => pathOf(input) === "/hosted/v1/enrollment/config" ? json({}, { status: 404 }) : json(instanceInfo(true)));
+    const ready = new BrowserEnrollment(readyCore, readySession, origin, fetcher);
+
+    await expect(ready.discover()).resolves.toEqual(expect.objectContaining({ stage: "ready", owner: true }));
+    expect(readyCore.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new_owner_from_identity", args: { deviceName: "Peppy Browser" } });
+    expect(readyCore.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_new" }));
+
+    const lockedCore = { invoke: vi.fn(async () => ({})) };
+    const lockedSession = new TestSession();
+    lockedSession.phase = "locked";
+    const locked = new BrowserEnrollment(lockedCore, lockedSession, origin, fetcher);
+    await expect(locked.discover()).resolves.toMatchObject({ stage: "locked" });
+    await expect(locked.connectSharedSecret("secret")).resolves.toMatchObject({ stage: "ready", owner: true });
+    expect(lockedSession.unlock).toHaveBeenCalledWith("secret");
+    expect(lockedCore.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_manual_challenge" }));
+    expect(lockedCore.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_new" }));
+  });
+
+  it("does not finish or fabricate ready state when Rust rejects the manual proof", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_manual_challenge") return { request: "{}" };
+      if (command === "_worker_enrollment_complete_manual_challenge") throw new Error("invalid-request");
+      return {};
+    }) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      return json({ enrollment_id: challengeId });
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.connectSharedSecret("wrong")).resolves.toMatchObject({ stage: "error", errorCode: "invalid-request" });
+    expect(session.finishEnrollment).not.toHaveBeenCalled();
+  });
+
+  it("uses the mode-specific CSRF header and bounds streamed JSON before parsing", async () => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    const oversized = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(65 * 1024)); controller.close(); } });
+    const hostedFetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/v1/instance/session") return json({ csrf_token: "hosted-csrf", expires_in_seconds: 3600 });
+      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const hosted = new BrowserEnrollment(core, session, origin, hostedFetcher);
+    await hosted.discover();
+    hosted.setHostedCsrf("hosted-csrf");
+    await hosted.revokeDevice(deviceId);
+    expect(hostedFetcher.mock.calls.at(-1)?.[1]).toMatchObject({ headers: { "X-Peppy-CSRF": "hosted-csrf" } });
+
+    const boundedFetcher = vi.fn<typeof fetch>(async input => pathOf(input) === "/hosted/v1/enrollment/config" ? new Response(oversized, { headers: { "content-length": String(65 * 1024) } }) : json(instanceInfo(true)));
+    const bounded = new BrowserEnrollment(core, session, origin, boundedFetcher);
+    await expect(bounded.discover()).resolves.toMatchObject({ stage: "error", errorCode: "enrollment-response" });
+  });
+
+  it("keeps the default global fetch bound through a same-origin community claim", async () => {
+    const fixtureOrigin = "https://127.0.0.1:17443";
+    let claimBoundary: Record<string, unknown> | undefined;
+    const defaultFetch = async function (this: unknown, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+      if (this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'WorkerGlobalScope': Illegal invocation");
+      const request = new Request(input, init);
+      if (request.url === `${fixtureOrigin}/hosted/v1/enrollment/config`) return json({ code: "not_found" }, { status: 404 });
+      if (request.url === `${fixtureOrigin}/v1/instance`) return json(instanceInfo(false));
+      if (request.url === `${fixtureOrigin}/v1/instance/claim`) {
+        const headerNames: string[] = [];
+        request.headers.forEach((_value, name) => headerNames.push(name));
+        claimBoundary = {
+          url: request.url,
+          method: request.method,
+          credentials: request.credentials,
+          headerNames,
+          bodyKeys: Object.keys(JSON.parse(await request.text()) as Record<string, unknown>).sort(),
+        };
+        return json({ vault_id: vaultId, device_id: deviceId, replayed: false, session: { csrf_token: "csrf", expires_in_seconds: 43_200 } });
+      }
+      throw new Error(`unexpected ${request.url}`);
+    };
+    const ownerRequest = {
+      operation_id: vaultId, setup_token: "setup", admin_password: "password-password",
+      device: { device_id: deviceId, name: "Peppy Browser", kind: "browser", signing_public_key: "public-key" },
+      material: { profile: {}, check_header: "header", fingerprint: "a".repeat(64), key_epoch: 1, admission_public_key: "admission-key" },
+      credential_digest: "b".repeat(64),
+    };
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) =>
+      command === "_worker_enrollment_create_owner" ? { request: JSON.stringify(ownerRequest) } : {}) };
+    vi.stubGlobal("fetch", defaultFetch);
+    try {
+      const session = new TestSession();
+      const enrollment = new BrowserEnrollment(core, session, fixtureOrigin);
+
+      await expect(enrollment.discover()).resolves.toMatchObject({ stage: "setup", origin: fixtureOrigin });
+      await expect(enrollment.createOwner({ setupToken: "setup", adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready" });
+      expect(claimBoundary).toEqual({
+        url: `${fixtureOrigin}/v1/instance/claim`,
+        method: "POST",
+        credentials: "include",
+        headerNames: ["content-type"],
+        bodyKeys: ["admin_password", "credential_digest", "device", "material", "operation_id", "setup_token"],
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
-
-function json(value: unknown, status = 200): Response { return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } }); }

@@ -58,6 +58,8 @@ def synthetic_values(port: int):
         "PUBLIC_ATTACHMENT_URL": f"http://127.0.0.1:{port}",
         "BIND_ADDR": f"127.0.0.1:{port}",
         "PEPPY_ISOLATED_DEMO": "1",
+        "PEPPY_SETUP_TOKEN": f"synthetic-{uuid.uuid4().hex}",
+        "PEPPY_DEMO_ADMIN_PASSWORD": f"synthetic-{uuid.uuid4().hex}",
     }
     return values
 
@@ -222,7 +224,16 @@ def run_inside_container() -> None:
     gateway.mkdir(mode=0o700, exist_ok=True)
     desktop.mkdir(mode=0o700, exist_ok=True)
     env = os.environ.copy()
-    server_env = {key: value for key, value in env.items() if key != "PEPPY_SIMULATOR_PASSPHRASE"}
+    server_env = {
+        key: value
+        for key, value in env.items()
+        if key not in {"PEPPY_SIMULATOR_PASSPHRASE", "PEPPY_SETUP_TOKEN"}
+    }
+    server_env["PEPPY_SETUP_TOKEN"] = env["PEPPY_SETUP_TOKEN"]
+    admission_env = server_env | {
+        "PEPPY_DEMO_SETUP_TOKEN": env["PEPPY_SETUP_TOKEN"],
+        "PEPPY_SIMULATOR_PASSPHRASE": env["PEPPY_SIMULATOR_PASSPHRASE"],
+    }
     controller = ChildController()
     target_dir = Path(env.get("CARGO_TARGET_DIR", "target")) / "debug"
     server_binary = str(target_dir / "peppy-server")
@@ -245,20 +256,9 @@ def run_inside_container() -> None:
                 time.sleep(0.2)
         else:
             raise RuntimeError("demo server did not become ready")
-        checked([simulator_binary, "prepare-vault", str(gateway)], env=env)
-        private_file(desktop / "vault-bootstrap.json", (gateway / "vault-bootstrap.json").read_text())
-        bootstrap = json.loads((gateway / "vault-bootstrap.json").read_text())
-        owner_env = server_env | {
-            "PEPPY_OWNER_PUBLIC_KEY_PROFILE": json.dumps(bootstrap["profile"], separators=(",", ":")),
-            "PEPPY_OWNER_VAULT_CHECK_HEADER_HEX": json.dumps(bootstrap["header"], separators=(",", ":")).encode().hex(),
-            "PEPPY_OWNER_PROFILE_FINGERPRINT": bootstrap["fingerprint"],
-            "PEPPY_OWNER_KEY_EPOCH": str(bootstrap["profile"]["key_epoch"]),
-        }
-        owner = checked([server_binary, "create-owner"], env=owner_env, stdout=subprocess.PIPE, text=True)
-        fields = dict(line.split("=", 1) for line in owner.stdout.splitlines())
-        owner_path = private_file(run / "owner.json", json.dumps({"version": 1, "origin": env["PUBLIC_API_URL"], "vaultId": fields["vault_id"], "deviceId": fields["device_id"], "deviceToken": fields["device_token"]}) + "\n")
-        checked([simulator_binary, "pair", str(gateway), str(owner_path), "gateway"], env=env)
-        checked([simulator_binary, "pair", str(desktop), str(owner_path), "device"], env=env)
+        checked([simulator_binary, "claim-owner", str(run / "owner")], env=admission_env)
+        checked([simulator_binary, "admit-gateway", str(gateway)], env=admission_env)
+        checked([simulator_binary, "admit-device", str(desktop)], env=admission_env)
         credentials_metadata, credentials_valid = credential_metadata(gateway / "credentials.json")
         private_file(run / "credential-metadata.json", json.dumps(credentials_metadata, sort_keys=True) + "\n")
         if not credentials_valid:

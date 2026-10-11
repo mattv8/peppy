@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 13] = [
+const UP: [&str; 15] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -17,9 +17,11 @@ const UP: [&str; 13] = [
     include_str!("../migrations/0011_mobile_gateway.sql"),
     include_str!("../migrations/0012_durable_wake_leases.sql"),
     include_str!("../migrations/0013_pairing_join_requests.sql"),
+    include_str!("../migrations/0014_enrollment.sql"),
+    include_str!("../migrations/0015_remove_legacy_pairing.sql"),
 ];
 
-const DOWN: [&str; 13] = [
+const DOWN: [&str; 15] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -33,6 +35,8 @@ const DOWN: [&str; 13] = [
     include_str!("../migrations/down/0011_mobile_gateway.down.sql"),
     include_str!("../migrations/down/0012_durable_wake_leases.down.sql"),
     include_str!("../migrations/down/0013_pairing_join_requests.down.sql"),
+    include_str!("../migrations/down/0014_enrollment.down.sql"),
+    include_str!("../migrations/down/0015_remove_legacy_pairing.down.sql"),
 ];
 
 #[tokio::test]
@@ -95,7 +99,12 @@ async fn run(database: &mut PgConnection, migration: &str) {
 }
 
 async fn assert_latest_schema(database: &mut PgConnection) {
-    assert!(table_exists(database, "pairing_join_requests").await);
+    assert!(!table_exists(database, "pairing_challenges").await);
+    assert!(!table_exists(database, "pairing_intents").await);
+    assert!(!table_exists(database, "pairing_join_requests").await);
+    assert!(table_exists(database, "instance_admin").await);
+    assert!(table_exists(database, "device_admissions").await);
+    assert!(table_exists(database, "phone_invitations").await);
     assert!(index_exists(database, "device_wake_jobs_lease_due").await);
     assert!(constraint_exists(database, "storage_deletions_reason_check").await);
     assert!(function_exists(database, "peppy_reject_mutation").await);

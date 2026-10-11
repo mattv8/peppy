@@ -31,15 +31,9 @@ internal enum class WelcomeDestination {
     HOSTED,
     SELF_HOSTED,
     HOSTED_ENROLLMENT,
-    SELF_HOSTED_PAIRING,
-    HOSTED_PAIRING;
-
-    val isPairing: Boolean
-        get() = this == SELF_HOSTED_PAIRING || this == HOSTED_PAIRING
+    SELF_HOSTED_ENROLLMENT,
+    HOSTED_PAIRING,
 }
-
-internal fun pairingCancellationDestination(destination: WelcomeDestination): WelcomeDestination =
-    if (destination == WelcomeDestination.SELF_HOSTED_PAIRING) WelcomeDestination.SELF_HOSTED else WelcomeDestination.HOSTED
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,11 +90,8 @@ internal fun WelcomeScreen(onGetStarted: () -> Unit, onSelectSelfHosted: () -> U
 
 @Composable
 internal fun SelfHostedSetupScreen(
-    importBusy: Boolean,
-    importResult: ImportResult?,
     onBack: () -> Unit,
-    onPair: () -> Unit,
-    onImport: () -> Unit,
+    onEnroll: () -> Unit,
     onOpenGuide: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -114,20 +105,7 @@ internal fun SelfHostedSetupScreen(
         }
         Text(stringResource(R.string.peppy_self_hosted_headline), style = MaterialTheme.typography.headlineSmall)
         Text(stringResource(R.string.peppy_self_hosted_body), style = MaterialTheme.typography.bodyMedium)
-        Button(onClick = onPair, modifier = Modifier.fillMaxWidth().testTag("pair-qr-button")) {
-            Text(stringResource(R.string.peppy_scan_qr))
-        }
-        BusyButton(
-            tag = "import-credential-button",
-            label = stringResource(R.string.peppy_use_credential_file),
-            busy = importBusy,
-            enabled = !importBusy,
-            modifier = Modifier.fillMaxWidth(),
-            onClick = onImport,
-        )
-        importResult?.let {
-            Text(importMessage(it), Modifier.testTag("enroll-error"), style = MaterialTheme.typography.bodySmall)
-        }
+        Button(onClick = onEnroll, modifier = Modifier.fillMaxWidth().testTag("self-hosted-enroll-button")) { Text(stringResource(R.string.peppy_continue)) }
         OutlinedButton(onClick = onOpenGuide, modifier = Modifier.testTag("self-hosted-docs-link")) {
             Text(stringResource(R.string.peppy_self_hosted_docs_link))
         }

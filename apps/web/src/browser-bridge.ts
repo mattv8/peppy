@@ -1,18 +1,23 @@
 import type {
   AttachmentView, BridgeError, ContactBookView, ContactEditOutcome, ContactEditRequestInput,
   ContactEditStatus, ContactSyncStatus, ContactView, DesktopBridge, DesktopSnapshot, Draft,
-  DraftInput, JoinView, NotificationPreferences, NotificationTarget, PairingIntent, PairingStatus,
-  PublicCopy, RecipientSuggestion, RestorableContact, SendDraftInput,
+  AppLockStatus, DraftInput, NotificationPreferences, NotificationTarget, PublicCopy,
+  RecipientSuggestion, RestorableContact, SendDraftInput,
 } from "../../desktop/src/bridge";
 import { validateAccountUrl } from "./account-navigation";
+import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
 type PendingRequest = { resolve(value: unknown): void; reject(error: Error): void; timer: number };
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
+export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string };
+export type InstanceManagement = { vault_id: string; devices: Array<{ device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean }>; storage_bytes: number; quota_bytes: number; replay_retention_days: number };
+type EnrollmentSecretField = { name: string; label: string; autocomplete?: string };
+type OwnerClaimDraft = { passphrase: string; setupToken?: string; adminPassword?: string };
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
-const MAX_IDENTITY_BYTES = 1024 * 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 let activeSecretDialog: (() => void) | undefined;
 
@@ -91,6 +96,79 @@ function secretDialog(options: { id: string; title: string; description: string;
   });
 }
 
+function generatedSecretDialog(passphrase: string): Promise<boolean> {
+  const id = "browser-enrollment-owner-secret";
+  activeSecretDialog?.();
+  return new Promise((resolve) => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    const dialog = document.createElement("dialog");
+    dialog.id = id;
+    dialog.setAttribute("data-browser-screen", id);
+    dialog.setAttribute("aria-labelledby", `${id}-heading`);
+    dialog.setAttribute("aria-describedby", `${id}-description`);
+    dialog.setAttribute("aria-modal", "true");
+    const form = document.createElement("form");
+    form.id = `${id}-form`;
+    form.method = "dialog";
+    const heading = document.createElement("h2");
+    heading.id = `${id}-heading`;
+    heading.textContent = "Save your vault shared secret";
+    const description = document.createElement("p");
+    description.id = `${id}-description`;
+    description.textContent = "Save this shared secret before continuing. You need it to recover and connect other devices.";
+    const label = document.createElement("label");
+    label.htmlFor = `${id}-passphrase`;
+    label.textContent = "Vault shared secret";
+    const secret = document.createElement("input");
+    secret.id = `${id}-passphrase`;
+    secret.name = "passphrase";
+    secret.type = "text";
+    secret.readOnly = true;
+    secret.value = passphrase;
+    secret.setAttribute("autocomplete", "off");
+    label.append(secret);
+    const acknowledgement = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.id = `${id}-acknowledged`;
+    checkbox.type = "checkbox";
+    acknowledgement.htmlFor = checkbox.id;
+    acknowledgement.append(checkbox, " I saved this shared secret");
+    const cancel = document.createElement("button");
+    cancel.id = `${id}-cancel`;
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    const submit = document.createElement("button");
+    submit.id = `${id}-submit`;
+    submit.type = "submit";
+    submit.className = "primary-button";
+    submit.disabled = true;
+    submit.textContent = "Continue";
+    form.append(heading, description, label, acknowledgement, cancel, submit);
+    const finish = (acknowledged: boolean) => {
+      secret.value = "";
+      checkbox.checked = false;
+      if (activeSecretDialog === close) activeSecretDialog = undefined;
+      dialog.remove();
+      previousFocus?.focus();
+      resolve(acknowledged);
+    };
+    const close = () => finish(false);
+    activeSecretDialog = close;
+    checkbox.onchange = () => { submit.disabled = !checkbox.checked; };
+    cancel.onclick = close;
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      if (checkbox.checked) finish(true);
+    };
+    dialog.oncancel = (event) => { event.preventDefault(); close(); };
+    dialog.append(form);
+    document.body.append(dialog);
+    dialog.showModal();
+    secret.focus();
+    secret.select();
+  });
+}
+
 function chooseFile(accept: string, multiple = false): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
@@ -102,13 +180,6 @@ function chooseFile(accept: string, multiple = false): Promise<File[]> {
     input.addEventListener("cancel", () => finish([]), { once: true });
     input.click();
   });
-}
-
-async function chooseCredentialFile(): Promise<ArrayBuffer | null> {
-  const [file] = await chooseFile("application/json");
-  if (!file) return null;
-  if (file.size > MAX_IDENTITY_BYTES) throw new BrowserBridgeError("invalid-identity", "The identity file is invalid.");
-  return file.arrayBuffer();
 }
 
 async function readContactPhoto(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null> {
@@ -138,10 +209,11 @@ export class BrowserBridge implements DesktopBridge {
   private readonly readyListeners = new Set<() => void>();
   private readonly stoppedListeners = new Set<(reason: string) => void>();
   private readonly blobUrls = new Set<string>();
-  private readonly credentialExportUrls = new Set<string>();
   private readonly banners = new Set<Notification>();
   private notificationContext?: { view: "conversations" | "notifications" | "settings" | "contacts"; conversationId?: string };
   private accountUrl?: string;
+  private enrollmentMode: "community" | "hosted" = "community";
+  private ownerClaimDraft?: OwnerClaimDraft;
 
   public constructor(private readonly port: MessagePort, private readonly timeoutMs = REQUEST_TIMEOUT_MS) {
     port.onmessage = (event: MessageEvent<RpcReply | WorkerEvent>) => this.receive(event.data);
@@ -238,6 +310,7 @@ export class BrowserBridge implements DesktopBridge {
   }
   public dispose(): void {
     activeSecretDialog?.();
+    this.ownerClaimDraft = undefined;
     if (!this.stopped) {
       try { this.port.postMessage({ id: this.nextId++, command: "disconnect", args: {} }); } catch {}
     }
@@ -271,31 +344,10 @@ export class BrowserBridge implements DesktopBridge {
   public lock_sync(): Promise<void> { return this.call("lock_sync"); }
 
   public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your device sync passphrase to access your messages.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "current-password" }] }); if (secret) await this.call("unlock", secret); }
-  public async import_credentials(): Promise<void> {
-    const bytes = await chooseCredentialFile();
-    if (!bytes) return;
-    const secret = await secretDialog({ id: "browser-import", title: "Import credentials", description: "Enter the device sync passphrase to import these credentials.", confirm: "Import", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "new-password" }] });
-    if (secret) await this.call("import_credential_file", { bytes, ...secret }, [bytes]);
-  }
-  public async export_credentials(): Promise<boolean> {
-    const value = await this.call<unknown>("export_credentials");
-    const exported = validCredentialExport(value);
-    this.credentialExportUrls.add(exported.url);
-    try {
-      const link = document.createElement("a");
-      link.href = exported.url;
-      link.download = exported.filename;
-      link.click();
-      return true;
-    } catch (error: unknown) {
-      await this.releaseCredentialExport(exported.url);
-      throw error;
-    }
-  }
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
-  public create_pairing_intent(): Promise<PairingIntent> { return this.call("create_pairing_intent"); }
-  public pairing_intent_status(intentToken: string): Promise<PairingStatus> { return this.call("pairing_intent_status", { intentToken }); }
-  public approve_pairing_intent(intentToken: string, keyDigest: string): Promise<void> { return this.call("approve_pairing_intent", { intentToken, keyDigest }); }
+  public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }
+  public set_app_lock(_enabled: boolean): Promise<boolean> { return unsupported("App lock"); }
+  public unlock_app(): Promise<boolean> { return unsupported("App lock"); }
   public async request_notification_permission(): Promise<"granted" | "denied" | "unknown"> { if (!("Notification" in window)) return "unknown"; const permission = await Notification.requestPermission(); return permission === "default" ? "unknown" : permission; }
   public async pick_attachments(): Promise<AttachmentView[]> {
     const files = await chooseFile("*/*", true);
@@ -306,10 +358,39 @@ export class BrowserBridge implements DesktopBridge {
   public async save_attachment(id: string): Promise<boolean> { const file = await this.call<{ bytes: ArrayBuffer; displayName: string; mediaType: string }>("export_attachment", { id }); const url = URL.createObjectURL(new Blob([file.bytes], { type: file.mediaType })); this.blobUrls.add(url); const link = document.createElement("a"); link.href = url; link.download = file.displayName; link.click(); window.setTimeout(() => { URL.revokeObjectURL(url); this.blobUrls.delete(url); }, 0); return true; }
   public async publish_attachment(id: string): Promise<PublicCopy | null> { if (!window.confirm("Create a public plaintext copy of this attachment? Anyone with the link may access it.")) return null; return this.call("publish_attachment", { id, confirmed: true }); }
   public pick_contact_photo(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null> { return readContactPhoto(); }
-  public join_start(origin: string | null): Promise<JoinView> { return this.call("join_start", { origin: origin ?? location.origin }); }
-  public join_status(): Promise<JoinView> { return this.call("join_status"); }
-  public join_cancel(): Promise<void> { return this.call("join_cancel"); }
-  public async join_confirm(): Promise<JoinView> { const secret = await secretDialog({ id: "browser-join-confirm", title: "Confirm pairing", description: "Enter your device sync passphrase to confirm this pairing.", confirm: "Confirm", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "current-password" }] }); if (!secret) return this.join_status(); return this.call("join_confirm", secret); }
+  public async enrollment_discover(): Promise<EnrollmentView> {
+    const view = await this.call<EnrollmentView>("enrollment_discover");
+    this.enrollmentMode = view.mode;
+    return this.finishOwnerClaim(view);
+  }
+  public async enrollment_status(): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_status")); }
+  public enrollment_cancel(): Promise<void> { this.ownerClaimDraft = undefined; return this.call("enrollment_cancel"); }
+  public enrollment_sign_out(): Promise<void> { return this.call("enrollment_sign_out"); }
+  public enrollment_set_hosted_csrf(csrf: string): Promise<void> { return this.call("enrollment_set_hosted_csrf", { csrf }); }
+  public enrollment_management(): Promise<InstanceManagement> { return this.call("enrollment_management"); }
+  public enrollment_revoke_device(deviceId: string): Promise<InstanceManagement> { return this.call("enrollment_revoke_device", { deviceId }); }
+  public async enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method })); }
+  public async enrollment_create_owner(): Promise<EnrollmentView> {
+    const draft = this.ownerClaimDraft ?? await this.createOwnerClaimDraft();
+    if (!draft) return this.enrollment_status();
+    this.ownerClaimDraft = draft;
+    return this.finishOwnerClaim(await this.call("enrollment_create_owner", draft));
+  }
+  public async enrollment_sign_in(): Promise<EnrollmentView> {
+    if (this.enrollmentMode === "hosted") {
+      const config = await fetchHostedWebConfig();
+      if (!config) throw new BrowserBridgeError("unavailable", "Peppy could not start hosted sign-in.");
+      await beginHostedAuthorization(config);
+      return this.enrollment_status();
+    }
+    return this.enrollmentSecretAction("enrollment_sign_in", "browser-enrollment-signin", "Sign in to Peppy", "Enter the server administrator password.", "Sign in", [{ name: "adminPassword", label: "Admin password", autocomplete: "current-password" }]);
+  }
+  public async enrollment_connect_shared_secret(): Promise<EnrollmentView> {
+    return this.enrollmentSecretAction("enrollment_connect_shared_secret", "browser-enrollment-secret", "Enter device secret", "Enter the vault shared secret provided by an owner.", "Connect", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "one-time-code" }]);
+  }
+  public async enrollment_approve(): Promise<EnrollmentView> {
+    return this.enrollmentSecretAction("enrollment_approve", "browser-enrollment-approve", "Approve phone", "Enter the vault shared secret after verifying the code on both devices.", "Approve", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "current-password" }]);
+  }
   public open_composer(): Promise<void> { return unsupported("Additional composer windows"); }
   public set_start_at_login(): Promise<void> { return unsupported("Start at login"); }
   public popout_conversation(): Promise<{ headCreated: boolean; warning?: string }> { return unsupported("Floating conversations"); }
@@ -328,19 +409,25 @@ export class BrowserBridge implements DesktopBridge {
   }
   public hosted_provision(): Promise<void> { return unsupported("Hosted provisioning"); }
 
-  private async releaseCredentialExport(url: string): Promise<void> {
-    if (!this.credentialExportUrls.delete(url) || this.stopped) return;
-    await this.call("release_exported_credential", { url });
+  private async enrollmentSecretAction(command: string, id: string, title: string, description: string, confirm: string, fields: EnrollmentSecretField[]): Promise<EnrollmentView> {
+    const secret = await secretDialog({ id, title, description, confirm, fields });
+    if (!secret) return this.enrollment_status();
+    return this.finishOwnerClaim(await this.call(command, secret));
   }
 
-}
+  private async createOwnerClaimDraft(): Promise<OwnerClaimDraft | undefined> {
+    const credentials = this.enrollmentMode === "community"
+      ? await secretDialog({ id: "browser-enrollment-owner", title: "Set up your Peppy server", description: "Create your server administrator credentials.", confirm: "Continue", fields: [{ name: "setupToken", label: "Setup token", autocomplete: "off" }, { name: "adminPassword", label: "Admin password", autocomplete: "new-password" }] })
+      : {};
+    if (!credentials) return undefined;
+    const generated = await this.call<{ passphrase: string }>("enrollment_generate_secret");
+    if (!await generatedSecretDialog(generated.passphrase)) return undefined;
+    return { ...credentials, passphrase: generated.passphrase };
+  }
 
-function validCredentialExport(value: unknown): { url: string; filename: string } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download.");
-  const { url, filename } = value as Record<string, unknown>;
-  if (typeof url !== "string" || typeof filename !== "string" || filename !== "peppy-credentials.json") throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download.");
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download."); }
-  if (parsed.protocol !== "blob:" || parsed.origin !== location.origin) throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid credential download.");
-  return { url, filename };
+  private finishOwnerClaim(view: EnrollmentView): EnrollmentView {
+    if (view.stage === "ready" || view.stage === "phone_connected") this.ownerClaimDraft = undefined;
+    return view;
+  }
+
 }

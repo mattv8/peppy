@@ -30,6 +30,163 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("forwards management commands only to the browser worker", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const management = bridge.enrollment_management();
+    expect(port.sent).toEqual([{ id: 1, command: "enrollment_management", args: {} }]);
+    port.reply({ id: 1, ok: true, value: { vault_id: "vault", devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 } });
+    await expect(management).resolves.toMatchObject({ vault_id: "vault" });
+  });
+
+  it("requires saving the generated community owner secret before forwarding it", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      expect(port.sent).toEqual([{ id: 1, command: "enrollment_discover", args: {} }]);
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "setup" } });
+      await expect(discover).resolves.toMatchObject({ stage: "setup" });
+
+      const createOwner = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
+      (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      expect(port.sent[1]).toEqual({ id: 2, command: "enrollment_generate_secret", args: {} });
+      port.reply({ id: 2, ok: true, value: { passphrase: "generated-vault-secret" } });
+      await vi.waitFor(() => expect(document.getElementById("browser-enrollment-owner-secret")).not.toBeNull());
+
+      const secret = document.getElementById("browser-enrollment-owner-secret-passphrase") as HTMLInputElement;
+      const acknowledgement = document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement;
+      const submit = document.getElementById("browser-enrollment-owner-secret-submit") as HTMLButtonElement;
+      expect(secret.value).toBe("generated-vault-secret");
+      expect(secret.readOnly).toBe(true);
+      expect(submit.disabled).toBe(true);
+      document.getElementById("browser-enrollment-owner-secret-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      expect(port.sent).toHaveLength(2);
+
+      acknowledgement.checked = true;
+      acknowledgement.dispatchEvent(new Event("change"));
+      expect(submit.disabled).toBe(false);
+      document.getElementById("browser-enrollment-owner-secret-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      expect(port.sent[2]).toEqual({ id: 3, command: "enrollment_create_owner", args: { setupToken: "setup-token", adminPassword: "admin-password", passphrase: "generated-vault-secret" } });
+      expect(secret.value).toBe("");
+      expect(secret.isConnected).toBe(false);
+      port.reply({ id: 3, ok: true, value: { mode: "community", stage: "ready", owner: true } });
+      await expect(createOwner).resolves.toMatchObject({ stage: "ready" });
+      expect(document.getElementById("browser-enrollment-owner")).toBeNull();
+      expect(document.getElementById("browser-enrollment-owner-secret")).toBeNull();
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("cancels owner setup and generated-secret acknowledgement without creating an owner", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "setup" } });
+      await discover;
+
+      const cancelSetup = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      expect(port.sent[1]).toEqual({ id: 2, command: "enrollment_status", args: {} });
+      port.reply({ id: 2, ok: true, value: { mode: "community", stage: "setup" } });
+      await expect(cancelSetup).resolves.toMatchObject({ stage: "setup" });
+
+      const cancelSecret = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
+      (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      port.reply({ id: 3, ok: true, value: { passphrase: "generated-vault-secret" } });
+      await vi.waitFor(() => expect(document.getElementById("browser-enrollment-owner-secret")).not.toBeNull());
+      (document.getElementById("browser-enrollment-owner-secret-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(4));
+      expect(port.sent[3]).toEqual({ id: 4, command: "enrollment_status", args: {} });
+      port.reply({ id: 4, ok: true, value: { mode: "community", stage: "setup" } });
+      await expect(cancelSecret).resolves.toMatchObject({ stage: "setup" });
+      expect(port.sent).not.toContainEqual(expect.objectContaining({ command: "enrollment_create_owner" }));
+      expect(document.getElementById("browser-enrollment-owner-secret")).toBeNull();
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("creates a hosted owner only after acknowledging its generated secret", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "hosted", stage: "setup" } });
+      await discover;
+
+      const createOwner = bridge.enrollment_create_owner();
+      expect(document.getElementById("browser-enrollment-owner")).toBeNull();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      expect(port.sent[1]).toEqual({ id: 2, command: "enrollment_generate_secret", args: {} });
+      port.reply({ id: 2, ok: true, value: { passphrase: "hosted-vault-secret" } });
+      await vi.waitFor(() => expect(document.getElementById("browser-enrollment-owner-secret")).not.toBeNull());
+      const acknowledgement = document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement;
+      acknowledgement.checked = true;
+      acknowledgement.dispatchEvent(new Event("change"));
+      document.getElementById("browser-enrollment-owner-secret-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      expect(port.sent[2]).toEqual({ id: 3, command: "enrollment_create_owner", args: { passphrase: "hosted-vault-secret" } });
+      port.reply({ id: 3, ok: true, value: { mode: "hosted", stage: "ready", owner: true } });
+      await expect(createOwner).resolves.toMatchObject({ stage: "ready" });
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("retries a failed owner claim with the same private draft", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "setup" } });
+      await discover;
+
+      const firstAttempt = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
+      (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      port.reply({ id: 2, ok: true, value: { passphrase: "generated-vault-secret" } });
+      await vi.waitFor(() => expect(document.getElementById("browser-enrollment-owner-secret")).not.toBeNull());
+      const acknowledgement = document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement;
+      acknowledgement.checked = true;
+      acknowledgement.dispatchEvent(new Event("change"));
+      document.getElementById("browser-enrollment-owner-secret-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      const firstRequest = port.sent[2];
+      port.reply({ id: 3, ok: true, value: { mode: "community", stage: "error", errorCode: "network-failed" } });
+      await expect(firstAttempt).resolves.toMatchObject({ stage: "error" });
+
+      const retry = bridge.enrollment_create_owner();
+      expect(port.sent).toHaveLength(4);
+      expect(firstRequest).toEqual({ id: 3, command: "enrollment_create_owner", args: { setupToken: "setup-token", adminPassword: "admin-password", passphrase: "generated-vault-secret" } });
+      expect(port.sent[3]).toEqual({ id: 4, command: "enrollment_create_owner", args: { setupToken: "setup-token", adminPassword: "admin-password", passphrase: "generated-vault-secret" } });
+      port.reply({ id: 4, ok: true, value: { mode: "community", stage: "ready", owner: true } });
+      await expect(retry).resolves.toMatchObject({ stage: "ready" });
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
   it("surfaces host denials instead of pretending native features succeeded", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);
@@ -37,6 +194,7 @@ describe("BrowserBridge", () => {
     port.reply({ id: 1, ok: false, error: { code: "invalid-request", message: "Denied" } });
     await expect(result).rejects.toMatchObject({ code: "invalid-request", message: "Denied" });
     await expect(bridge.open_composer()).rejects.toMatchObject({ code: "unsupported" });
+    await expect(bridge.get_app_lock_status()).rejects.toMatchObject({ code: "unsupported" });
   });
 
   it("opens only a validated billing destination in a new tab", async () => {
@@ -161,55 +319,6 @@ describe("BrowserBridge", () => {
     Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
     click.mockRestore();
     vi.useRealTimers();
-  });
-
-  it("starts a credential download from a Worker capability without revoking it immediately", async () => {
-    const port = new TestPort();
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    const bridge = new BrowserBridge(port as unknown as MessagePort);
-    const download = bridge.export_credentials();
-    port.reply({ id: 1, ok: true, value: { url: `blob:${location.origin}/credential`, filename: "peppy-credentials.json" } });
-
-    await expect(download).resolves.toBe(true);
-    expect(click).toHaveBeenCalledOnce();
-    expect(port.sent).toEqual([{ id: 1, command: "export_credentials", args: {} }]);
-    click.mockRestore();
-  });
-
-  it("rejects credential download responses that are not Worker Blob capabilities", async () => {
-    const port = new TestPort();
-    const download = new BrowserBridge(port as unknown as MessagePort).export_credentials();
-    port.reply({ id: 1, ok: true, value: { url: "https://example.test/credential.json", filename: "peppy-credentials.json" } });
-
-    await expect(download).rejects.toMatchObject({ code: "unavailable" });
-  });
-
-  it("disconnects synchronously on disposal so an in-flight export cannot succeed later", async () => {
-    const port = new TestPort();
-    const bridge = new BrowserBridge(port as unknown as MessagePort);
-    const download = bridge.export_credentials();
-    const rejection = expect(download).rejects.toMatchObject({ code: "disconnected" });
-    bridge.dispose();
-    expect(port.sent).toEqual([
-      { id: 1, command: "export_credentials", args: {} },
-      { id: 2, command: "disconnect", args: {} },
-    ]);
-    port.reply({ id: 1, ok: true, value: { url: `blob:${location.origin}/credential`, filename: "peppy-credentials.json" } });
-    await rejection;
-    expect(port.close).toHaveBeenCalledOnce();
-  });
-
-  it("rejects an oversized credential file before it is read", async () => {
-    const port = new TestPort();
-    const arrayBuffer = vi.fn();
-    const click = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (this: HTMLInputElement) {
-      Object.defineProperty(this, "files", { configurable: true, value: [{ size: 1024 * 1024 + 1, arrayBuffer }] });
-      this.dispatchEvent(new Event("change"));
-    });
-    await expect(new BrowserBridge(port as unknown as MessagePort).import_credentials()).rejects.toMatchObject({ code: "invalid-identity" });
-    expect(arrayBuffer).not.toHaveBeenCalled();
-    expect(port.sent).toEqual([]);
-    click.mockRestore();
   });
 
   it("submits the browser unlock dialog once with its passphrase", async () => {

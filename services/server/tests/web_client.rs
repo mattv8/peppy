@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode, header},
-    routing::get,
+    routing::{get, post},
 };
 use http_body_util::BodyExt;
 use peppy_server::web_client::{WebClientConfig, wrap};
@@ -56,6 +56,27 @@ fn app_for_config(config: WebClientConfig) -> Router {
         .route("/readyz", get(|| async { "ready" }))
         .route("/__release", get(|| async { "release" }))
         .route("/file/x", get(|| async { "file" }))
+        .route("/hosted/v1/enrollment/config", get(|| async { "config" }))
+        .route(
+            "/hosted/v1/web/app-session",
+            post(|| async { StatusCode::CREATED }).delete(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/hosted/v1/web/app-account",
+            get(|| async { StatusCode::UNAUTHORIZED }),
+        )
+        .route(
+            "/hosted/v1/web/provisioning",
+            post(|| async { "provisioning" }),
+        )
+        .route(
+            "/hosted/v1/web/provisioning/complete",
+            post(|| async { "complete" }),
+        )
+        .route(
+            "/hosted/v1/web/app-authorize",
+            get(|| async { "authorize" }),
+        )
         .fallback(|| async { StatusCode::IM_A_TEAPOT });
     wrap(inner, config)
 }
@@ -215,6 +236,143 @@ async fn serves_app_assets_config_and_api_only_on_the_configured_host() {
         .await
         .unwrap();
     assert_eq!(other_host.status(), StatusCode::IM_A_TEAPOT);
+}
+
+#[tokio::test]
+async fn app_host_forwards_only_exact_enrollment_paths_with_method_unchanged() {
+    let (_assets, app) = app();
+    for (path, method, status) in [
+        ("/hosted/v1/enrollment/config", "GET", StatusCode::OK),
+        (
+            "/hosted/v1/enrollment/config?probe=1",
+            "GET",
+            StatusCode::OK,
+        ),
+        ("/hosted/v1/web/app-session", "POST", StatusCode::CREATED),
+        (
+            "/hosted/v1/web/app-session",
+            "DELETE",
+            StatusCode::NO_CONTENT,
+        ),
+        (
+            "/hosted/v1/web/app-account",
+            "GET",
+            StatusCode::UNAUTHORIZED,
+        ),
+        ("/hosted/v1/web/provisioning", "POST", StatusCode::OK),
+        (
+            "/hosted/v1/web/provisioning/complete",
+            "POST",
+            StatusCode::OK,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(path, Some("app.example.test"), method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
+
+    // Methods the backend does not route stay the backend's decision (405), not the SPA's.
+    let wrong_method = app
+        .clone()
+        .oneshot(request(
+            "/hosted/v1/enrollment/config",
+            Some("app.example.test"),
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let no_spa_on_post = app
+        .clone()
+        .oneshot(request(
+            "/hosted/v1/web/app-session",
+            Some("app.example.test"),
+            "PUT",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(no_spa_on_post.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    for path in [
+        "/hosted",
+        "/hosted/",
+        "/hosted/v1",
+        "/hosted/v1/enrollment",
+        "/hosted/v1/enrollment/config/",
+        "/hosted/v1/enrollment/config/x",
+        "/hosted/v1/web/app-session/",
+        "/hosted/v1/web/app-session/x",
+        "/hosted/v1/web/app-account/",
+        "/hosted/v1/web/provisioning/complete/x",
+        "/hosted/v1/web/app-authorize",
+        "/hosted/v1/web/account",
+        "/hosted/v1/account/billing",
+        "/hosted/v1/web/app-session%2F",
+    ] {
+        for method in ["GET", "POST", "DELETE"] {
+            let response = app
+                .clone()
+                .oneshot(request(path, Some("app.example.test"), method))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn account_host_and_root_mode_do_not_forward_app_enrollment_paths() {
+    let (_assets, app) = app();
+    let account = app
+        .clone()
+        .oneshot(request(
+            "/hosted/v1/web/app-authorize",
+            Some("api.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(account.status(), StatusCode::OK);
+
+    let (_assets, root) = root_app();
+    let response = root
+        .oneshot(request("/hosted/v1/web/app-session", None, "POST"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn app_host_shell_sends_no_referrer_while_assets_keep_same_origin() {
+    let (_assets, app) = app();
+    let shell = app
+        .clone()
+        .oneshot(request(
+            "/?enrollment_code=abc&state=def",
+            Some("app.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(shell.headers()[header::REFERRER_POLICY], "no-referrer");
+
+    let asset = app
+        .oneshot(request(
+            "/assets/app-1234abcd.js",
+            Some("app.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(asset.headers()[header::REFERRER_POLICY], "same-origin");
+
+    let (_assets, root) = root_app();
+    let root_shell = root.oneshot(request("/", None, "GET")).await.unwrap();
+    assert_eq!(root_shell.headers()[header::REFERRER_POLICY], "same-origin");
 }
 
 #[tokio::test]

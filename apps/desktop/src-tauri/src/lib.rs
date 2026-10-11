@@ -12,10 +12,12 @@ use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_notification::NotificationExt;
 
+mod app_lock;
 mod contacts;
 mod credentials;
 mod dialogs;
 mod dto;
+mod enrollment;
 mod error;
 mod fsutil;
 mod gateways;
@@ -23,7 +25,6 @@ mod heads;
 mod heads_runtime;
 
 mod hosted;
-mod join;
 mod lifecycle;
 mod material_state;
 mod media;
@@ -44,8 +45,8 @@ mod window_chrome;
 mod windows;
 
 use credentials::{
-    check_origin_binding, ensure_database_key, load_config, parse_credential, read_credential_file,
-    save_config, serialize_credential, store_credential, stored_credential, HostConfig,
+    check_origin_binding, ensure_database_key, load_config, parse_credential, save_config,
+    store_credential, HostConfig,
 };
 use dto::{DraftView, Head, PublicCopyView, SendResultView, Snapshot};
 use error::{core_error, BridgeError, BridgeResult};
@@ -54,9 +55,7 @@ use peppy_client_core::{AttachmentId, ConversationId, NotificationTarget};
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
-use session::{
-    open_session, DraftInput, Notifier, PairingIntentView, PairingStatusView, Session, VaultSummary,
-};
+use session::{open_session, DraftInput, Notifier, Session, VaultSummary};
 use sync::{blocking, fetch_vault, vault_header};
 
 pub const STATE_EVENT: &str = "peppy://state";
@@ -68,6 +67,7 @@ pub struct AppState {
     store: Arc<dyn SecretStore>,
     config_lock: Mutex<()>,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
+    enrollment: Mutex<enrollment::Controller>,
     /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
     notifier: Notifier,
@@ -77,6 +77,9 @@ pub struct AppState {
     head_generation: std::sync::Mutex<heads::GenerationFence>,
     allow_exit: AtomicBool,
     quit_requested: AtomicBool,
+    app_locked: AtomicBool,
+    app_lock_storage_available: AtomicBool,
+    app_lock_attempts: Arc<app_lock::Attempts>,
 }
 
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
@@ -135,6 +138,7 @@ impl AppState {
             store,
             config_lock: Mutex::new(()),
             session: tokio::sync::Mutex::new(None),
+            enrollment: Mutex::new(enrollment::Controller::default()),
             import_lock: tokio::sync::Mutex::new(()),
             notifier,
             notifications,
@@ -143,6 +147,9 @@ impl AppState {
             head_generation: std::sync::Mutex::new(heads::GenerationFence::default()),
             allow_exit: AtomicBool::new(false),
             quit_requested: AtomicBool::new(false),
+            app_locked: AtomicBool::new(true),
+            app_lock_storage_available: AtomicBool::new(true),
+            app_lock_attempts: Arc::new(app_lock::Attempts::default()),
         }
     }
 
@@ -231,7 +238,7 @@ fn head() -> Head {
     }
 }
 
-fn empty_snapshot(origin: Option<String>, credential_export_available: bool) -> Snapshot {
+fn empty_snapshot(origin: Option<String>) -> Snapshot {
     let code = if origin.is_some() {
         "credentials-required"
     } else {
@@ -265,8 +272,17 @@ fn empty_snapshot(origin: Option<String>, credential_export_available: bool) -> 
         contact_books: None,
         contacts_pending_count: None,
         contact_sync: None,
-        credential_export_available: Some(credential_export_available),
     }
+}
+
+fn locked_snapshot(storage_available: bool) -> Snapshot {
+    let mut snapshot = empty_snapshot(None);
+    snapshot.connection.error_code = Some(if storage_available {
+        "app-locked"
+    } else {
+        "secure-store-unavailable"
+    });
+    snapshot
 }
 
 /// Opens the current binding for state snapshots, preserving secure-store and session failures.
@@ -282,9 +298,14 @@ async fn load_state(
     conversation_id: Option<String>,
 ) -> BridgeResult<Snapshot> {
     check_conversation_scope(window.label(), conversation_id.as_deref())?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(locked_snapshot(
+            state.app_lock_storage_available.load(Ordering::Acquire),
+        ));
+    }
     let origin = state.config()?.origin;
     let Some(session) = snapshot_session(&state).await? else {
-        return Ok(empty_snapshot(origin, false));
+        return Ok(empty_snapshot(origin));
     };
     let s = session.clone();
     let preferences = state.notifications.preferences();
@@ -300,88 +321,10 @@ async fn load_state(
         startup_supported: cfg!(any(target_os = "macos", target_os = "windows")),
         background: startup::background_requested(std::env::args()),
     });
-    snapshot.credential_export_available = Some(true);
     if deferred {
         session.notify();
     }
     Ok(snapshot)
-}
-
-fn credential_export_error(message: &'static str) -> BridgeError {
-    BridgeError::new("credential-export", message)
-}
-
-fn changed_export_binding() -> BridgeError {
-    credential_export_error(
-        "The active device changed while choosing a destination. Choose Export credentials again.",
-    )
-}
-
-fn write_exported_credential(destination: &std::path::Path, bytes: &[u8]) -> BridgeResult<()> {
-    crate::fsutil::write_private_new(destination, bytes).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            credential_export_error(
-                "That file already exists. Choose a new filename; Peppy never overwrites credential files.",
-            )
-        } else {
-            credential_export_error("Could not save the credential file safely.")
-        }
-    })
-}
-
-#[tauri::command]
-async fn export_credentials(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> BridgeResult<bool> {
-    require_main(window.label())?;
-    let intended = state.config()?.active_binding().cloned().ok_or_else(|| {
-        credential_export_error("There is no active device credential to export.")
-    })?;
-    let store = state.store.clone();
-    let intended_for_check = intended.clone();
-    let has_credential =
-        blocking(move || Ok(stored_credential(&*store, &intended_for_check)?.is_some())).await?;
-    if !has_credential {
-        return Err(credential_export_error(
-            "There is no active device credential to export.",
-        ));
-    }
-    let destination = dialogs::save_file(
-        &app,
-        "Export Peppy device credential",
-        peppy_hosted_client::device_credentials::CREDENTIAL_EXPORT_FILENAME,
-    )
-    .await?;
-
-    export_after_selection(&state, intended, destination).await
-}
-
-async fn export_after_selection(
-    state: &AppState,
-    intended: credentials::Binding,
-    destination: Option<std::path::PathBuf>,
-) -> BridgeResult<bool> {
-    let Some(destination) = destination else {
-        return Ok(false);
-    };
-    let _import = state.import_lock.lock().await;
-    let current = state.config()?.active_binding().cloned();
-    if current.as_ref() != Some(&intended) {
-        return Err(changed_export_binding());
-    }
-    let store = state.store.clone();
-    let bytes = blocking(move || {
-        let credential = stored_credential(&*store, &intended)?.ok_or_else(|| {
-            credential_export_error("There is no active device credential to export.")
-        })?;
-        serialize_credential(&credential)
-            .map_err(|_| credential_export_error("Could not serialize the credential file."))
-    })
-    .await?;
-    blocking(move || write_exported_credential(&destination, &bytes)).await?;
-    Ok(true)
 }
 
 #[tauri::command]
@@ -420,39 +363,9 @@ async fn configure_server(
     Ok(())
 }
 
-#[tauri::command]
-async fn import_credentials(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> BridgeResult<()> {
-    require_main(window.label())?;
-    let Some(path) = dialogs::pick_file(&app, "Import Peppy device credential").await? else {
-        return Ok(());
-    };
-    let bytes = blocking(move || read_credential_file(&path)).await?;
-    let credential = Arc::new(parse_credential(&bytes)?);
-    drop(bytes);
-    verify_import(&state, &credential).await?;
-    let _import = state.import_lock.lock().await;
-    let target = credential.binding();
-    let switching = state.config()?.active_binding() != Some(&target);
-    let permit = if switching {
-        Some(lifecycle::prepare_switch(&app).await?)
-    } else {
-        None
-    };
-    activate_import_locked(&state, credential).await?;
-    if let Some(permit) = permit {
-        permit.finish().await?;
-    }
-    (state.notifier)();
-    Ok(())
-}
-
-/// Activates a credential produced natively by hosted provisioning or QR join. Its origin is
-/// selected first so the existing origin-binding, verification and activation checks apply
-/// unchanged; the previous configuration is restored if any step fails.
+/// Activates a credential produced by a native enrollment flow. Its origin is selected first so
+/// the existing origin-binding, verification, and activation checks apply unchanged; the previous
+/// configuration is restored if any step fails.
 async fn activate_native_credential(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -488,7 +401,7 @@ async fn activate_native_credential(
 /// Shared by tests: proves the credential at its own origin,
 /// then activates it under the import lock.
 #[cfg(test)]
-async fn import_credential(
+async fn verify_and_activate_test_credential(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
@@ -603,46 +516,105 @@ async fn unlock_sync(
     result
 }
 
-/// Creates a short-lived server intent using the native credential. The webview receives only
-/// the canonical origin and public intent token needed to render the QR code.
-#[tauri::command]
-async fn create_pairing_intent(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-) -> BridgeResult<PairingIntentView> {
-    require_main(window.label())?;
-    state.require_session().await?.create_pairing_intent().await
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppLockStatus {
+    enabled: bool,
+    locked: bool,
+    storage_available: bool,
 }
 
 #[tauri::command]
-async fn pairing_intent_status(
+fn get_app_lock_status(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-    intent_token: String,
-) -> BridgeResult<PairingStatusView> {
+) -> BridgeResult<AppLockStatus> {
     require_main(window.label())?;
-    state
-        .require_session()
-        .await?
-        .pairing_intent_status(&intent_token)
-        .await
+    let configured = app_lock::status(&*state.store);
+    let storage_available =
+        state.app_lock_storage_available.load(Ordering::Acquire) && configured.is_ok();
+    let enabled = storage_available && matches!(configured, Ok(app_lock::Status::Enabled));
+    Ok(AppLockStatus {
+        enabled,
+        locked: state.app_locked.load(Ordering::Acquire),
+        storage_available,
+    })
 }
 
-/// Approval echoes the exact claimed key digest after the person compares the SAS. The server's
-/// challenge response remains native because it is consumed by the phone, not the webview.
 #[tauri::command]
-async fn approve_pairing_intent(
+async fn unlock_app(
     window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
-    intent_token: String,
-    key_digest: String,
-) -> BridgeResult<()> {
+) -> BridgeResult<bool> {
     require_main(window.label())?;
-    state
-        .require_session()
-        .await?
-        .approve_pairing_intent(&intent_token, &key_digest)
-        .await
+    if !state.app_locked.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    if !state.app_lock_storage_available.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let Some(password) =
+        dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockUnlock).await?
+    else {
+        return Ok(false);
+    };
+    let store = state.store.clone();
+    let attempts = state.app_lock_attempts.clone();
+    let verified = blocking(move || app_lock::verify(&*store, password, &attempts)).await?;
+    if verified {
+        state.app_locked.store(false, Ordering::Release);
+        (state.notifier)();
+    }
+    Ok(verified)
+}
+
+#[tauri::command]
+async fn set_app_lock(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<bool> {
+    require_main(window.label())?;
+    if !state.app_lock_storage_available.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let currently_enabled = matches!(app_lock::status(&*state.store)?, app_lock::Status::Enabled);
+    if enabled == currently_enabled {
+        return Ok(true);
+    }
+    if enabled {
+        let Some(password) =
+            dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockCreate).await?
+        else {
+            return Ok(false);
+        };
+        let Some(confirm) =
+            dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockConfirm).await?
+        else {
+            return Ok(false);
+        };
+        if password != confirm {
+            return Ok(false);
+        }
+        let store = state.store.clone();
+        blocking(move || app_lock::enable(&*store, &password)).await?;
+    } else {
+        let Some(password) =
+            dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockDisable).await?
+        else {
+            return Ok(false);
+        };
+        let store = state.store.clone();
+        let attempts = state.app_lock_attempts.clone();
+        if !blocking(move || app_lock::verify(&*store, password, &attempts)).await? {
+            return Ok(false);
+        }
+        let store = state.store.clone();
+        blocking(move || app_lock::disable(&*store)).await?;
+    }
+    Ok(true)
 }
 
 async fn unlock_with(
@@ -1468,8 +1440,17 @@ pub fn run() {
             ));
             #[cfg(not(target_os = "macos"))]
             app.manage(AppState::new(root, Arc::new(secure_store), notifier));
+            let state = app.state::<AppState>();
+            match app_lock::status(&*state.store) {
+                Ok(app_lock::Status::Disabled) => state.app_locked.store(false, Ordering::Release),
+                Ok(app_lock::Status::Enabled) => {}
+                Err(_) => {
+                    state
+                        .app_lock_storage_available
+                        .store(false, Ordering::Release);
+                }
+            }
             app.manage(hosted::HostedState::default());
-            app.manage(join::JoinState::default());
             // The state hint is emitted after normal live applies and snapshot work alike. Core's
             // queue contains only live first-insert candidates, so this native drain cannot turn
             // history/snapshot replay into banners.
@@ -1590,12 +1571,10 @@ pub fn run() {
         ($($extra:path,)*) => { tauri::generate_handler![
         load_state,
         configure_server,
-        import_credentials,
-        export_credentials,
         unlock_sync,
-        create_pairing_intent,
-        pairing_intent_status,
-        approve_pairing_intent,
+        get_app_lock_status,
+        unlock_app,
+        set_app_lock,
         save_draft,
         send_draft,
         mark_seen,
@@ -1630,17 +1609,38 @@ pub fn run() {
         $($extra,)*
     ] };
     }
-    let builder = builder.invoke_handler(command_handler!(
-        hosted::hosted_account,
-        hosted::hosted_sign_in,
-        hosted::hosted_sign_out,
-        hosted::hosted_open_billing,
-        hosted::hosted_provision,
-        join::join_start,
-        join::join_status,
-        join::join_cancel,
-        join::join_confirm,
-    ));
+    let builder = builder.invoke_handler(move |invoke: tauri::ipc::Invoke| {
+        let command = invoke.message.command();
+        let webview = invoke.message.webview();
+        let state = webview.app_handle().state::<AppState>();
+        let allowed = matches!(
+            command,
+            "load_state" | "get_app_lock_status" | "unlock_app" | "acknowledge_lifecycle"
+        );
+        if state.app_locked.load(Ordering::Acquire) && !allowed {
+            invoke
+                .resolver
+                .reject(BridgeError::new("app-locked", "Peppy is locked."));
+            return true;
+        }
+        let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
+            hosted::hosted_account,
+            hosted::hosted_sign_in,
+            hosted::hosted_sign_out,
+            hosted::hosted_open_billing,
+            hosted::hosted_provision,
+            enrollment::enrollment_discover,
+            enrollment::enrollment_create_owner,
+            enrollment::enrollment_sign_in,
+            enrollment::enrollment_connect_shared_secret,
+            enrollment::enrollment_add_phone,
+            enrollment::enrollment_approve,
+            enrollment::enrollment_status,
+            enrollment::enrollment_cancel,
+            enrollment::enrollment_sign_out,
+        );
+        handler(invoke)
+    });
     let app = builder
         .build(tauri::generate_context!())
         .expect("error while building Peppy desktop");

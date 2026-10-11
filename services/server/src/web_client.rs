@@ -137,9 +137,11 @@ async fn dispatch(
     State(state): State<Arc<WebClientRouter>>,
     request: Request<Body>,
 ) -> Response<Body> {
-    if !state.config.serves_all_hosts() {
+    let app_host = if state.config.serves_all_hosts() {
+        false
+    } else {
         match request_host_target(request.headers(), &state.config.host) {
-            HostTarget::App => {}
+            HostTarget::App => true,
             HostTarget::AppLikeMalformed => return StatusCode::NOT_FOUND.into_response(),
             HostTarget::Other => {
                 return state
@@ -150,10 +152,10 @@ async fn dispatch(
                     .unwrap_or_else(|never| match never {});
             }
         }
-    }
+    };
 
     let path = request.uri().path();
-    if is_api_path(path) {
+    if is_api_path(path) || (app_host && is_app_enrollment_path(path)) {
         return state
             .inner
             .clone()
@@ -174,12 +176,20 @@ async fn dispatch(
         return configuration_response(&state.config, request.method() == Method::HEAD);
     }
     if path == "/" || (is_safe_navigation_path(path) && !is_static_namespace(path)) {
-        return serve_asset(
+        let mut response = serve_asset(
             &state.config,
             "index.html",
             request.method() == Method::HEAD,
         )
         .await;
+        if app_host {
+            // The app shell may carry an enrollment code in its URL; keep it out of Referer.
+            response.headers_mut().insert(
+                header::REFERRER_POLICY,
+                HeaderValue::from_static("no-referrer"),
+            );
+        }
+        return response;
     }
     serve_asset(
         &state.config,
@@ -196,6 +206,20 @@ fn is_api_path(path: &str) -> bool {
         || path.starts_with("/v1/")
         || path == "/file"
         || path.starts_with("/file/")
+}
+
+/// Exact app-host paths forwarded to the API router. Each is matched by path
+/// only; the query is ignored and no prefix or sub-path is forwarded.
+const APP_ENROLLMENT_PATHS: [&str; 5] = [
+    "/hosted/v1/enrollment/config",
+    "/hosted/v1/web/app-session",
+    "/hosted/v1/web/app-account",
+    "/hosted/v1/web/provisioning",
+    "/hosted/v1/web/provisioning/complete",
+];
+
+fn is_app_enrollment_path(path: &str) -> bool {
+    APP_ENROLLMENT_PATHS.contains(&path)
 }
 
 enum HostTarget {

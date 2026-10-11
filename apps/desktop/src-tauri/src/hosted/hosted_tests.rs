@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use peppy_hosted_api::enrollment::ClientKind;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -18,6 +19,8 @@ use uuid::Uuid;
 
 /// Credential origin for provisioning tests; requests go to the fake server via `base_override`.
 const HTTPS_ORIGIN: &str = "https://peppy.test";
+const CLIENT_KIND: ClientKind = ClientKind::Desktop;
+const DEVICE_NAME: &str = "Peppy Desktop";
 
 struct FakeServerState {
     account_revoked: bool,
@@ -442,7 +445,9 @@ async fn provision_wrong_resume_passphrase_returns_error() {
 
     // Create a valid checkpoint with a known passphrase.
     let correct_phrase = "alpha bravo charlie delta echo foxtrot";
-    let prov = peppy_hosted_client::prepare(origin, account_id, correct_phrase).unwrap();
+    let prov =
+        peppy_hosted_client::prepare(origin, account_id, correct_phrase, CLIENT_KIND, DEVICE_NAME)
+            .unwrap();
     let checkpoint_bytes = prov.checkpoint().unwrap();
     let checkpoint_key = super::checkpoint_key(origin, account_id);
     store.set(&checkpoint_key, &checkpoint_bytes).unwrap();
@@ -638,7 +643,14 @@ async fn resumable_fixture(
 ) {
     let store = MemoryStore::default();
     let hosted = HostedState::default();
-    let pending = peppy_hosted_client::prepare(HTTPS_ORIGIN, ACCOUNT, RESUME_PHRASE).unwrap();
+    let pending = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
     if granted {
         pending
             .accept_grant(

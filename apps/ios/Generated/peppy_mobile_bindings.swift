@@ -2000,29 +2000,48 @@ public func FfiConverterTypeNativeClient_lower(_ value: NativeClient) -> UInt64 
 
 
 
-/**
- * Phone-owned Ed25519 enrollment seed. The only byte export is for an
- * Android Keystore/Keychain caller; it is never included in a view DTO.
- */
-public protocol NativeEnrollmentKeyProtocol: AnyObject, Sendable {
+public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
-    func exportSeedForNativeSecureStorage()  -> Data
+    func approvePhoneInvitationRequest(statusJson: String, passphrase: String) throws  -> String
     
     /**
-     * Computes the SAS only after the returned server digest matches this key.
+     * Abandons a local claimant flow; it does not perform a server-side cancellation.
      */
-    func pairingSas(intentToken: String, deviceId: String, serverKeyDigest: String) throws  -> String
+    func cancelPhoneFlow() throws 
     
-    func publicKeyBase64url() throws  -> String
+    func checkpoint() throws  -> Data
     
-    func signPairingProof(proof: Data) throws  -> String
+    func claimPhoneInvitationRequest(qrJson: String) throws  -> String
+    
+    func completeManualChallengeRequest(challengeJson: String, passphrase: String) throws  -> String
+    
+    func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String?) throws  -> String
+    
+    func consumeCreatedPhoneInvitation(createdJson: String) throws 
+    
+    func consumePhoneClaim(claimJson: String) throws 
+    
+    func createOwnerRequest(setupToken: String, adminPassword: String, passphrase: String) throws  -> String
+    
+    func createPhoneInvitationRequest(method: NativeEnrollmentMethod) throws  -> String
+    
+    func finishManualAdmission(responseJson: String, passphrase: String) throws  -> NativeEnrollmentIdentity
+    
+    func finishOwnerAdmission(responseJson: String, passphrase: String) throws  -> NativeEnrollmentIdentity
+    
+    func finishPhoneAdmission(completeJson: String) throws  -> NativeEnrollmentIdentity
+    
+    func manualChallengeRequest(vaultId: String?) throws  -> String
+    
+    func phoneSas(statusJson: String) throws  -> String
+    
+    /**
+     * Opaque claimant-authenticated polling descriptor for native transport only.
+     */
+    func phoneStatusRequest() throws  -> String
     
 }
-/**
- * Phone-owned Ed25519 enrollment seed. The only byte export is for an
- * Android Keystore/Keychain caller; it is never included in a view DTO.
- */
-open class NativeEnrollmentKey: NativeEnrollmentKeyProtocol, @unchecked Sendable {
+open class NativeEnrollmentClient: NativeEnrollmentClientProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
 
     /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
@@ -2059,7 +2078,7 @@ open class NativeEnrollmentKey: NativeEnrollmentKeyProtocol, @unchecked Sendable
     @_documentation(visibility: private)
 #endif
     public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativeenrollmentkey(self.handle, $0) }
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativeenrollmentclient(self.handle, $0) }
     }
     // No primary constructor declared for this class.
 
@@ -2069,51 +2088,175 @@ open class NativeEnrollmentKey: NativeEnrollmentKeyProtocol, @unchecked Sendable
             return
         }
 
-        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeenrollmentkey(handle, $0) }
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeenrollmentclient(handle, $0) }
     }
 
     
 
     
-open func exportSeedForNativeSecureStorage() -> Data  {
-    return try!  FfiConverterData.lift(try! rustCall() {
+open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentkey_export_seed_for_native_secure_storage(
-            self.uniffiCloneHandle(),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_approve_phone_invitation_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(statusJson),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
     )
 })
 }
     
     /**
-     * Computes the SAS only after the returned server digest matches this key.
+     * Abandons a local claimant flow; it does not perform a server-side cancellation.
      */
-open func pairingSas(intentToken: String, deviceId: String, serverKeyDigest: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+open func cancelPhoneFlow()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentkey_pairing_sas(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(intentToken),
-        FfiConverterString.lower(deviceId),
-        FfiConverterString.lower(serverKeyDigest),uniffiCallStatus
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_cancel_phone_flow(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
-})
+}
 }
     
-open func publicKeyBase64url()throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+open func checkpoint()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentkey_public_key_base64url(
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_checkpoint(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
-open func signPairingProof(proof: Data)throws  -> String  {
+open func claimPhoneInvitationRequest(qrJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentkey_sign_pairing_proof(
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_claim_phone_invitation_request(
             self.uniffiCloneHandle(),
-        FfiConverterData.lower(proof),uniffiCallStatus
+        FfiConverterString.lower(qrJson),uniffiCallStatus
+    )
+})
+}
+    
+open func completeManualChallengeRequest(challengeJson: String, passphrase: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_complete_manual_challenge_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(challengeJson),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+    
+open func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_confirm_phone_invitation_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(statusJson),
+        FfiConverterOptionString.lower(sharedSecret),uniffiCallStatus
+    )
+})
+}
+    
+open func consumeCreatedPhoneInvitation(createdJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_created_phone_invitation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(createdJson),uniffiCallStatus
+    )
+}
+}
+    
+open func consumePhoneClaim(claimJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_phone_claim(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(claimJson),uniffiCallStatus
+    )
+}
+}
+    
+open func createOwnerRequest(setupToken: String, adminPassword: String, passphrase: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_owner_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(setupToken),
+        FfiConverterString.lower(adminPassword),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+    
+open func createPhoneInvitationRequest(method: NativeEnrollmentMethod)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_phone_invitation_request(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeEnrollmentMethod_lower(method),uniffiCallStatus
+    )
+})
+}
+    
+open func finishManualAdmission(responseJson: String, passphrase: String)throws  -> NativeEnrollmentIdentity  {
+    return try  FfiConverterTypeNativeEnrollmentIdentity_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_finish_manual_admission(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(responseJson),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+    
+open func finishOwnerAdmission(responseJson: String, passphrase: String)throws  -> NativeEnrollmentIdentity  {
+    return try  FfiConverterTypeNativeEnrollmentIdentity_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_finish_owner_admission(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(responseJson),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+    
+open func finishPhoneAdmission(completeJson: String)throws  -> NativeEnrollmentIdentity  {
+    return try  FfiConverterTypeNativeEnrollmentIdentity_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_finish_phone_admission(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(completeJson),uniffiCallStatus
+    )
+})
+}
+    
+open func manualChallengeRequest(vaultId: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_manual_challenge_request(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(vaultId),uniffiCallStatus
+    )
+})
+}
+    
+open func phoneSas(statusJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_phone_sas(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(statusJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Opaque claimant-authenticated polling descriptor for native transport only.
+     */
+open func phoneStatusRequest()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_phone_status_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -2126,24 +2269,24 @@ open func signPairingProof(proof: Data)throws  -> String  {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeNativeEnrollmentKey: FfiConverter {
+public struct FfiConverterTypeNativeEnrollmentClient: FfiConverter {
     typealias FfiType = UInt64
-    typealias SwiftType = NativeEnrollmentKey
+    typealias SwiftType = NativeEnrollmentClient
 
-    public static func lift(_ handle: UInt64) throws -> NativeEnrollmentKey {
-        return NativeEnrollmentKey(unsafeFromHandle: handle)
+    public static func lift(_ handle: UInt64) throws -> NativeEnrollmentClient {
+        return NativeEnrollmentClient(unsafeFromHandle: handle)
     }
 
-    public static func lower(_ value: NativeEnrollmentKey) -> UInt64 {
+    public static func lower(_ value: NativeEnrollmentClient) -> UInt64 {
         return value.uniffiCloneHandle()
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentKey {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentClient {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    public static func write(_ value: NativeEnrollmentKey, into buf: inout [UInt8]) {
+    public static func write(_ value: NativeEnrollmentClient, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -2152,15 +2295,166 @@ public struct FfiConverterTypeNativeEnrollmentKey: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeNativeEnrollmentKey_lift(_ handle: UInt64) throws -> NativeEnrollmentKey {
-    return try FfiConverterTypeNativeEnrollmentKey.lift(handle)
+public func FfiConverterTypeNativeEnrollmentClient_lift(_ handle: UInt64) throws -> NativeEnrollmentClient {
+    return try FfiConverterTypeNativeEnrollmentClient.lift(handle)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeNativeEnrollmentKey_lower(_ value: NativeEnrollmentKey) -> UInt64 {
-    return FfiConverterTypeNativeEnrollmentKey.lower(value)
+public func FfiConverterTypeNativeEnrollmentClient_lower(_ value: NativeEnrollmentClient) -> UInt64 {
+    return FfiConverterTypeNativeEnrollmentClient.lower(value)
+}
+
+
+
+
+
+
+public protocol NativeEnrollmentIdentityProtocol: AnyObject, Sendable {
+    
+    /**
+     * Consumes the verified root package directly into the supplied native core.
+     */
+    func activateInto(nativeClient: NativeClient) throws 
+    
+    /**
+     * Returns the bearer only to a generated native binding for immediate secure-store install.
+     */
+    func credentialForNativeSecureStore() throws  -> String
+    
+    func metadata()  -> NativeEnrollmentIdentityMetadata
+    
+}
+open class NativeEnrollmentIdentity: NativeEnrollmentIdentityProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_peppy_mobile_bindings_fn_clone_nativeenrollmentidentity(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_peppy_mobile_bindings_fn_free_nativeenrollmentidentity(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Consumes the verified root package directly into the supplied native core.
+     */
+open func activateInto(nativeClient: NativeClient)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentidentity_activate_into(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeClient_lower(nativeClient),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Returns the bearer only to a generated native binding for immediate secure-store install.
+     */
+open func credentialForNativeSecureStore()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentidentity_credential_for_native_secure_store(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func metadata() -> NativeEnrollmentIdentityMetadata  {
+    return try!  FfiConverterTypeNativeEnrollmentIdentityMetadata_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentidentity_metadata(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeEnrollmentIdentity: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = NativeEnrollmentIdentity
+
+    public static func lift(_ handle: UInt64) throws -> NativeEnrollmentIdentity {
+        return NativeEnrollmentIdentity(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: NativeEnrollmentIdentity) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentIdentity {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: NativeEnrollmentIdentity, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentIdentity_lift(_ handle: UInt64) throws -> NativeEnrollmentIdentity {
+    return try FfiConverterTypeNativeEnrollmentIdentity.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentIdentity_lower(_ value: NativeEnrollmentIdentity) -> UInt64 {
+    return FfiConverterTypeNativeEnrollmentIdentity.lower(value)
 }
 
 
@@ -3478,6 +3772,76 @@ public func FfiConverterTypeNativeConversation_lower(_ value: NativeConversation
 }
 
 
+public struct NativeEnrollmentIdentityMetadata: Equatable, Hashable {
+    public var origin: String
+    public var vaultId: String
+    public var deviceId: String
+    public var role: String
+    public var profileJson: String
+    public var headerJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(origin: String, vaultId: String, deviceId: String, role: String, profileJson: String, headerJson: String) {
+        self.origin = origin
+        self.vaultId = vaultId
+        self.deviceId = deviceId
+        self.role = role
+        self.profileJson = profileJson
+        self.headerJson = headerJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeEnrollmentIdentityMetadata: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeEnrollmentIdentityMetadata: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentIdentityMetadata {
+        return
+            try NativeEnrollmentIdentityMetadata(
+                origin: FfiConverterString.read(from: &buf), 
+                vaultId: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                role: FfiConverterString.read(from: &buf), 
+                profileJson: FfiConverterString.read(from: &buf), 
+                headerJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeEnrollmentIdentityMetadata, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterString.write(value.vaultId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.role, into: &buf)
+        FfiConverterString.write(value.profileJson, into: &buf)
+        FfiConverterString.write(value.headerJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentIdentityMetadata_lift(_ buf: RustBuffer) throws -> NativeEnrollmentIdentityMetadata {
+    return try FfiConverterTypeNativeEnrollmentIdentityMetadata.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentIdentityMetadata_lower(_ value: NativeEnrollmentIdentityMetadata) -> RustBuffer {
+    return FfiConverterTypeNativeEnrollmentIdentityMetadata.lower(value)
+}
+
+
 public struct NativeGatewayCapabilities: Equatable, Hashable {
     public var notificationMirroringSupported: Bool
     public var smsSyncSupported: Bool
@@ -3995,64 +4359,6 @@ public func FfiConverterTypeNativeIngestResult_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeNativeIngestResult_lower(_ value: NativeIngestResult) -> RustBuffer {
     return FfiConverterTypeNativeIngestResult.lower(value)
-}
-
-
-public struct NativeJoinRequestQr: Equatable, Hashable {
-    public var httpsOrigin: String
-    public var joinRequestId: String
-    public var joinKey: String
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(httpsOrigin: String, joinRequestId: String, joinKey: String) {
-        self.httpsOrigin = httpsOrigin
-        self.joinRequestId = joinRequestId
-        self.joinKey = joinKey
-    }
-
-    
-
-    
-}
-
-#if compiler(>=6)
-extension NativeJoinRequestQr: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeNativeJoinRequestQr: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeJoinRequestQr {
-        return
-            try NativeJoinRequestQr(
-                httpsOrigin: FfiConverterString.read(from: &buf), 
-                joinRequestId: FfiConverterString.read(from: &buf), 
-                joinKey: FfiConverterString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: NativeJoinRequestQr, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.httpsOrigin, into: &buf)
-        FfiConverterString.write(value.joinRequestId, into: &buf)
-        FfiConverterString.write(value.joinKey, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeNativeJoinRequestQr_lift(_ buf: RustBuffer) throws -> NativeJoinRequestQr {
-    return try FfiConverterTypeNativeJoinRequestQr.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeNativeJoinRequestQr_lower(_ value: NativeJoinRequestQr) -> RustBuffer {
-    return FfiConverterTypeNativeJoinRequestQr.lower(value)
 }
 
 
@@ -5714,6 +6020,152 @@ public func FfiConverterTypeNativeAttachmentState_lower(_ value: NativeAttachmen
 
 
 
+public enum NativeEnrollmentClientKind: Equatable, Hashable {
+    
+    case browser
+    case desktop
+    case android
+    case ios
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeEnrollmentClientKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeEnrollmentClientKind: FfiConverterRustBuffer {
+    typealias SwiftType = NativeEnrollmentClientKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentClientKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .browser
+        
+        case 2: return .desktop
+        
+        case 3: return .android
+        
+        case 4: return .ios
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeEnrollmentClientKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .browser:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .desktop:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .android:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .ios:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentClientKind_lift(_ buf: RustBuffer) throws -> NativeEnrollmentClientKind {
+    return try FfiConverterTypeNativeEnrollmentClientKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentClientKind_lower(_ value: NativeEnrollmentClientKind) -> RustBuffer {
+    return FfiConverterTypeNativeEnrollmentClientKind.lower(value)
+}
+
+
+
+
+public enum NativeEnrollmentMethod: Equatable, Hashable {
+    
+    case transfer
+    case sharedSecret
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeEnrollmentMethod: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeEnrollmentMethod: FfiConverterRustBuffer {
+    typealias SwiftType = NativeEnrollmentMethod
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeEnrollmentMethod {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .transfer
+        
+        case 2: return .sharedSecret
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeEnrollmentMethod, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .transfer:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .sharedSecret:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentMethod_lift(_ buf: RustBuffer) throws -> NativeEnrollmentMethod {
+    return try FfiConverterTypeNativeEnrollmentMethod.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeEnrollmentMethod_lower(_ value: NativeEnrollmentMethod) -> RustBuffer {
+    return FfiConverterTypeNativeEnrollmentMethod.lower(value)
+}
+
+
+
+
 public enum NativeGatewayPlatform: Equatable, Hashable {
     
     case android
@@ -5775,6 +6227,86 @@ public func FfiConverterTypeNativeGatewayPlatform_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeNativeGatewayPlatform_lower(_ value: NativeGatewayPlatform) -> RustBuffer {
     return FfiConverterTypeNativeGatewayPlatform.lower(value)
+}
+
+
+
+
+public enum NativeHostedClientKind: Equatable, Hashable {
+    
+    case browser
+    case desktop
+    case android
+    case ios
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeHostedClientKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHostedClientKind: FfiConverterRustBuffer {
+    typealias SwiftType = NativeHostedClientKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHostedClientKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .browser
+        
+        case 2: return .desktop
+        
+        case 3: return .android
+        
+        case 4: return .ios
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeHostedClientKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .browser:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .desktop:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .android:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .ios:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedClientKind_lift(_ buf: RustBuffer) throws -> NativeHostedClientKind {
+    return try FfiConverterTypeNativeHostedClientKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHostedClientKind_lower(_ value: NativeHostedClientKind) -> RustBuffer {
+    return FfiConverterTypeNativeHostedClientKind.lower(value)
 }
 
 
@@ -6882,43 +7414,11 @@ public func createVaultMaterial(vaultId: String, passphrase: String)throws  -> N
     )
 })
 }
-public func generateNativeEnrollmentKey()throws  -> NativeEnrollmentKey  {
-    return try  FfiConverterTypeNativeEnrollmentKey_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_generate_native_enrollment_key(uniffiCallStatus
-    )
-})
-}
-public func nativeEnrollmentKeyFromNativeSecureStorage(seed: Data)throws  -> NativeEnrollmentKey  {
-    return try  FfiConverterTypeNativeEnrollmentKey_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_native_enrollment_key_from_native_secure_storage(
-        FfiConverterData.lower(seed),uniffiCallStatus
-    )
-})
-}
 public func openNativeClient(config: NativeOpenConfig)throws  -> NativeClient  {
     return try  FfiConverterTypeNativeClient_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_open_native_client(
         FfiConverterTypeNativeOpenConfig_lower(config),uniffiCallStatus
-    )
-})
-}
-/**
- * Canonical bytes to sign with the phone-owned enrollment key. This binding
- * deliberately does not create, import, or expose private enrollment keys.
- */
-public func pairingProofBytes(challengeToken: String, vaultId: String, deviceId: String, profileFingerprint: String, keyEpoch: UInt32, approvedRole: String)throws  -> Data  {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_pairing_proof_bytes(
-        FfiConverterString.lower(challengeToken),
-        FfiConverterString.lower(vaultId),
-        FfiConverterString.lower(deviceId),
-        FfiConverterString.lower(profileFingerprint),
-        FfiConverterUInt32.lower(keyEpoch),
-        FfiConverterString.lower(approvedRole),uniffiCallStatus
     )
 })
 }
@@ -6954,24 +7454,6 @@ public func hostedSessionRequest(attemptId: String, idToken: String)throws  -> S
     )
 })
 }
-public func intentDigestHex(intentToken: String) -> String  {
-    return try!  FfiConverterString.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_intent_digest_hex(
-        FfiConverterString.lower(intentToken),uniffiCallStatus
-    )
-})
-}
-public func pairingIntentSas(intentToken: String, keyDigest: String, deviceId: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_pairing_intent_sas(
-        FfiConverterString.lower(intentToken),
-        FfiConverterString.lower(keyDigest),
-        FfiConverterString.lower(deviceId),uniffiCallStatus
-    )
-})
-}
 public func parseHostedAccount(json: String, expectedAccountId: String)throws  -> NativeHostedAccount  {
     return try  FfiConverterTypeNativeHostedAccount_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -6997,22 +7479,15 @@ public func parseHostedSession(json: String)throws  -> NativeHostedSession  {
     )
 })
 }
-public func parseJoinRequestQr(payload: String, allowLoopbackHttp: Bool)throws  -> NativeJoinRequestQr  {
-    return try  FfiConverterTypeNativeJoinRequestQr_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_parse_join_request_qr(
-        FfiConverterString.lower(payload),
-        FfiConverterBool.lower(allowLoopbackHttp),uniffiCallStatus
-    )
-})
-}
-public func prepareHostedProvisioning(origin: String, accountId: String, passphrase: String)throws  -> NativeHostedProvisioning  {
+public func prepareHostedProvisioning(origin: String, accountId: String, passphrase: String, clientKind: NativeHostedClientKind, deviceName: String)throws  -> NativeHostedProvisioning  {
     return try  FfiConverterTypeNativeHostedProvisioning_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(
         FfiConverterString.lower(origin),
         FfiConverterString.lower(accountId),
-        FfiConverterString.lower(passphrase),uniffiCallStatus
+        FfiConverterString.lower(passphrase),
+        FfiConverterTypeNativeHostedClientKind_lower(clientKind),
+        FfiConverterString.lower(deviceName),uniffiCallStatus
     )
 })
 }
@@ -7026,20 +7501,41 @@ public func restoreHostedProvisioning(checkpointBytes: Data, expectedOrigin: Str
     )
 })
 }
-public func sealIntentToken(joinKeyB64url: String, intentToken: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
-        uniffiCallStatus in
-    uniffi_peppy_mobile_bindings_fn_func_seal_intent_token(
-        FfiConverterString.lower(joinKeyB64url),
-        FfiConverterString.lower(intentToken),uniffiCallStatus
-    )
-})
-}
 public func vaultProfileFingerprint(profileJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_vault_profile_fingerprint(
         FfiConverterString.lower(profileJson),uniffiCallStatus
+    )
+})
+}
+public func newNativeEnrollmentClient(origin: String, kind: NativeEnrollmentClientKind, deviceName: String)throws  -> NativeEnrollmentClient  {
+    return try  FfiConverterTypeNativeEnrollmentClient_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_new_native_enrollment_client(
+        FfiConverterString.lower(origin),
+        FfiConverterTypeNativeEnrollmentClientKind_lower(kind),
+        FfiConverterString.lower(deviceName),uniffiCallStatus
+    )
+})
+}
+public func newNativeExistingOwnerEnrollmentClient(origin: String, kind: NativeEnrollmentClientKind, deviceName: String, profileJson: String, headerJson: String)throws  -> NativeEnrollmentClient  {
+    return try  FfiConverterTypeNativeEnrollmentClient_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_new_native_existing_owner_enrollment_client(
+        FfiConverterString.lower(origin),
+        FfiConverterTypeNativeEnrollmentClientKind_lower(kind),
+        FfiConverterString.lower(deviceName),
+        FfiConverterString.lower(profileJson),
+        FfiConverterString.lower(headerJson),uniffiCallStatus
+    )
+})
+}
+public func restoreNativeEnrollmentClient(checkpoint: Data)throws  -> NativeEnrollmentClient  {
+    return try  FfiConverterTypeNativeEnrollmentClient_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_restore_native_enrollment_client(
+        FfiConverterData.lower(checkpoint),uniffiCallStatus
     )
 })
 }
@@ -7062,16 +7558,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_create_vault_material() != 14347) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_generate_native_enrollment_key() != 6734) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_native_enrollment_key_from_native_secure_storage() != 28470) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_peppy_mobile_bindings_checksum_func_open_native_client() != 13839) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_pairing_proof_bytes() != 9385) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_generate_hosted_passphrase() != 10342) {
@@ -7086,12 +7573,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request() != 59693) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_intent_digest_hex() != 10067) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_pairing_intent_sas() != 60670) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account() != 35553) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7101,19 +7582,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() != 62352) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_parse_join_request_qr() != 41586) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() != 1953) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() != 3935) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_restore_hosted_provisioning() != 44262) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_seal_intent_token() != 6010) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint() != 3664) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_func_vault_profile_fingerprint() != 3664) {
+    if (uniffi_peppy_mobile_bindings_checksum_func_new_native_enrollment_client() != 30121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_new_native_existing_owner_enrollment_client() != 16192) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_restore_native_enrollment_client() != 36620) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
@@ -7398,18 +7882,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_unlock() != 27497) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentkey_export_seed_for_native_secure_storage() != 43338) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentkey_pairing_sas() != 55286) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentkey_public_key_base64url() != 30145) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentkey_sign_pairing_proof() != 58757) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeplaintexthandle_dispose() != 40845) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7456,6 +7928,63 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds() != 15882) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_phone_invitation_request() != 23020) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_phone_flow() != 56287) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_checkpoint() != 28606) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_claim_phone_invitation_request() != 8280) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_complete_manual_challenge_request() != 29980) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_confirm_phone_invitation_request() != 24855) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_created_phone_invitation() != 47620) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_phone_claim() != 14687) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_owner_request() != 33051) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_phone_invitation_request() != 43184) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_manual_admission() != 62181) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_owner_admission() != 7059) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_phone_admission() != 48135) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_manual_challenge_request() != 2106) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_sas() != 11797) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_status_request() != 62139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_activate_into() != 62525) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_credential_for_native_secure_store() != 9455) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_metadata() != 35415) {
         return InitializationResult.apiChecksumMismatch
     }
 

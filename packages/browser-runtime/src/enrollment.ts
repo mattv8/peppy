@@ -1,177 +1,375 @@
-const MAX_JOIN_JSON_BYTES = 64 * 1024;
-const JOIN_DEADLINE_MS = 20_000;
+const MAX_JSON_BYTES = 64 * 1024;
+const DEVICE_NAME = "Peppy Browser";
 
-export type JoinState = "idle" | "waiting" | "claimed" | "confirm" | "approved" | "expired" | "failed";
-export interface JoinView { state: JoinState; qrPayload?: string; expiresInSeconds?: number; sas?: string; origin?: string; errorCode?: string; }
-export interface JoinActivation { (metadata: unknown, deviceToken: string, passphrase: string, signal: AbortSignal): Promise<void>; }
-interface JoinCore { invoke(request: { command: string; args: Record<string, unknown> }): Promise<unknown>; }
-interface Created { join_request_id: string; poll_secret: string; expires_in_seconds: number; }
-interface Poll { state: "waiting" | "offered" | "expired"; sealed_intent_token?: string; intent_digest?: string; expires_in_seconds: number; }
-interface Claimed { key_digest: string; sas: string; claim_secret: string; expires_in_seconds: number; }
-interface Challenge { challenge_token: string; vault_id: string; key_epoch: number; profile_fingerprint: string; requested_role: string; expires_in_seconds: number; }
-interface PendingIdentity { metadata: unknown; deviceToken: string; }
+type DeploymentMode = "community" | "hosted";
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
+type SessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 
-/** Worker-private enrollment. All HTTP remains same-origin; apiOrigin is QR/protocol data only. */
+export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string };
+export type EnrollmentSecrets = { setupToken?: string; adminPassword?: string; passphrase?: string };
+export type EnrollmentDevice = { device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean };
+export type InstanceManagement = { vault_id: string; devices: EnrollmentDevice[]; storage_bytes: number; quota_bytes: number; replay_retention_days: number };
+export type EnrollmentIdentity = { role: "owner" | "device" | "gateway" };
+export interface EnrollmentCore { invoke(request: { command: string; args: Record<string, unknown> }): Promise<unknown>; }
+export interface EnrollmentSession {
+  readonly phase: SessionPhase;
+  finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string): Promise<void>;
+  unlock(passphrase: string): Promise<void>;
+  publicIdentity(): EnrollmentIdentity | undefined;
+  tokenForTransport(): string;
+}
+
+/** Worker-private enrollment transport. Rust owns every credential, proof, and QR key. */
 export class BrowserEnrollment {
-  private state: JoinView = { state: "idle" };
-  private pollSecret?: string;
-  private intent?: string;
-  private claim?: Claimed;
-  private pending?: PendingIdentity;
-  private generation = 0;
-  private active?: AbortController;
-  private serial: Promise<void> = Promise.resolve();
+  private viewValue: EnrollmentView = { mode: "community", stage: "server" };
+  private csrf?: string;
+  private invitationId?: string;
+  private enrollmentClient?: { origin: string; purpose: "fresh" | "owner" };
+  private addPhonePending?: Promise<EnrollmentView>;
+  private readonly fetchBase: string;
 
-  public constructor(private readonly core: JoinCore, private readonly workerOrigin: string, private readonly activate: JoinActivation, private readonly fetcher: typeof fetch = fetch) {}
-  public view(): JoinView { return { ...this.state }; }
+  /** `origin` is the durable API identity; browser fetches remain on the app-origin proxy. */
+  public constructor(private readonly core: EnrollmentCore, private readonly session: EnrollmentSession, private readonly origin: string, private readonly fetcher: typeof fetch = fetch.bind(globalThis), fetchBase = origin) { this.fetchBase = fetchBase; }
 
-  public start(signal?: AbortSignal): Promise<JoinView> {
-    const generation = this.supersede();
-    return this.enqueue(async () => {
-      await this.cancelRust();
-      if (!this.isCurrent(generation)) return;
-      const controller = this.begin(signal);
-      try {
-        const apiOrigin = await this.configOrigin(controller.signal);
-        const request = await anonymousJson<Created>(this.fetcher, this.workerOrigin, "/v1/pairing/join-requests", "POST", undefined, controller.signal);
-        requireCreated(request);
-        if (!this.isCurrent(generation)) return;
-        const joined = object(await this.core.invoke({ command: "_worker_join_start", args: { apiOrigin, joinRequestId: request.join_request_id } }));
-        if (!this.isCurrent(generation)) return;
-        this.pollSecret = request.poll_secret;
-        this.state = { state: "waiting", qrPayload: string(joined.qrPayload), expiresInSeconds: boundedExpiry(request.expires_in_seconds), origin: apiOrigin };
-      } catch (error) { this.fail(generation, error); }
-    }).then(() => this.view());
-  }
+  public view(): EnrollmentView { return { ...this.viewValue }; }
 
-  public poll(signal?: AbortSignal): Promise<JoinView> {
-    const generation = this.generation;
-    return this.enqueue(async () => {
-      if (!this.isCurrent(generation) || !["waiting", "claimed"].includes(this.state.state)) return;
-      const controller = this.begin(signal);
-      try {
-        if (this.state.state === "waiting") await this.pollOffer(generation, controller.signal);
-        else if (this.state.state === "claimed") await this.pollChallenge(generation, controller.signal);
-      } catch (error) { this.fail(generation, error); }
-    }).then(() => this.view());
-  }
-
-  /** The host passes a secret-only UI phrase directly here; it never becomes a renderer DTO. */
-  public confirm(passphrase: string, signal?: AbortSignal): Promise<JoinView> {
-    const generation = this.generation;
-    return this.enqueue(async () => {
-      if (!this.isCurrent(generation) || this.state.state !== "confirm") throw new EnrollmentError("join-state");
-      const controller = this.begin(signal);
-      try {
-        const identity = this.pending ?? await this.consumeIdentity(generation, controller.signal);
-        if (!this.isCurrent(generation)) return;
-        await this.activate(identity.metadata, identity.deviceToken, passphrase, controller.signal);
-        if (!this.isCurrent(generation)) return;
-        this.pending = undefined;
-        this.state = { state: "approved" };
-      } catch (error) {
-        if (this.isCurrent(generation) && !isCancelled(error)) throw error;
-      }
-    }).then(() => this.view());
-  }
-
-  public cancel(): void { this.supersede(); void this.enqueue(() => this.cancelRust()); }
-
-  private async pollOffer(generation: number, signal: AbortSignal): Promise<void> {
-    const origin = this.state.origin;
-    if (!origin || !this.pollSecret) throw new EnrollmentError("join-state");
-    const request = object(await this.core.invoke({ command: "_worker_join_request", args: {} }));
-    const response = await anonymousJson<Poll>(this.fetcher, this.workerOrigin, `/v1/pairing/join-requests/${encodeURIComponent(string(request.joinRequestId))}`, "GET", undefined, signal, { "Peppy-Join-Secret": this.pollSecret });
-    if (!this.isCurrent(generation)) return;
-    if (response.state === "waiting") { this.state = { ...this.state, expiresInSeconds: boundedExpiry(response.expires_in_seconds) }; return; }
-    if (response.state === "expired") { this.state = { state: "expired", origin }; return; }
-    if (!response.sealed_intent_token || !response.intent_digest) throw new EnrollmentError("join-offer-invalid");
-    const opened = object(await this.core.invoke({ command: "_worker_join_open_offer", args: { sealedIntentToken: response.sealed_intent_token, intentDigest: response.intent_digest, apiOrigin: origin } }));
-    if (!this.isCurrent(generation)) return;
-    const intent = string(opened.intent);
-    const claim = await anonymousJson<Claimed>(this.fetcher, this.workerOrigin, `/v1/pairing/intents/${encodeURIComponent(intent)}/claim`, "POST", { device_id: opened.deviceId, public_key: opened.publicKey, requested_role: "device" }, signal);
-    if (!this.isCurrent(generation)) return;
-    await this.core.invoke({ command: "_worker_join_claim", args: { keyDigest: claim.key_digest, sas: claim.sas } });
-    if (!this.isCurrent(generation)) return;
-    this.intent = intent;
-    this.claim = claim;
-    this.state = { state: "claimed", sas: claim.sas, origin, expiresInSeconds: boundedExpiry(claim.expires_in_seconds) };
-  }
-
-  private async pollChallenge(generation: number, signal: AbortSignal): Promise<void> {
-    const origin = this.state.origin;
-    if (!origin || !this.intent || !this.claim) throw new EnrollmentError("join-state");
-    const request = object(await this.core.invoke({ command: "_worker_join_request", args: {} }));
+  public async discover(origin = this.origin): Promise<EnrollmentView> {
     try {
-      const challenge = await anonymousJson<Challenge>(this.fetcher, this.workerOrigin, `/v1/pairing/intents/${encodeURIComponent(this.intent)}/challenge`, "POST", { device_id: request.deviceId, key_digest: this.claim.key_digest, claim_secret: this.claim.claim_secret }, signal);
-      if (!this.isCurrent(generation)) return;
-      if (challenge.requested_role !== "device") throw new EnrollmentError("join-role-invalid");
-      await this.core.invoke({ command: "_worker_join_challenge", args: {
-        challengeToken: challenge.challenge_token,
-        vaultId: challenge.vault_id,
-        keyEpoch: challenge.key_epoch,
-        profileFingerprint: challenge.profile_fingerprint,
-        requestedRole: challenge.requested_role,
-      } });
-      if (this.isCurrent(generation)) this.state = { state: "confirm", sas: this.claim.sas, origin, expiresInSeconds: boundedExpiry(challenge.expires_in_seconds) };
+       const info = await this.discoverInfo();
+       const mode = deploymentMode(info.mode);
+       this.viewValue = { ...this.viewValue, mode };
+      if (this.session.phase === "locked") {
+        this.viewValue = { mode, stage: "locked", origin };
+        return this.view();
+      }
+      if (this.session.phase === "ready") {
+        const identity = this.requireIdentity();
+        if (identity.role === "owner") await this.initializeExistingOwner(origin);
+        this.viewValue = readyView(mode, origin, identity);
+        return this.view();
+      }
+      if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
+      await this.initializeFresh(origin);
+       if (mode === "hosted") {
+         const account = await this.hostedAccount();
+         this.viewValue = hostedStage(account, origin);
+       } else this.viewValue = { mode, stage: info.claimed === true ? "signin" : "setup", origin };
     } catch (error) {
-      if (error instanceof EnrollmentHttpError && error.status === 401 && error.serverCode === "pairing_challenge_unavailable") return;
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async generateSecret(): Promise<string> { return required(await this.core.invoke({ command: "_worker_enrollment_generate_secret", args: {} }), "passphrase"); }
+
+  public async createOwner(secrets: EnrollmentSecrets): Promise<EnrollmentView> {
+    try {
+      if (!secrets.passphrase) throw new Error("enrollment-state");
+      if (this.viewValue.mode === "hosted") return this.createHostedOwner(secrets.passphrase);
+      if (!secrets.setupToken || !secrets.adminPassword) throw new Error("enrollment-state");
+      const request = await this.rustRequest("_worker_enrollment_create_owner", secrets);
+      const response = await this.request("/v1/instance/claim", "POST", request);
+      this.captureClaimSession(response);
+      await this.session.finishEnrollment("_worker_enrollment_finish_owner", JSON.stringify(response), secrets.passphrase);
+      this.enrollmentClient = undefined;
+      this.viewValue = readyView(this.viewValue.mode, this.origin, this.requireIdentity());
+    } catch (error) {
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async signIn(adminPassword: string): Promise<EnrollmentView> {
+    try {
+      if (this.viewValue.mode === "hosted") return this.view();
+      const response = await this.request("/v1/instance/session", "POST", { admin_password: adminPassword, client: "browser" });
+      this.captureSession(response);
+      this.viewValue = { ...this.viewValue, stage: "locked" };
+    } catch (error) {
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async connectSharedSecret(passphrase: string): Promise<EnrollmentView> {
+    try {
+      if (this.session.phase === "locked") {
+        await this.session.unlock(passphrase);
+        this.viewValue = readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
+        return this.view();
+      }
+      if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
+      const challenge = await this.request("/v1/enrollment/challenges", "POST", await this.rustRequest("_worker_enrollment_manual_challenge", { vaultId: undefined }));
+      const proof = await this.rustRequest("_worker_enrollment_complete_manual_challenge", { challengeJson: JSON.stringify(challenge), passphrase });
+      const id = required(challenge, "enrollment_id");
+      const complete = await this.request(`/v1/enrollment/challenges/${encodeURIComponent(id)}/complete`, "POST", proof);
+      await this.session.finishEnrollment("_worker_enrollment_finish_manual", JSON.stringify(complete), passphrase);
+      this.enrollmentClient = undefined;
+      this.viewValue = readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
+    } catch (error) {
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public addPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
+    if (this.addPhonePending) return this.addPhonePending;
+    const pending = this.createPhoneInvitation(method);
+    this.addPhonePending = pending;
+    return pending.finally(() => { if (this.addPhonePending === pending) this.addPhonePending = undefined; });
+  }
+
+  private async createPhoneInvitation(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
+    try {
+      if (this.session.phase !== "ready" || this.requireIdentity().role !== "owner") throw new Error("enrollment-state");
+      if (this.invitationId && (this.viewValue.stage === "waiting_phone" || this.viewValue.stage === "verify_phone")) return this.view();
+      if (this.invitationId) this.resetOwnerInvitation();
+      await this.initializeExistingOwner(this.viewValue.origin ?? this.origin);
+      const created = await this.request("/v1/enrollment/invitations", "POST", await this.rustRequest("_worker_enrollment_create_phone_invitation", { method }), true);
+      await this.core.invoke({ command: "_worker_enrollment_consume_created_phone_invitation", args: { createdJson: JSON.stringify(created) } });
+      const qr = await this.core.invoke({ command: "_worker_enrollment_get_phone_qr", args: {} });
+      this.invitationId = required(created, "invitation_id");
+      this.viewValue = { ...this.viewValue, stage: "waiting_phone", qrPayload: required(qr, "qr"), expiresInSeconds: safeInteger(created.expires_in_seconds) };
+    } catch (error) {
+      this.resetOwnerInvitation();
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async status(): Promise<EnrollmentView> {
+    if (!this.invitationId) return this.view();
+    try {
+      const status = await this.invitationStatus();
+      const expiresInSeconds = safeInteger(status.expires_in_seconds);
+      if (status.state === "claimed") {
+        const sas = await this.core.invoke({ command: "_worker_enrollment_phone_status", args: { statusJson: JSON.stringify(status) } });
+        this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode: required(sas, "sas"), expiresInSeconds };
+      } else if (status.state === "consumed") {
+        this.resetOwnerInvitation();
+        this.viewValue = { ...this.viewValue, stage: "phone_connected", expiresInSeconds };
+      } else if (status.state === "expired") {
+        this.resetOwnerInvitation();
+        this.viewValue = { ...this.viewValue, stage: "expired", expiresInSeconds };
+      } else if (["waiting", "approved", "confirmed"].includes(String(status.state))) {
+        this.viewValue = { ...this.viewValue, stage: "waiting_phone", expiresInSeconds };
+      } else if (status.state === "denied") {
+        throw new Error("enrollment-state");
+      } else {
+        throw new Error("enrollment-response");
+      }
+    } catch (error) {
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async approve(passphrase: string): Promise<EnrollmentView> {
+    try {
+      if (!this.invitationId) throw new Error("enrollment-state");
+      const status = await this.invitationStatus();
+      if (status.state !== "claimed") throw new Error("enrollment-state");
+      const request = await this.rustRequest("_worker_enrollment_approve_phone_invitation", { statusJson: JSON.stringify(status), passphrase });
+      await this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}/approve`, "POST", request, true);
+      this.viewValue = { ...this.viewValue, stage: "waiting_phone", expiresInSeconds: safeInteger(status.expires_in_seconds) };
+    } catch (error) {
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async cancel(): Promise<void> {
+    if (this.invitationId) await this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}`, "DELETE", undefined, true);
+    this.resetOwnerInvitation();
+    this.viewValue = { ...this.viewValue, stage: "ready", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined };
+  }
+
+  public async signOut(): Promise<void> {
+    await this.request(this.viewValue.mode === "hosted" ? "/hosted/v1/web/app-session" : "/v1/instance/session", "DELETE");
+    this.csrf = undefined;
+    this.viewValue = { ...this.viewValue, stage: "signin" };
+  }
+
+  public management(): Promise<InstanceManagement> { return this.managementRequest("/v1/instance/management", "GET"); }
+
+  public revokeDevice(deviceId: string): Promise<InstanceManagement> {
+    if (!isDeviceId(deviceId)) return Promise.reject({ code: "invalid-request" });
+    return this.managementRequest(`/v1/instance/devices/${encodeURIComponent(deviceId)}/revoke`, "POST");
+  }
+
+  public setHostedCsrf(csrf: string): void {
+    if (!csrf || csrf.length > 4096) throw new Error("enrollment-response");
+    this.csrf = csrf;
+  }
+
+  private async createHostedOwner(passphrase: string): Promise<EnrollmentView> {
+    const account = await this.hostedAccount();
+    const accountId = required(account, "account_id");
+    const prepared = await this.core.invoke({ command: "_worker_enrollment_prepare_hosted_owner", args: { accountId, passphrase, deviceName: DEVICE_NAME } });
+    const grant = await this.request("/hosted/v1/web/provisioning", "POST", JSON.parse(required(prepared, "request")));
+    const accepted = await this.core.invoke({ command: "_worker_enrollment_accept_hosted_grant", args: { grantJson: JSON.stringify(grant) } });
+    const complete = await this.request("/hosted/v1/web/provisioning/complete", "POST", JSON.parse(required(accepted, "request")));
+    await this.session.finishEnrollment("_worker_enrollment_finish_hosted_owner", JSON.stringify(complete), passphrase);
+    this.viewValue = readyView("hosted", this.origin, this.requireIdentity());
+    return this.view();
+  }
+
+  private async discoverInfo(): Promise<Record<string, unknown>> {
+    try {
+      return await this.request("/hosted/v1/enrollment/config", "GET");
+    } catch (error) {
+      if (!(error instanceof HttpStatusError) || error.status !== 404) throw error;
+      return this.request("/v1/instance", "GET");
+    }
+  }
+
+  private async hostedAccount(): Promise<Record<string, unknown>> {
+    return this.request("/hosted/v1/web/app-account", "GET");
+  }
+
+  private async initializeFresh(origin: string): Promise<void> {
+    if (this.enrollmentClient?.origin === origin && this.enrollmentClient.purpose === "fresh") return;
+    await this.core.invoke({ command: "_worker_enrollment_new", args: { origin, deviceName: DEVICE_NAME } });
+    this.enrollmentClient = { origin, purpose: "fresh" };
+  }
+
+  private async initializeExistingOwner(origin: string): Promise<void> {
+    if (this.enrollmentClient?.origin === origin && this.enrollmentClient.purpose === "owner") return;
+    await this.core.invoke({ command: "_worker_enrollment_new_owner_from_identity", args: { deviceName: DEVICE_NAME } });
+    this.enrollmentClient = { origin, purpose: "owner" };
+  }
+
+  private resetOwnerInvitation(): void {
+    this.invitationId = undefined;
+    if (this.enrollmentClient?.purpose === "owner") this.enrollmentClient = undefined;
+  }
+
+  private requireIdentity(): EnrollmentIdentity {
+    const identity = this.session.publicIdentity();
+    if (!identity || !["owner", "device", "gateway"].includes(identity.role)) throw new Error("enrollment-response");
+    return identity;
+  }
+
+  private invitationStatus(): Promise<Record<string, unknown>> {
+    if (!this.invitationId) return Promise.reject(new Error("enrollment-state"));
+    return this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}`, "GET", undefined, true);
+  }
+
+  private async rustRequest(command: string, args: Record<string, unknown>): Promise<unknown> {
+    const result = await this.core.invoke({ command, args });
+    return JSON.parse(required(result, "request")) as unknown;
+  }
+
+  private async managementRequest(path: string, method: "GET" | "POST"): Promise<InstanceManagement> {
+    try {
+      return management(await this.request(path, method));
+    } catch (error) {
+      if (error instanceof HttpStatusError && (error.status === 401 || error.status === 403)) throw { code: `http-${error.status}` };
       throw error;
     }
   }
 
-  private async consumeIdentity(generation: number, signal: AbortSignal): Promise<PendingIdentity> {
-    const confirmed = object(await this.core.invoke({ command: "_worker_join_confirm", args: {} }));
-    const origin = this.state.origin;
-    if (!origin || origin !== string(confirmed.apiOrigin) || !this.isCurrent(generation)) throw new EnrollmentError("join-confirm");
-    const consumed = await anonymousJson<{ device_token: string; vault_id: string; device_id: string }>(this.fetcher, this.workerOrigin, "/v1/pairing/consume", "POST", { challenge_token: string(confirmed.challengeToken), device_id: string(confirmed.deviceId), public_key: confirmed.publicKey, profile_fingerprint: string(confirmed.profileFingerprint), key_epoch: confirmed.keyEpoch, signature: string(confirmed.signature) }, signal);
-    if (!this.isCurrent(generation) || consumed.vault_id !== string(confirmed.vaultId) || consumed.device_id !== string(confirmed.deviceId)) throw new EnrollmentError("join-consume-invalid");
-    const deviceToken = string(consumed.device_token);
-    const vault = await authenticatedJson<Record<string, unknown>>(this.fetcher, this.workerOrigin, "/v1/vault", deviceToken, signal);
-    if (vault.vault_id !== consumed.vault_id || vault.device_id !== consumed.device_id || vault.role !== "device" || vault.profile_fingerprint !== confirmed.profileFingerprint || vault.key_epoch !== confirmed.keyEpoch) throw new EnrollmentError("join-consume-invalid");
-    const metadata = { version: 1, origin: canonicalOrigin(this.workerOrigin), vaultId: consumed.vault_id, deviceId: consumed.device_id, role: "device", profile: vault.public_key_profile, header: decodeHeader(vault.encrypted_vault_check_header) };
-    const pending = { metadata, deviceToken };
-    this.pending = pending;
-    return pending;
+  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown, authenticated = false): Promise<T> {
+    const token = authenticated ? this.session.tokenForTransport() : undefined;
+    const csrfHeader = this.viewValue.mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
+    const response = await this.fetcher(new URL(path, this.fetchBase), {
+      method,
+      credentials: "include",
+      headers: {
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(this.csrf && method !== "GET" ? { [csrfHeader]: this.csrf } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!response.ok) throw new HttpStatusError(response.status);
+    if (response.status === 204) return {} as T;
+    return JSON.parse(await readBoundedText(response)) as T;
   }
 
-  private async configOrigin(signal: AbortSignal): Promise<string> {
-    const config = await anonymousJson<{ version: number; apiOrigin: string }>(this.fetcher, this.workerOrigin, "/web/config.json", "GET", undefined, signal);
-    if (config.version !== 1) throw new EnrollmentError("join-config");
-    return canonicalOrigin(config.apiOrigin);
+  private captureClaimSession(response: Record<string, unknown>): void {
+    const session = record(response.session);
+    this.captureSession(session);
   }
-  private supersede(): number { this.generation += 1; this.active?.abort(); this.active = undefined; this.pollSecret = undefined; this.intent = undefined; this.claim = undefined; this.pending = undefined; this.state = { state: "idle" }; return this.generation; }
-  private begin(signal?: AbortSignal): AbortController { const controller = this.active = new AbortController(); if (signal?.aborted) controller.abort(); else signal?.addEventListener("abort", () => controller.abort(), { once: true }); return controller; }
-  private async cancelRust(): Promise<void> { try { await this.core.invoke({ command: "_worker_join_cancel", args: {} }); } catch { /* cancellation must not revive stale state */ } }
-  private enqueue(action: () => Promise<void>): Promise<void> { const next = this.serial.then(action, action); this.serial = next.catch(() => undefined); return next; }
-  private isCurrent(generation: number): boolean { return generation === this.generation && !this.active?.signal.aborted; }
-  private fail(generation: number, error: unknown): void { if (this.isCurrent(generation) && !isCancelled(error)) this.state = { state: "failed", errorCode: error instanceof EnrollmentError ? error.code : "join-network" }; }
+
+  private captureSession(response: Record<string, unknown>): void {
+    const csrf = response.csrf_token;
+    if (typeof csrf === "string" && csrf) this.csrf = csrf;
+  }
+
+  private fail(error: unknown): void {
+    const errorCode = error instanceof HttpStatusError ? `http-${error.status}` : error instanceof Error ? error.message : "enrollment-error";
+    this.viewValue = { ...this.viewValue, stage: "error", errorCode };
+  }
 }
 
-export class EnrollmentError extends Error { public constructor(public readonly code: string) { super(code); } }
-class EnrollmentHttpError extends EnrollmentError { public constructor(public readonly status: number, public readonly serverCode?: string) { super("join-network"); } }
+class HttpStatusError extends Error {
+  public constructor(public readonly status: number) { super(`http-${status}`); }
+}
 
-async function anonymousJson<T>(fetcher: typeof fetch, origin: string, path: string, method: "GET" | "POST", body: unknown, signal: AbortSignal, headers: Record<string, string> = {}): Promise<T> { return requestJson(fetcher, origin, path, method, body, signal, headers); }
-async function authenticatedJson<T>(fetcher: typeof fetch, origin: string, path: string, deviceToken: string, signal: AbortSignal): Promise<T> { return requestJson(fetcher, origin, path, "GET", undefined, signal, { Authorization: `Bearer ${deviceToken}` }); }
-async function requestJson<T>(fetcher: typeof fetch, origin: string, path: string, method: "GET" | "POST", body: unknown, signal: AbortSignal, headers: Record<string, string>): Promise<T> {
-  const url = new URL(path, canonicalOrigin(origin));
-  if (url.origin !== canonicalOrigin(origin) || url.search || !url.pathname.startsWith("/v1/") && url.pathname !== "/web/config.json") throw new EnrollmentError("join-network");
-  const deadline = new AbortController(); const timer = setTimeout(() => deadline.abort(), JOIN_DEADLINE_MS); const abort = () => deadline.abort(); signal.addEventListener("abort", abort, { once: true });
+function readyView(mode: DeploymentMode, origin: string, identity: EnrollmentIdentity): EnrollmentView {
+  return { mode, stage: "ready", origin, owner: identity.role === "owner" };
+}
+function hostedStage(account: Record<string, unknown>, origin: string): EnrollmentView {
+  const classification = account.classification;
+  const access = account.access;
+  const hasVault = typeof account.vault_id === "string" && account.vault_id.length > 0;
+  if (access === "readonly" && !hasVault) return { mode: "hosted", stage: "error", origin, errorCode: "billing-required" };
+  if (!hasVault && (classification === "incomplete" || classification === "eligible")) return { mode: "hosted", stage: "setup", origin };
+  return { mode: "hosted", stage: "locked", origin };
+}
+
+async function readBoundedText(response: Response): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_JSON_BYTES)) throw new Error("enrollment-response");
+  if (response.body === null) throw new Error("enrollment-response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    const response = await fetcher(url, { method, body: body === undefined ? undefined : JSON.stringify(body), headers: { ...headers, ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, signal: deadline.signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-    if (response.redirected || response.url !== "" && response.url !== url.toString()) { cancel(response); throw new EnrollmentError("join-network"); }
-    if (!response.ok) { const code = await responseCode(response, deadline.signal); throw new EnrollmentHttpError(response.status, code); }
-    const bytes = await bounded(response, deadline.signal); try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as T; } catch { throw new EnrollmentError("join-network"); }
-  } catch (error) { if (signal.aborted) throw new EnrollmentError("cancelled"); if (error instanceof EnrollmentError) throw error; throw new EnrollmentError("join-network"); }
-  finally { clearTimeout(timer); signal.removeEventListener("abort", abort); }
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > MAX_JSON_BYTES) throw new Error("enrollment-response");
+      chunks.push(next.value);
+    }
+  } catch (error) {
+    try { await reader.cancel(); } catch {}
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new Error("enrollment-response"); }
 }
-async function bounded(response: Response, signal: AbortSignal): Promise<Uint8Array> { if (response.body === null) throw new EnrollmentError("join-network"); const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let total = 0; try { while (true) { const part = await reader.read(); if (part.done) break; total += part.value.byteLength; if (total > MAX_JOIN_JSON_BYTES) throw new EnrollmentError("join-network"); chunks.push(part.value); } } catch (error) { await reader.cancel().catch(() => undefined); throw signal.aborted ? new EnrollmentError("cancelled") : error; } finally { reader.releaseLock(); } const bytes = new Uint8Array(total); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; } return bytes; }
-async function responseCode(response: Response, signal: AbortSignal): Promise<string | undefined> { try { const value = JSON.parse(new TextDecoder().decode(await bounded(response, signal))) as { code?: unknown }; return typeof value.code === "string" && /^[a-z_]{1,64}$/.test(value.code) ? value.code : undefined; } catch { return undefined; } }
-function cancel(response: Response): void { void response.body?.cancel().catch(() => undefined); }
-function canonicalOrigin(value: string): string { const url = new URL(value); const loopback = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname); if ((!loopback && url.protocol !== "https:") || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new EnrollmentError("join-config"); return url.origin; }
-function object(value: unknown): Record<string, unknown> { if (typeof value !== "object" || value === null || Array.isArray(value)) throw new EnrollmentError("join-network"); return value as Record<string, unknown>; }
-function string(value: unknown): string { if (typeof value !== "string" || value.length === 0) throw new EnrollmentError("join-network"); return value; }
-function boundedExpiry(value: number): number { if (!Number.isSafeInteger(value)) throw new EnrollmentError("join-network"); return Math.max(0, value); }
-function requireCreated(value: Created): void { string(value.join_request_id); string(value.poll_secret); boundedExpiry(value.expires_in_seconds); }
-function isCancelled(error: unknown): boolean { return error instanceof EnrollmentError && error.code === "cancelled"; }
-function decodeHeader(value: unknown): unknown { if (typeof value !== "string") throw new EnrollmentError("join-confirm"); try { const binary = atob(value); const bytes = Uint8Array.from(binary, character => character.charCodeAt(0)); return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new EnrollmentError("join-confirm"); } }
+
+function deploymentMode(value: unknown): DeploymentMode {
+  if (value !== "community" && value !== "hosted") throw new Error("enrollment-response");
+  return value;
+}
+function record(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("enrollment-response");
+  return value as Record<string, unknown>;
+}
+function required(value: unknown, key: string): string {
+  const output = record(value)[key];
+  if (typeof output !== "string" || !output) throw new Error("enrollment-response");
+  return output;
+}
+function safeInteger(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
+function isDeviceId(value: string): boolean { return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(value); }
+function management(value: Record<string, unknown>): InstanceManagement {
+  const devices = value.devices;
+  if (!isDeviceId(required(value, "vault_id")) || !Array.isArray(devices) || safeInteger(value.storage_bytes) === undefined || safeInteger(value.quota_bytes) === undefined || safeInteger(value.replay_retention_days) === undefined) throw new Error("enrollment-response");
+  return { vault_id: required(value, "vault_id"), devices: devices.map(device), storage_bytes: value.storage_bytes as number, quota_bytes: value.quota_bytes as number, replay_retention_days: value.replay_retention_days as number };
+}
+function device(value: unknown): EnrollmentDevice {
+  const entry = record(value);
+  const kind = required(entry, "kind");
+  const role = required(entry, "role");
+  if (!isDeviceId(required(entry, "device_id")) || !["browser", "desktop", "android", "ios"].includes(kind) || !["owner", "device", "gateway"].includes(role) || typeof entry.name !== "string" || typeof entry.revoked !== "boolean" || typeof entry.gateway_online !== "boolean") throw new Error("enrollment-response");
+  return { device_id: required(entry, "device_id"), name: entry.name, kind: kind as EnrollmentDevice["kind"], role: role as EnrollmentDevice["role"], revoked: entry.revoked, gateway_online: entry.gateway_online };
+}

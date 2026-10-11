@@ -109,13 +109,47 @@ duplicate-detection identities continue to consume server storage after compacti
 
 ## Security boundaries
 
-Each vault uses a manually shared passphrase. Clients derive vault keys locally; the server stores and orders opaque envelopes and never receives that passphrase. The protocol does not claim forward secrecy. The encrypted vault-check header permits offline passphrase guessing; TLS and server rate limits cannot prevent it. Choose a long random multiword passphrase.
+Each vault has a generated shared secret. Clients derive vault keys locally. A new phone can receive keys through an explicitly approved, encrypted QR pairing exchange or enter the shared secret manually. The server API never receives the shared secret or plaintext transferred keys. The protocol does not claim forward secrecy. Public verification material permits offline guessing, so retain the generated random multiword secret.
 
 Every passphrase holder has the same cryptographic authority. Credential revocation does not remove access from a passphrase holder. Rotate the passphrase, activate the new epoch on each participating client, and keep historical epoch material needed to read history. A gateway blocks commands from a retired epoch. The composed protocol has not received an external security audit.
 
 SMS and MMS move in plaintext outside Peppy's encryption boundary. A gateway records carrier attempts durably and does not resend an attempt with an unknown carrier outcome. Snapshot history cannot execute carrier work. Copying a client database back behind the application is not detectable. Public attachment copies are separately supplied PNG, JPEG, or WebP plaintext derivatives. Their share tokens and expiry/revocation controls do not encrypt them; never upload private originals as public copies.
 
 ## Local server and TLS experiments
+
+### First-run setup and device connections
+
+Open the server's HTTPS address in the web app, or connect a desktop or phone to
+that address. An unclaimed community server asks for its operator setup code,
+a new administrator password, and confirmation that you saved the generated
+vault shared secret. The initiating device becomes the first owner. The admin
+password controls server management; the shared secret protects vault data.
+
+Set `PEPPY_SETUP_TOKEN` to an operator code of at least 32 UTF-8 bytes, or read
+the generated code from the server's first-start logs. An absent or empty setting
+generates a code; it does not disable the setup check. Configure the same token
+on replicas.
+
+The web app's **Manage server** page lists devices, gateway status and storage
+usage, and supports device revocation. Quota and retention values are read-only.
+It is not a database backup/restore interface.
+
+Use **Add phone** in the web or desktop workbench. There is one QR format:
+**Connect your phone**. Compare the verification codes and approve the connection.
+Choose encrypted key transfer or manual shared-secret entry. Alternatively,
+enter the server address and shared secret on the new device without using a QR.
+Hosted enrollment additionally requires the account's available Apple/Google
+sign-in and entitlement checks. No QR appears in Settings, and there is no
+credential-file onboarding or reversed **Add a computer** flow.
+
+After enrollment, grant the supported mirroring permissions on the phone.
+Connecting a device cannot grant OS permissions or enable unsupported RCS access.
+Desktop application locking is optional and disabled by default; its local
+password is separate from the server password and vault secret.
+
+This enrollment redesign is a breaking foundation change, not an upgrade path
+for older pairing deployments. The application does not erase existing databases
+or client profiles automatically.
 
 The local API publishes on `127.0.0.1:7000`; PostgreSQL and SeaweedFS have no host ports. `/healthz` reports whether the process can serve requests. `/readyz` also checks PostgreSQL, migrations, and, when configured, a bounded attachment-store probe. `just smoke-infra` starts the stack, checks both routes, and runs the storage contract check.
 
@@ -130,7 +164,7 @@ export PUBLIC_ATTACHMENT_URL=http://127.0.0.1:18080
 docker compose --env-file .env -f docker-compose.yml up
 ```
 
-For a public TLS experiment, set `PUBLIC_HOST` and add `-f infra/compose/compose.caddy.yml` to the Compose command. Community serves the browser UI and API together at `https://PUBLIC_HOST/`; set `WEB_UI_ENABLED=false` to opt out of the UI. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
+For a public TLS experiment, set `PUBLIC_HOST` and add `-f infra/compose/compose.caddy.yml` to the Compose command. Community serves the browser UI and API together at `https://PUBLIC_HOST/`; set `WEB_UI_ENABLED=false` to opt out of the UI. Keep `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` as external HTTPS origins, and keep `S3_INTERNAL_ENDPOINT` internal. Set `TRUSTED_PROXY_CIDRS` to only the direct reverse proxy's IP addresses or narrow CIDRs and keep it aligned with the proxy topology. If it is empty, forwarded addresses are ignored and clients behind one proxy share that proxy's rate-limit bucket. The Caddy overlay is the only supplied configuration that publishes ports 80 and 443. It is not production-readiness evidence.
 
 ## Develop and contribute
 

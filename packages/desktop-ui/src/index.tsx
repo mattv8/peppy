@@ -36,7 +36,6 @@ export {
 } from "./phone";
 import "./styles.css";
 export { ContactAvatar } from "./ContactAvatar";
-export { PairPhone, pairingQrPayload, type PairingIntent, type PairingStatus } from "./PairPhone";
 export {
   Bell,
   Check,

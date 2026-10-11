@@ -1,19 +1,42 @@
 pub mod api;
 pub mod config;
+pub mod enrollment;
 pub mod health;
+pub mod instance;
 pub mod scope;
 pub mod storage;
 pub mod web_client;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
+/// Serves a router while attaching each TCP peer address to request extensions.
+pub async fn serve<S>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: S,
+) -> std::io::Result<()>
+where
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+}
+
 use axum::{Router, routing::get};
 use health::HealthState;
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
-    api::{AccessPolicy, CommunityAccessPolicy, TransportOptions},
+    api::{
+        AccessPolicy, CommunityAccessPolicy, CommunityEnrollmentAuthorization,
+        EnrollmentAuthorization, TransportOptions,
+    },
     config::Config,
 };
 use std::sync::Arc;
@@ -25,18 +48,39 @@ pub struct ServerBuilder {
     runtime_db: PgPool,
     maintenance_db: Option<PgPool>,
     access_policy: Arc<dyn AccessPolicy>,
+    enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
+    setup_token: Option<String>,
     row_security: bool,
 }
 
 impl ServerBuilder {
+    /// Assembles a self-hosted community server with no hosted authorization
+    /// adapter or setup-token override.
+    pub fn community(config: Config, runtime_db: PgPool) -> Self {
+        Self::new(config, runtime_db)
+    }
+
     pub fn new(config: Config, runtime_db: PgPool) -> Self {
+        let enrollment_authorization = Arc::new(CommunityEnrollmentAuthorization::with_origin(
+            runtime_db.clone(),
+            config.public_api_url.as_ref(),
+        ));
         Self {
             config,
-            runtime_db,
+            runtime_db: runtime_db.clone(),
             maintenance_db: None,
             access_policy: Arc::new(CommunityAccessPolicy),
+            enrollment_authorization,
+            setup_token: None,
             row_security: false,
         }
+    }
+
+    /// Supplies the operator setup token directly for embedders that already own
+    /// configuration, avoiding process-global environment mutation.
+    pub fn setup_token(mut self, token: impl Into<String>) -> Self {
+        self.setup_token = Some(token.into());
+        self
     }
 
     pub fn maintenance_database(mut self, database: PgPool) -> Self {
@@ -46,6 +90,16 @@ impl ServerBuilder {
 
     pub fn access_policy(mut self, policy: Arc<dyn AccessPolicy>) -> Self {
         self.access_policy = policy;
+        self
+    }
+
+    /// Supplies hosted/account enrollment authorization without coupling the
+    /// reusable server to a private account implementation.
+    pub fn enrollment_authorization(
+        mut self,
+        authorization: Arc<dyn EnrollmentAuthorization>,
+    ) -> Self {
+        self.enrollment_authorization = authorization;
         self
     }
 
@@ -67,10 +121,36 @@ impl ServerBuilder {
             )
             .into());
         }
+        let explicit_setup_token_digest = self
+            .setup_token
+            .as_deref()
+            .map(instance::operator_setup_token_digest)
+            .transpose()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         let health = HealthState::from_database(&self.config, self.runtime_db.clone()).await?;
         let maintenance_db = self
             .maintenance_db
             .unwrap_or_else(|| self.runtime_db.clone());
+        let setup_token_digest = match explicit_setup_token_digest {
+            Some(digest) => digest,
+            None if self.row_security => instance::disabled_setup_token_digest(),
+            None => {
+                match instance::configured_setup_token_digest().map_err(std::io::Error::other)? {
+                    Some(configured) => configured,
+                    None => {
+                        let claimed: bool =
+                            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instance_admin)")
+                                .fetch_one(&self.runtime_db)
+                                .await?;
+                        if claimed {
+                            instance::disabled_setup_token_digest()
+                        } else {
+                            instance::setup_token_digest().map_err(std::io::Error::other)?
+                        }
+                    }
+                }
+            }
+        };
         let options = TransportOptions {
             replay_retention: self.config.replay_retention,
             ..TransportOptions::default()
@@ -82,6 +162,8 @@ impl ServerBuilder {
             options,
             None,
             self.access_policy,
+            self.enrollment_authorization,
+            setup_token_digest,
             self.row_security,
         );
         maintenance.db = maintenance_db;

@@ -11,18 +11,26 @@ This reference records non-obvious Peppy domain constraints. Related references:
 
 - Rust core is the sole owner of local SQLite/SQLCipher and durable
   domain/protocol state. Native hosts own transport, OS scheduling, secure
-  storage, cancellation, and carrier effects. Web UI receives sanitized DTOs,
-  never passphrases, device credentials, database keys, or encryption keys.
+  storage, cancellation, and carrier effects. Shared React views receive
+  sanitized DTOs, never passphrases, device credentials, database keys, or
+  encryption keys. Browser secret forms and private worker RPC are separate
+  from those DTOs, but remain accessible to same-origin JavaScript.
   See [client core](../crates/client-core/src/lib.rs) and
   [desktop sessions](../apps/desktop/src-tauri/src/session.rs).
-- Device sync uses a manually shared passphrase. Do not substitute automatic
-  key distribution or claim forward secrecy. Carrier SMS/MMS is outside the
-  application's encryption boundary.
-- Cached purpose keys can restore a previously verified, unlocked epoch but do
-  not pin a profile or change the active epoch; they can make an already-active
-  epoch usable. Only manual passphrase/header unlock records cache integrity,
-  and hosts explicitly cut over to a newer verified epoch after that unlock.
-  See [key lifecycle](../crates/client-core/src/lib.rs) and [desktop unlock](../apps/desktop/src-tauri/src/lib.rs).
+- Enrollment can transfer a root only through a context-authenticated
+  `VerifiedHandoff`, or admit a device that proves the existing vault shared
+  secret. It does not make a QR code, server-held invitation value, or account
+  session into a vault secret. Carrier SMS/MMS remains outside the application's
+  encryption boundary. Do not claim forward secrecy. See
+  [enrollment client](../crates/hosted-client/src/newenrollment.rs)
+  and [handoff import](../crates/client-core/src/lib.rs).
+- A protected native key cache may restore an already verified, unlocked epoch,
+  but cannot pin a profile, change the active epoch, or establish enrollment
+  bindings. Manual passphrase/header verification and `VerifiedHandoff` import
+  are explicit verified key-installation paths; a handoff also binds the
+  enrollment context and recipient identity before pinning its profile and
+  epoch. Import initializes an absent active epoch; it is not an implicit
+  cutover from an already-active epoch. See [key lifecycle](../crates/client-core/src/lib.rs).
 - A published attachment is a separately supplied plaintext derivative, not a
   publication of the encrypted original. See
   [attachment API](../services/server/src/api/attachments.rs).
@@ -53,8 +61,10 @@ This reference records non-obvious Peppy domain constraints. Related references:
 
 - Rust is the source of shared wire contracts. Generate bindings and schemas
   from it rather than maintaining equivalent hand-written platform models.
-  [Envelope generation](../crates/protocol/src/generate.rs) covers envelope
-  and pairing schemas, not every REST adapter.
+  [Protocol generation](../crates/protocol/src/generate.rs) covers envelope
+  contracts; enrollment REST DTOs are canonical in
+  [hosted-api enrollment](../crates/hosted-api/src/enrollment.rs), not an old
+  pairing schema or platform copy.
 - Preserve distinct identity roles: envelope, command, device, vault, event,
   message, and source sequence are not interchangeable. See
   [domain IDs](../crates/domain/src/ids.rs) and
@@ -86,26 +96,54 @@ This reference records non-obvious Peppy domain constraints. Related references:
   differing value alone is not grounds to discard the local checkpoint. See
   [mobile provisioning](../crates/mobile-bindings/src/hosted.rs); the account
   selection query is in `peppy-platform/src/service.rs`.
-- Before a checkpoint exists, the chosen passphrase is volatile presentation
-  state. Preserve it across password-manager hops and configuration changes,
-  with sensitive content concealed. Do not serialize it into Android saved
-  state or silently generate a replacement on return. After process death,
-  recover prepared material using the user's saved phrase; a checkpoint never
-  contains the plaintext passphrase.
-- A phone that creates the first vault is an `owner`. Capability registration
-  lets it execute work addressed to itself without changing its role to
-  `gateway`. Adding execution capability grants no owner authority; server
-  filtering must still prevent consuming another gateway's work. See
-  [server sync](../services/server/src/api/sync.rs) and
-  [desktop gateway selection](../apps/desktop/src-tauri/src/gateways.rs).
-- The two QR flows have different directions. A new phone scans an enrolled
-  owner's intent QR. In **Add a computer**, the owner phone scans the new
-  computer's join-request QR and offers an encrypted intent through the server.
-  That offer is not approval: both flows still require the locally computed
-  verification code and explicit owner confirmation. Computer claimants use
-  role `device`, not `gateway`. See
-  [pairing contracts](../crates/protocol/src/pairing.rs) and
-  [join cryptography](../crates/hosted-client/src/lib.rs).
+- Generated vault shared secrets require an explicit save acknowledgement.
+  Preserve an in-progress secret in transient private state across same-page
+  retries; do not put it in logs, process arguments, Android saved state, or
+  browser local/session storage. Recover protected prepared material after a
+  restart using the user's saved secret, not a silently regenerated phrase.
+- Enrollment has one `connect_phone` QR: version, purpose, canonical origin,
+  invitation secret, and transfer public key. The invitation secret stays on
+  the two clients: the claimant supplies an HMAC-bound claim, the owner checks
+  it locally, both compare the derived SAS, and the owner explicitly approves.
+  The approved result is a `VerifiedHandoff` for transfer or a local shared-
+  secret proof for manual admission. See [QR DTO](../crates/hosted-api/src/enrollment.rs),
+  [claim authenticator](../crates/crypto/src/enrollment.rs), and
+  [enrollment state machine](../crates/hosted-client/src/newenrollment.rs).
+- The recipient must pin the owner's transfer public key to the scanned QR
+  before accepting any server claim or transcript. Matching a server-supplied
+  key to a server-supplied transcript is not authentication. A short SAS does
+  not replace either endpoint's out-of-band key/claim verification.
+- On an unclaimed community instance, the setup code authorizes claiming; the
+  admin password authorizes server management; and the generated or existing
+  vault shared secret authorizes vault admission. Keep all three distinct.
+  Claim retry is protected and idempotent. Browser, desktop, or phone can be the
+  first owner. A first phone is an `owner`; a later
+  phone normally has `gateway` role, while execution capability remains a
+  separate registration. Execution capability grants no owner authority and
+  must not permit consuming another gateway's work. See
+  [claim API](../crates/hosted-api/src/enrollment.rs),
+  [instance routes](../services/server/src/api.rs), and
+  [gateway work filtering](../services/server/src/api/sync.rs).
+- Hosted browser authorization uses a bounded PKCE code handoff with separate
+  account and app-session audiences. Initialize enrollment identity with the
+  canonical API origin, but fetch through the same-app-origin proxy; browser
+  origin is transport authorization, not enrollment context. See
+  [browser sign-in client](../apps/web/src/newhosted-app-auth.ts) and
+  [app-host routing](../services/server/src/web_client.rs). Private
+  `peppy-platform/src/web_auth.rs` and `src/enrollment_policy.rs` own session
+  audiences and hosted account admission. Instance management is available
+  only for self-hosted community servers, not the hosted service.
+- Account authentication and owner-device authentication can both be required
+  for hosted enrollment. Native `Peppy-Account-Session` is not the device's
+  Authorization bearer. Browser app cookies do not authorize account billing.
+  Authenticate the account and bind its vault before scoped database reads;
+  a valid device bearer alone must not bypass hosted enrollment policy.
+- First setup uses `/v1/instance/*`; device admission uses `/v1/enrollment/*`.
+  The old `/v1/pairing` routes, reversed computer-join protocol, and
+  `create-owner` CLI are removed. Keep the single QR in onboarding or the main
+  Add phone flow, never Settings; do not add a Save QR action.
+- Device credentials may be serialized only for protected native secure storage.
+  Do not add credential-file onboarding or export UI.
 - Server-advertised providers and platform configuration both gate native
   sign-in. Mobile Google SDKs use the server's nonce; browser OAuth clients and
   native token audiences stay separate. Configuring an Apple audience alone

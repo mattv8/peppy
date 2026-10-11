@@ -3,18 +3,15 @@ import { BrowserCore, type CoreResult, type EmscriptenCoreModule } from "./core.
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./owner.js";
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
-import { BrowserEnrollment, type JoinView } from "./enrollment.js";
+import { BrowserEnrollment, type EnrollmentView, type InstanceManagement } from "./enrollment.js";
 import { BrowserScheduler } from "./scheduler.js";
 import { OriginTransport } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
-import { credentialFileBytes, importCredentialFile, type ParsedCredentialFile } from "./credential-files.js";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
 const OWNER_NAME = "peppy-browser-v1";
-const CREDENTIAL_EXPORT_TTL_MS = 300_000;
-const CREDENTIAL_EXPORT_FILENAME = "peppy-credentials.json";
 
 export type RpcError = { code: string; message: string; currentRevision?: string };
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
@@ -34,9 +31,6 @@ export interface HostSession {
   mutate(command: string, args: Record<string, unknown>): Promise<CoreResult>;
   unlock(passphrase: string): Promise<void>;
   enroll(metadata: unknown, deviceToken: string, passphrase: string): Promise<void>;
-  parseCredentialFile?(bytes: Uint8Array): Promise<ParsedCredentialFile>;
-  portableIdentityMetadata?(bytes: Uint8Array, vault: Record<string, unknown>): Promise<unknown>;
-  exportCredential?(): Promise<{ filename: string; bytes: Uint8Array }>;
   shutdown(): void;
   drain?(): Promise<void>;
   tokenForTransport?(): string;
@@ -53,10 +47,19 @@ export interface HostSession {
 export interface BrowserNetwork {
   start(): Promise<void>;
   stop(): Promise<void>;
-  joinStart(): Promise<JoinView>;
-  joinPoll(): Promise<JoinView>;
-  joinCancel(): void;
-  joinConfirm(passphrase: string): Promise<JoinView>;
+  enrollmentDiscover(origin?: string): Promise<EnrollmentView>;
+  enrollmentCreateOwner(secrets: { setupToken?: string; adminPassword?: string; passphrase: string }): Promise<EnrollmentView>;
+  enrollmentSignIn(adminPassword: string): Promise<EnrollmentView>;
+  enrollmentSetHostedCsrf(csrf: string): Promise<void>;
+  enrollmentConnectSharedSecret(passphrase: string): Promise<EnrollmentView>;
+  enrollmentAddPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
+  enrollmentStatus(): Promise<EnrollmentView>;
+  enrollmentApprove(passphrase: string): Promise<EnrollmentView>;
+  enrollmentCancel(): Promise<void>;
+  enrollmentSignOut(): Promise<void>;
+  enrollmentGenerateSecret(): Promise<string>;
+  enrollmentManagement(): Promise<InstanceManagement>;
+  enrollmentRevokeDevice(deviceId: string): Promise<InstanceManagement>;
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
   wake?(): void;
@@ -72,8 +75,6 @@ export interface BrowserHostDependencies {
   settings?: NotificationSettings;
   publisher?: PublicCopyTransport & { origin: string };
   notification?: NotificationAdapter;
-  credentialOrigin?: string;
-  credentialFetch?: typeof fetch;
 }
 
 type Invocation = { coreCommand: string; mutation: boolean };
@@ -101,20 +102,40 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
 };
 
 const NATIVE_ONLY = new Set([
-  "configure_server", "import_credentials", "pick_attachments", "save_attachment",
+  "configure_server", "get_app_lock_status", "set_app_lock", "unlock_app", "pick_attachments", "save_attachment",
   "open_composer", "set_start_at_login", "popout_conversation", "hide_head",
   "close_composer", "close_head_panel", "window", "request_notification_permission", "set_notification_context",
   "subscribe_lifecycle", "subscribe_lifecycle_finished", "acknowledge_lifecycle", "hosted_account",
-  "hosted_sign_in", "hosted_sign_out", "hosted_open_billing", "hosted_provision", "join_start", "join_status",
-  "join_cancel", "join_confirm",
+  "hosted_sign_in", "hosted_sign_out", "hosted_open_billing", "hosted_provision",
 ]);
+
+const ENROLLMENT_MUTATIONS = new Set([
+  "enrollment_create_owner",
+  "enrollment_sign_in",
+  "enrollment_set_hosted_csrf",
+  "enrollment_connect_shared_secret",
+  "enrollment_add_phone",
+  "enrollment_approve",
+  "enrollment_cancel",
+  "enrollment_sign_out",
+  "enrollment_revoke_device",
+]);
+
+const ENROLLMENT_ACTIVATIONS = new Set([
+  "enrollment_create_owner",
+  "enrollment_connect_shared_secret",
+]);
+
+function isReadyEnrollmentView(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).stage === "ready";
+}
 
 function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
   return {
     version: "1", mode: "browser", connection: { state: "offline" },
     encryption: { state: phase === "unenrolled" ? "preview" : "locked" }, gateways: [], conversations: [],
     head: { enabled: false, capability: "unsupported" }, pendingCount: 0, quarantineCount: 0,
-    notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" }, credentialExportAvailable: false,
+    notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
   };
 }
 
@@ -123,33 +144,11 @@ function errorFor(error: unknown): RpcError {
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const revision = "details" in error && typeof error.details === "object" && error.details !== null &&
       "currentRevision" in error.details && typeof error.details.currentRevision === "string" ? error.details.currentRevision : undefined;
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "credential-mismatch", "credentials-required", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "invalid-identity", "credential-file-too-large", "credential-invalid-json", "credential-unsupported-version", "credential-invalid-token", "credential-invalid-vault-id", "credential-invalid-device-id", "credential-invalid-origin", "credential-origin-credentials", "credential-origin-path", "credential-origin-insecure", "credential-origin-mismatch", "credential-vault-mismatch", "credential-invalid-vault", "credential-network"]);
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403"]);
     const code = codes.has(error.code) ? error.code : "unavailable";
-    const message = credentialErrorMessage(code);
-    return { code, message, currentRevision: revision };
+    return { code, message: "Browser operation failed.", currentRevision: revision };
   }
   return { code: "unavailable", message: "Browser operation failed." };
-}
-
-function credentialErrorMessage(code: string): string {
-  const messages: Readonly<Record<string, string>> = {
-    "credential-file-too-large": "The credential file is too large.",
-    "credential-origin-mismatch": "The credential belongs to a different server.",
-    "credential-unsupported-version": "This credential file version is unsupported.",
-    "credential-invalid-json": "The credential file is not valid JSON.",
-    "credential-invalid-token": "The credential file has an invalid device token.",
-    "credential-invalid-vault-id": "The credential file has an invalid vault ID.",
-    "credential-invalid-device-id": "The credential file has an invalid device ID.",
-    "credential-invalid-origin": "The credential file has an invalid server origin.",
-    "credential-origin-credentials": "The credential file has an invalid server origin.",
-    "credential-origin-path": "The credential file has an invalid server origin.",
-    "credential-origin-insecure": "The credential file has an invalid server origin.",
-    "credential-vault-mismatch": "The credential does not match the authenticated vault.",
-    "credential-invalid-vault": "The authenticated vault response is invalid.",
-    "credential-network": "The credential server is unavailable.",
-    "invalid-identity": "The selected identity file is invalid.",
-  };
-  return messages[code] ?? "Browser operation failed.";
 }
 
 function requestId(value: unknown): number {
@@ -180,7 +179,7 @@ function coreArgs(command: string, args: Record<string, unknown>): Record<string
 }
 
 /** Dispatches a renderer request without exposing a generic Rust command or worker-private APIs. */
-export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }, credentialOrigin?: string, credentialFetch?: typeof fetch): Promise<RpcResponse> {
+export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
   const { id, command, args } = request;
   try {
@@ -192,18 +191,12 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
        if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
        const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
        if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-        return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>), ...contacts as Record<string, unknown>, credentialExportAvailable: (snapshot as Record<string, unknown>).credentialExportAvailable === true, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+        return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
     }
     if (command === "unlock") {
       const passphrase = secretString(args, "passphrase");
       if (!passphrase) throw { code: "invalid-request" };
       await session.unlock(passphrase);
-      return { id, ok: true, value: undefined };
-    }
-    if (command === "import_credential_file") {
-      const passphrase = secretString(args, "passphrase");
-      if (!passphrase || !session.parseCredentialFile || !session.portableIdentityMetadata || !credentialOrigin) throw { code: "invalid-request" };
-      await importCredentialFile(session as Required<Pick<HostSession, "parseCredentialFile" | "portableIdentityMetadata" | "enroll">>, credentialFileBytes(args.bytes), credentialOrigin, passphrase, credentialFetch);
       return { id, ok: true, value: undefined };
     }
     if (command === "prepare_attachment") return { id, ok: true, value: await addAttachmentPreview(session, await prepareAttachment(session, args)) };
@@ -344,7 +337,6 @@ export class BrowserWorkerHost {
   private unsubscribeNetwork?: () => void;
   private presenter?: BannerPresenter;
   private presentationPort?: BrowserPort;
-  private readonly credentialExports = new Map<BrowserPort, Map<string, ReturnType<typeof setTimeout>>>();
 
   public constructor(private readonly dependencies: BrowserHostDependencies) {}
 
@@ -379,7 +371,6 @@ export class BrowserWorkerHost {
       try { await this.dependencies.network?.stop(); } catch {}
       this.unsubscribeNetwork?.();
       this.presenter?.clear();
-      this.releaseCredentialExports();
       this.owner?.owner.shutdown();
       try { await this.owner?.owner.drain?.(); } catch {}
       acknowledge?.();
@@ -412,23 +403,10 @@ export class BrowserWorkerHost {
       return;
     }
     if (validRequest(request) && request.command === "disconnect") {
-      this.releaseCredentialExports(port);
       this.ports.delete(port);
       if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
       port.postMessage({ event: "stopped", reason: "disconnected" });
       port.close();
-      return;
-    }
-    if (validRequest(request) && request.command === "release_exported_credential") {
-      const url = request.args.url;
-      if (typeof url !== "string") { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      this.releaseCredentialExport(port, url);
-      port.postMessage({ id: request.id, ok: true, value: undefined });
-      return;
-    }
-    if (validRequest(request) && request.command === "export_credentials") {
-      const response = await this.exportCredential(port, request.id);
-      port.postMessage(response);
       return;
     }
     if (validRequest(request) && request.command === "set_notification_context") {
@@ -452,20 +430,25 @@ export class BrowserWorkerHost {
       try { await this.dependencies.network.unlockNewEpoch(passphrase); port.postMessage({ id: request.id, ok: true, value: undefined }); this.changed(); this.dependencies.network.wake?.(); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
-    if (validRequest(request) && request.command.startsWith("join_")) {
-      const response = await this.join(request);
+    if (validRequest(request) && request.command.startsWith("enrollment_")) {
+      const response = await this.enrollment(request);
       port.postMessage(response);
-      if (response.ok) this.changed();
+      if (response.ok && ENROLLMENT_MUTATIONS.has(request.command)) {
+        this.changed();
+        if (ENROLLMENT_ACTIVATIONS.has(request.command) && this.owner.owner.phase === "ready" && isReadyEnrollmentView(response.value)) {
+          await this.dependencies.network?.start();
+        }
+      }
       if (this.owner.owner.phase === "closed") await this.stop("closed");
       return;
     }
     const generation = this.owner.owner.generation;
     const command = validRequest(request) ? request.command : undefined;
-    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.dependencies.credentialOrigin, this.dependencies.credentialFetch);
+    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher);
     if (response.ok && command === "load_state" && this.dependencies.network?.epochStatus?.()) {
       const value = response.value;
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-        response = { ...response, value: { ...value as Record<string, unknown>, credentialExportAvailable: false, encryption: { ...(value as Record<string, unknown>).encryption as Record<string, unknown>, state: "mismatch" } } };
+        response = { ...response, value: { ...value as Record<string, unknown>, encryption: { ...(value as Record<string, unknown>).encryption as Record<string, unknown>, state: "mismatch" } } };
       }
     }
     port.postMessage(response);
@@ -473,9 +456,9 @@ export class BrowserWorkerHost {
       await this.stop("closed");
       return;
     }
-    if ((response.ok && command !== undefined && (INVOCATIONS[command]?.mutation || command === "unlock" || command === "import_credential_file" || command === "publish_attachment" || command === "retry_attachment")) || generation !== this.owner.owner.generation) {
+    if ((response.ok && command !== undefined && (INVOCATIONS[command]?.mutation || command === "unlock" || command === "publish_attachment" || command === "retry_attachment")) || generation !== this.owner.owner.generation) {
       this.changed();
-      if (command === "unlock" || command === "import_credential_file") await this.dependencies.network?.start();
+      if (command === "unlock") await this.dependencies.network?.start();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment") this.dependencies.network?.wake?.();
     }
@@ -492,58 +475,36 @@ export class BrowserWorkerHost {
 
   private drainPresentation(): void { void this.presenter?.drain().catch(() => undefined); }
 
-  private async join(request: RpcRequest): Promise<RpcResponse> {
+  private async enrollment(request: RpcRequest): Promise<RpcResponse> {
     const network = this.dependencies.network;
     if (!network) return { id: request.id, ok: false, error: { code: "unavailable", message: "Browser operation failed." } };
     try {
-      const value = request.command === "join_start" ? await network.joinStart()
-        : request.command === "join_status" ? await network.joinPoll()
-          : request.command === "join_cancel" ? (network.joinCancel(), { state: "idle" })
-            : request.command === "join_confirm" ? await confirmJoin(network, request.args)
-              : undefined;
-      if (!value || request.command === "join_confirm" && !secretString(request.args, "passphrase")) throw { code: "invalid-request" };
-      if (request.command === "join_confirm" && value.state === "approved") await network.start();
+      const setupToken = secretString(request.args, "setupToken");
+      const adminPassword = secretString(request.args, "adminPassword");
+      const csrf = secretString(request.args, "csrf");
+      const passphrase = secretString(request.args, "passphrase");
+      const method = request.args.method;
+      const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
+       : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase })
+          : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "")
+            : request.command === "enrollment_set_hosted_csrf" && csrf ? (await network.enrollmentSetHostedCsrf(csrf), undefined)
+            : request.command === "enrollment_connect_shared_secret" && passphrase ? await network.enrollmentConnectSharedSecret(passphrase)
+              : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
+                : request.command === "enrollment_status" ? await network.enrollmentStatus()
+                  : request.command === "enrollment_approve" && passphrase ? await network.enrollmentApprove(passphrase)
+                    : request.command === "enrollment_cancel" ? (await network.enrollmentCancel(), undefined)
+        : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
+                        : request.command === "enrollment_generate_secret" ? { passphrase: await network.enrollmentGenerateSecret() }
+                          : request.command === "enrollment_management" ? await network.enrollmentManagement()
+                            : request.command === "enrollment_revoke_device" && typeof request.args.deviceId === "string" ? await network.enrollmentRevokeDevice(request.args.deviceId)
+                          : undefined;
+      if (value === undefined && request.command !== "enrollment_cancel" && request.command !== "enrollment_sign_out") throw { code: "invalid-request" };
       return { id: request.id, ok: true, value };
     } catch (error: unknown) { return { id: request.id, ok: false, error: errorFor(error) }; }
   }
 
   private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
 
-  private async exportCredential(port: BrowserPort, id: number): Promise<RpcResponse> {
-    try {
-      if (!this.owner || this.stopping || this.owner.owner.phase !== "ready" || !this.owner.owner.exportCredential) throw { code: "credentials-required" };
-      const exported = await this.owner.owner.exportCredential();
-      if (this.stopping || !this.ports.has(port) || this.owner.owner.phase !== "ready") throw { code: "locked" };
-      if (exported.filename !== CREDENTIAL_EXPORT_FILENAME) throw { code: "core" };
-      const payload = new Uint8Array(exported.bytes.byteLength);
-      payload.set(exported.bytes);
-      const url = URL.createObjectURL(new Blob([payload.buffer], { type: "application/json" }));
-      payload.fill(0);
-      this.trackCredentialExport(port, url);
-      return { id, ok: true, value: { url, filename: CREDENTIAL_EXPORT_FILENAME } };
-    } catch (error: unknown) { return { id, ok: false, error: errorFor(error) }; }
-  }
-
-  private trackCredentialExport(port: BrowserPort, url: string): void {
-    const exports = this.credentialExports.get(port) ?? new Map<string, ReturnType<typeof setTimeout>>();
-    this.credentialExports.set(port, exports);
-    exports.set(url, setTimeout(() => this.releaseCredentialExport(port, url), CREDENTIAL_EXPORT_TTL_MS));
-  }
-
-  private releaseCredentialExport(port: BrowserPort, url: string): void {
-    const exports = this.credentialExports.get(port);
-    const timer = exports?.get(url);
-    if (timer === undefined) return;
-    clearTimeout(timer);
-    exports?.delete(url);
-    if (exports?.size === 0) this.credentialExports.delete(port);
-    URL.revokeObjectURL(url);
-  }
-
-  private releaseCredentialExports(port?: BrowserPort): void {
-    const ports = port ? [port] : [...this.credentialExports.keys()];
-    for (const owner of ports) for (const url of this.credentialExports.get(owner)?.keys() ?? []) this.releaseCredentialExport(owner, url);
-  }
 }
 
 function notificationContext(args: Record<string, unknown>): BannerContext | undefined {
@@ -554,17 +515,25 @@ function notificationContext(args: Record<string, unknown>): BannerContext | und
   return { view: args.view, ...(typeof args.conversationId === "string" ? { conversationId: args.conversationId } : {}), ...(typeof args.notificationPermission === "string" ? { notificationPermission: args.notificationPermission } : {}), ...(typeof args.focused === "boolean" ? { focused: args.focused } : {}) };
 }
 
-async function confirmJoin(network: BrowserNetwork, args: Record<string, unknown>): Promise<JoinView> {
-  const passphrase = secretString(args, "passphrase");
-  if (!passphrase) throw { code: "invalid-request" };
-  return network.joinConfirm(passphrase);
-}
 
 export async function loadBrowserCore(): Promise<EmscriptenCoreModule> {
   const coreEntrypoint = "/core/peppy-browser-core.js";
   const module = await import(/* @vite-ignore */ coreEntrypoint) as { default?: (options: { locateFile(file: string): string }) => Promise<EmscriptenCoreModule> };
   if (!module.default) throw new Error("Browser core is unavailable");
   return module.default({ locateFile: file => file.endsWith(".wasm") ? "/core/peppy_browser_core.wasm" : `/core/${file}` });
+}
+
+async function browserOrigins(): Promise<{ logicalOrigin: string; fetchBase: string }> {
+  const fetchBase = self.location.origin;
+  try {
+    const response = await fetch("/web/config.json", { credentials: "omit" });
+    if (!response.ok) return { logicalOrigin: fetchBase, fetchBase };
+    const config: unknown = await response.json();
+    const apiOrigin = typeof config === "object" && config !== null ? (config as { apiOrigin?: unknown }).apiOrigin : undefined;
+    const parsed = typeof apiOrigin === "string" ? new URL(apiOrigin) : undefined;
+    if (!parsed || parsed.protocol !== "https:" || parsed.username || parsed.password) return { logicalOrigin: fetchBase, fetchBase };
+    return { logicalOrigin: parsed.origin, fetchBase };
+  } catch { return { logicalOrigin: fetchBase, fetchBase }; }
 }
 
 export function browserHostDependencies(locks: OwnerLockManager | undefined, terminate: () => void): BrowserHostDependencies {
@@ -609,17 +578,27 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
       stop: stopNetwork,
       subscribeChanges(listener) { changeListeners.add(listener); return () => changeListeners.delete(listener); },
-      async joinStart() { return enrollment?.start() ?? { state: "failed", errorCode: "unavailable" }; },
-      async joinPoll() { return enrollment?.poll() ?? { state: "failed", errorCode: "unavailable" }; },
-      joinCancel() { enrollment?.cancel(); },
-      async joinConfirm(passphrase: string) { return enrollment?.confirm(passphrase) ?? { state: "failed", errorCode: "unavailable" }; },
+      async enrollmentDiscover(origin) { return enrollment?.discover(origin) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+      async enrollmentCreateOwner(secrets) { return enrollment?.createOwner(secrets) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentSignIn(adminPassword) { return enrollment?.signIn(adminPassword) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentSetHostedCsrf(csrf) { enrollment?.setHostedCsrf(csrf); },
+      async enrollmentConnectSharedSecret(passphrase) { return enrollment?.connectSharedSecret(passphrase) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+      async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+      async enrollmentStatus() { return enrollment?.status() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+      async enrollmentApprove(passphrase) { return enrollment?.approve(passphrase) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+      async enrollmentCancel() { await enrollment?.cancel(); },
+      async enrollmentSignOut() { await enrollment?.signOut(); },
+      async enrollmentGenerateSecret() { if (!enrollment) throw { code: "unavailable" }; return enrollment.generateSecret(); },
+      async enrollmentManagement() { if (!enrollment) throw { code: "unavailable" }; return enrollment.management(); },
+      async enrollmentRevokeDevice(deviceId) { if (!enrollment) throw { code: "unavailable" }; return enrollment.revokeDevice(deviceId); },
     },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
       const core = new BrowserCore(() => modulePromise);
       const module = await modulePromise as EmscriptenCoreModule & { FS: EmscriptenFilesystem };
-      const session = await BrowserSession.boot({ origin: self.location.origin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), onFatal });
-      enrollment = new BrowserEnrollment(core, self.location.origin, (metadata, deviceToken, passphrase, signal) => session.enroll(metadata, deviceToken, passphrase, signal));
+      const origins = await browserOrigins();
+      const session = await BrowserSession.boot({ origin: origins.logicalOrigin, core, filesystem: module.FS, checkpoint: new IndexedDbCheckpointStore(OWNER_NAME), onFatal });
+        enrollment = new BrowserEnrollment(core, session, origins.logicalOrigin, undefined, origins.fetchBase);
       publicTransport = new OriginTransport({ origin: self.location.origin, deviceToken: () => session.tokenForTransport() });
       scheduler = new BrowserScheduler(
         session,
@@ -636,6 +615,5 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
         return publicTransport.postPublicCopy(path, bytes, request);
       },
     },
-    credentialOrigin: self.location.origin,
   };
 }

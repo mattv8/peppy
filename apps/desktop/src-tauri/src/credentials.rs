@@ -20,6 +20,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(test)]
 pub use peppy_hosted_client::device_credentials::MAX_CREDENTIAL_BYTES;
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
@@ -94,6 +95,7 @@ fn portable_import_error(error: PortableCredentialError) -> BridgeError {
     }
 }
 
+#[allow(dead_code)]
 pub fn serialize_credential(credential: &ImportedCredential) -> BridgeResult<Zeroizing<Vec<u8>>> {
     let portable = peppy_hosted_client::device_credentials::PortableDeviceCredential::new(
         credential.origin.clone(),
@@ -103,18 +105,6 @@ pub fn serialize_credential(credential: &ImportedCredential) -> BridgeResult<Zer
     )
     .map_err(portable_import_error)?;
     serialize_portable_credential(&portable).map_err(portable_import_error)
-}
-
-/// Reads at most `MAX_CREDENTIAL_BYTES + 1` bytes so oversized files are rejected without
-/// loading them.
-pub fn read_credential_file(path: &Path) -> BridgeResult<Zeroizing<Vec<u8>>> {
-    let file = fs::File::open(path)
-        .map_err(|_| import_error("Could not read the selected credential file."))?;
-    let mut bytes = Zeroizing::new(Vec::new());
-    file.take(MAX_CREDENTIAL_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| import_error("Could not read the selected credential file."))?;
-    Ok(bytes)
 }
 
 /// The identity a credential, database key, key cache and local database are bound to.

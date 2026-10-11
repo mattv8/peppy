@@ -11,7 +11,7 @@ export type MessageView = { id: string; revision: string; sender: "self" | "othe
 export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; participants?: string[]; replyBlockedReason?: string };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
-export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; credentialExportAvailable?: boolean; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
+export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type SendDraftInput = DraftInput & { gatewayId: string; simId: string };
@@ -45,11 +45,19 @@ export type ResolvedContact = { contactId: string; bookId: string; displayName: 
 export type ContactResolutionMap = Record<string, ResolvedContact>;
 /** `currentRevision` is set when the stored draft revision is known (stale saves/sends, refused sends). */
 export type BridgeError = { code: string; message: string; currentRevision?: string };
-/** Public pairing intent data only; credentials and challenge tokens stay native. */
-export type PairingIntent = { httpsOrigin: string; intentToken: string; expiresInSeconds: number };
-export type PairingStatus = { claimed: boolean; approved: boolean; deviceId?: string; keyDigest?: string; sas?: string; expiresInSeconds: number };
 export type HostedAccountView = { available: boolean; signedIn: boolean; accountLabel: string | null; classification: "new" | "pending" | "incomplete" | "provisioning" | "existing" | "lapsed" | null; entitlement: string | null; access: "read_write" | "read_only" | null; hasVault: boolean; resumable: boolean };
-export type JoinView = { state: "idle" | "waiting" | "claimed" | "confirm" | "approved" | "expired" | "denied" | "failed"; qrPayload?: string; expiresInSeconds?: number; sas?: string; origin?: string; errorCode?: string };
+/** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
+export type EnrollmentView = {
+  mode: "community" | "hosted";
+  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
+  origin?: string;
+  owner?: boolean;
+  hasGateway?: boolean;
+  qrPayload?: string;
+  verificationCode?: string;
+  expiresInSeconds?: number;
+  errorCode?: string;
+};
 export type HostedPreviewView = {
   scenario: string; screen: string; accountState: string; entitlementState: string;
   approvalState: string; unlocked: boolean; rejected: boolean;
@@ -57,18 +65,18 @@ export type HostedPreviewView = {
   fixture: { accountLabel: string | null; signInProvider: "apple" | "google" | null; subscription: { displayPrice: string; status: string } | null; approvalCode: string | null; hostedOrigin: string | null };
   scenarios: string[];
 };
+/** App-open password state; no password or verifier crosses this boundary. */
+export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
 
 export interface DesktopBridge {
   load_state(conversationId?: string): Promise<DesktopSnapshot>;
   configure_server(origin: string): Promise<void>;
-  import_credentials(): Promise<void>;
-  export_credentials(): Promise<boolean>;
   unlock_sync(): Promise<void>;
+  get_app_lock_status(): Promise<AppLockStatus>;
+  set_app_lock(enabled: boolean): Promise<boolean>;
+  unlock_app(): Promise<boolean>;
   /** Browser-only capability for locking a shared encrypted session. */
   lock_sync?(): Promise<void>;
-  create_pairing_intent(): Promise<PairingIntent>;
-  pairing_intent_status(intentToken: string): Promise<PairingStatus>;
-  approve_pairing_intent(intentToken: string, keyDigest: string): Promise<void>;
   save_draft(input: DraftInput): Promise<Draft>;
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
   send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: MessageStatus; reason?: string; revision?: string }>;
@@ -113,9 +121,14 @@ export interface DesktopBridge {
   hosted_sign_out(): Promise<void>;
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
-  join_start(origin: string | null): Promise<JoinView>;
-  join_status(): Promise<JoinView>;
-  join_cancel(): Promise<void>;
-  join_confirm(): Promise<JoinView>;
+  enrollment_discover(origin?: string): Promise<EnrollmentView>;
+  enrollment_create_owner(): Promise<EnrollmentView>;
+  enrollment_sign_in(): Promise<EnrollmentView>;
+  enrollment_connect_shared_secret(): Promise<EnrollmentView>;
+  enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
+  enrollment_status(): Promise<EnrollmentView>;
+  enrollment_approve(): Promise<EnrollmentView>;
+  enrollment_cancel(): Promise<void>;
+  enrollment_sign_out(): Promise<void>;
 
 }

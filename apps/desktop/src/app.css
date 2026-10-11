@@ -805,3 +805,34 @@ html[data-window-rounded="false"] #composer-shell,
 .settings-disclosure[open] > :not(summary) {
   margin: 0 8px 8px;
 }
+
+.app-lock-screen {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 24px;
+  box-sizing: border-box;
+  background: var(--peppy-surface-panel);
+}
+
+.app-lock-card {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  width: min(360px, 100%);
+  padding: 24px;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-radius-md, 8px);
+  background: var(--peppy-surface-panel);
+  box-shadow: var(--peppy-shadow-2);
+}
+
+.app-lock-card h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.app-lock-card p {
+  margin: 0;
+  font-size: 13px;
+}

@@ -192,8 +192,8 @@ existing `data-settings-section` values.
 
 Each card shows its summary. Common controls stay directly usable. Secondary
 controls sit behind disclosure. The existing Change server disclosure stays in
-Server. Credential import and export are separate collapsed `details` under
-Advanced. There is no settings search.
+Server. There is no settings search. Do not add settings QR, QR-save,
+credential-file onboarding, or credential export controls.
 
 Rules for disclosure:
 
@@ -207,9 +207,36 @@ Rules for disclosure:
 - On submit, reveal validation errors before focusing a hidden field. Known host
   errors focus only their matching field (for example, `The birthday is invalid.`);
   ambiguous edit errors reveal populated groups without moving focus.
-- Setup keeps its existing progressive flow and fixed copy. Restyle it only.
+- Setup follows the discovered deployment mode and enrollment state. Do not
+  route a community browser into hosted identity sign-in because an outer UI
+  preference defaults to Hosted.
 - Composer and notifications keep their existing progressive behavior. Do not
   add speculative features.
+
+### Enrollment UI
+
+- The main **Add phone** flow is a single sequence: choose transfer or shared
+  secret, show one `connect_phone` QR, show the SAS after the phone claims, then
+  require the owner's explicit SAS checkbox before approval. The QR is not a
+  credential or approval and has no Save action. Keep the stable stage and QR
+  hooks in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
+- Native desktop requests the setup code, admin password, and vault shared
+  secret in separate native secure prompts. App-lock credentials remain a
+  separate native gate. Browser-hosted secret prompts are DOM controls by
+  design: they remain accessible to same-origin JavaScript and must not be
+  described as native secure controls. Keep their values outside shared React
+  snapshots and clear their fields after use. See
+  [native enrollment](../apps/desktop/src-tauri/src/enrollment.rs),
+  [native app lock](../apps/desktop/src-tauri/src/app_lock.rs), and
+  [browser bridge](../apps/web/src/browser-bridge.ts).
+- Default optional local lock settings to off. A lock must protect local UI
+  access only; it does not replace account authorization, device credentials,
+  or the vault shared secret. Enabling applies on the next launch. Enforce the
+  lock in native command dispatch, sanitize snapshots, and suppress plaintext
+  notification/head presentation; a React overlay is not a security gate.
+- The web-only **Manage server** page uses authenticated community management
+  routes for device status/revocation and read-only storage/quota/retention
+  values. It contains no pairing QR or destructive database-reset controls.
 
 ## Windows, drafts, and layout
 

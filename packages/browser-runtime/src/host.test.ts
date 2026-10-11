@@ -47,82 +47,13 @@ function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): vo
 }
 
 describe("browser host RPC", () => {
-  it("does not forward private core commands", async () => {
+  it("does not forward private worker commands", async () => {
     const session = new FakeSession();
-    await expect(dispatchBrowserRpc(session, { id: 1, command: "_worker_transport_token", args: {} }))
-      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    for (const command of ["_worker_transport_token", "_worker_enrollment_finish_owner"]) {
+      await expect(dispatchBrowserRpc(session, { id: 1, command, args: {} }))
+        .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+    }
     expect(session.calls).toEqual([]);
-  });
-
-  it.each([
-    ["credential-origin-mismatch", "The credential belongs to a different server."],
-    ["credential-unsupported-version", "This credential file version is unsupported."],
-    ["credential-invalid-json", "The credential file is not valid JSON."],
-    ["credential-invalid-token", "The credential file has an invalid device token."],
-    ["credential-invalid-vault-id", "The credential file has an invalid vault ID."],
-    ["credential-invalid-device-id", "The credential file has an invalid device ID."],
-    ["credential-invalid-origin", "The credential file has an invalid server origin."],
-    ["credential-vault-mismatch", "The credential does not match the authenticated vault."],
-    ["credential-invalid-vault", "The authenticated vault response is invalid."],
-    ["credential-network", "The credential server is unavailable."],
-    ["credential-file-too-large", "The credential file is too large."],
-  ])("maps %s to a fixed useful credential-import message", async (code, message) => {
-    const session = new FakeSession();
-    session.mutate = async () => { throw { code, message: "secret server detail" }; };
-
-    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: {} } }))
-      .resolves.toEqual({ id: 1, ok: false, error: { code, message } });
-  });
-
-  it("exports credentials only as a per-port Blob capability and releases only owned URLs", async () => {
-    const originalCreate = URL.createObjectURL;
-    const originalRevoke = URL.revokeObjectURL;
-    const create = vi.fn(() => "blob:https://peppy.test/credential");
-    const revoke = vi.fn();
-    Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
-    try {
-      const session = new FakeSession();
-      (session as HostSession).exportCredential = async () => ({ filename: "peppy-credentials.json", bytes: new Uint8Array([1]) });
-      const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
-      const owner = port();
-      const other = port();
-      await host.attach(owner);
-      await host.attach(other);
-      owner.emit({ id: 1, command: "export_credentials", args: {} });
-      await eventually(() => owner.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
-      expect(owner.messages).toContainEqual({ id: 1, ok: true, value: { url: "blob:https://peppy.test/credential", filename: "peppy-credentials.json" } });
-      expect(revoke).not.toHaveBeenCalled();
-      other.emit({ id: 2, command: "release_exported_credential", args: { url: "blob:https://peppy.test/credential" } });
-      await eventually(() => other.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
-      expect(revoke).not.toHaveBeenCalled();
-      owner.emit({ id: 3, command: "release_exported_credential", args: { url: "blob:https://peppy.test/credential" } });
-      await eventually(() => revoke.mock.calls.length === 1);
-    } finally {
-      Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
-    }
-  });
-
-  it("expires a Worker-owned credential URL after five minutes", async () => {
-    const originalCreate = URL.createObjectURL;
-    const originalRevoke = URL.revokeObjectURL;
-    const revoke = vi.fn();
-    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:https://peppy.test/ttl"), revokeObjectURL: revoke });
-    vi.useFakeTimers();
-    try {
-      const session = new FakeSession();
-      (session as HostSession).exportCredential = async () => ({ filename: "peppy-credentials.json", bytes: new Uint8Array([1]) });
-      const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
-      const owner = port();
-      await host.attach(owner);
-      owner.emit({ id: 1, command: "export_credentials", args: {} });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(revoke).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(300_000);
-      expect(revoke).toHaveBeenCalledWith("blob:https://peppy.test/ttl");
-    } finally {
-      vi.useRealTimers();
-      Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
-    }
   });
 
   it.each([
@@ -149,7 +80,6 @@ describe("browser host RPC", () => {
         notifications: [],
         appFilters: [],
         notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
-        credentialExportAvailable: false,
       },
     });
     expect(JSON.stringify(response)).not.toContain("do-not-expose");
@@ -165,13 +95,6 @@ describe("browser host RPC", () => {
       { command: "contact_snapshot", args: { addresses: [] }, mutation: false },
       { command: "save_draft", args: { text: "hello" }, mutation: true },
     ]);
-  });
-
-  it("preserves Rust readiness instead of inferring export availability from a ready phase", async () => {
-    const session = new FakeSession();
-    session.snapshot = { credentialExportAvailable: false };
-    const response = await dispatchBrowserRpc(session, { id: 1, command: "load_state", args: {} });
-    expect(response).toMatchObject({ ok: true, value: { credentialExportAvailable: false } });
   });
 
   it("uses the Rust contact_snapshot address contract after loading the snapshot", async () => {
@@ -256,18 +179,17 @@ describe("browser host RPC", () => {
 
   it("overlays a pending epoch mismatch and routes a ready-session passphrase to manual rotation", async () => {
     const session = new FakeSession();
-    session.snapshot = { credentialExportAvailable: true };
     const unlockNewEpoch = vi.fn(async () => undefined);
     const network = {
-      start: async () => undefined, stop: async () => undefined, joinStart: async () => ({ state: "idle" as const }), joinPoll: async () => ({ state: "idle" as const }), joinCancel: () => undefined, joinConfirm: async () => ({ state: "idle" as const }),
+      start: async () => undefined, stop: async () => undefined,
       epochStatus: () => "needs-unlock" as const, unlockNewEpoch,
     };
-    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network });
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
     const attached = port();
     await host.attach(attached);
     attached.emit({ id: 1, command: "load_state", args: {} });
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
-    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ encryption: { state: "mismatch" }, credentialExportAvailable: false }) }));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ encryption: { state: "mismatch" } }) }));
     expect(session.phase).toBe("ready");
     attached.emit({ id: 2, command: "unlock", args: { passphrase: "manual-passphrase" } });
     await eventually(() => unlockNewEpoch.mock.calls.length === 1);
@@ -275,21 +197,166 @@ describe("browser host RPC", () => {
     expect(session.phase).toBe("ready");
   });
 
-  it("replies to a join cancellation before terminally stopping a closed session", async () => {
+  it.each([
+    "enrollment_discover",
+    "enrollment_status",
+    "enrollment_generate_secret",
+    "enrollment_management",
+  ])("does not broadcast or start sync after the read-only %s request", async command => {
     const session = new FakeSession();
+    const start = vi.fn(async () => undefined);
     const network = {
-      start: async () => undefined, stop: async () => undefined, joinStart: async () => ({ state: "idle" as const }), joinPoll: async () => ({ state: "idle" as const }),
-      joinCancel: () => { session.phase = "closed"; }, joinConfirm: async () => ({ state: "idle" as const }),
+      start,
+      stop: async () => undefined,
+      enrollmentDiscover: async () => ({ mode: "community" as const, stage: "ready" as const }),
+      enrollmentStatus: async () => ({ mode: "community" as const, stage: "ready" as const }),
+      enrollmentGenerateSecret: async () => "generated-passphrase",
+      enrollmentManagement: async () => ({ vault_id: "00000000-0000-0000-0000-000000000001", devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 }),
     };
-    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network });
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
     const attached = port();
     await host.attach(attached);
-    attached.emit({ id: 1, command: "join_cancel", args: {} });
+
+    attached.emit({ id: 1, command, args: {} });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).not.toContainEqual({ event: "changed" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("lets a subscribed UI reload enrollment and app state once after an enrollment mutation", async () => {
+    const session = new FakeSession();
+    session.snapshot = { version: "1", connection: { state: "connected" }, conversations: [] };
+    const network = {
+      start: async () => undefined,
+      stop: async () => undefined,
+      enrollmentAddPhone: async () => ({ mode: "community" as const, stage: "waiting_phone" as const }),
+      enrollmentStatus: async () => ({ mode: "community" as const, stage: "waiting_phone" as const }),
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    const originalPostMessage = attached.postMessage.bind(attached);
+    let changedEvents = 0;
+    attached.postMessage = message => {
+      originalPostMessage(message);
+      if (typeof message !== "object" || message === null || !("event" in message) || message.event !== "changed") return;
+      changedEvents += 1;
+      if (changedEvents <= 5) {
+        attached.emit({ id: 100 + changedEvents * 2, command: "enrollment_status", args: {} });
+        attached.emit({ id: 101 + changedEvents * 2, command: "load_state", args: {} });
+      }
+    };
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_add_phone", args: { method: "shared_secret" } });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 103));
+    expect(changedEvents).toBe(1);
+    expect(attached.messages).toContainEqual({
+      id: 103,
+      ok: true,
+      value: expect.objectContaining({ version: "1", connection: { state: "connected" } }),
+    });
+  });
+
+  it.each(["enrollment_create_owner", "enrollment_connect_shared_secret"])("starts sync when %s activates a ready session", async command => {
+    const session = new FakeSession();
+    session.phase = "unenrolled";
+    const start = vi.fn(async () => undefined);
+    const activate = async () => {
+      session.phase = "ready";
+      return { mode: "community" as const, stage: "ready" as const };
+    };
+    const network = {
+      start,
+      stop: async () => undefined,
+      enrollmentCreateOwner: activate,
+      enrollmentConnectSharedSecret: activate,
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command, args: { passphrase: "manual-passphrase" } });
+
+    await eventually(() => start.mock.calls.length === 1);
+    expect(attached.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("does not start sync when an activating enrollment mutation returns an error view", async () => {
+    const session = new FakeSession();
+    session.phase = "unenrolled";
+    const start = vi.fn(async () => undefined);
+    const network = {
+      start,
+      stop: async () => undefined,
+      enrollmentCreateOwner: async () => {
+        session.phase = "ready";
+        return { mode: "community" as const, stage: "error" as const, errorCode: "activation-failed" };
+      },
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_create_owner", args: { passphrase: "manual-passphrase" } });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true, value: expect.objectContaining({ stage: "error" }) }));
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("does not start sync or broadcast when an activating enrollment mutation fails", async () => {
+    const session = new FakeSession();
+    session.phase = "unenrolled";
+    const start = vi.fn(async () => undefined);
+    const network = {
+      start,
+      stop: async () => undefined,
+      enrollmentCreateOwner: async () => { throw new Error("failed activation"); },
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_create_owner", args: { passphrase: "manual-passphrase" } });
+
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false }));
+    expect(attached.messages).not.toContainEqual({ event: "changed" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("replies to enrollment cancellation before terminally stopping a closed session", async () => {
+    const session = new FakeSession();
+    const network = {
+      start: async () => undefined, stop: async () => undefined,
+      enrollmentCancel: async () => { session.phase = "closed"; },
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "enrollment_cancel", args: {} });
     await eventually(() => attached.closed);
     const reply = attached.messages.findIndex(message => typeof message === "object" && message !== null && "id" in message && message.id === 1);
     const stopped = attached.messages.findIndex(message => typeof message === "object" && message !== null && "event" in message && message.event === "stopped");
     expect(reply).toBeGreaterThanOrEqual(0);
     expect(stopped).toBeGreaterThan(reply);
+  });
+
+  it("routes management RPCs only through the browser network adapter", async () => {
+    const session = new FakeSession();
+    const enrollmentManagement = vi.fn(async () => ({ vault_id: "00000000-0000-0000-0000-000000000001", devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 }));
+    const enrollmentRevokeDevice = vi.fn(async () => ({ vault_id: "00000000-0000-0000-0000-000000000001", devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 }));
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => undefined, stop: async () => undefined, enrollmentManagement, enrollmentRevokeDevice } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "enrollment_management", args: {} });
+    attached.emit({ id: 2, command: "enrollment_revoke_device", args: { deviceId: "00000000-0000-0000-0000-000000000002" } });
+    await eventually(() => enrollmentRevokeDevice.mock.calls.length === 1);
+    expect(enrollmentManagement).toHaveBeenCalledOnce();
+    expect(enrollmentRevokeDevice).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000002");
+    expect(session.calls).toEqual([]);
   });
 
   it("fails closed when Web Locks are unavailable", async () => {

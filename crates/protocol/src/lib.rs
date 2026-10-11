@@ -1,6 +1,5 @@
 mod envelope;
 mod generate;
-mod pairing;
 mod v1;
 
 pub use envelope::{
@@ -10,8 +9,4 @@ pub use envelope::{
 };
 pub use generate::{
     GeneratedContracts, all_schema_references_resolve, generate_contracts, write_contracts,
-};
-pub use pairing::{
-    JoinRequestCreated, JoinRequestOffer, JoinRequestQr, JoinRequestState, JoinRequestStatus,
-    pairing_key_digest, pairing_proof_message, pairing_sas,
 };

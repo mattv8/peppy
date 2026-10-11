@@ -242,7 +242,8 @@ fn map_crypto_error(error: CryptoError) -> IdentityError {
         CryptoError::SurroundingWhitespace => IdentityError::InvalidPassphrase,
         CryptoError::UnsupportedSuite
         | CryptoError::InvalidProfile
-        | CryptoError::InvalidCiphertext => IdentityError::Invalid,
+        | CryptoError::InvalidCiphertext
+        | CryptoError::InvalidEnrollment => IdentityError::Invalid,
         CryptoError::OperationFailed | CryptoError::InvalidStream | CryptoError::Io => {
             IdentityError::Unavailable
         }
@@ -547,6 +548,10 @@ mod tests {
         );
         assert_eq!(
             map_crypto_error(CryptoError::InvalidProfile),
+            IdentityError::Invalid
+        );
+        assert_eq!(
+            map_crypto_error(CryptoError::InvalidEnrollment),
             IdentityError::Invalid
         );
         assert_eq!(
