@@ -15,10 +15,16 @@ class AndroidBackendTests(unittest.TestCase):
         command.write_text(f"#!/bin/sh\n{body}\n")
         command.chmod(0o755)
 
+    def copy_android_script(self, repo):
+        helper_directory = repo / "infra/dev"
+        helper_directory.mkdir(parents=True)
+        for name in ("android.sh", "dev_port.py", "dev_tls.py"):
+            shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
+        return helper_directory / "android.sh"
+
     def copy_script_with_fake_java_home(self, repo, fake_java_home):
-        script = repo / "infra/dev/android.sh"
-        script.parent.mkdir(parents=True)
-        source = (ROOT / "infra/dev/android.sh").read_text()
+        script = self.copy_android_script(repo)
+        source = script.read_text()
         script.write_text(source.replace("/usr/libexec/java_home", str(fake_java_home)))
         script.chmod(0o755)
         return script
@@ -244,9 +250,7 @@ class AndroidBackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "native repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script = self.copy_android_script(repo)
             bin_dir = temp / "bin"
             bin_dir.mkdir()
             sdk = temp / "sdk"
@@ -316,9 +320,7 @@ class AndroidBackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script = self.copy_android_script(repo)
             (repo / ".env").touch()
             bin_dir = temp / "bin"
             bin_dir.mkdir()
@@ -341,9 +343,7 @@ class AndroidBackendTests(unittest.TestCase):
             with self.subTest(wsl=wsl), tempfile.TemporaryDirectory() as temp:
                 temp = pathlib.Path(temp)
                 repo = temp / "repo"
-                script = repo / "infra/dev/android.sh"
-                script.parent.mkdir(parents=True)
-                shutil.copy(ROOT / "infra/dev/android.sh", script)
+                script = self.copy_android_script(repo)
                 (repo / ".env").touch()
                 bin_dir = temp / "bin"
                 bin_dir.mkdir()
@@ -363,9 +363,7 @@ class AndroidBackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script = self.copy_android_script(repo)
             bin_dir = temp / "bin"
             bin_dir.mkdir()
             calls = temp / "calls"
@@ -385,9 +383,7 @@ class AndroidBackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script = self.copy_android_script(repo)
             bin_dir = temp / "bin"
             bin_dir.mkdir()
             calls = temp / "calls"
@@ -405,9 +401,7 @@ class AndroidBackendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             temp = pathlib.Path(temp)
             repo = temp / "repo"
-            script = repo / "infra/dev/android.sh"
-            script.parent.mkdir(parents=True)
-            shutil.copy(ROOT / "infra/dev/android.sh", script)
+            script = self.copy_android_script(repo)
             bin_dir = temp / "bin"
             bin_dir.mkdir()
             calls = temp / "calls"

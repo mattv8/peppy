@@ -71,7 +71,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory)
             helper_directory = root / "infra/dev"
             helper_directory.mkdir(parents=True)
-            for name in ("dev-smoke.sh", "dev_port.py"):
+            for name in ("dev-smoke.sh", "dev_port.py", "dev_tls.py"):
                 shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
             tools = root / "tools"
             tools.mkdir()
@@ -219,6 +219,7 @@ class DevScriptTests(unittest.TestCase):
                 shutil.copy(ROOT / "infra/dev" / name, root / "infra/dev" / name)
             self.install_migration_controller(root)
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev/install-actions.py").write_text(
                 "from pathlib import Path\nPath(__import__('os').environ['PEPPY_ORDER']).open('a').write('setup\\n')\n"
@@ -248,6 +249,7 @@ class DevScriptTests(unittest.TestCase):
             shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
             self.install_migration_controller(root)
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             shutil.copy(ROOT / "justfile", root / "justfile")
             (root / "infra/dev/install-actions.py").write_text("from pathlib import Path\nPath(__import__('os').environ['PEPPY_ORDER']).open('a').write('setup\\n')\n")
             (root / ".env").write_text("synthetic=1\n")
@@ -281,6 +283,7 @@ class DevScriptTests(unittest.TestCase):
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev.sh", root / "infra/dev/dev.sh")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             (root / ".opencode/dev/android.env").write_text(
@@ -310,6 +313,7 @@ class DevScriptTests(unittest.TestCase):
             (root / ".opencode/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             sentinel, marker = root / "SENTINEL", root / "effects"
@@ -347,6 +351,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory); (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             helper = root / "infra/dev/android.sh"
@@ -368,6 +373,7 @@ class DevScriptTests(unittest.TestCase):
             root = Path(directory); (root / "infra/dev").mkdir(parents=True)
             shutil.copy(ROOT / "justfile", root / "justfile")
             shutil.copy(ROOT / "infra/dev/dev_port.py", root / "infra/dev/dev_port.py")
+            shutil.copy(ROOT / "infra/dev/dev_tls.py", root / "infra/dev/dev_tls.py")
             self.install_migration_controller(root)
             (root / ".env").write_text("synthetic=1\n")
             order = root / "order"; tools = root / "tools"; tools.mkdir()
