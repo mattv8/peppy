@@ -2118,6 +2118,13 @@ fn with_epoch(mut envelope: Value, epoch: u32, fingerprint: &str) -> Value {
 async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,1,$2,$3)")
+        .bind(server.vault)
+        .bind(&server.fingerprint)
+        .bind(URL_SAFE_NO_PAD.decode(admission_public_key(server.vault, 1)).unwrap())
+        .execute(&server.pool)
+        .await
+        .unwrap();
     let owner = server.owner_token.clone();
     let gateway = server.provision_device("gateway").await;
     let device = server.provision_device("device").await;

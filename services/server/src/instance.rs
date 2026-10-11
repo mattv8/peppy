@@ -1,7 +1,7 @@
 //! Self-host instance setup and administrator session primitives.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use libsodium_rs::crypto_pwhash::argon2id;
+use libsodium_rs::crypto_pwhash::{self, argon2id};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
@@ -28,7 +28,8 @@ pub fn password_hash(password: &str) -> Result<String, &'static str> {
 }
 
 pub fn password_matches(hash: &str, password: &str) -> bool {
-    validate_password(password).is_ok() && argon2id::pwhash_str_verify(hash, password.as_bytes())
+    validate_password(password).is_ok()
+        && crypto_pwhash::pwhash_str_verify(hash, password.as_bytes()).unwrap_or(false)
 }
 
 pub fn digest(value: &[u8]) -> [u8; 32] {
