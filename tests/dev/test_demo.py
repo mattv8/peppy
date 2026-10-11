@@ -93,9 +93,11 @@ class DemoTests(unittest.TestCase):
         self.assertIn("--no-deps", run)
         self.assertIn("PEPPY_WEB_CLIENT_ROOT=false", run)
 
-    def test_create_owner_uses_configured_target_binary(self):
+    def test_demo_uses_current_enrollment_commands_not_removed_owner_cli(self):
         source = (ROOT / "infra/dev/demo.py").read_text()
-        self.assertIn('[server_binary, "create-owner"]', source)
+        self.assertIn('[simulator_binary, "claim-owner"', source)
+        self.assertIn('[simulator_binary, "admit-gateway"', source)
+        self.assertNotIn('"create-owner"', source)
 
     def test_migration_uses_built_server_binary_not_cargo_run(self):
         source = (ROOT / "infra/dev/demo.py").read_text()

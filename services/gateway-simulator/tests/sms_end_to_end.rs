@@ -3,17 +3,18 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::*;
-use peppy_crypto::{create_vault_check_header, derive_root_key};
+use peppy_crypto::{
+    create_vault_check_header, derive_root_key, enrollment::derive_admission_keypair,
+};
 use peppy_gateway_simulator::{
     drain_media, effects_path, publish_capabilities, run_one_carrier_effect,
     run_one_carrier_effect_for_route, sync_http, upload_pending,
 };
-use peppy_protocol::pairing_proof_message;
 use peppy_server::api::{create_owner, router};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{fs, future::Future, path::PathBuf, time::Duration};
 use tempfile::TempDir;
@@ -117,28 +118,27 @@ impl Server {
             fingerprint,
         }
     }
-    async fn pair(&self, role: &str) -> Paired {
-        let key = SigningKey::from_bytes(&[9; 32]);
+    async fn enroll_fixture_device(&self, role: &str) -> Paired {
         let id = DeviceId::new();
-        let public =
-            json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-        let http = reqwest::Client::builder()
-            .timeout(NETWORK_TIMEOUT)
-            .build()
+        let token = format!("fixture-{id}");
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,'{}'::jsonb,$4,1)")
+            .bind(self.vault.0)
+            .bind(id.0)
+            .bind(role)
+            .bind(&self.fingerprint)
+            .execute(&self.pool)
+            .await
             .unwrap();
-        let challenge: Value = network("E01-pair-create", http.post(format!("{}/v1/pairing", self.url)).bearer_auth(&self.owner).json(&json!({"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"requested_role":role})).send()).await.unwrap().error_for_status().unwrap().json().await.unwrap();
-        let challenge_bytes: [u8; 32] = URL_SAFE_NO_PAD
-            .decode(challenge["challenge_token"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let proof =
-            pairing_proof_message(&challenge_bytes, self.vault, id, &self.fingerprint, 1, role);
-        let body: Value = network("E01-pair-consume", http.post(format!("{}/v1/pairing/consume", self.url)).json(&json!({"challenge_token":challenge["challenge_token"],"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())})).send()).await.unwrap().error_for_status().unwrap().json().await.unwrap();
-        Paired {
-            id,
-            token: body["device_token"].as_str().unwrap().into(),
-        }
+        sqlx::query(
+            "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
+        )
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(self.vault.0)
+        .bind(id.0)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        Paired { id, token }
     }
     async fn shutdown(self) {
         self.task.abort();
@@ -211,9 +211,9 @@ async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
     eprintln!("phase=E01 status=start");
     let server = Server::start().await;
     eprintln!("phase=E01 status=server_ready");
-    let desktop_p = server.pair("device").await;
-    eprintln!("phase=E01 status=desktop_paired");
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    eprintln!("phase=E01 status=desktop_enrolled");
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     eprintln!("phase=E01 status=ok");
 
@@ -461,8 +461,8 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
     let _guard = LOCK.lock().await;
     eprintln!("phase=EM01 status=start");
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-media", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-media", &server, gateway_p.id);
@@ -735,8 +735,8 @@ async fn simulator_resyncs_pruned_replay_without_executing_snapshot_commands() {
     let _guard = LOCK.lock().await;
     eprintln!("phase=ES01 status=start");
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-snapshot", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-snapshot", &server, gateway_p.id);
@@ -911,8 +911,8 @@ async fn simulator_resyncs_pruned_replay_without_executing_snapshot_commands() {
 async fn advertised_sim_route_is_discoverable_and_foreign_route_never_effects() {
     let _guard = LOCK.lock().await;
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-route", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-route", &server, gateway_p.id);
@@ -989,8 +989,8 @@ async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
     let _guard = LOCK.lock().await;
     eprintln!("phase=EROT01 status=start");
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-rotation", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-rotation", &server, gateway_p.id);
@@ -1040,11 +1040,14 @@ async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
     let fingerprint_two = profile_two.fingerprint().unwrap();
     let root_two = derive_root_key(ROTATED_PHRASE, &profile_two).unwrap();
     let header_two = create_vault_check_header(&root_two, profile_two.clone()).unwrap();
+    let admission_public_key =
+        URL_SAFE_NO_PAD.encode(derive_admission_keypair(&root_two).unwrap().public_key());
     let register = json!({
         "key_epoch": 2,
         "public_key_profile": profile_two,
         "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&header_two).unwrap()),
         "profile_fingerprint": fingerprint_two,
+        "admission_public_key": admission_public_key,
     });
     let http = reqwest::Client::builder()
         .timeout(NETWORK_TIMEOUT)

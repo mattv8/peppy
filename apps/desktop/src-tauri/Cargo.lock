@@ -3856,9 +3856,12 @@ dependencies = [
 name = "peppy-hosted-api"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "hex",
  "schemars 1.0.4",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
  "uuid",
 ]
 
@@ -3871,7 +3874,6 @@ dependencies = [
  "peppy-client-core",
  "peppy-crypto",
  "peppy-hosted-api",
- "peppy-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -3908,7 +3910,10 @@ dependencies = [
  "hex",
  "hmac",
  "ipnet",
+ "libsodium-rs",
+ "peppy-crypto",
  "peppy-domain",
+ "peppy-hosted-api",
  "peppy-protocol",
  "reqwest 0.12.24",
  "serde",

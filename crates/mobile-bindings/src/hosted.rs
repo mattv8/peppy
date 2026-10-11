@@ -48,13 +48,6 @@ pub struct NativeHostedProvisioningView {
     pub device_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct NativeJoinRequestQr {
-    pub https_origin: String,
-    pub join_request_id: String,
-    pub join_key: String,
-}
-
 #[derive(uniffi::Object)]
 pub struct NativeHostedProvisioning {
     inner: Mutex<hc::HostedProvisioning>,
@@ -64,42 +57,6 @@ impl fmt::Debug for NativeHostedProvisioning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativeHostedProvisioning").finish()
     }
-}
-
-// Join request functions (these already delegate to hc)
-
-#[uniffi::export]
-pub fn parse_join_request_qr(
-    payload: String,
-    allow_loopback_http: bool,
-) -> Result<NativeJoinRequestQr, MobileBindingsError> {
-    let qr = hc::parse_join_request_qr(&payload, allow_loopback_http).map_err(convert_error)?;
-    Ok(NativeJoinRequestQr {
-        https_origin: qr.https_origin,
-        join_request_id: qr.join_request_id.to_string(),
-        join_key: qr.join_key,
-    })
-}
-
-#[uniffi::export]
-pub fn seal_intent_token(
-    join_key_b64url: String,
-    intent_token: String,
-) -> Result<String, MobileBindingsError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    let join_key: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(join_key_b64url)
-        .map_err(|_| MobileBindingsError::InvalidRequest)?
-        .try_into()
-        .map_err(|_| MobileBindingsError::InvalidRequest)?;
-    let sealed = hc::seal_intent_token(&join_key, &intent_token).map_err(convert_error)?;
-    Ok(URL_SAFE_NO_PAD.encode(sealed))
-}
-
-#[uniffi::export]
-pub fn intent_digest_hex(intent_token: String) -> String {
-    hc::intent_digest_hex(&intent_token)
 }
 
 // Login and session request/parse functions
@@ -170,15 +127,6 @@ pub fn vault_profile_fingerprint(profile_json: String) -> Result<String, MobileB
     hc::vault_profile_fingerprint(profile_json).map_err(convert_error)
 }
 
-#[uniffi::export]
-pub fn pairing_intent_sas(
-    intent_token: String,
-    key_digest: String,
-    device_id: String,
-) -> Result<String, MobileBindingsError> {
-    hc::pairing_intent_sas(intent_token, key_digest, device_id).map_err(convert_error)
-}
-
 // Provisioning functions
 
 #[uniffi::export]
@@ -186,11 +134,39 @@ pub fn prepare_hosted_provisioning(
     origin: String,
     account_id: String,
     passphrase: String,
+    client_kind: NativeHostedClientKind,
+    device_name: String,
 ) -> Result<std::sync::Arc<NativeHostedProvisioning>, MobileBindingsError> {
-    let provisioning = hc::prepare(&origin, &account_id, &passphrase).map_err(convert_error)?;
+    let provisioning = hc::prepare(
+        &origin,
+        &account_id,
+        &passphrase,
+        client_kind.into(),
+        &device_name,
+    )
+    .map_err(convert_error)?;
     Ok(std::sync::Arc::new(NativeHostedProvisioning {
         inner: Mutex::new(provisioning),
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeHostedClientKind {
+    Browser,
+    Desktop,
+    Android,
+    Ios,
+}
+
+impl From<NativeHostedClientKind> for peppy_hosted_api::enrollment::ClientKind {
+    fn from(value: NativeHostedClientKind) -> Self {
+        match value {
+            NativeHostedClientKind::Browser => Self::Browser,
+            NativeHostedClientKind::Desktop => Self::Desktop,
+            NativeHostedClientKind::Android => Self::Android,
+            NativeHostedClientKind::Ios => Self::Ios,
+        }
+    }
 }
 
 #[uniffi::export]
@@ -298,9 +274,14 @@ mod tests {
     #[test]
     fn provisioning_material_unlocks_serializes_and_restores_without_plaintext() {
         let account = uuid::Uuid::new_v4().to_string();
-        let prepared =
-            prepare_hosted_provisioning(ORIGIN.into(), account.clone(), PASSPHRASE.into())
-                .expect("valid local preparation");
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            account.clone(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
         assert!(prepared.passphrase_matches(PASSPHRASE.into()).unwrap());
         assert!(
             !prepared
@@ -357,29 +338,16 @@ mod tests {
     }
 
     #[test]
-    fn owner_pairing_sas_validates_and_matches_protocol_vector() {
-        let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let digest = "4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0";
-        let device = "00000000-0000-0000-0000-000000000002";
-        assert_eq!(
-            pairing_intent_sas(token.into(), digest.into(), device.into()).unwrap(),
-            peppy_protocol::pairing_sas(
-                token,
-                digest,
-                peppy_client_core::DeviceId(uuid::Uuid::parse_str(device).unwrap())
-            )
-        );
-        assert!(pairing_intent_sas("not-a-token".into(), digest.into(), device.into()).is_err());
-        assert!(pairing_intent_sas(token.into(), "A".repeat(64), device.into()).is_err());
-        assert!(pairing_intent_sas(token.into(), digest.into(), format!("{{{device}}}")).is_err());
-    }
-
-    #[test]
     fn rejects_complete_response_with_wrong_operation_vault_device() {
         let account = uuid::Uuid::new_v4().to_string();
-        let prepared =
-            prepare_hosted_provisioning(ORIGIN.into(), account.clone(), PASSPHRASE.into())
-                .expect("valid local preparation");
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            account.clone(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
         let grant = format!("pgr_{}", "a".repeat(64));
         prepared
             .accept_grant(serde_json::json!({"grant": grant, "expires_in_seconds": 60}).to_string())
@@ -419,9 +387,14 @@ mod tests {
     #[test]
     fn rejects_checkpoint_origin_and_account_mismatch() {
         let account = uuid::Uuid::new_v4().to_string();
-        let prepared =
-            prepare_hosted_provisioning(ORIGIN.into(), account.clone(), PASSPHRASE.into())
-                .expect("valid local preparation");
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            account.clone(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
         let checkpoint = prepared.checkpoint().unwrap();
 
         // Wrong origin
@@ -448,9 +421,14 @@ mod tests {
     #[test]
     fn rejects_noncanonical_device_operation_vault_uuids() {
         let account = uuid::Uuid::new_v4().to_string();
-        let prepared =
-            prepare_hosted_provisioning(ORIGIN.into(), account.clone(), PASSPHRASE.into())
-                .expect("valid local preparation");
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            account.clone(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
         let checkpoint = prepared.checkpoint().unwrap();
 
         #[derive(serde::Deserialize, serde::Serialize)]
@@ -467,6 +445,10 @@ mod tests {
             header: peppy_crypto::VaultCheckHeader,
             profile_fingerprint: String,
             grant: Option<String>,
+            client_kind: peppy_hosted_api::enrollment::ClientKind,
+            device_name: String,
+            signing_seed: Vec<u8>,
+            admission_public_key: String,
         }
 
         let mut value: Checkpoint = serde_json::from_slice(&checkpoint).unwrap();
@@ -495,9 +477,14 @@ mod tests {
     #[test]
     fn rejects_tampered_profile_and_header() {
         let account = uuid::Uuid::new_v4().to_string();
-        let prepared =
-            prepare_hosted_provisioning(ORIGIN.into(), account.clone(), PASSPHRASE.into())
-                .expect("valid local preparation");
+        let prepared = prepare_hosted_provisioning(
+            ORIGIN.into(),
+            account.clone(),
+            PASSPHRASE.into(),
+            NativeHostedClientKind::Android,
+            "test device".into(),
+        )
+        .expect("valid local preparation");
         let checkpoint = prepared.checkpoint().unwrap();
 
         #[derive(serde::Deserialize, serde::Serialize)]
@@ -514,6 +501,10 @@ mod tests {
             header: peppy_crypto::VaultCheckHeader,
             profile_fingerprint: String,
             grant: Option<String>,
+            client_kind: peppy_hosted_api::enrollment::ClientKind,
+            device_name: String,
+            signing_seed: Vec<u8>,
+            admission_public_key: String,
         }
 
         let mut value: Checkpoint = serde_json::from_slice(&checkpoint).unwrap();

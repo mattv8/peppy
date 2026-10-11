@@ -68,8 +68,6 @@ import dev.peppy.mobile.ui.theme.PeppyTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
-import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,24 +83,6 @@ private val MMS_PERMISSIONS = arrayOf(Manifest.permission.READ_SMS, Manifest.per
 
 private fun granted(context: Context, permission: String) =
     context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
-
-/** Reads at most [CredentialParser.MAX_BYTES] + 1 bytes so oversized files are rejected unread. */
-private fun readBounded(context: Context, uri: Uri): ByteArray? = try {
-    context.contentResolver.openInputStream(uri)?.use { input ->
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(4096)
-        while (out.size() <= CredentialParser.MAX_BYTES) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            out.write(buffer, 0, read)
-        }
-        out.toByteArray()
-    }
-} catch (_: IOException) {
-    null
-} catch (_: SecurityException) {
-    null
-}
 
 internal fun importMessage(result: ImportResult): String = when (result) {
     ImportResult.IMPORTED -> "Credential verified for this gateway device. Unlock with the vault passphrase next."
@@ -145,8 +125,6 @@ private fun CompanionScreen() {
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<GatewayStatus?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
-    var importBusy by remember { mutableStateOf(false) }
-    var importResult by remember { mutableStateOf<ImportResult?>(null) }
     var unlockBusy by remember { mutableStateOf(false) }
     var unlockResult by remember { mutableStateOf<UnlockResult?>(null) }
     var passphrase by remember { mutableStateOf("") }
@@ -162,17 +140,6 @@ private fun CompanionScreen() {
         status = current
     }
 
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        importBusy = true
-        scope.launch {
-            importResult = withContext(Dispatchers.IO) {
-                readBounded(context, uri)?.let { NativeGateway.importCredential(context, it) } ?: ImportResult.INVALID_CREDENTIAL
-            }
-            importBusy = false
-            refresh++
-        }
-    }
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         refresh++
         if (status?.sharedKeysReady == true) GatewayWork.enqueue(context)
@@ -187,10 +154,11 @@ private fun CompanionScreen() {
         refresh++
     }
 
-    if (welcomeDestination.isPairing) {
-        PairingScreen(
-            onDismiss = { welcomeDestination = pairingCancellationDestination(welcomeDestination) },
-            onFinished = {
+    if (welcomeDestination == WelcomeDestination.HOSTED_PAIRING && status?.enrolled == false) {
+        EnrollmentScreen(
+            initialOrigin = HostedAccountClient.ORIGIN,
+            onDismiss = { welcomeDestination = WelcomeDestination.HOSTED_ENROLLMENT },
+            onEnrolled = {
                 welcomeDestination = WelcomeDestination.HOSTED
                 refresh++
             },
@@ -206,7 +174,14 @@ private fun CompanionScreen() {
         HostedEnrollmentScreen(
             onDismiss = { welcomeDestination = WelcomeDestination.HOSTED },
             onEnrolled = { welcomeDestination = WelcomeDestination.HOSTED; refresh++ },
-            onPairExisting = { welcomeDestination = WelcomeDestination.HOSTED_PAIRING },
+            onEnrollExisting = { welcomeDestination = WelcomeDestination.HOSTED_PAIRING },
+        )
+        return
+    }
+    if (welcomeDestination == WelcomeDestination.SELF_HOSTED_ENROLLMENT && status?.enrolled == false) {
+        EnrollmentScreen(
+            onDismiss = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
+            onEnrolled = { welcomeDestination = WelcomeDestination.HOSTED; refresh++ },
         )
         return
     }
@@ -247,13 +222,8 @@ private fun CompanionScreen() {
                     onSelectSelfHosted = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
                 )
                 WelcomeDestination.SELF_HOSTED -> SelfHostedSetupScreen(
-                    importBusy = importBusy,
-                    importResult = importResult,
                     onBack = { welcomeDestination = WelcomeDestination.HOSTED },
-                    onPair = { welcomeDestination = WelcomeDestination.SELF_HOSTED_PAIRING },
-                    onImport = {
-                        filePicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
-                    },
+                    onEnroll = { welcomeDestination = WelcomeDestination.SELF_HOSTED_ENROLLMENT },
                     onOpenGuide = {
                         context.startActivity(
                             android.content.Intent(
@@ -284,7 +254,7 @@ private fun CompanionScreen() {
             )
             BusyButton(
                 "unlock-button", "Unlock", unlockBusy,
-                enabled = !unlockBusy && !importBusy && status?.enrolled == true && passphrase.isNotEmpty(),
+                enabled = !unlockBusy && status?.enrolled == true && passphrase.isNotEmpty(),
             ) {
                 val attempt = passphrase
                 passphrase = ""

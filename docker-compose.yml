@@ -70,6 +70,8 @@ services:
       <<: *server-environment
       BIND_ADDR: 0.0.0.0:8080
       PEPPY_WEB_CLIENT_ROOT: ${WEB_UI_ENABLED:-true}
+      PEPPY_SETUP_TOKEN: ${PEPPY_SETUP_TOKEN:-}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -45,9 +45,11 @@ pub use mms::{
     MmsAcquisitionPart, MmsAcquisitionState, MmsContext, MmsReplyContext, MmsSource,
 };
 use peppy_crypto::FileKey;
+use peppy_crypto::enrollment::VerifiedHandoff;
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
-    derive_purpose_key, derive_root_key, encrypt, verify_vault_check_header,
+    derive_purpose_key, derive_root_key, encrypt, profile_fingerprint_bytes,
+    verify_vault_check_header,
 };
 pub use peppy_crypto::{KeyProfile, VaultCheckHeader};
 pub use peppy_domain::{
@@ -929,6 +931,78 @@ impl Client {
         )?;
         tx.commit()?;
         s.active_epoch = Some(active);
+        s.keys.insert(profile.key_epoch, keys);
+        recover_decoder_revision(
+            &s.conn,
+            &Ctx {
+                vault_id: s.config.vault_id,
+                device_id: s.config.device_id,
+                keys: &s.keys,
+                active_epoch: s.active_epoch,
+            },
+            profile.key_epoch,
+        )?;
+        seal_with_store(s)
+    }
+
+    /// Installs a context-anchored authenticated handoff. It deliberately does not accept
+    /// `NativeKeyCache`, which cannot establish enrollment bindings.
+    pub fn import_verified_handoff(&self, handoff: VerifiedHandoff) -> Result<(), Error> {
+        let (package, context) = handoff.into_parts();
+        let (root, profile, header) = package.into_parts();
+        if profile.vault_id != context.vault_id
+            || profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+            || header.profile != profile
+        {
+            return Err(Error::InvalidProfile);
+        }
+        verify_vault_check_header(&root, &profile, &header).map_err(|error| match error {
+            CryptoError::AuthenticationFailed => Error::WrongPassphrase,
+            CryptoError::InvalidProfile => Error::InvalidProfile,
+            _ => Error::Crypto,
+        })?;
+        let derive =
+            |purpose| derive_purpose_key(&root, &profile, purpose).map_err(|_| Error::Crypto);
+        let keys = EpochKeys {
+            fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
+            command: derive(KeyPurpose::Command)?,
+            event: derive(KeyPurpose::Event)?,
+            compaction: Some(derive(KeyPurpose::Compaction)?),
+            profile: profile.clone(),
+        };
+        let mut guard = self.lock()?;
+        let s = &mut *guard;
+        if profile.vault_id != s.config.vault_id.0 {
+            return Err(Error::InvalidProfile);
+        }
+        if context.device_id != s.config.device_id.0 {
+            return Err(Error::IdentityMismatch);
+        }
+        let tx = s
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        match pinned_profile(&tx, profile.key_epoch)? {
+            Some(pinned) if pinned != profile => return Err(Error::InvalidProfile),
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT INTO key_epoch_profiles(epoch,profile) VALUES(?,?)",
+                    params![profile.key_epoch, json(&profile)?],
+                )?;
+            }
+        }
+        let check = key_cache_check(&key_cache_bytes(&s.config, profile.key_epoch, &keys)?);
+        tx.execute(
+            "INSERT INTO key_cache_checks(epoch,check_value) VALUES(?,?) ON CONFLICT(epoch) DO UPDATE SET check_value=excluded.check_value",
+            params![profile.key_epoch, check.as_slice()],
+        )?;
+        if s.active_epoch.is_none() {
+            set_meta(&tx, "active_epoch", &profile.key_epoch.to_string())?;
+        }
+        tx.commit()?;
+        s.active_epoch.get_or_insert(profile.key_epoch);
         s.keys.insert(profile.key_epoch, keys);
         recover_decoder_revision(
             &s.conn,
@@ -5346,6 +5420,8 @@ fn to_i64(value: u64) -> Result<i64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peppy_crypto::enrollment::EnrollmentContext;
+    use uuid::Uuid;
 
     #[test]
     fn database_key_must_be_exactly_32_bytes() {
@@ -6952,5 +7028,223 @@ mod tests {
             client.import_native_key_cache(&NativeKeyCache::from_native_storage(malformed)),
             Err(Error::InvalidKeyCache)
         ));
+    }
+
+    const HANDOFF_PASSPHRASE: &str = "correct horse battery staple";
+
+    /// A handoff produced by real seal and open, with its root derived from `HANDOFF_PASSPHRASE`.
+    struct HandoffFixture {
+        context: EnrollmentContext,
+        handoff: VerifiedHandoff,
+        profile: KeyProfile,
+        header: VaultCheckHeader,
+    }
+
+    fn sealed_handoff_fixture(vault_id: Uuid, device_id: Uuid, key_epoch: u32) -> HandoffFixture {
+        use peppy_crypto::enrollment::{
+            EnrollmentPurpose, EnrollmentRole, HandoffRootPackage, TransferKeypair, open_handoff,
+            seal_handoff,
+        };
+        use peppy_crypto::{create_vault_check_header, derive_root_key, profile_fingerprint_bytes};
+
+        let profile = KeyProfile::new(vault_id, key_epoch).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Phone,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Gateway,
+        };
+        let package = HandoffRootPackage::new(root, profile.clone(), header.clone()).unwrap();
+        let encrypted = seal_handoff(&sender, &recipient.public_key(), &context, package).unwrap();
+        let handoff = open_handoff(&recipient, &sender.public_key(), &context, &encrypted).unwrap();
+        HandoffFixture {
+            context,
+            handoff,
+            profile,
+            header,
+        }
+    }
+
+    fn handoff_test_client(
+        directory: &tempfile::TempDir,
+        name: &str,
+        vault_id: VaultId,
+        device_id: DeviceId,
+    ) -> Client {
+        Client::open(
+            ClientConfig {
+                database_path: directory.path().join(name),
+                vault_id,
+                device_id,
+            },
+            DatabaseKey::new(&[42; 32]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Everything a failed handoff import must leave untouched: the durable key rows and
+    /// metadata, the in-memory key status, and whether the epoch's cache is exportable.
+    #[derive(Debug, PartialEq, Eq)]
+    struct KeyState {
+        profiles: Vec<(u32, String)>,
+        checks: Vec<(u32, Vec<u8>)>,
+        metadata: Vec<(String, String)>,
+        status: KeyStatus,
+        cache: Option<Vec<u8>>,
+    }
+
+    fn key_state(client: &Client, epoch: u32) -> KeyState {
+        let rows = {
+            let s = client.lock().unwrap();
+            let profiles = s
+                .conn
+                .prepare("SELECT epoch,profile FROM key_epoch_profiles ORDER BY epoch")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let checks = s
+                .conn
+                .prepare("SELECT epoch,check_value FROM key_cache_checks ORDER BY epoch")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let metadata = s
+                .conn
+                .prepare("SELECT k,v FROM metadata ORDER BY k")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (profiles, checks, metadata)
+        };
+        KeyState {
+            profiles: rows.0,
+            checks: rows.1,
+            metadata: rows.2,
+            status: client.key_status().unwrap(),
+            cache: client
+                .export_native_key_cache(epoch)
+                .ok()
+                .map(|cache| cache.native_storage_bytes().to_vec()),
+        }
+    }
+
+    #[test]
+    fn verified_handoff_requires_the_matching_header_profile_and_epoch() {
+        use peppy_crypto::derive_root_key;
+        use peppy_crypto::enrollment::derive_admission_keypair;
+        use peppy_crypto::enrollment::verify_admission_signature;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "handoff.db", vault_id, device_id);
+        let HandoffFixture {
+            context,
+            handoff,
+            profile,
+            ..
+        } = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        let verification_root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let admission_public_key = derive_admission_keypair(&verification_root)
+            .unwrap()
+            .public_key();
+        let signature = handoff.sign_admission_context(&context).unwrap();
+        assert!(verify_admission_signature(&admission_public_key, &context, &signature).unwrap());
+        let mut tampered_context = context.clone();
+        tampered_context.credential_digest[0] ^= 1;
+        assert!(handoff.sign_admission_context(&tampered_context).is_err());
+        client.import_verified_handoff(handoff).unwrap();
+        assert_eq!(client.key_status().unwrap().unlocked_epochs, vec![4]);
+    }
+
+    #[test]
+    fn verified_handoff_for_a_foreign_vault_is_rejected_without_changing_key_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "foreign.db", VaultId::new(), device_id);
+        let before = key_state(&client, 4);
+        let foreign = sealed_handoff_fixture(Uuid::new_v4(), device_id.0, 4);
+
+        assert!(matches!(
+            client.import_verified_handoff(foreign.handoff),
+            Err(Error::InvalidProfile)
+        ));
+
+        assert_eq!(key_state(&client, 4), before);
+        assert!(client.key_status().unwrap().unlocked_epochs.is_empty());
+        assert!(matches!(
+            client.unlock(&foreign.profile, &foreign.header, HANDOFF_PASSPHRASE),
+            Err(Error::InvalidProfile)
+        ));
+        assert_eq!(key_state(&client, 4), before);
+    }
+
+    #[test]
+    fn verified_handoff_conflicting_with_the_pinned_profile_leaves_no_trace() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "pinned.db", vault_id, device_id);
+        let pinned = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        client.import_verified_handoff(pinned.handoff).unwrap();
+        let before = key_state(&client, 4);
+        assert_eq!(before.status.unlocked_epochs, vec![4]);
+        assert!(before.cache.is_some());
+
+        // A new salt gives a different profile for the same vault and epoch.
+        let conflicting = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        assert_ne!(conflicting.profile, pinned.profile);
+
+        assert!(matches!(
+            client.import_verified_handoff(conflicting.handoff),
+            Err(Error::InvalidProfile)
+        ));
+
+        assert_eq!(key_state(&client, 4), before);
+        assert!(matches!(
+            client.unlock(
+                &conflicting.profile,
+                &conflicting.header,
+                HANDOFF_PASSPHRASE
+            ),
+            Err(Error::InvalidProfile)
+        ));
+        assert_eq!(key_state(&client, 4), before);
+    }
+
+    #[test]
+    fn verified_handoff_for_another_device_is_rejected_without_changing_key_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let client = handoff_test_client(&directory, "device.db", vault_id, DeviceId::new());
+        let before = key_state(&client, 4);
+        let other_device = sealed_handoff_fixture(vault_id.0, Uuid::new_v4(), 4);
+
+        assert!(matches!(
+            client.import_verified_handoff(other_device.handoff),
+            Err(Error::IdentityMismatch)
+        ));
+
+        assert_eq!(key_state(&client, 4), before);
+        assert!(client.key_status().unwrap().unlocked_epochs.is_empty());
     }
 }

@@ -34,16 +34,20 @@ class TrustedCore {
   public attachmentIds: string[] = [];
   public unlockFailure?: Error;
   public mutationFailure?: Error;
-  public exportResponse: unknown = { filename: "peppy-credentials.json", bytes: [1] };
+  public finishFailure?: Error;
+  public publicIdentity = { vaultId: id, deviceId: id, role: "owner", unlocked: true, epoch: "1" };
+  public readonly commands: string[] = [];
   public async invoke({ command }: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
+    this.commands.push(command);
+    if ((command === "_worker_enrollment_finish_owner" || command === "_worker_enrollment_finish_manual") && this.finishFailure) throw this.finishFailure;
     if (command === "_worker_unlock_identity" && this.unlockFailure) throw this.unlockFailure;
+    if (command === "_worker_enrollment_finish_owner" || command === "_worker_enrollment_finish_manual" || command === "_worker_unlock_identity" || command === "_worker_enroll_identity") return this.publicIdentity;
     if (command === "mutate" && this.mutationFailure) throw this.mutationFailure;
     if (command === "_worker_checkpoint_identity") return { wrappedIdentity: this.envelope };
     if (command === "_worker_local_attachment_ids") return { attachmentIds: this.attachmentIds };
     if (command === "_worker_transport_token") { this.tokenCalls++; return { deviceToken: "private-token" }; }
     if (command === "preview_attachment") return { previewUrl: "data:image/png;base64,cHJldmlldw==" };
     if (command === "_worker_rotate_identity") this.envelope = "rotated-envelope";
-    if (command === "_worker_export_credential") return this.exportResponse as CoreResult;
     return {};
   }
 }
@@ -89,23 +93,26 @@ describe("BrowserSession", () => {
     expect(core.tokenCalls).toBe(1);
   });
 
-  it("keeps credential helpers private to their valid lifecycle phases and validates export output", async () => {
+  it("finishes verified enrollment before checkpointing and never becomes ready when the Rust finish command rejects", async () => {
     const fs = new MemoryFs();
     const core = new TrustedCore();
     const session = await BrowserSession.boot(sessionOptions(core, fs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
-    await expect(session.exportCredential()).rejects.toMatchObject({ code: "not-ready" });
-    await expect(session.parseCredentialFile(new Uint8Array([1]))).rejects.toMatchObject({ code: "core-error" });
     fs.seedDatabase();
-    await session.enroll({}, "device-token", "passphrase");
-    core.exportResponse = { filename: "wrong.json", bytes: [1] };
-    await expect(session.exportCredential()).rejects.toMatchObject({ code: "core-error" });
-    const secondFs = new MemoryFs();
-    const secondCore = new TrustedCore();
-    const secondSession = await BrowserSession.boot(sessionOptions(secondCore, secondFs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
-    secondFs.seedDatabase();
-    await secondSession.enroll({}, "device-token", "passphrase");
-    secondCore.exportResponse = { filename: "peppy-credentials.json", bytes: [256] };
-    await expect(secondSession.exportCredential()).rejects.toMatchObject({ code: "core-error" });
+
+    await session.finishEnrollment("_worker_enrollment_finish_owner", "admission-response", "vault-secret");
+    expect(core.commands).toEqual(expect.arrayContaining(["_worker_enrollment_finish_owner", "_worker_checkpoint_identity", "_worker_transport_token"]));
+    expect(core.commands.indexOf("_worker_enrollment_finish_owner")).toBeLessThan(core.commands.indexOf("_worker_checkpoint_identity"));
+    expect(core.commands.indexOf("_worker_checkpoint_identity")).toBeLessThan(core.commands.indexOf("_worker_transport_token"));
+    expect(session.phase).toBe("ready");
+    expect(session.publicIdentity()).toEqual({ role: "owner" });
+
+    const failedFs = new MemoryFs();
+    const failedCore = new TrustedCore();
+    failedCore.finishFailure = new CoreRejectedError("invalid-request");
+    const failed = await BrowserSession.boot(sessionOptions(failedCore, failedFs, new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`)));
+    failedFs.seedDatabase();
+    await expect(failed.finishEnrollment("_worker_enrollment_finish_manual", "admission-response", "vault-secret")).rejects.toMatchObject({ code: "invalid-request" });
+    expect(failed.phase).toBe("unenrolled");
   });
 
   it("keeps an old checkpoint after a rejected unlock and permits a retry", async () => {

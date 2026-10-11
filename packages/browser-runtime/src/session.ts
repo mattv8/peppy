@@ -1,7 +1,6 @@
 import { type CheckpointInput, CheckpointError, IndexedDbCheckpointStore, SerializedRuntime } from "./checkpoint.js";
 import { BrowserCoreError, CoreRejectedError, type CoreResult } from "./core.js";
 import { captureFilesystemCheckpoint, hydrateCipher, restoreFilesystemCheckpoint, type EmscriptenFilesystem } from "./filesystem.js";
-import type { ParsedCredentialFile } from "./credential-files.js";
 
 const ROOT = "/peppy";
 const MAX_PLAINTEXT_MEDIA_BYTES = 32 * 1024 * 1024;
@@ -10,6 +9,7 @@ const MAX_PREVIEW_URL_BYTES = 2 * 1024 * 1024;
 const CIPHER_FILE = /^client\.db\.media\/cipher\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.ppss$/;
 
 export type BrowserSessionPhase = "unenrolled" | "locked" | "ready" | "closed";
+export type BrowserPublicIdentity = { role: "owner" | "device" | "gateway" };
 
 export class BrowserSessionError extends Error {
   public constructor(public readonly code: "busy" | "cancelled" | "not-ready" | "closed") {
@@ -35,6 +35,7 @@ export class BrowserSession {
   private files: readonly string[] = [];
   private wrappedIdentity?: string;
   private transportToken?: string;
+  private publicIdentityValue?: BrowserPublicIdentity;
   private lifecycleBusy = false;
   private fatalReported = false;
   private readonly previews = new Map<string, string>();
@@ -72,10 +73,12 @@ export class BrowserSession {
   public get phase(): BrowserSessionPhase { return this.phaseValue; }
   public get generation(): number { return this.generationValue; }
   public get signal(): AbortSignal { return this.lifetime.signal; }
+  public publicIdentity(): BrowserPublicIdentity | undefined { return this.publicIdentityValue ? { ...this.publicIdentityValue } : undefined; }
 
   public async enroll(metadata: unknown, deviceToken: string, passphrase: string, signal?: AbortSignal): Promise<void> {
     return this.lifecycle("unenrolled", signal, async () => {
-      await this.options.core.invoke({ command: "_worker_enroll_identity", args: { metadata, deviceToken, passphrase } });
+      const identity = await this.options.core.invoke({ command: "_worker_enroll_identity", args: { metadata, deviceToken, passphrase } });
+      this.publicIdentityValue = publicIdentity(identity);
       await this.commitCheckpoint();
       this.throwIfAborted(signal);
       await this.loadTransportToken();
@@ -84,40 +87,16 @@ export class BrowserSession {
     });
   }
 
-  /** Worker-private parse; the renderer never receives its token-bearing result. */
-  public async parseCredentialFile(bytes: Uint8Array): Promise<ParsedCredentialFile> {
-    this.requirePhase("unenrolled");
-    const value = await this.options.core.invoke({ command: "_worker_parse_credential_file", args: { bytes: [...bytes] } });
-    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
-    const parsed = value as Record<string, unknown>;
-    if (parsed.format === "legacy" && typeof parsed.deviceToken === "string" && "metadata" in parsed) {
-      return { format: "legacy", metadata: parsed.metadata, deviceToken: parsed.deviceToken };
-    }
-    if (parsed.format === "portable" && typeof parsed.deviceToken === "string") {
-      return { format: "portable", deviceToken: parsed.deviceToken };
-    }
-    throw new BrowserCoreError("core-error");
-  }
-
-  /** Rust verifies the fetched portable vault before returning token-free enrollment metadata. */
-  public async portableIdentityMetadata(bytes: Uint8Array, vault: Record<string, unknown>): Promise<unknown> {
-    this.requirePhase("unenrolled");
-    return this.options.core.invoke({ command: "_worker_portable_identity_metadata", args: { bytes: [...bytes], vault } });
-  }
-
-  /** Produces a Worker-only credential payload for a transient browser download capability. */
-  public async exportCredential(): Promise<{ filename: string; bytes: Uint8Array }> {
-    this.requireReady();
-    return this.runtime.read(async () => {
-      this.requireReady();
-      const value = await this.options.core.invoke({ command: "_worker_export_credential", args: {} });
-      this.requireReady();
-      if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
-      const output = value as Record<string, unknown>;
-      const bytes = output.bytes;
-      if (output.filename !== "peppy-credentials.json") throw new BrowserCoreError("core-error");
-      if (!Array.isArray(bytes) || bytes.length === 0 || bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) throw new BrowserCoreError("core-error");
-      return { filename: output.filename, bytes: Uint8Array.from(bytes) };
+  /** Completes a Rust-verified enrollment handoff without routing it through generic identity enrollment. */
+  public async finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string, signal?: AbortSignal): Promise<void> {
+    return this.lifecycle("unenrolled", signal, async () => {
+      const identity = await this.options.core.invoke({ command, args: { responseJson, passphrase } });
+      this.publicIdentityValue = publicIdentity(identity);
+      await this.commitCheckpoint();
+      this.throwIfAborted(signal);
+      await this.loadTransportToken();
+      this.throwIfAborted(signal);
+      this.phaseValue = "ready";
     });
   }
 
@@ -125,7 +104,8 @@ export class BrowserSession {
     return this.lifecycle("locked", signal, async () => {
       const wrappedIdentity = this.wrappedIdentity;
       if (!wrappedIdentity) throw new CheckpointError("invalid-checkpoint");
-      await this.options.core.invoke({ command: "_worker_unlock_identity", args: { wrappedIdentity, passphrase } });
+      const identity = await this.options.core.invoke({ command: "_worker_unlock_identity", args: { wrappedIdentity, passphrase } });
+      this.publicIdentityValue = publicIdentity(identity);
       await this.commitCheckpoint();
       this.throwIfAborted(signal);
       await this.loadTransportToken();
@@ -354,6 +334,7 @@ export class BrowserSession {
     if (this.phaseValue === "closed") return;
     this.phaseValue = "closed";
     this.transportToken = undefined;
+    this.publicIdentityValue = undefined;
     this.previews.clear();
     this.previewedIds.clear();
     this.lifetime.abort();
@@ -468,4 +449,11 @@ function decodeWrappedIdentity(bytes: Uint8Array): string {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new BrowserCoreError("core-error");
+}
+
+function publicIdentity(value: CoreResult): BrowserPublicIdentity {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
+  const role = (value as Record<string, unknown>).role;
+  if (role !== "owner" && role !== "device" && role !== "gateway") throw new BrowserCoreError("core-error");
+  return { role };
 }

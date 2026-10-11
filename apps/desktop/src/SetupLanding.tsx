@@ -1,16 +1,23 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
-import { bridge, type HostedAccountView, type JoinView } from "./bridge";
+import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy, type PeppyCopyKey } from "./generated/peppyCopy";
 import "./setup-landing.css";
 
 type Mode = "hosted" | "self-hosted";
 type HostedPath = "chooser" | "existing" | "new";
-type Route = "checking" | "chooser" | "existing" | "new" | "join" | "lapsed" | "billing" | "provisioning" | "passphrase";
+type Route = "checking" | "chooser" | "new" | "enrollment" | "lapsed" | "billing" | "provisioning" | "passphrase";
+type Method = "transfer" | "shared_secret";
+type Stage = EnrollmentView["stage"];
 
 const copy = (key: PeppyCopyKey) => peppyCopy[key];
-const joinStates = new Set<JoinView["state"]>(["waiting", "claimed", "confirm"]);
-const qrOptions = { errorCorrectionLevel: "M" as const, margin: 1, width: 256 };
+const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone"]);
+const pollIntervalMs = 4_000;
+const qrOptions = { errorCorrectionLevel: "M" as const, margin: 4, width: 512 };
+const methodHints: Record<Method, string> = {
+  transfer: "Approve only after the codes match. Your phone then receives this device's vault keys directly.",
+  shared_secret: "After scanning, your phone asks for the vault shared secret. Enter it there, then compare the codes.",
+};
 
 type SelfHostedUrlError = "setup_self_hosted_url_invalid" | "setup_self_hosted_url_credentials" | "setup_self_hosted_url_path" | "setup_self_hosted_url_https_required";
 type SelfHostedUrlCheck = { origin: string | null; error: SelfHostedUrlError | null };
@@ -38,12 +45,20 @@ function checkSelfHostedUrl(value: string): SelfHostedUrlCheck {
 
 export const savedSetupMode = (): Mode => window.localStorage.getItem("peppy.setup.mode") === "self-hosted" ? "self-hosted" : "hosted";
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, selfHostedFallback, onJoined, fixedOrigin, accountUrl }: {
+function Heading({ children }: { children: ReactNode }) {
+  return <h2 tabIndex={-1}>{children}</h2>;
+}
+
+function Stage({ stage, children }: { stage: Stage; children: ReactNode }) {
+  return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage}>{children}</div>;
+}
+
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, onExit, onJoined, fixedOrigin, accountUrl }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
-  pairPhone: ReactNode;
-  selfHostedFallback: ReactNode;
+  addingPhone?: boolean;
+  onExit?(): void;
   onJoined(): void;
   fixedOrigin?: string;
   accountUrl?: string;
@@ -53,66 +68,70 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
   const [accountError, setAccountError] = useState(false);
   const [signInError, setSignInError] = useState(false);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
-  const [join, setJoin] = useState<JoinView>({ state: "idle" });
+  const [view, setView] = useState<EnrollmentView | null>(null);
   const [qr, setQr] = useState("");
-  const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
-  const [selfHostedOrigin, setSelfHostedOrigin] = useState<string | null>(fixedOrigin ?? null);
-  const [selfHostedUrlBlurred, setSelfHostedUrlBlurred] = useState(false);
-  const [acknowledged, setAcknowledged] = useState(false);
+  const [method, setMethod] = useState<Method>("transfer");
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
   const [provisionError, setProvisionError] = useState(false);
-  const heading = useRef<HTMLHeadingElement>(null);
+  const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
+  const [connectedOrigin, setConnectedOrigin] = useState<string | null>(fixedOrigin ?? null);
+  const [selfHostedUrlBlurred, setSelfHostedUrlBlurred] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const choice = useRef<HTMLButtonElement>(null);
   const modeSelect = useRef<HTMLSelectElement>(null);
-  const confirmCheckbox = useRef<HTMLInputElement>(null);
+  const verifyCheckbox = useRef<HTMLInputElement>(null);
   const joined = useRef(false);
   const provisioning = useRef(false);
-  const autoJoinStarted = useRef(false);
-  const joinStarting = useRef(false);
-  const joinActive = useRef(false);
-  const joinEpoch = useRef(0);
+  const discoverStarted = useRef(false);
+  const fixedStarted = useRef(false);
+  const enrollEpoch = useRef(0);
   const accountFetchEpoch = useRef(0);
   const signInEpoch = useRef(0);
+  const enrollmentActive = useRef(false);
+  const stageRef = useRef<Stage | null>(null);
+  const retryRef = useRef<() => void>(() => undefined);
   const previousMode = useRef(mode);
   const previousRoute = useRef<Route | null>(null);
 
-  const invalidateJoin = () => { joinEpoch.current += 1; };
-  const resetJoin = (cancel = true) => {
-    invalidateJoin();
-    if (cancel && joinActive.current) void bridge.join_cancel();
-    joinActive.current = false;
-    joinStarting.current = false;
-    setJoin({ state: "idle" });
+  const community = Boolean(fixedOrigin) || mode === "self-hosted" || enrolledWithoutPhone || addingPhone;
+  const hostedBrowser = Boolean(fixedOrigin && accountUrl);
+
+  const apply = (next: EnrollmentView) => {
+    enrollmentActive.current = pollingStages.has(next.stage);
+    if (next.stage !== stageRef.current) setVerified(false);
+    stageRef.current = next.stage;
+    setView(next);
+  };
+  const failedView = (): EnrollmentView => ({ mode: mode === "hosted" ? "hosted" : "community", stage: "error", origin: connectedOrigin ?? undefined, errorCode: "unavailable" });
+  const runEnrollment = async (action: () => Promise<EnrollmentView>, retry: () => void) => {
+    const epoch = ++enrollEpoch.current;
+    retryRef.current = retry;
+    setBusy(true);
+    try {
+      const next = await action();
+      if (epoch === enrollEpoch.current) apply(next);
+    } catch {
+      if (epoch === enrollEpoch.current) apply(failedView());
+    } finally {
+      if (epoch === enrollEpoch.current) setBusy(false);
+    }
+  };
+  const cancelActive = () => {
+    if (!enrollmentActive.current) return;
+    enrollmentActive.current = false;
+    void bridge.enrollment_cancel().catch(() => undefined);
+  };
+  const resetEnrollment = () => {
+    enrollEpoch.current += 1;
+    cancelActive();
+    enrollmentActive.current = false;
+    stageRef.current = null;
+    setView(null);
     setQr("");
     setVerified(false);
     setBusy(false);
-  };
-  const beginJoin = async (origin: string | null) => {
-    if (joinStarting.current) return;
-    joinStarting.current = true;
-    joinActive.current = true;
-    const epoch = ++joinEpoch.current;
-    setJoin({ state: "idle" });
-    setBusy(true);
-    setVerified(false);
-    setQr("");
-    try {
-      const next = await bridge.join_start(origin);
-      if (epoch !== joinEpoch.current) return;
-      setJoin(next);
-      if (next.qrPayload) {
-        const nextQr = await QRCode.toDataURL(next.qrPayload, qrOptions);
-        if (epoch === joinEpoch.current) setQr(nextQr);
-      }
-    } catch {
-      if (epoch === joinEpoch.current) setJoin({ state: "failed" });
-    } finally {
-      if (epoch === joinEpoch.current) {
-        joinStarting.current = false;
-        setBusy(false);
-      }
-    }
   };
   const refreshAccount = async () => {
     const epoch = ++accountFetchEpoch.current;
@@ -133,160 +152,45 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
     }
   };
 
-  useEffect(() => () => {
-    accountFetchEpoch.current += 1;
-    signInEpoch.current += 1;
-    invalidateJoin();
-    if (joinActive.current) void bridge.join_cancel();
-  }, []);
-  useEffect(() => {
-    if (fixedOrigin || previousMode.current === mode) return;
-    previousMode.current = mode;
-    accountFetchEpoch.current += 1;
-    signInEpoch.current += 1;
-    resetJoin();
-    setHostedPath("chooser");
-    setAccount(null);
-    setAccountError(false);
-    setAccountLoading(mode === "hosted");
-    setSelfHostedOrigin(null);
-    setSelfHostedUrlBlurred(false);
-  }, [fixedOrigin, mode]);
-  useEffect(() => {
-    if (fixedOrigin || mode !== "hosted" || enrolledWithoutPhone) return;
-    void refreshAccount();
-    return () => {
-      accountFetchEpoch.current += 1;
-    };
-  }, [fixedOrigin, mode, enrolledWithoutPhone]);
-
-  const route: Route = fixedOrigin || mode === "self-hosted" ? "existing"
-    : accountLoading && account === null ? "checking"
-      : account?.signedIn
-      ? account.hasVault && account.resumable ? "provisioning"
-        : account.classification === "lapsed" ? "lapsed"
-          : account.hasVault ? "join"
-            : account.access !== "read_write" ? "billing"
-              : account.resumable || account.classification === "provisioning" ? "provisioning"
-                : "passphrase"
-      : hostedPath === "existing" ? "join" : hostedPath;
-
-  useEffect(() => {
-    if (route !== "join" || !account?.signedIn || autoJoinStarted.current) return;
-    autoJoinStarted.current = true;
-    void beginJoin(null);
-  }, [route, account?.signedIn]);
-  useEffect(() => {
-    if (!fixedOrigin || autoJoinStarted.current) return;
-    autoJoinStarted.current = true;
-    void bridge.join_status().then(async next => {
-      if (next.state === "idle") {
-        await beginJoin(fixedOrigin);
-        return;
-      }
-      setJoin(next);
-      if (next.qrPayload) setQr(await QRCode.toDataURL(next.qrPayload, qrOptions));
-    }).catch(() => void beginJoin(fixedOrigin));
-  }, [fixedOrigin]);
-  useEffect(() => {
-    if (route === "join") return;
-    autoJoinStarted.current = false;
-  }, [route]);
-  useEffect(() => {
-    const leftJoinRoute = previousRoute.current === "join" && route !== "join";
-    previousRoute.current = route;
-    if (leftJoinRoute && joinActive.current) resetJoin();
-  }, [route]);
-  useEffect(() => {
-    if (enrolledWithoutPhone && joinActive.current) resetJoin();
-  }, [enrolledWithoutPhone]);
-
-  useEffect(() => {
-    if (!joinStates.has(join.state)) return;
-    const epoch = joinEpoch.current;
-    const timer = window.setInterval(() => {
-      void bridge.join_status().then(async next => {
-        if (epoch !== joinEpoch.current) return;
-        setJoin(previous => next.errorCode === "join-retrying" && next.expiresInSeconds === undefined ? { ...next, expiresInSeconds: previous.expiresInSeconds } : next);
-        if (next.qrPayload) {
-          const nextQr = await QRCode.toDataURL(next.qrPayload, qrOptions);
-          if (epoch === joinEpoch.current) setQr(nextQr);
-        }
-      }).catch(() => {
-        if (epoch === joinEpoch.current) setJoin({ state: "failed" });
-      });
-    }, 4_000);
-    return () => window.clearInterval(timer);
-  }, [join.state]);
-
-  useEffect(() => {
-    if (join.state !== "approved" || joined.current) return;
-    joined.current = true;
-    onJoined();
-  }, [join.state, onJoined]);
-
-  const provision = () => {
-    setProvisionError(false);
-    setBusy(true);
-    void bridge.hosted_provision().catch(() => setProvisionError(true)).finally(() => {
-      setBusy(false);
-      void refreshAccount();
-    });
+  const discover = (origin?: string) => runEnrollment(() => bridge.enrollment_discover(origin), () => discover(origin));
+  const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner(), createOwner);
+  const signInEnrollment = () => runEnrollment(() => bridge.enrollment_sign_in(), signInEnrollment);
+  const connectSharedSecret = () => runEnrollment(() => bridge.enrollment_connect_shared_secret(), connectSharedSecret);
+  const addPhone = (next: Method) => {
+    setMethod(next);
+    void runEnrollment(() => bridge.enrollment_add_phone(next), () => addPhone(next));
   };
-  useEffect(() => {
-    if (route !== "provisioning" || provisioning.current) return;
-    provisioning.current = true;
-    provision();
-  }, [route]);
-  useEffect(() => {
-    if (route !== "billing" && route !== "lapsed") return;
-    const onFocus = () => void refreshAccount();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [route]);
-  useEffect(() => {
-    if (mode === "hosted" && route === "chooser") {
-      choice.current?.focus();
+  const approve = () => {
+    if (!verified) return;
+    void runEnrollment(() => bridge.enrollment_approve(), approve);
+  };
+  const refreshStatus = () => runEnrollment(() => bridge.enrollment_status(), refreshStatus);
+  const cancelPairing = () => {
+    if (addingPhone) {
+      enrollEpoch.current += 1;
+      enrollmentActive.current = false;
+      void bridge.enrollment_cancel().catch(() => undefined).finally(onExit);
       return;
     }
-    requestAnimationFrame(() => {
-      if (join.state === "confirm") confirmCheckbox.current?.focus();
-      else if (!fixedOrigin && mode === "self-hosted" && !selfHostedOrigin) modeSelect.current?.focus();
-      else heading.current?.focus();
-    });
-  }, [fixedOrigin, mode, route, join.state, selfHostedOrigin]);
-
-  const recordModeChoice = (next: Mode) => {
-    if (!fixedOrigin) window.localStorage.setItem("peppy.setup.mode", next);
+    void runEnrollment(async () => {
+      await bridge.enrollment_cancel();
+      enrollmentActive.current = false;
+      return bridge.enrollment_status();
+    }, cancelPairing);
   };
-  const selectMode = (next: Mode) => {
-    recordModeChoice(next);
-    if (next !== mode) {
-      resetJoin();
-      setHostedPath("chooser");
-      setSelfHostedOrigin(null);
-    }
-    onMode(next);
-  };
-  const chooseExisting = () => {
-    recordModeChoice("hosted");
-    setHostedPath("existing");
-    void beginJoin(null);
-  };
-  const chooseNew = () => {
-    recordModeChoice("hosted");
-    setHostedPath("new");
+  const changeServer = () => {
+    enrollEpoch.current += 1;
+    cancelActive();
+    setBusy(false);
+    apply({ mode: "community", stage: "server", origin: connectedOrigin ?? undefined });
   };
   const backToChooser = () => {
     signInEpoch.current += 1;
     setSignInError(false);
-    resetJoin();
+    resetEnrollment();
     setHostedPath("chooser");
   };
-  const cancelJoin = () => {
-    resetJoin();
-    if (!account?.signedIn && mode === "hosted") setHostedPath("chooser");
-  };
+
   const signIn = async () => {
     recordModeChoice("hosted");
     const epoch = ++signInEpoch.current;
@@ -304,76 +208,378 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, pairPhone, se
       if (epoch === signInEpoch.current) setBusy(false);
     }
   };
+
+  const invalidateAccountFlows = () => {
+    accountFetchEpoch.current += 1;
+    signInEpoch.current += 1;
+  };
+
+  useEffect(() => () => {
+    invalidateAccountFlows();
+    enrollEpoch.current += 1;
+    cancelActive();
+  }, []);
+  useEffect(() => {
+    if (fixedOrigin || previousMode.current === mode) return;
+    previousMode.current = mode;
+    invalidateAccountFlows();
+    resetEnrollment();
+    setHostedPath("chooser");
+    setAccount(null);
+    setAccountError(false);
+    setAccountLoading(mode === "hosted");
+    setConnectedOrigin(null);
+    setSelfHostedUrlBlurred(false);
+  }, [fixedOrigin, mode]);
+  useEffect(() => {
+    if (fixedOrigin || mode !== "hosted" || enrolledWithoutPhone) return;
+    void refreshAccount();
+    return () => {
+      accountFetchEpoch.current += 1;
+    };
+  }, [fixedOrigin, mode, enrolledWithoutPhone]);
+  useEffect(() => {
+    if (!fixedOrigin || fixedStarted.current) return;
+    fixedStarted.current = true;
+    void discover(fixedOrigin);
+  }, [fixedOrigin]);
+  useEffect(() => {
+    if (!enrolledWithoutPhone && !addingPhone) return;
+    cancelActive();
+    void refreshStatus();
+  }, [addingPhone, enrolledWithoutPhone]);
+
+  const route: Route = addingPhone ? "enrollment" : accountLoading && account === null ? "checking"
+    : account?.signedIn
+      ? account.hasVault && account.resumable ? "provisioning"
+        : account.classification === "lapsed" ? "lapsed"
+          : account.hasVault ? "enrollment"
+            : account.access !== "read_write" ? "billing"
+              : account.resumable || account.classification === "provisioning" ? "provisioning"
+                : "passphrase"
+      : hostedPath === "existing" ? "enrollment" : hostedPath === "new" ? "new" : "chooser";
+
+  useEffect(() => {
+    if (addingPhone || route !== "enrollment" || discoverStarted.current) return;
+    discoverStarted.current = true;
+    void discover();
+  }, [addingPhone, route, account?.signedIn]);
+  useEffect(() => {
+    if (route !== "enrollment") discoverStarted.current = false;
+  }, [route]);
+  useEffect(() => {
+    const leftEnrollment = previousRoute.current === "enrollment" && route !== "enrollment";
+    previousRoute.current = route;
+    if (leftEnrollment) resetEnrollment();
+  }, [route]);
+  useEffect(() => {
+    if (route !== "provisioning" || provisioning.current) return;
+    provisioning.current = true;
+    provision();
+  }, [route]);
+  useEffect(() => {
+    if (route !== "billing" && route !== "lapsed") return;
+    const onFocus = () => void refreshAccount();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [route]);
+
+  const stage = view?.stage ?? null;
+  const payload = stage === "waiting_phone" ? view?.qrPayload : undefined;
+  useEffect(() => {
+    if (!payload) {
+      setQr("");
+      return;
+    }
+    let live = true;
+    void QRCode.toDataURL(payload, qrOptions).then(url => { if (live) setQr(url); }).catch(() => { if (live) setQr(""); });
+    return () => {
+      live = false;
+    };
+  }, [payload]);
+  useEffect(() => {
+    if (!stage || !pollingStages.has(stage)) return;
+    const timer = window.setInterval(() => {
+      const epoch = enrollEpoch.current;
+      void bridge.enrollment_status().then(next => {
+        if (epoch === enrollEpoch.current) apply(next);
+      }).catch(() => {
+        if (epoch !== enrollEpoch.current) return;
+        retryRef.current = refreshStatus;
+        apply(failedView());
+      });
+    }, pollIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [stage]);
+  const joinedNow = stage === "phone_connected" || (!addingPhone && stage === "ready" && Boolean(view?.hasGateway));
+  useEffect(() => {
+    if (!joinedNow || joined.current) return;
+    joined.current = true;
+    onJoined();
+  }, [joinedNow, onJoined]);
+  useEffect(() => {
+    if (route === "checking") return;
+    if (!community && mode === "hosted" && route === "chooser") {
+      choice.current?.focus();
+      return;
+    }
+    requestAnimationFrame(() => {
+      if (stage === "verify_phone") verifyCheckbox.current?.focus();
+      else if (!fixedOrigin && mode === "self-hosted" && !connectedOrigin) modeSelect.current?.focus();
+      else bodyRef.current?.querySelector<HTMLElement>("h2")?.focus();
+    });
+  }, [fixedOrigin, mode, route, stage, connectedOrigin, community]);
+
+  const recordModeChoice = (next: Mode) => {
+    if (!fixedOrigin) window.localStorage.setItem("peppy.setup.mode", next);
+  };
+  const selectMode = (next: Mode) => {
+    recordModeChoice(next);
+    if (next !== mode) {
+      resetEnrollment();
+      setHostedPath("chooser");
+      setConnectedOrigin(null);
+    }
+    onMode(next);
+  };
+  const chooseExisting = () => {
+    recordModeChoice("hosted");
+    setHostedPath("existing");
+  };
+  const chooseNew = () => {
+    recordModeChoice("hosted");
+    setHostedPath("new");
+  };
   const startProvisioning = () => {
     recordModeChoice("hosted");
     provision();
   };
+  const provision = () => {
+    setProvisionError(false);
+    setBusy(true);
+    void bridge.hosted_provision().catch(() => setProvisionError(true)).finally(() => {
+      setBusy(false);
+      void refreshAccount();
+    });
+  };
   const connectSelfHosted = () => {
     recordModeChoice("self-hosted");
-    setSelfHostedOrigin(validOrigin);
-    void beginJoin(validOrigin);
+    setConnectedOrigin(validOrigin);
+    void discover(validOrigin ?? undefined);
   };
-  const confirmJoin = async () => {
-    if (!verified) return;
-    const epoch = joinEpoch.current;
-    setBusy(true);
-    try {
-      const next = await bridge.join_confirm();
-      if (epoch === joinEpoch.current) setJoin(next);
-    } catch {
-      if (epoch === joinEpoch.current) setJoin({ state: "failed" });
-    } finally {
-      if (epoch === joinEpoch.current) setBusy(false);
-    }
-  };
+
   const selfHostedCheck = checkSelfHostedUrl(selfHostedUrl);
   const validOrigin = fixedOrigin ?? selfHostedCheck.origin;
   const selfHostedUrlError = selfHostedUrlBlurred ? selfHostedCheck.error : null;
+  const showUrlForm = !fixedOrigin && !enrolledWithoutPhone && mode === "self-hosted" && (view === null || view.stage === "server" || view.stage === "error");
 
-  const joinPanel = (
-    <section id="hosted-join-panel" data-join-state={join.state} aria-label={copy("hosted_join_headline")}>
-      <h2 ref={heading} tabIndex={-1}>{copy("hosted_join_headline")}</h2>
-      {qr && joinStates.has(join.state) && <div id="join-qr-hero"><img id="join-qr-image" src={qr} alt="" aria-hidden="true" /><span id="join-qr-sr-label" className="visually-hidden" role="img" aria-label={copy("production_pairing_qr_accessibility")} />{join.expiresInSeconds !== undefined && <span id="join-countdown" role="timer" aria-live="off" aria-label={`${join.expiresInSeconds} seconds remaining`}>{join.expiresInSeconds}s</span>}</div>}
-      {account?.signedIn && <p className="setup-hint">{copy("production_existing_vault")}</p>}
-      {join.state === "waiting" && <><p id="join-state-message">{copy("setup_join_waiting")}</p><p className="setup-hint">{copy("setup_join_scan_hint")}</p></>}
-      {join.state === "claimed" && <><p id="join-state-message">{copy("setup_join_claimed")}</p><Sas value={join.sas} /></>}
-      {join.state === "confirm" && <div id="join-confirm-panel" data-panel="sas"><Sas value={join.sas} /><p>{copy("setup_join_confirm")}</p><label id="join-sas-confirm-label"><input ref={confirmCheckbox} id="join-sas-checkbox" type="checkbox" checked={verified} onChange={event => setVerified(event.target.checked)} /> {copy("production_pairing_verify")}</label><div id="join-confirm-actions"><button id="join-confirm-button" className="primary-button" disabled={!verified || busy} onClick={() => void confirmJoin()}>{copy("setup_join_continue")}</button><button id="join-cancel-button-confirm" className="secondary-button" disabled={busy} onClick={cancelJoin}>{copy("cancel")}</button></div></div>}
-      {join.state === "approved" && <p id="join-state-message">{copy("setup_join_approved")}</p>}
-      {join.state === "expired" && <p id="join-state-message">{copy("production_pairing_expired")}</p>}
-      {join.state === "denied" && <p id="join-state-message">{copy("hosted_join_denied")}</p>}
-      {join.state === "failed" && <p id="join-state-message">{copy("production_pairing_error")} {join.errorCode && <span>{join.errorCode}</span>}</p>}
-      {join.errorCode === "join-retrying" && <p className="join-retrying-hint">{copy("setup_join_retrying")}</p>}
-      <div id="join-actions">
-        {(join.state === "waiting" || join.state === "claimed") && <button id="join-cancel-button" className="secondary-button" onClick={cancelJoin}>{copy("cancel")}</button>}
-        {["expired", "denied", "failed"].includes(join.state) && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(fixedOrigin ?? (mode === "hosted" ? null : selfHostedOrigin))}>{copy("try_again")}</button>}
-        {account?.signedIn && join.state === "idle" && <button id="join-refresh-button" className="secondary-button" disabled={busy} onClick={() => void beginJoin(null)}>{copy("try_again")}</button>}
-        {!account?.signedIn && mode === "hosted" && <button id="setup-back-button" className="secondary-button" disabled={busy && join.state === "confirm"} onClick={backToChooser}>{copy("back")}</button>}
-      </div>
-    </section>
+  const renderEnrollment = (): ReactNode => {
+    const back = mode === "hosted" && !account?.signedIn && !community
+      ? <div className="enrollment-actions"><button id="setup-back-button" className="secondary-button" disabled={busy && view?.stage === "verify_phone"} onClick={backToChooser}>{copy("back")}</button></div>
+      : null;
+    return (
+      <>
+        {view ? renderStage(view) : <p id="enrollment-checking" role="status">Checking this server…</p>}
+        {back}
+      </>
+    );
+  };
+
+  const renderStage = (view: EnrollmentView): ReactNode => {
+    const hosted = view.mode === "hosted";
+    switch (view.stage) {
+      case "server":
+        return hosted ? (
+          <Stage stage="server">
+            <Heading>Connecting to Peppy Hosted</Heading>
+            <div className="enrollment-actions"><button className="secondary-button" disabled={busy} onClick={() => void discover()}>{copy("try_again")}</button></div>
+          </Stage>
+        ) : null;
+      case "setup":
+        return hosted ? (
+          <Stage stage="setup">
+            <Heading>Create your vault</Heading>
+            <p>Peppy will create your vault and a shared secret. Each one is confirmed in a secure prompt.</p>
+            <div className="enrollment-actions">
+              <button id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create vault</button>
+              <button id="enrollment-cancel-setup-button" className="secondary-button" disabled={busy} onClick={changeServer}>Cancel</button>
+            </div>
+          </Stage>
+        ) : (
+          <Stage stage="setup">
+            <Heading>Set up your server</Heading>
+            <p>Peppy will ask for the setup code from your server operator, an admin password, and a generated shared secret. Each one is entered in a secure prompt.</p>
+            <p className="setup-hint">The admin password manages the server. It is not your vault secret.</p>
+            <div className="enrollment-actions">
+              <button id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create server</button>
+              <button id="enrollment-cancel-setup-button" className="secondary-button" disabled={busy} onClick={changeServer}>Cancel</button>
+            </div>
+          </Stage>
+        );
+      case "signin":
+        return (
+          <Stage stage="signin">
+            <Heading>{hosted ? copy("hosted_sign_in_headline") : "Sign in to your server"}</Heading>
+            <p>{hosted ? "Sign in to your Peppy account to continue. Signing in does not unlock your vault." : "Sign in with the admin password in the secure prompt. Signing in does not unlock your vault."}</p>
+            {!hosted && <p id="enrollment-signin-shared-secret-hint" className="setup-hint">The admin password manages this server. The vault shared secret connects this device to encrypted data.</p>}
+            <div className="enrollment-actions">
+              <button id="enrollment-signin-button" className="primary-button" disabled={busy} onClick={() => void signInEnrollment()}>Sign in</button>
+              {!hosted && <button id="enrollment-signin-shared-secret-button" className="secondary-button" disabled={busy} onClick={() => void connectSharedSecret()}>Connect with shared secret</button>}
+            </div>
+          </Stage>
+        );
+      case "locked":
+        return (
+          <Stage stage="locked">
+            <Heading>Connect this device</Heading>
+            <p>Enter the shared secret from your server owner in the secure prompt. Signing in alone does not unlock messages.</p>
+            <div className="enrollment-actions">
+              <button id="enrollment-shared-secret-button" className="primary-button" disabled={busy} onClick={() => void connectSharedSecret()}>Enter shared secret</button>
+            </div>
+          </Stage>
+        );
+      case "ready":
+        if (view.hasGateway && !addingPhone) return <Stage stage="ready"><p role="status">Phone connected.</p></Stage>;
+        if (!view.owner) {
+          return (
+            <Stage stage="ready">
+              <Heading>Waiting for an owner</Heading>
+              <p>An owner of this server can connect a phone. Ask them to add your phone from Peppy.</p>
+            </Stage>
+          );
+        }
+        return (
+          <Stage stage="ready">
+            <Heading>Connect your phone</Heading>
+            <p>Connect a phone to start sending messages. Permissions are granted on the phone, not here.</p>
+            <fieldset className="enrollment-methods">
+              <legend>How should the phone connect?</legend>
+              <label><input type="radio" name="enrollment-method" value="transfer" checked={method === "transfer"} onChange={() => setMethod("transfer")} /> Transfer keys securely</label>
+              <label><input type="radio" name="enrollment-method" value="shared_secret" checked={method === "shared_secret"} onChange={() => setMethod("shared_secret")} /> Enter shared secret on phone</label>
+            </fieldset>
+            <div className="enrollment-actions">
+              <button id="enrollment-add-phone-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Add phone</button>
+            </div>
+          </Stage>
+        );
+      case "waiting_phone":
+        return (
+          <Stage stage="waiting_phone">
+            <Heading>Connect your phone</Heading>
+            <p>Open Peppy on your phone and scan this code.</p>
+            {qr && (
+              <div id="enrollment-qr-hero">
+                <img id="enrollment-qr-image" src={qr} alt="" aria-hidden="true" />
+                <span className="visually-hidden" role="img" aria-label={copy("production_pairing_qr_accessibility")} />
+                {view.expiresInSeconds !== undefined && <span id="enrollment-countdown" role="timer" aria-live="off" aria-label={`${view.expiresInSeconds} seconds remaining`}>Expires in {view.expiresInSeconds}s</span>}
+              </div>
+            )}
+            <p className="setup-hint">{methodHints[method]}</p>
+            <p className="setup-hint">This QR connects your phone to this server. It does not grant any permissions by itself.</p>
+            <div className="enrollment-actions">
+              <button id="enrollment-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>Cancel</button>
+            </div>
+          </Stage>
+        );
+      case "verify_phone":
+        return (
+          <Stage stage="verify_phone">
+            <Heading>Verify the code</Heading>
+            <p>Compare this code with the code shown in Peppy on your phone. Approve only if they match.</p>
+            <output id="enrollment-verification-code" aria-label={`Verification code: ${view.verificationCode ?? ""}`}>{view.verificationCode}</output>
+            <label className="settings-check">
+              <input ref={verifyCheckbox} id="enrollment-verify-checkbox" type="checkbox" checked={verified} disabled={busy} onChange={event => setVerified(event.target.checked)} /> The codes match on both devices.
+            </label>
+            <div className="enrollment-actions">
+              <button id="enrollment-approve-button" className="primary-button" disabled={!verified || busy} onClick={approve}>Confirm and approve</button>
+              <button id="enrollment-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>Cancel</button>
+            </div>
+          </Stage>
+        );
+      case "phone_connected":
+        return <Stage stage="phone_connected"><Heading>Phone connected</Heading><p role="status">Finish setup on your phone.</p></Stage>;
+      case "expired":
+        return (
+          <Stage stage="expired">
+            <Heading>Code expired</Heading>
+            <p role="alert">This code expired. Start again to get a new one.</p>
+            <div className="enrollment-actions">
+              <button id="enrollment-restart-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Start again</button>
+              <button id="enrollment-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>Cancel</button>
+            </div>
+          </Stage>
+        );
+      case "error":
+        return (
+          <Stage stage="error">
+            <Heading>Something went wrong</Heading>
+            <p id="enrollment-error" role="alert">Peppy could not complete this step. Your server address was kept.</p>
+            <div className="enrollment-actions">
+              <button id="enrollment-retry-button" className="primary-button" disabled={busy} onClick={() => retryRef.current()}>Retry</button>
+            </div>
+          </Stage>
+        );
+      default:
+        return null;
+    }
+  };
+
+  const statusMessage = stage === "waiting_phone" ? "Scan this code with your phone."
+    : stage === "verify_phone" ? "Compare the verification code before approving."
+      : stage === "phone_connected" ? "Phone connected. Finish setup on your phone."
+        : stage === "expired" ? "This code expired."
+          : stage === "error" ? "Something went wrong."
+            : "";
+
+  const hostedPanels = (
+    <>
+      {route === "checking" && <section id="hosted-account-checking" aria-busy="true"><h2 tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>}
+      {route === "chooser" && <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>}
+      {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>{copy("hosted_sign_in_headline")}</h2><p>{copy("hosted_sign_in_body")}</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
+      {route === "enrollment" && <div id="enrollment-panel">{renderEnrollment()}</div>}
+      {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>}
+      {route === "billing" && <section id="hosted-billing-card"><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>}
+      {route === "provisioning" && <section id="hosted-provisioning-card"><h2 tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>}
+      {route === "passphrase" && <section id="hosted-passphrase-card"><h2 tabIndex={-1}>{copy("passphrase_create_headline")}</h2><p>{copy("passphrase_create_body")}</p><p className="setup-hint">{copy("passphrase_irrecoverable_warn")}</p><p className="setup-hint">{copy("passphrase_native_note")}</p><label className="settings-check"><input id="passphrase-ack" type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> {copy("passphrase_ack_label")}</label><button id="passphrase-native-cta-button" className="primary-button" disabled={!acknowledged || busy} onClick={startProvisioning}>{copy("passphrase_native_cta")}</button>{provisionError && <p id="hosted-passphrase-error" role="alert">{copy("production_provision_retry")}</p>}</section>}
+    </>
   );
 
   let content: ReactNode;
-  if (fixedOrigin || mode === "self-hosted") {
-    const hostedBrowser = Boolean(fixedOrigin && accountUrl);
+  if (community) {
     const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
     const body = fixedOrigin ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
-    content = <section id="self-hosted-panel" aria-label={headline}><h2 ref={heading} tabIndex={-1}>{headline}</h2><p>{body}</p>{fixedOrigin ? <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p> : <><div id="self-hosted-url-field" className="setup-url-field"><label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-invalid={selfHostedUrlError ? "true" : undefined} aria-describedby={selfHostedUrlError ? "self-hosted-url-error self-hosted-url-hint" : "self-hosted-url-hint"} onChange={event => setSelfHostedUrl(event.target.value)} onBlur={() => setSelfHostedUrlBlurred(true)} /></label>{selfHostedUrlError && <span id="self-hosted-url-error" className="setup-field-error" aria-live="polite">{copy(selfHostedUrlError)}</span>}<span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span></div><button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button></>}{(selfHostedOrigin || fixedOrigin) && joinPanel}{hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}<details id="self-hosted-advanced"><summary>{copy("setup_self_hosted_advanced")}</summary>{selfHostedFallback}</details></section>;
-  } else if (route === "checking") {
-    content = <section id="hosted-account-checking" aria-busy="true"><h2 ref={heading} tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>;
-  } else if (route === "chooser") {
-    content = <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>;
-  } else if (route === "new") {
-    content = <section id="hosted-signin-panel" data-section="signin"><h2 ref={heading} tabIndex={-1}>{copy("hosted_sign_in_headline")}</h2><p>{copy("hosted_sign_in_body")}</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" disabled={busy && join.state === "confirm"} onClick={backToChooser}>{copy("back")}</button></section>;
-  } else if (route === "join") content = joinPanel;
-  else if (route === "lapsed") content = <section id="hosted-lapsed-card"><h2 ref={heading} tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>;
-  else if (route === "billing") content = <section id="hosted-billing-card"><h2 ref={heading} tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>;
-  else if (route === "provisioning") content = <section id="hosted-provisioning-card"><h2 ref={heading} tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>;
-  else content = <section id="hosted-passphrase-card"><h2 ref={heading} tabIndex={-1}>{copy("passphrase_create_headline")}</h2><p>{copy("passphrase_create_body")}</p><p className="setup-hint">{copy("passphrase_irrecoverable_warn")}</p><p className="setup-hint">{copy("passphrase_native_note")}</p><label className="settings-check"><input id="passphrase-ack" type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> {copy("passphrase_ack_label")}</label><button id="passphrase-native-cta-button" className="primary-button" disabled={!acknowledged || busy} onClick={startProvisioning}>{copy("passphrase_native_cta")}</button>{provisionError && <p id="hosted-passphrase-error" role="alert">{copy("production_provision_retry")}</p>}</section>;
+    content = (
+      <section id="self-hosted-panel" aria-label={headline}>
+        {!enrolledWithoutPhone && <><h2 tabIndex={-1}>{headline}</h2><p>{body}</p></>}
+        {fixedOrigin && <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p>}
+        {showUrlForm && (
+          <>
+            <div id="self-hosted-url-field" className="setup-url-field">
+              <label>Server URL<input id="self-hosted-url-input" type="url" value={selfHostedUrl} placeholder="https://server.example" aria-invalid={selfHostedUrlError ? "true" : undefined} aria-describedby={selfHostedUrlError ? "self-hosted-url-error self-hosted-url-hint" : "self-hosted-url-hint"} onChange={event => setSelfHostedUrl(event.target.value)} onBlur={() => setSelfHostedUrlBlurred(true)} /></label>
+              {selfHostedUrlError && <span id="self-hosted-url-error" className="setup-field-error" aria-live="polite">{copy(selfHostedUrlError)}</span>}
+              <span id="self-hosted-url-hint" className="setup-hint">{copy("setup_self_hosted_url_hint")}</span>
+            </div>
+            <button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button>
+          </>
+        )}
+        {(view !== null || fixedOrigin) && <div id="enrollment-panel">{renderEnrollment()}</div>}
+        {hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}
+      </section>
+    );
+  } else {
+    content = hostedPanels;
+  }
 
-  if (enrolledWithoutPhone) content = pairPhone;
-  return <section id="setup-landing" aria-label="Set up Peppy"><div id="setup-landing-inner"><header id="setup-landing-header"><h1>Set up Peppy</h1>{!enrolledWithoutPhone && !fixedOrigin && <select ref={modeSelect} id="setup-mode-select" aria-label="Server mode" disabled={busy && join.state === "confirm"} value={mode} onChange={event => selectMode(event.target.value as Mode)}><option value="hosted">{copy("setup_mode_hosted")}</option><option value="self-hosted">{copy("setup_mode_self_hosted")}</option></select>}</header><div id="setup-landing-body" role="region">{content}</div></div><div id="setup-status-region" className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{join.state === "waiting" ? copy("setup_join_waiting") : join.state === "claimed" ? copy("setup_join_claimed") : join.state === "confirm" ? copy("setup_join_confirm") : join.state === "approved" ? copy("setup_join_approved") : join.state === "expired" ? copy("production_pairing_expired") : join.state === "denied" ? copy("hosted_join_denied") : join.state === "failed" ? copy("production_pairing_error") : ""}</div></section>;
-}
-
-function Sas({ value }: { value?: string }) {
-  return <div id="join-sas-panel" data-panel="sas"><output id="join-sas-code" aria-label={`Verification code: ${value ?? ""}`}>{value}</output></div>;
+  return (
+    <section id="setup-landing" aria-label="Set up Peppy">
+      <div id="setup-landing-inner">
+        <header id="setup-landing-header">
+          <h1>Set up Peppy</h1>
+          {!enrolledWithoutPhone && !fixedOrigin && <select ref={modeSelect} id="setup-mode-select" aria-label="Server mode" disabled={busy && stage === "verify_phone"} value={mode} onChange={event => selectMode(event.target.value as Mode)}><option value="hosted">{copy("setup_mode_hosted")}</option><option value="self-hosted">{copy("setup_mode_self_hosted")}</option></select>}
+        </header>
+        <div id="setup-landing-body" role="region" ref={bodyRef}>{content}</div>
+      </div>
+      <div id="setup-status-region" className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{statusMessage}</div>
+    </section>
+  );
 }

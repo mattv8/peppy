@@ -4,7 +4,7 @@ use crate::{
     error::{BridgeError, BridgeResult},
     fsutil,
     session::Session,
-    tray,
+    tray, AppState,
 };
 use peppy_client_core::BannerCandidate;
 pub use peppy_desktop_api::{NotificationPreferences, Preview};
@@ -181,7 +181,14 @@ pub fn drain_banner_candidates(
         .drain_lock
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let preferences = settings.preferences();
+    let mut preferences = settings.preferences();
+    if app
+        .state::<AppState>()
+        .app_locked
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        preferences.preview = Preview::Hidden;
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)

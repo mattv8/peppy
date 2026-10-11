@@ -10,6 +10,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.NativeHostedAccount
+import uniffi.peppy_mobile_bindings.NativeHostedClientKind
 import uniffi.peppy_mobile_bindings.NativeHostedLoginAttempt
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioning
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioningView
@@ -127,6 +128,13 @@ internal class HostedAccountClient(
         } finally { bytes.fill(0) }
     }
 
+    /** Native enrollment transport only; callers must never surface this account session. */
+    internal fun enrollmentSessionHeader(): String? = try {
+        session().token
+    } catch (_: HostedFailure) {
+        null
+    }
+
     private fun account(session: Session, stamp: Stamp): NativeHostedAccount {
         check(stamp)
         if (nowMs() >= session.expiresAt) throw HostedFailure(HostedFailure.Kind.SESSION_EXPIRED)
@@ -177,7 +185,13 @@ internal class HostedAccountClient(
         }
         if (account.access != "read_write") throw HostedFailure(HostedFailure.Kind.ENTITLEMENT)
         if (account.vaultId != null) throw HostedFailure(HostedFailure.Kind.EXISTING_VAULT)
-        prepareHostedProvisioning(ORIGIN, session.accountId, passphrase).use { item ->
+        prepareHostedProvisioning(
+            ORIGIN,
+            session.accountId,
+            passphrase,
+            NativeHostedClientKind.ANDROID,
+            "Android phone",
+        ).use { item ->
             save(stamp, CHECKPOINT_KEY, item.checkpoint())
             item.view()
         }

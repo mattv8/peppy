@@ -86,10 +86,36 @@ path; it does not consume hosted env files or run private migrations.
 
 ## Database, storage, and billing boundaries
 
+- Community first claim requires an operator setup code. A nonempty configured
+  `PEPPY_SETUP_TOKEN` must contain at least 32 UTF-8 bytes; absent or empty
+  configuration generates a random first-start token, not an authorization
+  bypass. Do not log administrator passwords or vault shared secrets.
+- Rate limits use the real socket peer. Forwarding headers affect that identity
+  only when the socket peer matches explicit `TRUSTED_PROXY_CIDRS`; parse a
+  bounded chain from right to left and fall back to the socket peer on malformed
+  input. Never trust a bare forwarded header or default-trust the whole private
+  container subnet. Reverse-proxy operators must configure narrow trusted
+  proxy ranges and keep them aligned with their topology; without that setting,
+  clients behind a proxy share its rate-limit bucket. See
+  [server assembly](../services/server/src/lib.rs) and
+  [request authorization](../services/server/src/api.rs).
+
 - The hosted `migrate` command runs the public core `MIGRATOR` before private
-  migrations. In particular, core `0013_pairing_join_requests.sql` must exist
-  before private `0008_pairing_join_requests_rls.sql`. Advance the public source
-  pin before releasing private code that depends on that table.
+  migrations. The enrollment fresh chain uses public `0014_enrollment.sql` and
+  `0015_remove_legacy_pairing.sql`, then private `0011_enrollment_rls.sql` and
+  `0012_app_auth.sql`. Private `0008` is removed; private `0004` is edited only
+  to remove obsolete pairing history. This is a coordinated fresh-chain change,
+  not authorization to reset an existing database or rewrite unrelated migration
+  history. Databases that already applied the old private `0004` or `0008`
+  are not supported by this fresh-chain change; do not claim an upgrade path
+  without separately implementing and verifying one. See
+  [public enrollment migration](../services/server/migrations/0014_enrollment.sql)
+  and [public removal](../services/server/migrations/0015_remove_legacy_pairing.sql).
+  Private counterparts are `peppy-platform/migrations/0011_enrollment_rls.sql`
+  and `migrations/0012_app_auth.sql`.
+- Keep public and private source pins unchanged until release coordination has
+  selected the compatible pair. A fresh-chain result, local fixture, or build
+  does not establish a deployed migration or released browser enrollment flow.
 - API runtime, migration, and maintenance connections have distinct privileges;
   relay connections are separate again. Runtime uses RLS, while maintenance
   has deliberately bounded bypass access. A successful migration-role query

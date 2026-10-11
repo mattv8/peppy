@@ -1123,13 +1123,12 @@ fn missing_credential_or_origin_mismatch_fails_closed() {
 mod real_server {
     use super::*;
     use crate::{session::VaultSummary, sync, AppState};
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use ed25519_dalek::{Signer, SigningKey};
     use peppy_client_core::{
         Client, ClientConfig, Cursor, DatabaseKey, DeviceId, IncomingSms, PermitDecision,
         SendResult, VaultId,
     };
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
     use sqlx::postgres::PgPoolOptions;
     use std::{str::FromStr, time::Duration};
 
@@ -1212,28 +1211,36 @@ mod real_server {
     }
 
     impl Server {
-        async fn pair(&self, role: &str) -> (DeviceId, String) {
-            let key = SigningKey::from_bytes(&[11; 32]);
+        async fn add_test_device(&self, role: &str) -> (DeviceId, String) {
             let id = DeviceId::new();
-            let public = json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-            let http = reqwest::Client::new();
-            let challenge: Value = http.post(format!("{}/v1/pairing", self.url)).bearer_auth(&self.owner)
-                .json(&json!({"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"requested_role":role}))
-                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-            let token = challenge["challenge_token"].as_str().unwrap();
-            let raw: [u8; 32] = URL_SAFE_NO_PAD.decode(token).unwrap().try_into().unwrap();
-            let proof = peppy_protocol::pairing_proof_message(
-                &raw,
-                self.vault,
-                id,
-                &self.fingerprint,
-                1,
-                role,
+            let token = format!(
+                "{:032x}{:032x}{:032x}",
+                uuid::Uuid::new_v4().as_u128(),
+                uuid::Uuid::new_v4().as_u128(),
+                uuid::Uuid::new_v4().as_u128()
             );
-            let body: Value = http.post(format!("{}/v1/pairing/consume", self.url))
-                .json(&json!({"challenge_token":token,"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())}))
-                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-            (id, body["device_token"].as_str().unwrap().to_owned())
+            let mut transaction = self.pool.begin().await.unwrap();
+            sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind(self.vault.0)
+                .bind(id.0)
+                .bind(role)
+                .bind(json!({}))
+                .bind(&self.fingerprint)
+                .bind(1_i32)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
+            )
+            .bind(Sha256::digest(token.as_bytes()).as_slice())
+            .bind(self.vault.0)
+            .bind(id.0)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+            (id, token)
         }
         async fn shutdown(self) {
             self.task.abort();
@@ -1304,8 +1311,8 @@ mod real_server {
     async fn real_server_import_unlock_ws_send_status_and_incoming() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (desktop_id, desktop_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (desktop_id, desktop_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         // The gateway reports one simulated SIM through the capability contract.
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","label":"SIM 1","sms":"available","mms":"unsupported"}]}}))
@@ -1353,7 +1360,7 @@ mod real_server {
         ))
         .unwrap();
         assert_eq!(
-            crate::import_credential(&state, Arc::new(foreign))
+            crate::verify_and_activate_test_credential(&state, Arc::new(foreign))
                 .await
                 .unwrap_err()
                 .code,
@@ -1368,7 +1375,7 @@ mod real_server {
         ))
         .unwrap();
         assert_eq!(
-            crate::import_credential(&state, Arc::new(wrong))
+            crate::verify_and_activate_test_credential(&state, Arc::new(wrong))
                 .await
                 .unwrap_err()
                 .code,
@@ -1381,7 +1388,7 @@ mod real_server {
             &desktop_token,
         ))
         .unwrap();
-        crate::import_credential(&state, Arc::new(credential))
+        crate::verify_and_activate_test_credential(&state, Arc::new(credential))
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
@@ -1400,7 +1407,7 @@ mod real_server {
             &desktop_token,
         ))
         .unwrap();
-        crate::import_credential(&state, Arc::new(again))
+        crate::verify_and_activate_test_credential(&state, Arc::new(again))
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
@@ -1592,7 +1599,7 @@ mod real_server {
             token,
         ))
         .unwrap();
-        crate::import_credential(&state, Arc::new(credential))
+        crate::verify_and_activate_test_credential(&state, Arc::new(credential))
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
@@ -1622,9 +1629,9 @@ mod real_server {
     async fn real_server_mms_streaming_transfer_and_public_copy() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (sender_id, sender_token) = server.pair("device").await;
-        let (receiver_id, receiver_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (sender_id, sender_token) = server.add_test_device("device").await;
+        let (receiver_id, receiver_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}))
             .send().await.unwrap().error_for_status().unwrap();
@@ -1760,9 +1767,9 @@ mod real_server {
     async fn real_server_expired_cursor_resyncs_by_staged_snapshot_then_goes_live() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (first_id, first_token) = server.pair("device").await;
-        let (late_id, late_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (first_id, first_token) = server.add_test_device("device").await;
+        let (late_id, late_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"unsupported"}]}}))
             .send().await.unwrap().error_for_status().unwrap();
@@ -1890,9 +1897,9 @@ mod real_server {
     async fn real_server_received_image_can_be_published_as_a_separate_copy() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (sender_id, sender_token) = server.pair("device").await;
-        let (receiver_id, receiver_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (sender_id, sender_token) = server.add_test_device("device").await;
+        let (receiver_id, receiver_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}))
             .send().await.unwrap().error_for_status().unwrap();
@@ -2188,7 +2195,9 @@ async fn retained_android_notification_round_trip_smoke() {
         Arc::new(MemoryStore::default()),
         Arc::new(|| {}),
     );
-    crate::import_credential(&state, credential).await.unwrap();
+    crate::verify_and_activate_test_credential(&state, credential)
+        .await
+        .unwrap();
     let session = state.session().await.unwrap().unwrap();
     let vault = sync::fetch_vault(
         &session.api,

@@ -13,9 +13,10 @@
     "core:window:allow-start-dragging",
     "allow-load-state",
     "allow-configure-server",
-    "allow-import-credentials",
-    "allow-export-credentials",
     "allow-unlock-sync",
+    "allow-get-app-lock-status",
+    "allow-unlock-app",
+    "allow-set-app-lock",
     "allow-save-draft",
     "allow-send-draft",
     "allow-mark-seen",
@@ -50,9 +51,14 @@
     "allow-hosted-sign-out",
     "allow-hosted-open-billing",
     "allow-hosted-provision",
-    "allow-join-start",
-    "allow-join-status",
-    "allow-join-cancel",
-    "allow-join-confirm"
+    "allow-enrollment-discover",
+    "allow-enrollment-create-owner",
+    "allow-enrollment-sign-in",
+    "allow-enrollment-connect-shared-secret",
+    "allow-enrollment-add-phone",
+    "allow-enrollment-approve",
+    "allow-enrollment-status",
+    "allow-enrollment-cancel",
+    "allow-enrollment-sign-out"
   ]
 }

@@ -20,6 +20,25 @@ reviews use `pnpm --dir packages/mobile-design check` for drift.
   `desktopCatalog`. A key present in the shared source is not necessarily
   shipped on mobile: preview/store-only keys are intentionally excluded.
 
+## Enrollment
+
+- Rust owns enrollment identity, QR parsing, claim HMAC, SAS, and root handoff.
+  Install the opaque Rust identity before reporting native secret storage ready;
+  a transfer activates only after the claimed SAS and explicit owner approval.
+  See [Android host](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentHost.kt),
+  [Android installation](../apps/android/app/src/main/java/dev/peppy/mobile/NativeGateway.kt),
+  and [iOS session](../apps/ios/PeppyNative/NativeSession.swift).
+- Native hosts send Rust-produced, claimant-authenticated phone-status
+  descriptors only. The private claim header is not UI data or a general HTTP
+  capability. Use the canonical enrollment origin for identity and the
+  same-origin status descriptor for transport. See [iOS host](../apps/ios/PeppyNative/EnrollmentHost.swift).
+- The phone UI scans one `connect_phone` code, presents the SAS before the
+  confirmation action, and prompts for the shared secret only for that method.
+  Camera permission is requested only when the user starts scanning. Do not add
+  automatic OS-permission requests, default-SMS role requests, or RCS claims.
+  See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentScreen.kt)
+  and [iOS enrollment UI](../apps/ios/PeppyMobile/PhoneEnrollmentView.swift).
+
 Use native typography and touch targets with a 4px spacing rhythm; do not copy
 desktop control dimensions. Use the coral graphic brand and semantic coral accents; coral is not normal-size text, follow the
 system light/dark appearance, and retain opaque readable content when reduced

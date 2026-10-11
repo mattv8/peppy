@@ -131,16 +131,6 @@
         }
       }
     },
-    "peppy.use_credential_file": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Use credential file"
-          }
-        }
-      }
-    },
     "peppy.unlock_with_passphrase": {
       "localizations": {
         "en": {
@@ -611,6 +601,16 @@
         }
       }
     },
+    "peppy.production_pairing_sas_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verification code"
+          }
+        }
+      }
+    },
     "peppy.production_pairing_unlocked": {
       "localizations": {
         "en": {
@@ -1036,7 +1036,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Add this phone"
+            "value": "Connect this phone"
           }
         }
       }
@@ -1046,7 +1046,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Compare this code on your other device before approving this phone."
+            "value": "Compare the verification code with the web or desktop app before approving the connection."
           }
         }
       }
@@ -1061,22 +1061,12 @@
         }
       }
     },
-    "peppy.hosted_join_fallback": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Use my encryption passphrase instead"
-          }
-        }
-      }
-    },
     "peppy.hosted_join_denied": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This request was declined or expired. Try again or use your encryption passphrase."
+            "value": "This connection was not approved. Ask the owner to create a new Connect your phone code, or use your shared secret."
           }
         }
       }
@@ -1296,7 +1286,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scan a pairing QR code from an enrolled owner device, or import a credential file."
+            "value": "Enter your server address and shared secret, or scan a Connect your phone code."
           }
         }
       }
@@ -1541,72 +1531,62 @@
         }
       }
     },
-    "peppy.production_add_computer": {
+    "peppy.production_pairing_invalid_qr": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Add a computer"
+            "value": "This is not a phone pairing code. Scan a code from an enrolled owner device."
           }
         }
       }
     },
-    "peppy.production_add_computer_scan_body": {
+    "peppy.production_pairing_scan_owner_hint": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scan the QR code shown on the computer."
+            "value": "Scan a code from an enrolled owner device."
           }
         }
       }
     },
-    "peppy.production_pairing_role_computer": {
+    "peppy.production_pairing_camera_owner_hint": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Computer"
+            "value": "Point your camera at a code from an enrolled owner device."
           }
         }
       }
     },
-    "peppy.production_add_computer_origin_mismatch": {
+    "peppy.enrollment_setup_code": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This QR code is for a different Peppy server."
+            "value": "Setup code"
           }
         }
       }
     },
-    "peppy.production_add_computer_already_linked": {
+    "peppy.enrollment_admin_password": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This pairing code has already been used. Start pairing again on your computer."
+            "value": "Admin password"
           }
         }
       }
     },
-    "peppy.production_add_computer_allow_hint": {
+    "peppy.enrollment_allow_camera": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Connects the computer to your vault."
-          }
-        }
-      }
-    },
-    "peppy.production_add_computer_deny_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Rejects this computer."
+            "value": "Allow camera access"
           }
         }
       }

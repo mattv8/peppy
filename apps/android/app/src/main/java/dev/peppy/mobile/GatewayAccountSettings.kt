@@ -35,7 +35,6 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
     var deleteOpen by remember { mutableStateOf(false) }
     var erase by remember { mutableStateOf("") }
     var revokeTarget by remember { mutableStateOf<GatewayAccountDevice?>(null) }
-    var ownerPairingOpen by remember { mutableStateOf(false) }
     val relayPrefs = remember { context.getSharedPreferences("peppy-relay", 0) }
     var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
     var relayOrigin by remember { mutableStateOf(relayPrefs.getString("relay-origin.v1", "") ?: "") }
@@ -65,11 +64,6 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                             onClick = { revokeTarget = device },
                             modifier = Modifier.testTag("device-remove-${device.id}"),
                         ) { Text(if (device.id == account.self.id) "Disconnect" else "Remove") }
-                    }
-                }
-                if (account.self.role == "owner" && NativeGateway.status(context).sharedKeysReady) {
-                    OutlinedButton(onClick = { ownerPairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("add-device-button")) {
-                        Text(stringResource(R.string.peppy_production_add_device))
                     }
                 }
             }
@@ -121,10 +115,4 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
             dismissButton = { OutlinedButton(onClick = { revokeTarget = null }) { Text("Cancel") } },
         )
     }
-    if (ownerPairingOpen) AlertDialog(
-        onDismissRequest = { ownerPairingOpen = false },
-        title = { Text(stringResource(R.string.peppy_production_add_device)) },
-        text = { OwnerPairingSheet(onDismiss = { ownerPairingOpen = false }) },
-        confirmButton = {},
-    )
 }

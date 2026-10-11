@@ -17,6 +17,7 @@ use std::{
 use zeroize::Zeroize;
 
 mod hosted;
+pub mod newenrollment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CapabilityState {
@@ -81,28 +82,6 @@ pub struct NativeGatewayPolicyDecision {
     pub capture_mms: bool,
     pub transfer_media: bool,
     pub rcs_supported: bool,
-}
-
-/// Canonical bytes to sign with the phone-owned enrollment key. This binding
-/// deliberately does not create, import, or expose private enrollment keys.
-#[uniffi::export]
-pub fn pairing_proof_bytes(
-    challenge_token: String,
-    vault_id: String,
-    device_id: String,
-    profile_fingerprint: String,
-    key_epoch: u32,
-    approved_role: String,
-) -> Result<Vec<u8>, MobileBindingsError> {
-    peppy_hosted_client::claim::pairing_proof_bytes(
-        &challenge_token,
-        &vault_id,
-        &device_id,
-        &profile_fingerprint,
-        key_epoch,
-        &approved_role,
-    )
-    .map_err(|_| MobileBindingsError::InvalidRequest)
 }
 
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
@@ -536,59 +515,6 @@ pub struct NativePlaintextHandle {
     file: Mutex<Option<peppy_client_core::NativePlaintextFile>>,
 }
 
-/// Phone-owned Ed25519 enrollment seed. The only byte export is for an
-/// Android Keystore/Keychain caller; it is never included in a view DTO.
-#[derive(uniffi::Object)]
-pub struct NativeEnrollmentKey {
-    key: peppy_hosted_client::claim::EnrollmentKey,
-}
-
-#[uniffi::export]
-pub fn generate_native_enrollment_key() -> Result<Arc<NativeEnrollmentKey>, MobileBindingsError> {
-    Ok(Arc::new(NativeEnrollmentKey {
-        key: peppy_hosted_client::claim::EnrollmentKey::generate()
-            .map_err(|_| MobileBindingsError::Crypto)?,
-    }))
-}
-
-#[uniffi::export]
-pub fn native_enrollment_key_from_native_secure_storage(
-    seed: Vec<u8>,
-) -> Result<Arc<NativeEnrollmentKey>, MobileBindingsError> {
-    Ok(Arc::new(NativeEnrollmentKey {
-        key: peppy_hosted_client::claim::EnrollmentKey::from_seed(&seed)
-            .map_err(|_| MobileBindingsError::InvalidRequest)?,
-    }))
-}
-
-#[uniffi::export]
-impl NativeEnrollmentKey {
-    pub fn export_seed_for_native_secure_storage(&self) -> Vec<u8> {
-        self.key.export_seed_for_native_secure_storage()
-    }
-    pub fn public_key_base64url(&self) -> Result<String, MobileBindingsError> {
-        self.key
-            .public_key_base64url()
-            .map_err(|_| MobileBindingsError::Crypto)
-    }
-    pub fn sign_pairing_proof(&self, proof: Vec<u8>) -> Result<String, MobileBindingsError> {
-        self.key
-            .sign_pairing_proof(&proof)
-            .map_err(|_| MobileBindingsError::Crypto)
-    }
-    /// Computes the SAS only after the returned server digest matches this key.
-    pub fn pairing_sas(
-        &self,
-        intent_token: String,
-        device_id: String,
-        server_key_digest: String,
-    ) -> Result<String, MobileBindingsError> {
-        self.key
-            .pairing_sas(&intent_token, &device_id, &server_key_digest)
-            .map_err(|_| MobileBindingsError::InvalidRequest)
-    }
-}
-
 fn parse_id<T: FromStr>(value: &str) -> Result<T, MobileBindingsError> {
     value
         .parse()
@@ -848,6 +774,17 @@ fn with_client<T>(
         guard.as_ref().ok_or(MobileBindingsError::Closed)?.clone()
     };
     operation(&client).map_err(Into::into)
+}
+
+impl NativeClient {
+    pub(crate) fn activate_enrollment_identity(
+        &self,
+        activation: peppy_hosted_client::newenrollment::NativeIdentityActivation,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            activation.activate(client).map_err(|_| CoreError::Crypto)
+        })
+    }
 }
 
 fn draft_view(
@@ -2043,89 +1980,7 @@ impl NativePlaintextHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-    #[test]
-    fn enrollment_seed_roundtrip_signs_only_the_canonical_pairing_proof() {
-        let seed = vec![7; 32];
-        let key = native_enrollment_key_from_native_secure_storage(seed.clone()).unwrap();
-        assert_eq!(key.export_seed_for_native_secure_storage(), seed);
-        let proof = pairing_proof_bytes(
-            URL_SAFE_NO_PAD.encode([3; 32]),
-            "00000000-0000-0000-0000-000000000001".into(),
-            "00000000-0000-0000-0000-000000000002".into(),
-            "a".repeat(64),
-            1,
-            "gateway".into(),
-        )
-        .unwrap();
-        let signature: [u8; 64] = URL_SAFE_NO_PAD
-            .decode(key.sign_pairing_proof(proof.clone()).unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let public = libsodium_rs::crypto_sign::PublicKey::from_bytes(
-            &URL_SAFE_NO_PAD
-                .decode(key.public_key_base64url().unwrap())
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(libsodium_rs::crypto_sign::verify_detached(
-            &signature, &proof, &public
-        ));
-        let digest = peppy_protocol::pairing_key_digest(public.as_bytes());
-        assert_eq!(
-            key.pairing_sas(
-                "intent-1".into(),
-                "00000000-0000-0000-0000-000000000002".into(),
-                digest.clone()
-            )
-            .unwrap(),
-            "168435"
-        );
-        assert!(
-            key.pairing_sas(
-                "intent-1".into(),
-                "00000000-0000-0000-0000-000000000002".into(),
-                format!("x{digest}")
-            )
-            .is_err()
-        );
-        for changed in [
-            pairing_proof_bytes(
-                URL_SAFE_NO_PAD.encode([4; 32]),
-                "00000000-0000-0000-0000-000000000001".into(),
-                "00000000-0000-0000-0000-000000000002".into(),
-                "a".repeat(64),
-                1,
-                "gateway".into(),
-            )
-            .unwrap(),
-            pairing_proof_bytes(
-                URL_SAFE_NO_PAD.encode([3; 32]),
-                "00000000-0000-0000-0000-000000000001".into(),
-                "00000000-0000-0000-0000-000000000003".into(),
-                "a".repeat(64),
-                2,
-                "owner".into(),
-            )
-            .unwrap(),
-        ] {
-            assert!(!libsodium_rs::crypto_sign::verify_detached(
-                &signature, &changed, &public
-            ));
-        }
-    }
-
-    #[test]
-    fn enrollment_seed_length_is_rejected_without_panic() {
-        for len in [0, 31, 33, 64] {
-            assert!(matches!(
-                native_enrollment_key_from_native_secure_storage(vec![0; len]),
-                Err(MobileBindingsError::InvalidRequest)
-            ));
-        }
-    }
     #[test]
     fn native_transport_strings_match_carrier_dispatch_contract() {
         assert_eq!(transport_name(Transport::Sms), "sms");

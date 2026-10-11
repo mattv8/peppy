@@ -36,11 +36,10 @@ import type {
   ResolvedContact,
   ContactResolutionMap,
   BridgeError,
-  PairingIntent,
-  PairingStatus,
   HostedAccountView,
-  JoinView,
+  EnrollmentView,
   HostedPreviewView,
+  AppLockStatus,
   DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 
@@ -78,11 +77,10 @@ export {
   type ResolvedContact,
   type ContactResolutionMap,
   type BridgeError,
-  type PairingIntent,
-  type PairingStatus,
   type HostedAccountView,
-  type JoinView,
+  type EnrollmentView,
   type HostedPreviewView,
+  type AppLockStatus,
   type DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 
@@ -91,7 +89,6 @@ const fixtureMessages: MessageView[] = [
   { id: "message-aurora-2", revision: "2", sender: "self", body: "I'll have it to you shortly.", timestamp: "09:43", status: "sent", attachments: [] },
 ];
 const fixtureSnapshot: DesktopSnapshot = { version: "1", mode: "fixture", connection: { state: "connected", origin: "https://push.example.com" }, encryption: { state: "unlocked" }, gateways: [{ id: "gateway-pixel8", name: "Pixel 8", simId: "sim-1", online: true, simulated: true, supportsSms: true, supportsMms: true, mmsContentVersion: 2, mmsMaxBytes: 300 * 1024, mmsLimitSource: "fallback", mmsMaxRecipients: 20 }], conversations: [{ id: "conv-aurora", name: "Aurora Chen", preview: "Can you send over the estimate?", unread: 2, messages: fixtureMessages }, { id: "conv-river", name: "River Park", preview: "Attachment received", unread: 0, participants: ["River Park", "Mina Torres"], messages: [{ id: "message-river-1", revision: "1", sender: "other", body: "Attachment received", timestamp: "Yesterday", transport: "mms", subject: "Estimate", attachments: [{ id: "attachment-river-1", name: "estimate.pdf", mediaType: "application/pdf", byteSize: 182000, state: "ready", transfer: "download", retryable: true }] }] }], activeConversationId: "conv-aurora", draft: undefined, head: { enabled: true, capability: "supported" }, deviceRole: "owner", pendingCount: 1, quarantineCount: 0, notifications: [{ target: { sourceDeviceId: "gateway-pixel8", notificationKey: "chat-42", lifetime: "1" }, packageName: "com.example.chat", appName: "Chat", title: "Morgan", text: "Are we still meeting after lunch?", postedAt: Date.now() - 120000, dismissible: true, seen: false, dismissalPending: false }, { target: { sourceDeviceId: "gateway-pixel8", notificationKey: "mail-7", lifetime: "1" }, packageName: "com.example.mail", appName: "Mail", title: "Project update", text: "A detailed update is ready for your review.", postedAt: Date.now() - 3600000, dismissible: true, seen: false, dismissalPending: false }], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" } };
-fixtureSnapshot.credentialExportAvailable = true;
 // Exercise the same display-only contact resolution path as the native snapshot.
 fixtureSnapshot.conversations[0].name = "+12025550123";
 fixtureSnapshot.conversations[0].participants = ["+12025550123"];
@@ -105,7 +102,6 @@ const fixtureDrafts = new Map<string, Draft>();
 let fixtureCreated = 0;
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
 const fixtureAccount = (): HostedAccountView => ({ available: true, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false });
-let fixtureJoin: JoinView = { state: "idle" };
 /** Display-only fixture views deliberately have no reducer or event transition logic. */
 const cannedHostedView = (screen = "welcome", scenario = "new"): HostedPreviewView => ({
   scenario, screen, accountState: screen === "welcome" ? "anonymous" : "signed_in", entitlementState: screen === "lapsed" ? "expired" : "active", approvalState: screen === "approval" ? "pending" : "none", unlocked: screen === "settings", rejected: false,
@@ -153,12 +149,10 @@ export const fixtureBridge: DesktopBridge = {
     return { ...fixtureSnapshot, conversations: [...fixtureSnapshot.conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active) };
   },
   configure_server: async () => undefined,
-  import_credentials: async () => undefined,
-  export_credentials: async () => { throw fixtureError("preview-unavailable", "Preview cannot export device credentials. Use an enrolled native or browser session to export."); },
   unlock_sync: async () => undefined,
-  create_pairing_intent: async () => ({ httpsOrigin: "https://push.example.com", intentToken: "A".repeat(43), expiresInSeconds: 300 }),
-  pairing_intent_status: async () => ({ claimed: false, approved: false, expiresInSeconds: 300 }),
-  approve_pairing_intent: async () => undefined,
+  get_app_lock_status: async () => ({ enabled: false, locked: false, storageAvailable: true }),
+  set_app_lock: async () => true,
+  unlock_app: async () => true,
   save_draft: async input => fixtureSave(input),
   send_draft: async () => ({ accepted: false, status: "failed-before-submit", reason: "Fixture gateway is offline; the draft was preserved." }),
   mark_seen: async () => undefined,
@@ -212,21 +206,23 @@ export const fixtureBridge: DesktopBridge = {
   hosted_sign_out: async () => undefined,
   hosted_open_billing: async () => undefined,
   hosted_provision: async () => undefined,
-  join_start: async origin => {
-    fixtureJoin = { state: "waiting", origin: origin ?? "https://peppy.pro", qrPayload: `fixture-join-${Date.now()}`, expiresInSeconds: 300 };
-    return fixtureJoin;
-  },
-  join_status: async () => fixtureJoin,
-  join_cancel: async () => { fixtureJoin = { state: "idle" }; },
-  join_confirm: async () => { fixtureJoin = { ...fixtureJoin, state: "approved" }; return fixtureJoin; },
+  enrollment_discover: async origin => ({ mode: "community", stage: "server", origin }),
+  enrollment_create_owner: async () => ({ mode: "community", stage: "ready", owner: true }),
+  enrollment_sign_in: async () => ({ mode: "community", stage: "locked" }),
+  enrollment_connect_shared_secret: async () => ({ mode: "community", stage: "waiting_phone" }),
+  enrollment_add_phone: async () => ({ mode: "community", stage: "waiting_phone" }),
+  enrollment_status: async () => ({ mode: "community", stage: "server" }),
+  enrollment_approve: async () => ({ mode: "community", stage: "phone_connected", owner: true }),
+  enrollment_cancel: async () => undefined,
+  enrollment_sign_out: async () => undefined,
+
 
 };
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
 export const tauriBridge: DesktopBridge = {
-  export_credentials: () => invoke("export_credentials"),
-  load_state: conversationId => invoke("load_state", { conversationId }), configure_server: origin => invoke("configure_server", { origin }), import_credentials: () => invoke("import_credentials"), unlock_sync: () => invoke("unlock_sync"), create_pairing_intent: () => invoke("create_pairing_intent"), pairing_intent_status: intentToken => invoke("pairing_intent_status", { intentToken }), approve_pairing_intent: (intentToken, keyDigest) => invoke("approve_pairing_intent", { intentToken, keyDigest }), save_draft: input => invoke("save_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
-  list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset) => invoke("list_contacts", { bookId, query, offset }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), join_start: origin => invoke("join_start", { origin }), join_status: () => invoke("join_status"), join_cancel: () => invoke("join_cancel"), join_confirm: () => invoke("join_confirm"),
+  load_state: conversationId => invoke("load_state", { conversationId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
+  list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset) => invoke("list_contacts", { bookId, query, offset }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), enrollment_discover: origin => invoke("enrollment_discover", { origin }), enrollment_create_owner: () => invoke("enrollment_create_owner"), enrollment_sign_in: () => invoke("enrollment_sign_in"), enrollment_connect_shared_secret: () => invoke("enrollment_connect_shared_secret"), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };
 

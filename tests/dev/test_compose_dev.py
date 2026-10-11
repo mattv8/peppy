@@ -27,7 +27,12 @@ class ComposeDevelopmentTests(unittest.TestCase):
         }
         inherited = {
             key: value for key, value in os.environ.items()
-            if key not in {'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL', 'PUBLIC_ATTACHMENT_URL', 'WEB_UI_ENABLED', 'DEBUG', 'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES'}
+            if key not in {
+                'BIND_ADDR', 'API_HOST_PORT', 'PUBLIC_API_URL',
+                'PUBLIC_ATTACHMENT_URL', 'WEB_UI_ENABLED', 'DEBUG',
+                'PEPPY_REPLAY_RETENTION_DAYS', 'VAULT_ATTACHMENT_QUOTA_BYTES',
+                'TRUSTED_PROXY_CIDRS',
+            }
             and not key.startswith('COMPOSE_')
         }
         return inherited | values | overrides
@@ -152,6 +157,41 @@ class ComposeDevelopmentTests(unittest.TestCase):
         result = self.render("docker-compose.yml", "infra/compose/compose.dev.yml", WEB_UI_ENABLED="false")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["services"]["dev"]["environment"]["PEPPY_WEB_CLIENT_ROOT"], "false")
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_setup_token_is_optional_and_forwarded_to_server_services(self):
+        for value in ("", "synthetic-setup-token-at-least-32-bytes"):
+            base = self.render("docker-compose.yml", PEPPY_SETUP_TOKEN=value)
+            self.assertEqual(base.returncode, 0, base.stderr)
+            api = json.loads(base.stdout)["services"]["api"]
+            self.assertEqual(api["environment"]["PEPPY_SETUP_TOKEN"], value)
+
+            dev = self.render("docker-compose.yml", "infra/compose/compose.dev.yml", PEPPY_SETUP_TOKEN=value)
+            self.assertEqual(dev.returncode, 0, dev.stderr)
+            dev_service = json.loads(dev.stdout)["services"]["dev"]
+            self.assertEqual(dev_service["environment"]["PEPPY_SETUP_TOKEN"], value)
+
+    @unittest.skipUnless(compose, "Docker Compose is unavailable")
+    def test_trusted_proxy_cidrs_are_optional_and_forwarded_to_api(self):
+        for value in ("", "192.0.2.10/32,2001:db8::10/128"):
+            base = self.render("docker-compose.yml", TRUSTED_PROXY_CIDRS=value)
+            self.assertEqual(base.returncode, 0, base.stderr)
+            self.assertEqual(
+                json.loads(base.stdout)["services"]["api"]["environment"]["TRUSTED_PROXY_CIDRS"],
+                value,
+            )
+
+            caddy = self.render(
+                "docker-compose.yml",
+                "infra/compose/compose.caddy.yml",
+                PUBLIC_HOST="peppy.invalid",
+                TRUSTED_PROXY_CIDRS=value,
+            )
+            self.assertEqual(caddy.returncode, 0, caddy.stderr)
+            self.assertEqual(
+                json.loads(caddy.stdout)["services"]["api"]["environment"]["TRUSTED_PROXY_CIDRS"],
+                value,
+            )
 
     @unittest.skipUnless(compose, "Docker Compose is unavailable")
     def test_base_production_service_set_is_unchanged(self):

@@ -4,6 +4,24 @@ Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for first ru
 
 The desktop client uses Tauri with native Rust code and a web UI. It supports native development on macOS and native Windows development from WSL. The helper does not provide Linux native development; Linux packaging remains CI-only.
 
+## Server setup and phone connections
+
+Enter your server address to discover its setup state. A fresh community instance
+can be claimed from this app using the operator setup code, a strong admin
+password, and a generated vault shared secret. Existing instances support admin
+sign-in and shared-secret enrollment. Passwords and shared secrets are handled by
+native dialogs rather than React fields or Tauri command arguments.
+
+An enrolled owner uses **Add phone** from the main workbench. Scan the single
+**Connect your phone** QR, compare the verification codes, and approve the phone.
+The selected mode transfers keys securely or requires the phone to enter the
+shared secret. QR codes are not shown in Settings. The old reversed computer QR,
+credential-file setup and Save QR action have been removed.
+
+The local **App lock** setting is off by default. Enabling it requires a native
+password confirmation and applies on the next start. It does not change the
+server's admin password or the vault shared secret.
+
 ## MMS messages
 
 MMS requires an enabled, permission-ready Android gateway advertising MMS content version 2 or later. Upgrade paired clients together. Groups and attachments select MMS; replies in an MMS conversation retain that transport. A missing capability blocks sending while preserving the editable draft. Incoming group replies may require own-number confirmation on the phone.

@@ -14,7 +14,6 @@
     <string name="peppy_devices">Devices</string>
     <string name="peppy_pair_device">Pair a device</string>
     <string name="peppy_scan_qr">Scan pairing QR code</string>
-    <string name="peppy_use_credential_file">Use credential file</string>
     <string name="peppy_unlock_with_passphrase">Unlock with passphrase</string>
     <string name="peppy_carrier_unavailable">Carrier messaging is unavailable on this device</string>
     <string name="peppy_rcs_unavailable">RCS is unavailable</string>
@@ -62,6 +61,7 @@
     <string name="peppy_production_pairing_waiting">Waiting for the new device…</string>
     <string name="peppy_production_pairing_expired">This pairing request expired. Create a new one to try again.</string>
     <string name="peppy_production_pairing_verify">I checked that the verification codes match</string>
+    <string name="peppy_production_pairing_sas_label">Verification code</string>
     <string name="peppy_production_pairing_unlocked">Unlock this owner device before adding another device.</string>
     <string name="peppy_production_secure_storage_failed">Secure storage is unavailable. Setup has stopped to protect your keys and existing data.</string>
     <string name="peppy_production_retry_sync">Retry sync</string>
@@ -104,11 +104,10 @@
     <string name="peppy_provisioning_headline">Setting up your server…</string>
     <string name="peppy_provisioning_error">Setup could not finish. Your subscription is active. Try again to resume.</string>
     <string name="peppy_provisioning_ready">Server ready</string>
-    <string name="peppy_hosted_join_headline">Add this phone</string>
-    <string name="peppy_hosted_join_body">Compare this code on your other device before approving this phone.</string>
+    <string name="peppy_hosted_join_headline">Connect this phone</string>
+    <string name="peppy_hosted_join_body">Compare the verification code with the web or desktop app before approving the connection.</string>
     <string name="peppy_hosted_join_waiting">Waiting for approval…</string>
-    <string name="peppy_hosted_join_fallback">Use my encryption passphrase instead</string>
-    <string name="peppy_hosted_join_denied">This request was declined or expired. Try again or use your encryption passphrase.</string>
+    <string name="peppy_hosted_join_denied">This connection was not approved. Ask the owner to create a new Connect your phone code, or use your shared secret.</string>
     <string name="peppy_device_approval_headline">Allow this phone?</string>
     <string name="peppy_device_approval_body">Only allow this request if the code matches on your new phone.</string>
     <string name="peppy_device_allow">Allow</string>
@@ -130,7 +129,7 @@
     <string name="peppy_permissions_skip">Set up later</string>
     <string name="peppy_permissions_done">Done</string>
     <string name="peppy_self_hosted_headline">Connect to your own server</string>
-    <string name="peppy_self_hosted_body">Scan a pairing QR code from an enrolled owner device, or import a credential file.</string>
+    <string name="peppy_self_hosted_body">Enter your server address and shared secret, or scan a Connect your phone code.</string>
     <string name="peppy_self_hosted_docs_link">Self-hosting guide</string>
     <string name="peppy_settings_server_section">Server</string>
     <string name="peppy_settings_server_hosted">Peppy Hosted</string>
@@ -155,11 +154,10 @@
     <string name="peppy_try_again">Try again</string>
     <string name="peppy_locked">Locked</string>
     <string name="peppy_setup_provisioning_body">Creating your vault. This may take a moment.</string>
-    <string name="peppy_production_add_computer">Add a computer</string>
-    <string name="peppy_production_add_computer_scan_body">Scan the QR code shown on the computer.</string>
-    <string name="peppy_production_pairing_role_computer">Computer</string>
-    <string name="peppy_production_add_computer_origin_mismatch">This QR code is for a different Peppy server.</string>
-    <string name="peppy_production_add_computer_already_linked">This pairing code has already been used. Start pairing again on your computer.</string>
-    <string name="peppy_production_add_computer_allow_hint">Connects the computer to your vault.</string>
-    <string name="peppy_production_add_computer_deny_hint">Rejects this computer.</string>
+    <string name="peppy_production_pairing_invalid_qr">This is not a phone pairing code. Scan a code from an enrolled owner device.</string>
+    <string name="peppy_production_pairing_scan_owner_hint">Scan a code from an enrolled owner device.</string>
+    <string name="peppy_production_pairing_camera_owner_hint">Point your camera at a code from an enrolled owner device.</string>
+    <string name="peppy_enrollment_setup_code">Setup code</string>
+    <string name="peppy_enrollment_admin_password">Admin password</string>
+    <string name="peppy_enrollment_allow_camera">Allow camera access</string>
 </resources>

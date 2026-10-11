@@ -10,9 +10,8 @@ license.workspace = true
 peppy-client-core.workspace = true
 peppy-crypto.workspace = true
 peppy-domain.workspace = true
-peppy-protocol.workspace = true
+peppy-hosted-client = { path = "../../crates/hosted-client", version = "0.1.0" }
 base64.workspace = true
-ed25519-dalek.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 rand.workspace = true
@@ -31,3 +30,4 @@ axum.workspace = true
 peppy-server = { path = "../server", version = "0.1.0" }
 sqlx = { workspace = true, features = ["uuid"] }
 tempfile.workspace = true
+sha2.workspace = true

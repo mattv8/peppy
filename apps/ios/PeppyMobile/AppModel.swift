@@ -11,7 +11,7 @@ import PeppyNative
 /// only in the SecureField binding until it is handed to the core once.
 @MainActor @Observable
 final class AppModel {
-    enum Activity: Equatable { case idle, importing, unlocking, syncing, refreshing, disconnecting }
+    enum Activity: Equatable { case idle, importing, unlocking, enrolling, syncing, refreshing, disconnecting }
 
     private(set) var status = SessionStatus()
     private(set) var activity = Activity.idle
@@ -133,6 +133,47 @@ final class AppModel {
     func unlock(passphrase: String) async {
         await run(.unlocking) { try await $0.unlock(passphrase: passphrase) }
     }
+
+    func claimInstance(origin: String, setupToken: String, adminPassword: String, passphrase: String) async {
+        await run(.enrolling) {
+            try await $0.claimInstance(
+                origin: origin,
+                setupToken: setupToken,
+                adminPassword: adminPassword,
+                passphrase: passphrase,
+                deviceName: UIDevice.current.name
+            )
+        }
+    }
+
+    func joinWithSharedSecret(origin: String, vaultID: String?, passphrase: String) async {
+        await run(.enrolling) {
+            try await $0.joinWithSharedSecret(
+                origin: origin,
+                vaultID: vaultID,
+                passphrase: passphrase,
+                deviceName: UIDevice.current.name
+            )
+        }
+    }
+
+    func beginPhoneEnrollment(qr: String) async -> PhoneEnrollmentStatus? {
+        activity = .enrolling
+        defer { activity = .idle }
+        do { return try await session.beginPhoneEnrollment(qrPayload: qr, deviceName: UIDevice.current.name) }
+        catch { lastError = (error as? ClientError)?.userMessage ?? "Could not scan this enrollment code."; return nil }
+    }
+
+    func phoneEnrollmentStatus() async -> PhoneEnrollmentStatus? {
+        do { return try await session.phoneEnrollmentStatus() }
+        catch { lastError = (error as? ClientError)?.userMessage ?? "Pairing expired or was denied."; return nil }
+    }
+
+    func confirmPhoneEnrollment(sharedSecret: String?) async {
+        await run(.enrolling) { try await $0.confirmPhoneEnrollment(sharedSecret: sharedSecret) }
+    }
+
+    func cancelPhoneEnrollment() { Task { await session.cancelPhoneEnrollment() } }
 
     func refreshDevices() async {
         defer { devicesLoaded = true }

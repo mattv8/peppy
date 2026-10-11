@@ -5,6 +5,8 @@ import { installBrowserBridge } from "./ui-bridge";
 import "../../desktop/src/app.css";
 import { BrowserBridge } from "./browser-bridge";
 import { fetchAccountUrl } from "./account-navigation";
+import { exchangeHostedCallback, fetchHostedWebConfig, retryHostedAuthorizationAfterSignIn } from "./newhosted-app-auth";
+import { InstanceManagement } from "./InstanceManagement";
 import "./web.css";
 
 function unsupported(reasons: string[]): void {
@@ -47,6 +49,8 @@ function showStartupFailure(reason: string): void {
 
 function BrowserApp({ bridge }: { bridge: BrowserBridge }) {
   const [accountUrl, setAccountUrl] = useState<string>();
+  const [apiOrigin, setApiOrigin] = useState(location.origin);
+  const [enrollment, setEnrollment] = useState<{ mode: "community" | "hosted"; owner?: boolean }>();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -55,10 +59,23 @@ function BrowserApp({ bridge }: { bridge: BrowserBridge }) {
       bridge.setAccountUrl(nextAccountUrl);
       setAccountUrl(nextAccountUrl);
     });
+    void fetchHostedWebConfig(controller.signal).then(config => {
+      if (!config || controller.signal.aborted) return;
+      setApiOrigin(config.apiOrigin);
+      void exchangeHostedCallback(csrf => bridge.enrollment_set_hosted_csrf(csrf)).then(result => {
+        if (result === "retry") void retryHostedAuthorizationAfterSignIn(config);
+      }).catch(() => undefined);
+    });
     return () => controller.abort();
   }, [bridge]);
 
-  return <App hostKind="browser" fixedOrigin={location.origin} accountUrl={accountUrl} />;
+  useEffect(() => {
+    void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined);
+    return bridge.subscribe(() => { void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined); });
+  }, [bridge]);
+
+  if (location.pathname === "/manage") return <InstanceManagement bridge={bridge} accountUrl={accountUrl} />;
+  return <div id="browser-app"><App hostKind="browser" fixedOrigin={apiOrigin} accountUrl={accountUrl} />{enrollment?.mode === "community" && enrollment.owner && <a id="browser-manage-server-link" href="/manage">Manage server</a>}</div>;
 }
 
 function boot(): void {
@@ -66,7 +83,7 @@ function boot(): void {
   if (reasons.length) return unsupported(reasons);
   showBooting();
   try {
-    const worker = new SharedWorker("/worker.js", { type: "module", name: "peppy-browser-v1" });
+    const worker = new SharedWorker("/worker.js", { type: "module", name: "peppy-browser-enrollment-v1" });
     const bridge = new BrowserBridge(worker.port);
     installBrowserBridge(bridge);
     const root = createRoot(document.getElementById("root")!);
@@ -74,6 +91,8 @@ function boot(): void {
     bridge.onReady(() => {
       if (ready) return;
       ready = true;
+      // Enrollment discovery stays in the worker; its sanitized view will drive the shared UI once its bridge contract lands.
+      void bridge.enrollment_discover().catch(() => undefined);
       root.render(<StrictMode><BrowserApp bridge={bridge} /></StrictMode>);
     });
     bridge.onStopped((reason) => { root.unmount(); if (ready) showStopped(reason); else showStartupFailure(reason); });

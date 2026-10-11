@@ -43,7 +43,7 @@
 #setup-landing-body,
 #setup-landing-body > section,
 #hosted-signin-panel,
-#hosted-join-panel {
+#enrollment-panel {
   display: grid;
   gap: 16px;
   min-width: 0;
@@ -51,7 +51,7 @@
 
 #setup-landing-body > section,
 #hosted-signin-panel,
-#hosted-join-panel {
+#enrollment-panel {
   padding: 16px;
   border: 1px solid var(--peppy-border);
   border-radius: var(--peppy-radius-md, 8px);
@@ -65,8 +65,40 @@
   line-height: 1.3;
 }
 
-#self-hosted-panel > #hosted-join-panel > h2 {
+#self-hosted-panel > #enrollment-panel > .enrollment-stage > h2 {
   font-size: 16px;
+}
+
+.enrollment-stage {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.enrollment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.enrollment-actions:empty {
+  display: none;
+}
+
+.enrollment-methods {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.enrollment-methods label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
 }
 
 #setup-landing-body :is(h2, h3, h4, h5, h6, p) {
@@ -135,7 +167,7 @@
   justify-self: start;
 }
 
-#join-qr-hero {
+#enrollment-qr-hero {
   align-items: center;
   display: grid;
   gap: 8px;
@@ -143,22 +175,14 @@
   margin-block: 8px;
 }
 
-#hosted-join-panel[data-join-state="claimed"] #join-qr-image {
-  opacity: .3;
-}
-
-#hosted-join-panel[data-join-state="confirm"] #join-qr-image {
-  display: none;
-}
-
-#join-qr-image {
+#enrollment-qr-image {
   width: clamp(160px, 38vh, 256px);
   max-width: 100%;
   height: auto;
   image-rendering: auto;
 }
 
-#join-countdown {
+#enrollment-countdown {
   padding: 4px 8px;
   border-radius: var(--peppy-radius-pill, var(--peppy-control-radius));
   background: var(--peppy-surface-widget);
@@ -167,56 +191,14 @@
   line-height: 1.3;
 }
 
-#join-state-message {
-  color: var(--peppy-text-primary);
-  font-size: 13px;
+#enrollment-panel > .enrollment-stage > .setup-hint {
   line-height: 1.5;
 }
 
-#hosted-join-panel > .setup-hint {
-  line-height: 1.5;
-}
-
-#join-sas-panel {
-  display: grid;
-  gap: 12px;
-}
-
-#join-sas-code {
+#enrollment-verification-code {
   font-family: monospace;
   font-size: 24px;
   letter-spacing: .12em;
-}
-
-#join-confirm-actions {
-  display: grid;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-#join-confirm-button {
-  margin-top: 8px;
-}
-
-#join-cancel-button-confirm {
-  margin-top: 0;
-}
-
-#join-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-#join-actions:empty {
-  display: none;
-}
-
-.join-retrying-hint {
-  color: var(--peppy-text-secondary, var(--peppy-text));
-  font-size: 13px;
-  margin: 4px 0 0;
 }
 
 #self-hosted-url-input {
@@ -235,29 +217,6 @@
   color: var(--peppy-error-text);
   font-size: 12px;
   line-height: 1.4;
-}
-
-#self-hosted-advanced {
-  min-width: 0;
-  margin-top: 24px;
-  padding-top: 16px;
-  border-top: 1px solid var(--peppy-border);
-}
-
-#self-hosted-advanced > summary {
-  width: fit-content;
-  padding: 4px 0;
-  color: var(--peppy-text-primary);
-  cursor: pointer;
-}
-
-#self-hosted-advanced > summary:focus-visible {
-  outline: 2px solid var(--peppy-focus);
-  outline-offset: 2px;
-}
-
-#self-hosted-advanced[open] > :not(summary) {
-  margin-top: 16px;
 }
 
 @media (max-width: 360px) {

@@ -277,7 +277,6 @@ async fn policy_receives_verified_principals_and_cannot_be_tricked_by_foreign_en
         Operation::Send,
         Operation::Upload,
         Operation::Publish,
-        Operation::Pair,
     ]));
     let server = TestServer::start(policy.clone()).await;
     let first = server.owner().await;
@@ -377,11 +376,6 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
         ),
         (
             "POST",
-            "/v1/pairing".to_owned(),
-            json!({"device_id": Uuid::new_v4(), "public_key": {}, "profile_fingerprint": "invalid", "key_epoch": 1, "requested_role": "invalid"}),
-        ),
-        (
-            "POST",
             format!("/v1/attachments/{}/public-copies", Uuid::new_v4()),
             json!({"not": "an image"}),
         ),
@@ -433,7 +427,6 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
         Operation::Sync,
         Operation::Send,
         Operation::Upload,
-        Operation::Pair,
         Operation::Publish,
         Operation::Revoke,
     ] {
@@ -563,48 +556,5 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
         )
         .await;
     assert_eq!(response.0, StatusCode::PAYLOAD_TOO_LARGE, "{}", response.1);
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn pairing_policy_callback_does_not_reacquire_a_one_connection_pool_inside_the_transaction() {
-    let _guard = TEST_LOCK.lock().await;
-    let policy = Arc::new(DatabasePolicy {
-        pool: tokio::sync::OnceCell::new(),
-        quota: 64 * 1024 * 1024,
-    });
-    let server = TestServer::start_with_policy(policy.clone(), 1).await;
-    policy.pool.set(server.pool.clone()).unwrap();
-    let owner = server.owner().await;
-    let (status, intent) = server
-        .request(
-            "POST",
-            "/v1/pairing/intents",
-            &owner.device_token,
-            json!({"https_origin": "https://example.test/"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{intent}");
-    let intent_token = intent["intent_token"].as_str().unwrap();
-    let signing = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
-    let public_key =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().as_bytes());
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        server.request(
-            "POST",
-            &format!("/v1/pairing/intents/{intent_token}/claim"),
-            &owner.device_token,
-            json!({
-                "device_id": Uuid::new_v4(),
-                "public_key": {"ed25519_public_key": public_key},
-                "requested_role": "device",
-            }),
-        ),
-    )
-    .await
-    .expect("pairing policy deadlocked by reacquiring its one-connection runtime pool");
-    assert_eq!(result.0, StatusCode::OK, "{}", result.1);
     server.shutdown().await;
 }

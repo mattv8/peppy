@@ -76,220 +76,54 @@ describe("draft lifecycle flushing", () => {
 
 describe("setup landing routing", () => {
   const signedOut = { available: false, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false } as const;
+  const enrollment = (stage: "server" | "ready" | "waiting_phone" | "phone_connected", overrides = {}) => ({ mode: "community" as const, stage, ...overrides });
   const landingSnapshot = async (overrides: Partial<DesktopSnapshot>) => {
     const snapshot = await fixtureBridge.load_state();
     vi.spyOn(bridge, "load_state").mockResolvedValue({ ...snapshot, activeConversationId: undefined, ...overrides });
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
-    vi.spyOn(bridge, "join_start").mockResolvedValue({ state: "waiting", qrPayload: "{\"join\":true}", expiresInSeconds: 300 });
-    vi.spyOn(bridge, "join_status").mockResolvedValue({ state: "waiting", qrPayload: "{\"join\":true}", expiresInSeconds: 300 });
-    vi.spyOn(bridge, "join_cancel").mockResolvedValue();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server"));
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+    vi.spyOn(bridge, "enrollment_cancel").mockResolvedValue();
   };
   afterEach(() => localStorage.removeItem("peppy.setup.mode"));
 
-  it("offers a fresh server-required desktop's hosted pairing only after the existing-phone choice", async () => {
-    await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
-    render(<App />);
-    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
-    expect(screen.getByRole("combobox", { name: /server mode/i })).toHaveValue("hosted");
-    const existingPhone = await screen.findByRole("button", { name: /already use peppy/i });
-    expect(bridge.join_start).not.toHaveBeenCalled();
-    fireEvent.click(existingPhone);
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
-  });
-
-  it("offers the self-hosted mode with URL input", async () => {
+  it("uses enrollment discovery for a fresh server-required desktop", async () => {
     await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
     render(<App />);
     fireEvent.change(await screen.findByRole("combobox", { name: /server mode/i }), { target: { value: "self-hosted" } });
-    expect(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/server url/i, { selector: "#self-hosted-url-input" }), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://server.example"));
   });
 
-  it("routes an unenrolled browser snapshot through fixed-origin setup without an unlock action", async () => {
+  it("opens owner add phone enrollment from the workbench even with a gateway", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
+  });
+
+  it("returns to the selected conversation when add phone is cancelled", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_add_phone).mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    fireEvent.click(await screen.findByText("Connect your phone"));
+    fireEvent.click(document.getElementById("enrollment-add-phone-button")!);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(bridge.enrollment_cancel).toHaveBeenCalledOnce());
+    expect(document.getElementById("conversation-stage")).toBeInTheDocument();
+  });
+
+  it("refreshes after phone enrollment without requesting the legacy sync unlock", async () => {
     await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
-    const unlock = vi.spyOn(bridge, "unlock_sync");
-    const exportCredentials = vi.spyOn(bridge, "export_credentials");
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    expect(await screen.findByText("https://community.example")).toBeInTheDocument();
-    expect(document.getElementById("setup-landing")).toBeInTheDocument();
-    fireEvent.click(screen.getByText(/advanced/i));
-    expect(document.getElementById("onboarding-view")).toHaveAttribute("data-compact", "true");
-    expect(screen.queryByRole("button", { name: "Configure server" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Unlock sync" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Import credentials" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Export credentials" })).not.toBeInTheDocument();
-    expect(unlock).not.toHaveBeenCalled();
-    expect(exportCredentials).not.toHaveBeenCalled();
-  });
-
-  it("wires export through standalone disconnected setup", async () => {
-    const exportCredentials = vi.fn().mockResolvedValue(true);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    await landingSnapshot({
-      activeConversationId: undefined,
-      connection: { state: "offline" },
-      credentialExportAvailable: true,
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Export credentials" }));
-
-    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
-  });
-
-  it("disables standalone export when readiness is omitted", async () => {
-    await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
-
-    render(<App />);
-    expect(await screen.findByRole("button", { name: "Export credentials" })).toBeDisabled();
-  });
-
-  it("blocks conflicting standalone setup actions while exporting", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    const exportPending = deferred<boolean>();
-    Object.assign(bridge, { export_credentials: vi.fn().mockReturnValue(exportPending.promise) });
-    await landingSnapshot({
-      activeConversationId: undefined,
-      mode: "native",
-      connection: { state: "offline" },
-      encryption: { state: "locked" },
-      credentialExportAvailable: true,
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Export credentials" }));
-    expect(screen.getByRole("button", { name: "Configure server" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Import credentials natively" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Unlock sync natively" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Export credentials" })).toBeDisabled();
-    exportPending.resolve(true);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Export credentials" })).toBeEnabled());
-  });
-
-  it("blocks setup export while importing credentials", async () => {
-    const importPending = deferred<void>();
-    vi.spyOn(bridge, "import_credentials").mockReturnValue(importPending.promise);
-    await landingSnapshot({
-      activeConversationId: undefined,
-      connection: { state: "offline" },
-      credentialExportAvailable: true,
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Import credentials natively" }));
-    expect(screen.getByRole("button", { name: "Export credentials" })).toBeDisabled();
-    importPending.resolve();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Export credentials" })).toBeEnabled());
-  });
-
-  it("reports rejected standalone server configuration through the onboarding notice", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Server rejected." });
-    await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Configure server" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Server rejected.");
-  });
-
-  it("reports rejected standalone credential import through the onboarding notice", async () => {
-    vi.spyOn(bridge, "import_credentials").mockRejectedValue({ message: "Import rejected." });
-    await landingSnapshot({ activeConversationId: undefined, connection: { state: "offline" } });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Import credentials natively" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Import rejected.");
-  });
-
-  it.each(["locked", "mismatch"] as const)("reports a rejected browser %s unlock while keeping recovery available", async (state) => {
-    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state } });
-    vi.spyOn(bridge, "unlock_sync").mockRejectedValue({ message: "Unlock rejected." });
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    const unlockButton = await screen.findByRole("button", { name: "Unlock sync" });
-    expect(unlockButton).toBeEnabled();
-    fireEvent.click(unlockButton);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Unlock rejected.");
-    expect(screen.getByRole("button", { name: "Unlock sync" })).toBeEnabled();
-  });
-
-  it("starts a browser credential download once an unlocked credential is available", async () => {
-    const exportCredentials = vi.fn().mockResolvedValue(true);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    const importCredentials = vi.spyOn(bridge, "import_credentials").mockResolvedValue();
-    await landingSnapshot({
-      mode: "browser",
-      connection: { state: "offline" },
-      encryption: { state: "unlocked" },
-      credentialExportAvailable: true,
-    } as Partial<DesktopSnapshot>);
-
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Export credentials" }));
-
-    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
-    await waitFor(() => expect(document.getElementById("setup-credential-export-notice")).toBeVisible());
-    expect(document.getElementById("setup-credential-export-notice")).toHaveAttribute("role", "status");
-    fireEvent.click(screen.getByRole("button", { name: "Import credentials" }));
-    await waitFor(() => expect(importCredentials).toHaveBeenCalledOnce());
-    expect(document.getElementById("setup-credential-export-notice")).toHaveClass("visually-hidden");
-  });
-
-  it("keeps an unlocked browser export pending and reports its failure", async () => {
-    const exportPending = deferred<boolean>();
-    const exportCredentials = vi.fn().mockReturnValue(exportPending.promise);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    await landingSnapshot({
-      mode: "browser",
-      connection: { state: "offline" },
-      encryption: { state: "unlocked" },
-      credentialExportAvailable: true,
-    } as Partial<DesktopSnapshot>);
-
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    const exportButton = await screen.findByRole("button", { name: "Export credentials" });
-    fireEvent.click(exportButton);
-    fireEvent.click(exportButton);
-    expect(exportCredentials).toHaveBeenCalledOnce();
-    expect(exportButton).toBeDisabled();
-    exportPending.reject({ message: "Export rejected." });
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("Export rejected.");
-    expect(screen.getByRole("button", { name: "Export credentials" })).toBeEnabled();
-  });
-
-  it("refreshes after browser join approval without prompting for a second unlock", async () => {
-    await landingSnapshot({ mode: "browser", connection: { state: "offline" }, encryption: { state: "preview" } });
-    vi.mocked(bridge.join_status).mockResolvedValue({ state: "approved" });
+    vi.mocked(bridge.enrollment_discover).mockResolvedValue(enrollment("phone_connected"));
     const unlock = vi.spyOn(bridge, "unlock_sync");
     render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    await waitFor(() => expect(bridge.join_status).toHaveBeenCalled());
     await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
     expect(unlock).not.toHaveBeenCalled();
-  });
-
-  it("shows phone pairing on a connected owner desktop with no phone", async () => {
-    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "owner" });
-    vi.spyOn(bridge, "create_pairing_intent").mockResolvedValue({ httpsOrigin: "https://example.test", intentToken: "a".repeat(43), expiresInSeconds: 300 } as Awaited<ReturnType<typeof bridge.create_pairing_intent>>);
-    render(<App />);
-    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
-    expect(screen.queryByRole("combobox", { name: /server mode/i })).not.toBeInTheDocument();
-    expect(bridge.join_start).not.toHaveBeenCalled();
-  });
-
-  it("keeps a joined non-owner desktop on the conversation view without starting a new join", async () => {
-    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "device" });
-    render(<App />);
-    await waitFor(() => expect(bridge.load_state).toHaveBeenCalled());
-    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
-    expect(bridge.join_start).not.toHaveBeenCalled();
-  });
-
-  it("keeps the conversation view once a phone is connected", async () => {
-    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" } });
-    render(<App />);
-    await waitFor(() => expect(bridge.load_state).toHaveBeenCalled());
-    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
   });
 });
 
@@ -1473,8 +1307,7 @@ describe("host state display", () => {
     expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
     expect(configure).not.toHaveBeenCalled();
     expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
-    expect(document.querySelector('[data-settings-section="pair-phone"]')?.compareDocumentPosition(section!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(document.querySelector('[data-settings-section="sync"]')?.compareDocumentPosition(document.querySelector('[data-settings-section="pair-phone"]')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(document.querySelector('[data-settings-section="sync"]')?.compareDocumentPosition(section!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     cleanup();
     render(<App accountUrl="https://account.example.com/account" />);
     await screen.findByText("Hello from Aurora");
@@ -1503,21 +1336,7 @@ describe("host state display", () => {
     expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
   });
 
-  it("keeps the configured origin separate from a rejected self-hosted draft", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    const configure = vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Server rejected." });
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(document.getElementById("settings-connection-summary")).toHaveTextContent("https://example.test");
-    fireEvent.click(screen.getByText("Change server"));
-    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://draft.test" } });
-    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Server rejected.");
-    expect(screen.getByLabelText("Server URL")).toHaveValue("https://draft.test");
-    expect(document.getElementById("settings-connection-summary")).toHaveTextContent("https://example.test");
-    expect(configure).toHaveBeenCalledWith("https://draft.test");
-  });
+
 
   it("keeps rejected unlock feedback in the sync section", async () => {
     host.encryption = { state: "locked" };
@@ -1532,225 +1351,27 @@ describe("host state display", () => {
     expect(unlock).toHaveBeenCalledOnce();
   });
 
-  it("hides browser preview export in Settings", async () => {
-    vi.mocked(bridge.load_state).mockResolvedValue({
-      ...host.load(),
-      mode: "browser",
-      encryption: { state: "preview" },
-      desktop: undefined,
-    });
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(screen.queryByRole("button", { name: "Export credentials" })).not.toBeInTheDocument();
-  });
 
-  it("keeps rejected credential-import feedback in the credentials section", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    vi.spyOn(bridge, "import_credentials").mockRejectedValue({ message: "Import rejected." });
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Import credentials natively" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert.closest('[data-settings-section="credentials"]')).toBeInTheDocument();
-    expect(document.getElementById("settings-credential-import-disclosure")).toHaveProperty("open", true);
-  });
 
-  it("does not issue settings commands while disclosures open and prevents duplicate configuration", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    const configure = deferred<void>();
-    const configureServer = vi.spyOn(bridge, "configure_server").mockReturnValue(configure.promise);
-    const importCredentials = vi.spyOn(bridge, "import_credentials");
-    const unlock = vi.spyOn(bridge, "unlock_sync");
-    const openBilling = vi.spyOn(bridge, "hosted_open_billing");
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByText("Change server"));
-    expect(configureServer).not.toHaveBeenCalled();
-    expect(importCredentials).not.toHaveBeenCalled();
-    expect(unlock).not.toHaveBeenCalled();
-    expect(openBilling).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
-    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
-    expect(configureServer).toHaveBeenCalledOnce();
-    configure.resolve();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Configure server" })).toBeEnabled());
-  });
 
-  it("does not expose native credential import in hosted settings", async () => {
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(document.querySelector('[data-settings-section="credentials"]')).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /import credentials/i })).not.toBeInTheDocument();
-  });
 
-  it("exports hosted native credentials when the host reports availability", async () => {
-    const exportCredentials = vi.fn().mockResolvedValue(true);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      credentialExportAvailable: true,
-    } as unknown as DesktopSnapshot));
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
 
-    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
-    expect(screen.queryByRole("button", { name: /import credentials/i })).not.toBeInTheDocument();
-    const exportNotice = document.getElementById("settings-credential-export-notice");
-    expect(exportNotice).toHaveClass("visually-hidden");
-    expect(exportNotice).toHaveTextContent("");
-  });
 
-  it("reports a browser credential download in Settings", async () => {
-    const exportCredentials = vi.fn().mockResolvedValue(true);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      mode: "browser",
-      encryption: { state: "unlocked" },
-      credentialExportAvailable: true,
-    } as DesktopSnapshot));
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
 
-    await waitFor(() => expect(exportCredentials).toHaveBeenCalledOnce());
-    await waitFor(() => expect(document.getElementById("settings-credential-export-notice")).toBeVisible());
-    expect(document.getElementById("settings-credential-export-notice")).toHaveAttribute("role", "status");
-  });
 
-  it("reopens a pending browser credential export when its success notice arrives", async () => {
-    const exportPending = deferred<boolean>();
-    Object.assign(bridge, { export_credentials: vi.fn().mockReturnValue(exportPending.promise) });
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      mode: "browser",
-      encryption: { state: "unlocked" },
-      credentialExportAvailable: true,
-    } as DesktopSnapshot));
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
-    const disclosure = document.getElementById("settings-credential-export-disclosure") as HTMLDetailsElement;
-    await waitFor(() => expect(screen.getByRole("button", { name: "Export credentials" })).toHaveAttribute("aria-busy", "true"));
-    fireEvent.click(disclosure.querySelector("summary")!);
-    await waitFor(() => expect(disclosure.open).toBe(false));
-    await act(async () => exportPending.resolve(true));
 
-    await waitFor(() => expect(disclosure.open).toBe(true));
-    expect(document.getElementById("settings-credential-export-notice")).toBeVisible();
-  });
 
-  it("keeps export failures scoped to the settings export section", async () => {
-    Object.assign(bridge, { export_credentials: vi.fn().mockRejectedValue({ message: "Export rejected." }) });
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      credentialExportAvailable: true,
-    }));
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Export credentials" }));
 
-    const alert = await screen.findByRole("alert");
-    expect(alert.closest("#settings-credential-export")).toBeInTheDocument();
-    expect(document.getElementById("settings-credential-export-disclosure")).toHaveProperty("open", true);
-  });
 
-  it("returns to idle without an export alert after native cancellation", async () => {
-    Object.assign(bridge, { export_credentials: vi.fn().mockResolvedValue(false) });
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      credentialExportAvailable: true,
-    }));
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const exportButton = screen.getByRole("button", { name: "Export credentials" });
-    fireEvent.click(exportButton);
 
-    await waitFor(() => expect(exportButton).toBeEnabled());
-    expect(document.querySelector("#settings-credential-export [role=alert]")).not.toBeInTheDocument();
-  });
 
-  it("hides hosted native export when readiness is explicitly false", async () => {
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      credentialExportAvailable: false,
-    }));
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(document.querySelector('[data-settings-section="credentials"]')).not.toBeInTheDocument();
-  });
 
-  it("blocks browser export while locked even when availability is stale", async () => {
-    const exportCredentials = vi.fn().mockResolvedValue(true);
-    Object.assign(bridge, { export_credentials: exportCredentials });
-    vi.mocked(bridge.load_state).mockImplementation(async id => ({
-      ...host.load(id),
-      mode: "browser",
-      encryption: { state: "locked" },
-      credentialExportAvailable: true,
-    } as unknown as DesktopSnapshot));
-    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const exportButton = screen.getByRole("button", { name: "Export credentials" });
-    expect(exportButton).toBeDisabled();
-    fireEvent.click(exportButton);
-    expect(exportCredentials).not.toHaveBeenCalled();
-  });
 
-  it.each([
-    ["owner", "connected", true],
-    ["device", "connected", false],
-    ["owner", "offline", false],
-    [undefined, "connected", false],
-  ] as const)("sets pairing availability for %s devices while %s", async (deviceRole, state, available) => {
-    host.connection = { state, origin: "https://example.test" } as DesktopSnapshot["connection"];
-    host.load = ((conversationId?: string) => ({ ...createHost().load(conversationId), connection: host.connection, deviceRole })) as typeof host.load;
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(document.querySelector('[data-settings-section="pair-phone"]')).toHaveAttribute("data-pairing-available", String(available));
-  });
 
-  it("explains an unknown pairing role differently from a confirmed non-owner", async () => {
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(document.getElementById("pairing-availability-note")).toHaveTextContent(/role is unknown/i);
-
-    cleanup();
-    vi.mocked(bridge.load_state).mockResolvedValue({ ...host.load(), deviceRole: "device" });
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(document.getElementById("pairing-availability-note")).toHaveTextContent(/only the owner/i);
-  });
-
-  it("disables QR generation with the pairing availability reason", async () => {
-    host.connection = { state: "offline", origin: "https://example.test" };
-    render(<App />);
-    await screen.findByText("Hello from Aurora");
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const generate = screen.getByRole("button", { name: "Generate QR code" });
-    expect(generate).toBeDisabled();
-    expect(document.getElementById("pairing-availability-note")).toBeInTheDocument();
-    expect(generate).toHaveAccessibleDescription(/reconnect/i);
-  });
 
   it("supplies a neutral loading status before the native snapshot arrives", () => {
     const pending = deferred<DesktopSnapshot>();
@@ -1786,69 +1407,11 @@ describe("host state display", () => {
     expect(screen.getByRole("button", { name: /Aurora/ })).toBeInTheDocument();
   });
 
-  it("shows guided onboarding when disconnected with no selection and invokes native setup actions", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    host.conversations = [];
-    host.connection = {
-      state: "offline",
-      origin: "",
-      errorCode: "credentials-required",
-    };
-    host.encryption = { state: "locked" };
-    const configure = vi.spyOn(bridge, "configure_server").mockResolvedValue();
-    render(<App />);
-    const onboarding = await screen.findByRole("region", {
-      name: "Set up Peppy",
-    });
-    expect(onboarding).toBeInTheDocument();
-    expect(within(onboarding).getAllByRole("listitem")).toHaveLength(2);
-    fireEvent.change(screen.getByLabelText("Server URL"), {
-      target: { value: "https://server.test" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
-    await waitFor(() =>
-      expect(configure).toHaveBeenCalledWith("https://server.test"),
-    );
-    expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
-  });
 
-  it("retains self-hosted mode after a failed configuration and does not record browser onboarding", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    host.conversations = [];
-    host.connection = { state: "offline", origin: "", errorCode: "credentials-required" };
-    vi.spyOn(bridge, "configure_server").mockRejectedValue({ message: "Rejected" });
-    render(<App />);
-    await screen.findByRole("region", { name: "Set up Peppy" });
-    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
-    await screen.findByRole("alert");
-    expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
 
-    cleanup();
-    localStorage.removeItem("peppy.setup.mode");
-    const browserSnapshot = { ...host.load(), mode: "browser" as const, encryption: { state: "locked" as const } };
-    vi.mocked(bridge.load_state).mockResolvedValue(browserSnapshot);
-    vi.spyOn(bridge, "import_credentials").mockResolvedValue();
-    render(<App hostKind="browser" fixedOrigin="https://fixed.example" />);
-    await screen.findByRole("region", { name: "Set up Peppy" });
-    fireEvent.click(screen.getByRole("button", { name: "Import credentials" }));
-    await waitFor(() => expect(bridge.import_credentials).toHaveBeenCalled());
-    expect(localStorage.getItem("peppy.setup.mode")).toBeNull();
-  });
 
-  it("records self-hosted mode after configuration succeeds even if the refresh fails", async () => {
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    host.conversations = [];
-    host.connection = { state: "offline", origin: "", errorCode: "credentials-required" };
-    vi.spyOn(bridge, "configure_server").mockResolvedValue();
-    vi.mocked(bridge.load_state)
-      .mockResolvedValueOnce(host.load())
-      .mockRejectedValueOnce({ message: "Refresh failed." });
-    render(<App />);
-    await screen.findByRole("region", { name: "Set up Peppy" });
-    fireEvent.click(screen.getByRole("button", { name: "Configure server" }));
-    await waitFor(() => expect(bridge.configure_server).toHaveBeenCalled());
-    await waitFor(() => expect(localStorage.getItem("peppy.setup.mode")).toBe("self-hosted"));
-  });
+
+
 
   it("replaces both panes with notifications and preserves the draft when returning", async () => {
     render(<App />);
@@ -2770,5 +2333,106 @@ describe("display-only contact names", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
     expect(await screen.findByLabelText("Ada Lovelace: Lunch?")).toBeInTheDocument();
     expect(host.notifications[0].title).toBe("+12025550100");
+  });
+});
+
+describe("desktop app lock", () => {
+  const lockedSnapshot = (errorCode: string): DesktopSnapshot => ({
+    ...host.load(),
+    connection: { state: "offline", origin: "https://example.test", errorCode },
+  });
+
+  it("defaults the password requirement off and never renders a password field", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    expect(checkbox).not.toBeChecked();
+    expect(document.querySelector("input[type=\"password\"]")).toBeNull();
+    expect(screen.getByText(/Changes apply the next time Peppy starts/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lock now" })).not.toBeInTheDocument();
+  });
+
+  it("enables the requirement only through the native prompt and reflects the fresh status", async () => {
+    const setLock = vi.spyOn(bridge, "set_app_lock").mockResolvedValue(true);
+    vi.spyOn(bridge, "get_app_lock_status")
+      .mockResolvedValueOnce({ enabled: false, locked: false, storageAvailable: true })
+      .mockResolvedValueOnce({ enabled: true, locked: false, storageAvailable: true });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(setLock).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeChecked());
+    expect(document.querySelector("input[type=\"password\"]")).toBeNull();
+  });
+
+  it("keeps the prior setting when the native prompt is cancelled", async () => {
+    const setLock = vi.spyOn(bridge, "set_app_lock").mockResolvedValue(false);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const checkbox = await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" });
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(setLock).toHaveBeenCalledWith(true));
+    expect(await screen.findByText("The password requirement was not changed.")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeChecked();
+  });
+
+  it("disables the control and explains storage failure when secure storage is unavailable", async () => {
+    vi.spyOn(bridge, "get_app_lock_status").mockResolvedValue({ enabled: false, locked: false, storageAvailable: false });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("checkbox", { name: "Require a password when Peppy starts" })).toBeDisabled();
+    expect(screen.getByText("Secure storage is unavailable, so this setting cannot be changed.")).toBeInTheDocument();
+  });
+
+  it("replaces the shell with a plain lock screen that shows no host data until unlocked", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(lockedSnapshot("app-locked"));
+    const unlock = vi.spyOn(bridge, "unlock_app").mockResolvedValue(true);
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Peppy is locked" })).toBeInTheDocument();
+    expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    expect(await screen.findByText("Hello from Aurora")).toBeInTheDocument();
+    expect(unlock).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("heading", { name: "Peppy is locked" })).not.toBeInTheDocument();
+  });
+
+  it("stays locked when the native unlock is cancelled or rejected", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue(lockedSnapshot("app-locked"));
+    const unlock = vi.spyOn(bridge, "unlock_app").mockResolvedValue(false);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Unlock" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Peppy is still locked.");
+    expect(unlock).toHaveBeenCalledOnce();
+    expect(bridge.load_state).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("heading", { name: "Peppy is locked" })).toBeInTheDocument();
+  });
+
+  it("shows a storage recovery message instead of an unlock action when secure storage fails", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue(lockedSnapshot("secure-store-unavailable"));
+    const unlock = vi.spyOn(bridge, "unlock_app").mockResolvedValue(true);
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Peppy cannot check its lock" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unlock" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/wrong password|incorrect password|server/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Hello from Aurora")).not.toBeInTheDocument();
+    expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("never applies the local app lock in the browser host", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...lockedSnapshot("app-locked"), mode: "browser", desktop: undefined });
+    const status = vi.spyOn(bridge, "get_app_lock_status");
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByRole("button", { name: "Settings" });
+    expect(screen.queryByRole("heading", { name: "Peppy is locked" })).not.toBeInTheDocument();
+    expect(status).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.queryByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
   });
 });

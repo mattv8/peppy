@@ -233,7 +233,7 @@ pub struct ProvisioningGrantResponse {
 // Intentionally no Debug for ProvisioningGrantResponse (sensitive)
 
 /// Request to complete device provisioning.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompleteProvisioningRequest {
     pub operation_id: Uuid,
@@ -246,6 +246,10 @@ pub struct CompleteProvisioningRequest {
     pub encrypted_vault_check_header: String,
     pub profile_fingerprint: String,
     pub key_epoch: u32,
+    pub admission_public_key: String,
+    pub signing_public_key: String,
+    pub client_kind: enrollment::ClientKind,
+    pub device_name: String,
 }
 
 // Intentionally no Debug for CompleteProvisioningRequest (sensitive)
@@ -739,6 +743,10 @@ mod tests {
             encrypted_vault_check_header: encrypted_vault_check_header.clone(),
             profile_fingerprint: profile_fingerprint.clone(),
             key_epoch: 1,
+            admission_public_key: "a".repeat(43),
+            signing_public_key: "b".repeat(43),
+            client_kind: enrollment::ClientKind::Desktop,
+            device_name: "Desktop".into(),
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -768,6 +776,10 @@ mod tests {
             encrypted_vault_check_header: "aGVsbG8gd29ybGQ=".to_string(),
             profile_fingerprint: "fp".to_string(),
             key_epoch: 1,
+            admission_public_key: "a".repeat(43),
+            signing_public_key: "b".repeat(43),
+            client_kind: enrollment::ClientKind::Desktop,
+            device_name: "Desktop".into(),
         };
         let mut json_obj = serde_json::to_value(&request)
             .unwrap()
@@ -823,3 +835,4 @@ mod tests {
 }
 pub mod auth_web;
 pub mod billing_web;
+pub mod enrollment;

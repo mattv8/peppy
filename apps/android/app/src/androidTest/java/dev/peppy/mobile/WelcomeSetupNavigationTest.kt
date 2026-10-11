@@ -86,30 +86,14 @@ class WelcomeSetupNavigationTest {
     }
 
     @Test
-    fun pairingCancellationReturnsToItsOrigin() {
-        assertEquals(
-            WelcomeDestination.SELF_HOSTED,
-            pairingCancellationDestination(WelcomeDestination.SELF_HOSTED_PAIRING),
-        )
-        assertEquals(
-            WelcomeDestination.HOSTED,
-            pairingCancellationDestination(WelcomeDestination.HOSTED_PAIRING),
-        )
-    }
-
-    @Test
-    fun selectingSelfHostedDoesNotStartPairingOrCredentialImport() {
-        val pairingStarts = AtomicInteger()
-        val importStarts = AtomicInteger()
+    fun selectingSelfHostedDoesNotStartEnrollment() {
+        val enrollmentStarts = AtomicInteger()
         composeRule.setContent {
             var selfHosted by remember { mutableStateOf(false) }
             if (selfHosted) {
                 SelfHostedSetupScreen(
-                    importBusy = false,
-                    importResult = null,
                     onBack = { selfHosted = false },
-                    onPair = { pairingStarts.incrementAndGet() },
-                    onImport = { importStarts.incrementAndGet() },
+                    onEnroll = { enrollmentStarts.incrementAndGet() },
                     onOpenGuide = {},
                 )
             } else {
@@ -120,8 +104,7 @@ class WelcomeSetupNavigationTest {
         composeRule.onNodeWithTag("welcome-server-mode-selector").performClick()
         composeRule.onNodeWithTag("welcome-server-mode-self-hosted").performClick()
 
-        assertEquals(0, pairingStarts.get())
-        assertEquals(0, importStarts.get())
+        assertEquals(0, enrollmentStarts.get())
     }
 
     @Test
@@ -155,17 +138,15 @@ private fun WelcomeFlow(initialDestination: WelcomeDestination = WelcomeDestinat
             onSelectSelfHosted = { destination = WelcomeDestination.SELF_HOSTED },
         )
         WelcomeDestination.SELF_HOSTED -> SelfHostedSetupScreen(
-            importBusy = false,
-            importResult = null,
             onBack = { destination = WelcomeDestination.HOSTED },
-            onPair = { destination = WelcomeDestination.SELF_HOSTED_PAIRING },
-            onImport = {},
+            onEnroll = { destination = WelcomeDestination.SELF_HOSTED_ENROLLMENT },
             onOpenGuide = {},
         )
         WelcomeDestination.HOSTED_ENROLLMENT -> Text(
             "Hosted enrollment",
             Modifier.testTag("hosted-enrollment-destination"),
         )
-        else -> Text("Pairing", Modifier.testTag("pairing-destination"))
+        WelcomeDestination.SELF_HOSTED_ENROLLMENT -> Text("Self-hosted enrollment")
+        WelcomeDestination.HOSTED_PAIRING -> Text("Phone enrollment")
     }
 }

@@ -12,6 +12,12 @@ use zeroize::Zeroizing;
 pub enum PassphrasePurpose {
     Unlock,
     Create,
+    SetupToken,
+    AdminPassword,
+    AppLockCreate,
+    AppLockConfirm,
+    AppLockUnlock,
+    AppLockDisable,
 }
 
 fn dialog_error() -> BridgeError {
@@ -241,6 +247,11 @@ mod windows_dialog {
         let (message, caption) = match purpose {
             PassphrasePurpose::Unlock => (w!("Enter the vault passphrase. It is verified only on this device and is never stored."), w!("Unlock Peppy sync")),
             PassphrasePurpose::Create => (w!("Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered."), w!("Create encryption passphrase")),
+            PassphrasePurpose::AppLockCreate => (w!("Choose a password required when Peppy opens on this computer."), w!("Require a password to open Peppy")),
+            PassphrasePurpose::AppLockConfirm => (w!("Enter the same password again."), w!("Confirm Peppy password")),
+            PassphrasePurpose::AppLockUnlock => (w!("Enter the password required to open Peppy on this computer."), w!("Unlock Peppy")),
+            PassphrasePurpose::AppLockDisable => (w!("Enter your current Peppy password to turn off the app lock."), w!("Turn off Peppy app lock")),
+            _ => return Err(BridgeError::new("platform-gate", "This passphrase prompt is unavailable on Windows.")),
         };
         let info = CREDUI_INFOW {
             cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
@@ -257,6 +268,16 @@ mod windows_dialog {
                 match purpose {
                     PassphrasePurpose::Unlock => w!("Peppy sync vault"),
                     PassphrasePurpose::Create => w!("Peppy encryption passphrase"),
+                    PassphrasePurpose::AppLockCreate
+                    | PassphrasePurpose::AppLockConfirm
+                    | PassphrasePurpose::AppLockUnlock
+                    | PassphrasePurpose::AppLockDisable => w!("Peppy app lock"),
+                    _ => {
+                        return Err(BridgeError::new(
+                            "platform-gate",
+                            "This passphrase prompt is unavailable on Windows.",
+                        ))
+                    }
                 },
                 None,
                 0,
@@ -316,6 +337,7 @@ mod linux {
         "Enter the vault passphrase. It is verified only on this device and is never stored.";
     const CREATE_TITLE: &str = "Create encryption passphrase";
     const CREATE_MESSAGE: &str = "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.";
+    const APP_LOCK_MESSAGE: &str = "Enter the password required to open Peppy on this computer.";
 
     pub fn secure_passphrase(
         purpose: PassphrasePurpose,
@@ -323,6 +345,24 @@ mod linux {
         let (title, message) = match purpose {
             PassphrasePurpose::Unlock => (UNLOCK_TITLE, UNLOCK_MESSAGE),
             PassphrasePurpose::Create => (CREATE_TITLE, CREATE_MESSAGE),
+            PassphrasePurpose::AppLockCreate => (
+                "Require a password to open Peppy",
+                "Choose a password required when Peppy opens on this computer.",
+            ),
+            PassphrasePurpose::AppLockConfirm => {
+                ("Confirm Peppy password", "Enter the same password again.")
+            }
+            PassphrasePurpose::AppLockUnlock => ("Unlock Peppy", APP_LOCK_MESSAGE),
+            PassphrasePurpose::AppLockDisable => (
+                "Turn off Peppy app lock",
+                "Enter your current Peppy password to turn off the app lock.",
+            ),
+            _ => {
+                return Err(BridgeError::new(
+                    "platform-gate",
+                    "This passphrase prompt is unavailable on Linux.",
+                ))
+            }
         };
         for (program, arguments) in [
             (
@@ -455,6 +495,12 @@ mod macos {
         match purpose {
             super::PassphrasePurpose::Unlock => ("Unlock Peppy sync", "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.", "Unlock"),
             super::PassphrasePurpose::Create => ("Create encryption passphrase", "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.", "Create"),
+            super::PassphrasePurpose::SetupToken => ("Claim Peppy server", "Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
+            super::PassphrasePurpose::AdminPassword => ("Peppy server administrator", "Enter the server administrator password. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
+            super::PassphrasePurpose::AppLockCreate => ("Require a password to open Peppy", "Choose a password required when Peppy opens on this computer.", "Continue"),
+            super::PassphrasePurpose::AppLockConfirm => ("Confirm Peppy password", "Enter the same password again.", "Continue"),
+            super::PassphrasePurpose::AppLockUnlock => ("Unlock Peppy", "Enter the password required to open Peppy on this computer.", "Unlock"),
+            super::PassphrasePurpose::AppLockDisable => ("Turn off Peppy app lock", "Enter your current Peppy password to turn off the app lock.", "Continue"),
         }
     }
 

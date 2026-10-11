@@ -342,6 +342,13 @@ fn runtime(app: &AppHandle) -> tauri::State<'_, HeadRuntime> {
 }
 
 fn schedule_refresh(app: &AppHandle) {
+    if app
+        .state::<AppState>()
+        .app_locked
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
     let start = {
         let runtime = runtime(app);
         let Ok(mut state) = runtime.state.lock() else {
@@ -391,6 +398,13 @@ fn schedule_refresh(app: &AppHandle) {
 
 async fn refresh(app: &AppHandle) {
     let app_state = app.state::<AppState>();
+    if app_state
+        .app_locked
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        clear_visible(app).await;
+        return;
+    }
     let binding = match app_state
         .config()
         .ok()
@@ -453,6 +467,14 @@ async fn refresh(app: &AppHandle) {
         }
         Err(_) => return, // transient query failures leave the last good registry intact
     };
+    if app
+        .state::<AppState>()
+        .app_locked
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        clear_visible(app).await;
+        return;
+    }
     if !revalidate_after_await(app, &token).await {
         return;
     }

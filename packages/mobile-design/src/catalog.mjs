@@ -13,7 +13,6 @@ export const catalog = Object.freeze({
   devices: "Devices",
   pair_device: "Pair a device",
   scan_qr: "Scan pairing QR code",
-  use_credential_file: "Use credential file",
   unlock_with_passphrase: "Unlock with passphrase",
   carrier_unavailable: "Carrier messaging is unavailable on this device",
   rcs_unavailable: "RCS is unavailable",
@@ -61,6 +60,7 @@ export const catalog = Object.freeze({
   production_pairing_waiting: "Waiting for the new device…",
   production_pairing_expired: "This pairing request expired. Create a new one to try again.",
   production_pairing_verify: "I checked that the verification codes match",
+  production_pairing_sas_label: "Verification code",
   production_pairing_unlocked: "Unlock this owner device before adding another device.",
   production_secure_storage_failed: "Secure storage is unavailable. Setup has stopped to protect your keys and existing data.",
   production_retry_sync: "Retry sync",
@@ -113,11 +113,10 @@ export const catalog = Object.freeze({
   provisioning_headline: "Setting up your server…",
   provisioning_error: "Setup could not finish. Your subscription is active. Try again to resume.",
   provisioning_ready: "Server ready",
-  hosted_join_headline: "Add this phone",
-  hosted_join_body: "Compare this code on your other device before approving this phone.",
+  hosted_join_headline: "Connect this phone",
+  hosted_join_body: "Compare the verification code with the web or desktop app before approving the connection.",
   hosted_join_waiting: "Waiting for approval…",
-  hosted_join_fallback: "Use my encryption passphrase instead",
-  hosted_join_denied: "This request was declined or expired. Try again or use your encryption passphrase.",
+  hosted_join_denied: "This connection was not approved. Ask the owner to create a new Connect your phone code, or use your shared secret.",
   device_approval_headline: "Allow this phone?",
   device_approval_body: "Only allow this request if the code matches on your new phone.",
   device_allow: "Allow",
@@ -139,7 +138,7 @@ export const catalog = Object.freeze({
   permissions_skip: "Set up later",
   permissions_done: "Done",
   self_hosted_headline: "Connect to your own server",
-  self_hosted_body: "Scan a pairing QR code from an enrolled owner device, or import a credential file.",
+  self_hosted_body: "Enter your server address and shared secret, or scan a Connect your phone code.",
   self_hosted_docs_link: "Self-hosting guide",
   settings_server_section: "Server",
   settings_server_hosted: "Peppy Hosted",
@@ -166,13 +165,12 @@ export const catalog = Object.freeze({
   try_again: "Try again",
   locked: "Locked",
   setup_provisioning_body: "Creating your vault. This may take a moment.",
-  production_add_computer: "Add a computer",
-  production_add_computer_scan_body: "Scan the QR code shown on the computer.",
-  production_pairing_role_computer: "Computer",
-  production_add_computer_origin_mismatch: "This QR code is for a different Peppy server.",
-  production_add_computer_already_linked: "This pairing code has already been used. Start pairing again on your computer.",
-  production_add_computer_allow_hint: "Connects the computer to your vault.",
-  production_add_computer_deny_hint: "Rejects this computer."
+  production_pairing_invalid_qr: "This is not a phone pairing code. Scan a code from an enrolled owner device.",
+  production_pairing_scan_owner_hint: "Scan a code from an enrolled owner device.",
+  production_pairing_camera_owner_hint: "Point your camera at a code from an enrolled owner device."
+  ,enrollment_setup_code: "Setup code"
+  ,enrollment_admin_password: "Admin password"
+  ,enrollment_allow_camera: "Allow camera access"
 });
 
 /** Native catalog: shared catalog excluding preview-only and mobile store keys. */
@@ -193,8 +191,8 @@ export const nativeCatalog = Object.freeze(
 
 /** Desktop wording overrides and desktop-only keys. Mobile outputs use `catalog` only. */
 export const desktopOverrides = Object.freeze({
-  hosted_join_headline: "Add this computer",
-  hosted_join_body: "Compare this code on your other device before approving this computer.",
+  hosted_join_headline: "Connect your phone",
+  hosted_join_body: "Scan this code with Peppy on your phone, then compare the verification codes.",
   device_approval_headline: "Allow this device?",
   device_approval_body: "Only allow this request if the code matches on your new device.",
   hosted_unlock_body: "Unlock synced content on this computer. Peppy cannot recover your passphrase.",
@@ -205,7 +203,6 @@ export const desktopOverrides = Object.freeze({
   passphrase_create_body: "Your encryption passphrase protects your synced content. You will enter the same passphrase on every device. It stays on your devices and is never sent to Peppy.",
   passphrase_ack_label: "Peppy cannot recover my passphrase. I have saved it somewhere safe.",
   passphrase_weak: "Use at least four different, unpredictable words, 24 characters or more.",
-  self_hosted_body: "Configure your server address, then import this computer's credential file.",
   passphrase_native_cta: "Enter passphrase securely",
   passphrase_native_note: "A secure system dialog will ask for your passphrase. Peppy's window never sees it.",
   permissions_login: "Open Peppy at login",
@@ -213,27 +210,16 @@ export const desktopOverrides = Object.freeze({
   hosted_preview_native_only: "This step uses a secure system dialog.",
   setup_mode_hosted: "Peppy Hosted",
   setup_mode_self_hosted: "Self-hosted",
-  setup_join_claimed: "A device scanned the code — approve on your phone, then confirm here. If your phone says this computer was already claimed, cancel here.",
-  setup_join_confirm: "Continue only if your phone shows this same code.",
-  setup_join_approved: "Approved — unlocking…",
-  setup_join_continue: "Continue",
-  setup_join_retrying: "Reconnecting…",
-  setup_self_hosted_join_body: "Enter your server address to scan a QR code from an enrolled owner device.",
+  setup_self_hosted_join_body: "Enter your server address to set up or connect this device.",
   setup_self_hosted_url_hint: "https:// required, or http:// for local addresses (127.0.0.1, localhost).",
   setup_self_hosted_url_invalid: "Enter a valid URL (for example, https://server.example).",
   setup_self_hosted_url_credentials: "Remove the username or password from the URL — only the server address is needed.",
   setup_self_hosted_url_path: "Use just the server address without a path, query, or #fragment.",
   setup_self_hosted_url_https_required: "Non-local addresses must use https://.",
-  setup_self_hosted_advanced: "Advanced",
-  credential_export_warning: "This auth-only file contains a plaintext device authentication token. It does not restore local sync state. Pair a new device for a new installation. Do not use the same identity concurrently. Keep it private. Your sync passphrase is still needed to decrypt messages. It is not a message backup.",
-  credential_export_unavailable: "No active credential is available to export.",
-  credential_export_locked: "Unlock sync before exporting credentials in this browser.",
   setup_choice_existing: "I already use Peppy on my phone",
-  setup_choice_existing_hint: "Scan a code with your phone to add this computer.",
+  setup_choice_existing_hint: "Connect this device to your server, then add a phone if needed.",
   setup_choice_new: "I'm new to Peppy",
   setup_choice_new_hint: "Sign in, choose a plan, and create your vault.",
-  setup_join_waiting: "Waiting for your phone to scan…",
-  setup_join_scan_hint: "On your enrolled phone, choose Add a computer and scan this code.",
 });
-export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_join_claimed", "setup_join_confirm", "setup_join_approved", "setup_join_continue", "setup_join_retrying", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_url_invalid", "setup_self_hosted_url_credentials", "setup_self_hosted_url_path", "setup_self_hosted_url_https_required", "setup_self_hosted_advanced", "credential_export_warning", "credential_export_unavailable", "credential_export_locked", "setup_choice_existing", "setup_choice_existing_hint", "setup_choice_new", "setup_choice_new_hint", "setup_join_waiting", "setup_join_scan_hint"]);
+export const desktopOnlyKeys = Object.freeze(["passphrase_native_cta", "passphrase_native_note", "permissions_login", "permissions_desktop_note", "hosted_preview_native_only", "setup_mode_hosted", "setup_mode_self_hosted", "setup_self_hosted_join_body", "setup_self_hosted_url_hint", "setup_self_hosted_url_invalid", "setup_self_hosted_url_credentials", "setup_self_hosted_url_path", "setup_self_hosted_url_https_required", "setup_choice_existing", "setup_choice_existing_hint", "setup_choice_new", "setup_choice_new_hint"]);
 export const desktopCatalog = Object.freeze({ ...catalog, ...desktopOverrides });

@@ -1,16 +1,14 @@
 //! Encrypted recovery acceptance over isolated PostgreSQL and SeaweedFS Compose fixtures.
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey};
 use peppy_client_core::*;
 use peppy_crypto::{create_vault_check_header, derive_root_key};
 use peppy_gateway_simulator::{drain_media, effects_path, run_one_carrier_effect, upload_pending};
-use peppy_protocol::pairing_proof_message;
 use peppy_server::{
     api::{create_owner, router},
     config::S3Config,
     storage::Storage,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     fs,
@@ -247,7 +245,6 @@ struct VaultFixture {
     profile: KeyProfile,
     header: VaultCheckHeader,
     fingerprint: String,
-    owner_token: String,
 }
 
 struct Paired {
@@ -328,7 +325,7 @@ async fn create_vault(pool: &PgPool) -> VaultFixture {
     let fingerprint = profile.fingerprint().unwrap();
     let root = derive_root_key(PHRASE, &profile).unwrap();
     let header = create_vault_check_header(&root, profile.clone()).unwrap();
-    let owner = create_owner(
+    create_owner(
         pool,
         serde_json::to_value(&profile).unwrap(),
         serde_json::to_vec(&header).unwrap(),
@@ -342,63 +339,33 @@ async fn create_vault(pool: &PgPool) -> VaultFixture {
         profile,
         header,
         fingerprint,
-        owner_token: owner.device_token,
     }
 }
 
-async fn pair(runtime: &RouterRuntime, vault: &VaultFixture, role: &str, byte: u8) -> Paired {
-    let key = SigningKey::from_bytes(&[byte; 32]);
+async fn enroll_fixture_device(
+    runtime: &RouterRuntime,
+    vault: &VaultFixture,
+    role: &str,
+    byte: u8,
+) -> Paired {
     let id = DeviceId::new();
-    let public =
-        json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-    let http = reqwest::Client::builder()
-        .timeout(NETWORK_TIMEOUT)
-        .build()
+    let token = format!("recovery-fixture-{byte}-{id}");
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,'{}'::jsonb,$4,1)")
+        .bind(vault.vault.0)
+        .bind(id.0)
+        .bind(role)
+        .bind(&vault.fingerprint)
+        .execute(&runtime.pool)
+        .await
         .unwrap();
-    let challenge: Value = bounded(
-        "recovery-pair-create",
-        http.post(format!("{}/v1/pairing", runtime.url))
-            .bearer_auth(&vault.owner_token)
-            .json(&json!({"device_id":id.0,"public_key":public,"profile_fingerprint":vault.fingerprint,"key_epoch":1,"requested_role":role}))
-            .send(),
-    )
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    let challenge_bytes: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(challenge["challenge_token"].as_str().unwrap())
-        .unwrap()
-        .try_into()
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(vault.vault.0)
+        .bind(id.0)
+        .execute(&runtime.pool)
+        .await
         .unwrap();
-    let proof = pairing_proof_message(
-        &challenge_bytes,
-        vault.vault,
-        id,
-        &vault.fingerprint,
-        1,
-        role,
-    );
-    let response: Value = bounded(
-        "recovery-pair-consume",
-        http.post(format!("{}/v1/pairing/consume", runtime.url))
-            .json(&json!({"challenge_token":challenge["challenge_token"],"device_id":id.0,"public_key":public,"profile_fingerprint":vault.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())}))
-            .send(),
-    )
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    Paired {
-        id,
-        token: response["device_token"].as_str().unwrap().into(),
-    }
+    Paired { id, token }
 }
 
 fn core_client(root: &Path, name: &str, vault: &VaultFixture, device_id: DeviceId) -> Client {
@@ -531,8 +498,8 @@ async fn encrypted_mms_survives_volume_restore_without_historical_carrier_effect
 
     let source_router = start_router(&source, true).await;
     let vault = create_vault(&source_router.pool).await;
-    let desktop_pair = pair(&source_router, &vault, "device", 7).await;
-    let gateway_pair = pair(&source_router, &vault, "gateway", 9).await;
+    let desktop_pair = enroll_fixture_device(&source_router, &vault, "device", 7).await;
+    let gateway_pair = enroll_fixture_device(&source_router, &vault, "gateway", 9).await;
     let desktop = core_client(root.path(), "recovery-desktop", &vault, desktop_pair.id);
     let png = fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media/valid-1x1.png"),

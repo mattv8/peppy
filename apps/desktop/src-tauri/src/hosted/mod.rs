@@ -45,6 +45,52 @@ pub struct HostedState {
     base_override: std::sync::Mutex<Option<String>>,
 }
 
+/// Native-only account session for hosted enrollment headers. It is never an IPC value.
+pub(crate) async fn enrollment_account_session(
+    state: &AppState,
+    hosted: &HostedState,
+    origin: &str,
+) -> BridgeResult<Zeroizing<String>> {
+    if origin != PRODUCTION_ORIGIN {
+        return Err(BridgeError::new(
+            "invalid-origin",
+            "Hosted enrollment is only available at Peppy Hosted.",
+        ));
+    }
+    let session = load_session_from_store(&*state.store, hosted, origin)
+        .await?
+        .ok_or_else(|| {
+            BridgeError::new(
+                "credentials-required",
+                "Sign in to Peppy Hosted before enrolling.",
+            )
+        })?;
+    Ok(Zeroizing::new(session.bearer.to_string()))
+}
+
+/// Reuses the reviewed hosted grant/checkpoint/protected-import flow for first owner creation.
+pub(crate) async fn provision_enrollment(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    hosted: &HostedState,
+) -> BridgeResult<()> {
+    let origin = hosted_origin()?;
+    provision_core(
+        &*state.store,
+        hosted,
+        &origin,
+        |need| async move {
+            let purpose = match need {
+                PassphraseNeed::Create => crate::dialogs::PassphrasePurpose::Create,
+                PassphraseNeed::Resume => crate::dialogs::PassphrasePurpose::Unlock,
+            };
+            crate::dialogs::passphrase(app, purpose).await
+        },
+        |credential, passphrase| activate_and_unlock(app, state, credential, passphrase),
+    )
+    .await
+}
+
 impl HostedState {
     fn api_base(&self, origin: &str) -> String {
         #[cfg(test)]
@@ -607,7 +653,14 @@ where
             }
             value
         }
-        None => prepare(origin, &session.account_id, &passphrase).map_err(client_error)?,
+        None => prepare(
+            origin,
+            &session.account_id,
+            &passphrase,
+            peppy_hosted_api::enrollment::ClientKind::Desktop,
+            "Peppy Desktop",
+        )
+        .map_err(client_error)?,
     };
     persist_checkpoint(store, &key, &provisioning)?;
 

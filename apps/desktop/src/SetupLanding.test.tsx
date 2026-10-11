@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bridge, type HostedAccountView, type JoinView } from "./bridge";
+import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy } from "./generated/peppyCopy";
 import { SetupLanding } from "./SetupLanding";
 
@@ -9,15 +9,8 @@ const account = (overrides: Partial<HostedAccountView> = {}): HostedAccountView 
   available: true, signedIn: false, accountLabel: null, classification: null,
   entitlement: null, access: null, hasVault: false, resumable: false, ...overrides,
 });
-const join = (overrides: Partial<JoinView> = {}): JoinView => {
-  const state = overrides.state ?? "waiting";
-  return {
-    state,
-    ...(["waiting", "claimed", "confirm"].includes(state) ? { expiresInSeconds: 300 } : {}),
-    ...(state === "waiting" ? { qrPayload: "secret-qr-payload" } : {}),
-    ...overrides,
-  };
-};
+const view = (overrides: Partial<EnrollmentView> = {}): EnrollmentView => ({ mode: "community", stage: "server", ...overrides });
+const waitingView = (overrides: Partial<EnrollmentView> = {}) => view({ stage: "waiting_phone", qrPayload: "secret-qr-payload", expiresInSeconds: 300, ...overrides });
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -28,14 +21,15 @@ const deferred = <T,>() => {
 let setStorageItem: ReturnType<typeof vi.fn>;
 
 function renderLanding(props: Partial<React.ComponentProps<typeof SetupLanding>> = {}) {
-  return render(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} pairPhone={<div>Pair phone</div>} selfHostedFallback={<div>Fallback setup</div>} onJoined={vi.fn()} {...props} />);
+  return render(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} {...props} />);
 }
 
 async function chooseExisting() {
   fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
 }
 
-function mockNextJoinPoll(next: JoinView) {
+/** Captures the 4-second enrollment poll so tests can fire it deterministically. */
+function capturePoll() {
   let poll: (() => void) | undefined;
   const nativeSetInterval = window.setInterval;
   vi.spyOn(window, "setInterval").mockImplementation((handler, timeout) => {
@@ -45,7 +39,6 @@ function mockNextJoinPoll(next: JoinView) {
     }
     return nativeSetInterval(handler, timeout) as unknown as ReturnType<typeof window.setInterval>;
   });
-  vi.mocked(bridge.join_status).mockResolvedValue(next);
   return async () => {
     await waitFor(() => expect(poll).toBeDefined());
     await act(async () => poll?.());
@@ -59,31 +52,34 @@ describe("SetupLanding", () => {
     Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => values.get(key) ?? null, setItem: setStorageItem, removeItem: (key: string) => values.delete(key), clear: () => values.clear() } });
     vi.restoreAllMocks();
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account());
-    vi.spyOn(bridge, "join_start").mockResolvedValue(join());
-    vi.spyOn(bridge, "join_status").mockResolvedValue(join());
-    vi.spyOn(bridge, "join_cancel").mockResolvedValue();
-    vi.spyOn(bridge, "join_confirm").mockResolvedValue(join({ state: "approved" }));
     vi.spyOn(bridge, "hosted_provision").mockResolvedValue();
     vi.spyOn(bridge, "hosted_open_billing").mockResolvedValue();
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account());
     vi.spyOn(bridge, "hosted_sign_out").mockResolvedValue();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_cancel").mockResolvedValue();
+    vi.spyOn(bridge, "enrollment_create_owner").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_sign_in").mockResolvedValue(view({ stage: "locked" }));
+    vi.spyOn(bridge, "enrollment_connect_shared_secret").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(waitingView());
+    vi.spyOn(bridge, "enrollment_approve").mockResolvedValue(view({ stage: "phone_connected", owner: true }));
   });
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
   });
 
-  it("shows a chooser without starting a hosted join", async () => {
+  it("shows a chooser without starting an enrollment", async () => {
     renderLanding();
     await waitFor(() => expect(screen.getByRole("button", { name: /already use peppy/i })).toHaveFocus());
     expect(screen.getByRole("button", { name: /i'm new to peppy/i })).toBeInTheDocument();
-    expect(bridge.join_start).not.toHaveBeenCalled();
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
   });
 
   it("uses a fixed self-hosted origin without hosted account calls or URL controls", async () => {
-    vi.mocked(bridge.join_status).mockResolvedValue({ state: "idle" });
     renderLanding({ fixedOrigin: "https://community.example" });
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("https://community.example"));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://community.example"));
     expect(bridge.hosted_account).not.toHaveBeenCalled();
     expect(document.getElementById("setup-mode-select")).not.toBeInTheDocument();
     expect(document.getElementById("self-hosted-url-input")).not.toBeInTheDocument();
@@ -97,18 +93,16 @@ describe("SetupLanding", () => {
     renderLanding({ fixedOrigin: "https://app.example.com", accountUrl: "https://account.example.com/account" });
 
     const link = await screen.findByRole("link", { name: /manage account & billing/i });
-    expect(document.querySelector("#self-hosted-panel > h2")).toHaveTextContent("Add this computer");
-    expect(screen.getByText("Scan a code with your phone to add this computer.")).toBeInTheDocument();
+    expect(document.querySelector("#self-hosted-panel > h2")).toHaveTextContent(peppyCopy.hosted_join_headline);
     expect(link).toHaveAttribute("href", "https://account.example.com/account");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
-    expect(document.getElementById("setup-account-billing-hint")?.compareDocumentPosition(document.getElementById("self-hosted-advanced")!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
-  it("starts a hosted join only after the existing-phone choice", async () => {
+  it("starts the hosted enrollment only after the existing-phone choice", async () => {
     renderLanding();
     await chooseExisting();
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("secret-qr-payload");
   });
@@ -129,47 +123,44 @@ describe("SetupLanding", () => {
     fireEvent.click(await screen.findByRole("button", { name: /i'm new to peppy/i }));
     expect(await screen.findByRole("button", { name: /continue with google/i })).toBeInTheDocument();
     expect(screen.queryByText(/subscribe/i)).not.toBeInTheDocument();
-    expect(bridge.join_start).not.toHaveBeenCalled();
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
   });
 
-  it("returns from either transient path to the focused chooser and cancels an existing join", async () => {
+  it("returns from the transient enrollment to the focused chooser and cancels the active pairing", async () => {
     renderLanding();
     await chooseExisting();
     await screen.findByRole("button", { name: "Back" });
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(bridge.join_cancel).toHaveBeenCalledOnce();
+    expect(bridge.enrollment_cancel).toHaveBeenCalledOnce();
     await waitFor(() => expect(screen.getByRole("button", { name: /already use peppy/i })).toHaveFocus());
     fireEvent.click(screen.getByRole("button", { name: /i'm new to peppy/i }));
     fireEvent.click(await screen.findByRole("button", { name: "Back" }));
     expect(await screen.findByRole("button", { name: /already use peppy/i })).toHaveFocus();
   });
 
-  it("does not restore a hidden join when a late start resolves after Back", async () => {
-    const start = deferred<JoinView>();
-    vi.spyOn(bridge, "join_start").mockReturnValue(start.promise);
+  it("does not restore a hidden enrollment when a late discovery resolves after Back", async () => {
+    const discovery = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_discover").mockReturnValue(discovery.promise);
     renderLanding();
     await chooseExisting();
     fireEvent.click(await screen.findByRole("button", { name: "Back" }));
-    await act(async () => start.resolve(join()));
+    await act(async () => discovery.resolve(waitingView()));
     expect(screen.getByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
-    expect(document.getElementById("hosted-join-panel")).not.toBeInTheDocument();
+    expect(document.getElementById("enrollment-panel")).not.toBeInTheDocument();
   });
 
-  it("does not restore a hidden join when a late poll resolves after Back", async () => {
-    const status = deferred<JoinView>();
-    let poll: (() => void) | undefined;
-    vi.spyOn(window, "setInterval").mockImplementation(handler => {
-      poll = handler as () => void;
-      return 1 as unknown as ReturnType<typeof window.setInterval>;
-    });
-    vi.spyOn(bridge, "join_status").mockReturnValue(status.promise);
+  it("ignores a poll response that resolves after Back", async () => {
+    const advance = capturePoll();
+    const status = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
     renderLanding();
     await chooseExisting();
-    await waitFor(() => expect(poll).toBeDefined());
-    poll?.();
+    await screen.findByRole("img", { name: /pairing qr/i });
+    await advance();
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    await act(async () => status.resolve(join({ state: "claimed", sas: "123456" })));
-    expect(document.getElementById("hosted-join-panel")).not.toBeInTheDocument();
+    await act(async () => status.resolve(view({ stage: "verify_phone", verificationCode: "123456" })));
+    expect(document.getElementById("enrollment-panel")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
   });
 
   it("shows a retryable account loading error on the new-user path", async () => {
@@ -189,24 +180,24 @@ describe("SetupLanding", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
-  it("keeps signed-in routing precedence and auto-joins only an existing vault", async () => {
+  it("keeps signed-in routing precedence and enrolls only an existing vault", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, classification: "lapsed", hasVault: true, resumable: false }));
     renderLanding();
     await waitFor(() => expect(document.getElementById("hosted-lapsed-card")).toBeInTheDocument());
-    expect(bridge.join_start).not.toHaveBeenCalled();
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
     cleanup();
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, hasVault: true, access: "read_write" }));
     renderLanding();
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledOnce());
     expect(document.getElementById("hosted-path-chooser")).not.toBeInTheDocument();
   });
 
-  it("routes a newly signed-in existing-vault account to the join", async () => {
+  it("routes a newly signed-in existing-vault account into hosted enrollment", async () => {
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account({ signedIn: true, hasVault: true, access: "read_write" }));
     renderLanding();
     fireEvent.click(await screen.findByRole("button", { name: /i'm new to peppy/i }));
     fireEvent.click(await screen.findByRole("button", { name: /continue with google/i }));
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
   });
 
   it("does not route a deferred sign-in after Back", async () => {
@@ -218,125 +209,37 @@ describe("SetupLanding", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     await act(async () => signIn.resolve(account({ signedIn: true, hasVault: true, access: "read_write" })));
     expect(screen.getByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
-    expect(bridge.join_start).not.toHaveBeenCalled();
-  });
-
-  it("preserves the SAS confirmation gate", async () => {
-    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
-    renderLanding();
-    await chooseExisting();
-    await advanceToConfirm();
-    const continueButton = await screen.findByRole("button", { name: "Continue" });
-    expect(continueButton).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox"));
-    await waitFor(() => expect(continueButton).toBeEnabled());
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
   });
 
   it("resets the transient hosted path when controlled mode changes", async () => {
-    const view = renderLanding();
+    const view1 = renderLanding();
     await chooseExisting();
-    view.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone={false} pairPhone={<div />} selfHostedFallback={<div />} onJoined={vi.fn()} />);
+    view1.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
     expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
-    view.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} pairPhone={<div />} selfHostedFallback={<div />} onJoined={vi.fn()} />);
+    view1.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
     expect(await screen.findByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
-    expect(bridge.join_cancel).toHaveBeenCalled();
+    expect(bridge.enrollment_cancel).toHaveBeenCalled();
   });
 
-  it("keeps native passphrase entry and enrolled-without-phone routing", async () => {
+  it("keeps native passphrase entry and hosted provisioning routing", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     renderLanding();
     expect(await screen.findByRole("button", { name: /enter passphrase securely/i })).toBeDisabled();
     expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
-    cleanup();
-    renderLanding({ enrolledWithoutPhone: true, pairPhone: <div>Pair phone hero</div> });
-    expect(screen.getByText("Pair phone hero")).toBeInTheDocument();
+  });
+
+  it("offers the enrolled-without-phone owner the connect-phone choice from the enrollment stages", async () => {
+    renderLanding({ enrolledWithoutPhone: true });
+    expect(await screen.findByRole("heading", { name: /connect your phone/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /transfer keys securely/i })).toBeChecked();
+    expect(screen.getByRole("button", { name: /add phone/i })).toBeInTheDocument();
     expect(screen.queryByLabelText("Server mode")).not.toBeInTheDocument();
+    expect(bridge.enrollment_status).toHaveBeenCalled();
+    expect(bridge.hosted_account).not.toHaveBeenCalled();
   });
 
-  it("restarts expired joins and exposes retry only after failure", async () => {
-    const start = vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "expired" }));
-    renderLanding();
-    await chooseExisting();
-    const retry = await screen.findByRole("button", { name: /try again/i });
-    await waitFor(() => expect(retry).toBeEnabled());
-    start.mockResolvedValue(join({ state: "waiting" }));
-    fireEvent.click(retry);
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(document.getElementById("hosted-join-panel")).toHaveAttribute("data-join-state", "waiting"));
-    await waitFor(() => expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument());
-  });
-
-  it("shows claimed SAS without desktop approval controls", async () => {
-    vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "claimed", sas: "123456" }));
-    renderLanding();
-    await chooseExisting();
-    expect(await screen.findByLabelText("Verification code: 123456")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /approve|deny/i })).not.toBeInTheDocument();
-  });
-
-  it("disables confirmation cancellation while confirming and reports approval to the parent", async () => {
-    const onJoined = vi.fn();
-    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
-    const confirm = deferred<JoinView>();
-    vi.spyOn(bridge, "join_confirm").mockReturnValue(confirm.promise);
-    renderLanding({ onJoined });
-    await chooseExisting();
-    await advanceToConfirm();
-    const continueButton = await screen.findByRole("button", { name: "Continue" });
-    expect(continueButton).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox"));
-    await waitFor(() => expect(continueButton).toBeEnabled());
-    fireEvent.click(continueButton);
-    expect(await screen.findByRole("button", { name: "Cancel" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "Server mode" })).toBeDisabled();
-    await act(async () => confirm.resolve(join({ state: "approved" })));
-    await waitFor(() => expect(onJoined).toHaveBeenCalledOnce());
-  });
-
-  it("waits for the initial account check before offering hosted choices", async () => {
-    const request = deferred<HostedAccountView>();
-    vi.spyOn(bridge, "hosted_account").mockReturnValue(request.promise);
-    renderLanding();
-    expect(document.getElementById("hosted-path-chooser")).not.toBeInTheDocument();
-    await act(async () => request.resolve(account()));
-    expect(await screen.findByRole("button", { name: /already use peppy/i })).toBeEnabled();
-  });
-
-  it("turns confirmation errors into a retryable join failure", async () => {
-    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
-    vi.spyOn(bridge, "join_confirm").mockRejectedValue(new Error("offline"));
-    renderLanding();
-    await chooseExisting();
-    await advanceToConfirm();
-    fireEvent.click(await screen.findByRole("checkbox"));
-    const continueButton = await screen.findByRole("button", { name: "Continue" });
-    await waitFor(() => expect(continueButton).toBeEnabled());
-    fireEvent.click(continueButton);
-    expect(await screen.findByRole("button", { name: /try again/i })).toBeInTheDocument();
-  });
-
-  it("retains the last countdown and announces retrying poll state", async () => {
-    let poll: (() => void) | undefined;
-    const nativeSetInterval = window.setInterval;
-    vi.spyOn(window, "setInterval").mockImplementation((handler, timeout) => {
-      if (timeout === 4_000) {
-        poll = handler as () => void;
-        return 1 as unknown as ReturnType<typeof window.setInterval>;
-      }
-      return nativeSetInterval(handler, timeout) as unknown as ReturnType<typeof window.setInterval>;
-    });
-    vi.spyOn(bridge, "join_status").mockResolvedValue(join({ errorCode: "join-retrying", expiresInSeconds: undefined }));
-    renderLanding();
-    await chooseExisting();
-    await waitFor(() => expect(poll).toBeDefined());
-    poll!();
-    await waitFor(() => expect(bridge.join_status).toHaveBeenCalledOnce());
-    await waitFor(() => expect(document.querySelector(".join-retrying-hint")).toHaveTextContent(/reconnecting/i));
-    expect(document.getElementById("join-countdown")).toHaveTextContent("300s");
-  });
-
-  it("keeps billing, provisioning, recovery checkpoint, and passphrase errors on their established routes", async () => {
+  it("keeps billing, provisioning, and passphrase errors on their established routes", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_only" }));
     renderLanding();
     expect(await screen.findByRole("button", { name: /check subscription/i })).toBeInTheDocument();
@@ -364,11 +267,11 @@ describe("SetupLanding", () => {
     expect(bridge.hosted_open_billing).toHaveBeenCalledOnce();
   });
 
-  it("recovers a resumable vault before starting a phone join", async () => {
+  it("recovers a resumable vault before starting a phone enrollment", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_only", classification: "lapsed", hasVault: true, resumable: true }));
     renderLanding();
     await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledOnce());
-    expect(bridge.join_start).not.toHaveBeenCalled();
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
   });
 
   it("provisions a resumable account and an acknowledged passphrase setup", async () => {
@@ -401,25 +304,17 @@ describe("SetupLanding", () => {
     await waitFor(() => expect(bridge.hosted_account).toHaveBeenCalledTimes(2));
   });
 
-  it("uses the hosted origin for a fresh pairing after self-hosted setup", async () => {
-    const view = renderLanding({ mode: "self-hosted" });
+  it("discovers the entered self-hosted origin before offering hosted choices", async () => {
+    const view1 = renderLanding({ mode: "self-hosted" });
     fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://self.example" } });
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("https://self.example"));
-    view.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} pairPhone={<div />} selfHostedFallback={<div />} onJoined={vi.fn()} />);
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://self.example"));
+    view1.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
-    await waitFor(() => expect(bridge.join_start).toHaveBeenLastCalledWith(null));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledTimes(2));
   });
 
-  it("announces the confirmation state through the dedicated status region", async () => {
-    const advanceToConfirm = mockNextJoinPoll(join({ state: "confirm", sas: "123456" }));
-    renderLanding();
-    await chooseExisting();
-    await advanceToConfirm();
-    await waitFor(() => expect(document.getElementById("setup-status-region")).toHaveTextContent(/continue only if/i));
-  });
-
-  it("only connects self-hosted HTTPS origins and always offers advanced setup", async () => {
+  it("only connects self-hosted HTTPS origins and has no legacy advanced fallback", async () => {
     renderLanding({ mode: "self-hosted" });
     const input = screen.getByLabelText("Server URL");
     const connect = screen.getByRole("button", { name: "Connect" });
@@ -427,8 +322,9 @@ describe("SetupLanding", () => {
     expect(connect).toBeDisabled();
     fireEvent.change(input, { target: { value: "https://example.test" } });
     fireEvent.click(connect);
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("https://example.test"));
-    expect(document.querySelector("#self-hosted-advanced")).toHaveTextContent("Fallback setup");
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://example.test"));
+    expect(document.getElementById("self-hosted-advanced")).not.toBeInTheDocument();
+    expect(screen.queryByText(/credential/i)).not.toBeInTheDocument();
   });
 
   it("records Self-hosted only when an explicit connection begins", async () => {
@@ -439,16 +335,15 @@ describe("SetupLanding", () => {
     expect(window.localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
   });
 
-  it("does not record a choice for automatic resumable provisioning or fixed-origin joining", async () => {
+  it("does not record a choice for automatic resumable provisioning or fixed-origin enrollment", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write", resumable: true }));
     renderLanding();
     await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalled());
     expect(setStorageItem).not.toHaveBeenCalled();
 
     cleanup();
-    vi.mocked(bridge.join_status).mockResolvedValue({ state: "idle" });
     renderLanding({ fixedOrigin: "https://community.example" });
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("https://community.example"));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://community.example"));
     expect(setStorageItem).not.toHaveBeenCalled();
   });
 
@@ -460,18 +355,19 @@ describe("SetupLanding", () => {
     expect(window.localStorage.getItem("peppy.setup.mode")).toBe("self-hosted");
   });
 
-  it("does not reset an active join when Hosted is selected again", async () => {
+  it("does not reset an active enrollment when Hosted is selected again", async () => {
     renderLanding();
     await chooseExisting();
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
     fireEvent.change(screen.getByRole("combobox", { name: "Server mode" }), { target: { value: "hosted" } });
-    expect(bridge.join_cancel).not.toHaveBeenCalled();
+    expect(bridge.enrollment_cancel).not.toHaveBeenCalled();
   });
 
-  it("keeps the setup heading while routing enrolled desktops to phone pairing", () => {
-    renderLanding({ enrolledWithoutPhone: true, pairPhone: <div>Pair phone hero</div> });
+  it("keeps the setup heading while routing enrolled desktops to phone enrollment", async () => {
+    renderLanding({ enrolledWithoutPhone: true });
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Set up Peppy");
     expect(screen.queryByLabelText("Server mode")).not.toBeInTheDocument();
+    await screen.findByRole("heading", { name: /connect your phone/i });
   });
 
   it("shows a retryable sign-in error", async () => {
@@ -487,83 +383,264 @@ describe("SetupLanding", () => {
     const fresh = account({ signedIn: true, hasVault: true, access: "read_write" });
     const request = deferred<HostedAccountView>();
     vi.spyOn(bridge, "hosted_account").mockReturnValue(request.promise);
-    const view = renderLanding({ mode: "self-hosted" });
-    view.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} pairPhone={<div />} selfHostedFallback={<div />} onJoined={vi.fn()} />);
+    const view1 = renderLanding({ mode: "self-hosted" });
+    view1.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
     await waitFor(() => expect(bridge.hosted_account).toHaveBeenCalled());
     await act(async () => request.resolve(fresh));
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith(null));
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
   });
 
-  it("cancels an active self-hosted join when unmounted", async () => {
-    const view = renderLanding({ mode: "self-hosted" });
+  it("cancels an active self-hosted enrollment when unmounted", async () => {
+    const view1 = renderLanding({ mode: "self-hosted" });
     fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://self.example" } });
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-    await waitFor(() => expect(bridge.join_start).toHaveBeenCalled());
-    view.unmount();
-    expect(bridge.join_cancel).toHaveBeenCalled();
+    await screen.findByRole("img", { name: /pairing qr/i });
+    view1.unmount();
+    expect(bridge.enrollment_cancel).toHaveBeenCalled();
   });
 
   it("does not route on account check during billing refresh", async () => {
     const request = deferred<HostedAccountView>();
     vi.spyOn(bridge, "hosted_account").mockReturnValue(request.promise);
     renderLanding();
-    // Resolve to billing state
     await act(async () => request.resolve(account({ signedIn: true, access: "read_only" })));
     await screen.findByRole("button", { name: /check subscription/i });
     expect(document.getElementById("hosted-billing-card")).toBeInTheDocument();
-    // Start a new account fetch via focus (billing route listens to focus)
     const refreshRequest = deferred<HostedAccountView>();
     vi.spyOn(bridge, "hosted_account").mockReturnValueOnce(refreshRequest.promise);
     act(() => { window.dispatchEvent(new Event("focus")); });
-    // Billing card should remain visible while refresh is pending
     expect(document.getElementById("hosted-billing-card")).toBeInTheDocument();
-    // Resolve refresh - billing card should still be there (no route change)
     await act(async () => refreshRequest.resolve(account({ signedIn: true, access: "read_only" })));
     expect(document.getElementById("hosted-billing-card")).toBeInTheDocument();
   });
 
-  it("restarts expired joins without a preceding cancel and restores QR and active state", async () => {
-    const start = vi.spyOn(bridge, "join_start").mockResolvedValue(join({ state: "expired" }));
-    const cancel = vi.spyOn(bridge, "join_cancel").mockResolvedValue();
-    renderLanding();
-    await chooseExisting();
-    // First start should happen
-    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
-    // Retry on expired
-    const retry = await screen.findByRole("button", { name: /try again/i });
-    await waitFor(() => expect(retry).toBeEnabled());
-    start.mockResolvedValue(join({ state: "waiting" }));
-    fireEvent.click(retry);
-    // Second start should be called without a cancel in between
-    await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
-    // Cancel should not have been called between starts
-    expect(cancel).not.toHaveBeenCalled();
-    // QR should return and active state should be restored
-    await waitFor(() => expect(document.getElementById("join-qr-image")).toBeInTheDocument());
-    expect(document.getElementById("hosted-join-panel")).toHaveAttribute("data-join-state", "waiting");
-  });
-
-  it("stops a hidden join when enrolledWithoutPhone changes to true", async () => {
-    const status = deferred<JoinView>();
-    let poll: (() => void) | undefined;
-    vi.spyOn(window, "setInterval").mockImplementation(handler => {
-      poll = handler as () => void;
-      return 1 as unknown as ReturnType<typeof window.setInterval>;
+  describe("sanitized enrollment stages", () => {
+    it("sends the entered server origin to discovery and renders no secret fields", async () => {
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://server.example"));
+      expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
     });
-    vi.spyOn(bridge, "join_status").mockReturnValue(status.promise);
-    const view = renderLanding();
-    await chooseExisting();
-    await waitFor(() => expect(poll).toBeDefined());
-    // Rerender with enrolledWithoutPhone=true (triggers pairPhone path)
-    const cancel = vi.spyOn(bridge, "join_cancel").mockResolvedValue();
-    view.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={true} pairPhone={<div>Pair phone hero</div>} selfHostedFallback={<div />} onJoined={vi.fn()} />);
-    // Should have canceled the active join
-    expect(cancel).toHaveBeenCalled();
-    // Poll handler should not restore the join after enrollment change
-    poll?.();
-    await act(async () => status.resolve(join({ state: "claimed", sas: "123456" })));
-    expect(document.getElementById("hosted-join-panel")).not.toBeInTheDocument();
-    expect(screen.getByText("Pair phone hero")).toBeInTheDocument();
+
+    it("creates the first owner through the native prompt and never shows a password field", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+      await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledOnce());
+      expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
+    });
+
+    it("cancels the setup stage back to the server address without a bridge call", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+      expect(await screen.findByLabelText("Server URL")).toHaveValue("https://server.example");
+      expect(bridge.enrollment_create_owner).not.toHaveBeenCalled();
+    });
+
+    it("signs in to a self-hosted server through the native prompt", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+      await waitFor(() => expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce());
+      expect(document.body).not.toHaveTextContent(/admin password/i);
+    });
+
+    it("signs in to a hosted stage through the enrollment bridge exactly once", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "hosted" }));
+      vi.spyOn(bridge, "enrollment_sign_in").mockResolvedValue(view({ stage: "locked", mode: "hosted" }));
+      renderLanding();
+      fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
+      fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+      expect(await screen.findByRole("button", { name: "Enter shared secret" })).toBeInTheDocument();
+      expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce();
+      expect(bridge.hosted_sign_in).not.toHaveBeenCalled();
+      expect(bridge.enrollment_discover).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses the community sign-in bridge for a fixed origin even when the outer mode is hosted", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "community", origin: "https://community.example" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+      expect(await screen.findByRole("heading", { name: "Sign in to your server" })).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent(/peppy account|hosted/i);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      await waitFor(() => expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce());
+      expect(bridge.hosted_sign_in).not.toHaveBeenCalled();
+    });
+
+    it("lets a community user connect with the shared secret without an admin sign-in", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "community", origin: "https://community.example" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+      expect(await screen.findByText("The admin password manages this server. The vault shared secret connects this device to encrypted data.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Connect with shared secret" }));
+      await waitFor(() => expect(bridge.enrollment_connect_shared_secret).toHaveBeenCalledOnce());
+      expect(bridge.enrollment_sign_in).not.toHaveBeenCalled();
+      expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
+    });
+
+    it("keeps the shared-secret path off the hosted sign-in stage", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "hosted" }));
+      renderLanding();
+      fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
+      expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Connect with shared secret" })).not.toBeInTheDocument();
+      expect(screen.queryByText(/The admin password manages this server/)).not.toBeInTheDocument();
+    });
+
+    it("keeps the entered server address when the shared secret is wrong", async () => {
+      vi.spyOn(bridge, "enrollment_connect_shared_secret").mockResolvedValue(view({ stage: "error", origin: "https://server.example", errorCode: "invalid-request" }));
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "community", origin: "https://server.example" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Connect with shared secret" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Your server address was kept");
+      expect(screen.getByLabelText("Server URL")).toHaveValue("https://server.example");
+    });
+
+    it("sets up a first hosted vault without an admin password prompt", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", mode: "hosted" }));
+      renderLanding();
+      fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
+      expect(await screen.findByRole("heading", { name: "Create your vault" })).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent(/admin password|setup code/i);
+      expect(screen.queryByRole("button", { name: "Create server" })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Create vault" }));
+      await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledOnce());
+    });
+
+    it("enters the shared secret through the bridge instead of a React input", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret" }));
+      await waitFor(() => expect(bridge.enrollment_connect_shared_secret).toHaveBeenCalledOnce());
+      expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
+    });
+
+    it("lets an owner choose a phone method and forwards it to add-phone", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("radio", { name: /enter shared secret on phone/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
+      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("shared_secret"));
+    });
+
+    it("shows a waiting message instead of an owner action to a non-owner device", async () => {
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: false }));
+      renderLanding({ enrolledWithoutPhone: true });
+      expect(await screen.findByRole("heading", { name: /waiting for an owner/i })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Add phone" })).not.toBeInTheDocument();
+    });
+
+    it("renders exactly one QR from the enrollment payload and offers no save action", async () => {
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("img", { name: /pairing qr/i });
+      expect(document.querySelectorAll("#enrollment-qr-image")).toHaveLength(1);
+      expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+      expect(screen.getByText(/does not grant any permissions/i)).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent("secret-qr-payload");
+    });
+
+    it("cancels a waiting pairing and refreshes the enrollment stage", async () => {
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("img", { name: /pairing qr/i });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(bridge.enrollment_cancel).toHaveBeenCalledOnce());
+      await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalled());
+    });
+
+    it("moves from a polled waiting view to the verification stage without showing the QR", async () => {
+      const advance = capturePoll();
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "verify_phone", verificationCode: "382941" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("img", { name: /pairing qr/i });
+      await advance();
+      expect(await screen.findByLabelText("Verification code: 382941")).toBeInTheDocument();
+      expect(document.getElementById("enrollment-qr-image")).not.toBeInTheDocument();
+    });
+
+    it("keeps approval disabled until the codes-match checkbox is checked", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "verify_phone", verificationCode: "382941" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      const approve = await screen.findByRole("button", { name: "Confirm and approve" });
+      expect(approve).toBeDisabled();
+      fireEvent.click(screen.getByRole("checkbox", { name: /codes match/i }));
+      expect(approve).toBeEnabled();
+      fireEvent.click(approve);
+      await waitFor(() => expect(bridge.enrollment_approve).toHaveBeenCalledOnce());
+    });
+
+    it("reports a connected phone to the parent exactly once", async () => {
+      const onJoined = vi.fn();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "phone_connected", owner: true }));
+      renderLanding({ mode: "self-hosted", onJoined });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(onJoined).toHaveBeenCalledOnce());
+      expect(document.getElementById("enrollment-phone_connected")).toHaveTextContent(/finish setup on your phone/i);
+    });
+
+    it("restarts an expired pairing with the previously chosen method", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
+      vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValueOnce(view({ stage: "expired" })).mockResolvedValueOnce(waitingView());
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("radio", { name: /enter shared secret on phone/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
+      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledTimes(2));
+      expect(bridge.enrollment_add_phone).toHaveBeenLastCalledWith("shared_secret");
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+    });
+
+    it("shows a generic error, keeps the server address, and retries the failed step", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockRejectedValueOnce(new Error("raw remote text")).mockResolvedValueOnce(waitingView());
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Peppy could not complete this step");
+      expect(document.body).not.toHaveTextContent("raw remote text");
+      expect(screen.getByLabelText("Server URL")).toHaveValue("https://server.example");
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+      expect(bridge.enrollment_discover).toHaveBeenCalledTimes(2);
+    });
+
+    it("ignores a poll that was in flight when the user cancelled", async () => {
+      const advance = capturePoll();
+      const stalePoll = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_status").mockReturnValueOnce(stalePoll.promise).mockResolvedValueOnce(view({ stage: "ready", owner: true }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("img", { name: /pairing qr/i });
+      await advance();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Add phone" })).toBeInTheDocument());
+      await act(async () => stalePoll.resolve(waitingView()));
+      expect(document.getElementById("enrollment-qr-image")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Add phone" })).toBeInTheDocument();
+    });
   });
 
   describe("self-hosted server URL validation", () => {
@@ -583,7 +660,7 @@ describe("SetupLanding", () => {
       const { input, connect } = renderSelfHosted();
       fireEvent.change(input, { target: { value: "http://127.0.0.1:7000" } });
       fireEvent.click(connect);
-      await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("http://127.0.0.1:7000"));
+      await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("http://127.0.0.1:7000"));
     });
 
     it("keeps a root slash on an otherwise valid HTTPS origin", () => {
@@ -605,7 +682,7 @@ describe("SetupLanding", () => {
       fireEvent.change(input, { target: { value: "HTTP://LOCALHOST:3000" } });
       expect(connect).toBeEnabled();
       fireEvent.click(connect);
-      await waitFor(() => expect(bridge.join_start).toHaveBeenCalledWith("http://localhost:3000"));
+      await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("http://localhost:3000"));
     });
 
     it("does not show an error while the field is still being typed in", () => {

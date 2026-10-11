@@ -21,9 +21,9 @@ use std::{
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-mod enrollment;
 mod identity_session;
 pub mod local_identity;
+mod newenrollment;
 mod origin;
 
 mod contacts;
@@ -41,8 +41,10 @@ struct Request<'a> {
     args: Option<&'a RawValue>,
 }
 
+#[cfg(test)]
 struct SecretBytes(Zeroizing<Vec<u8>>);
 
+#[cfg(test)]
 impl<'de> Deserialize<'de> for SecretBytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Vec::<u8>::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
@@ -131,7 +133,8 @@ pub struct BrowserCore {
     preferences: NotificationPreferences,
     trusted_origin: Option<String>,
     identity_session: Option<identity_session::IdentitySession>,
-    join: Option<enrollment::JoinSession>,
+    enrollment: Option<peppy_hosted_client::newenrollment::EnrollmentClient>,
+    hosted_provisioning: Option<peppy_hosted_client::HostedProvisioning>,
 }
 
 #[derive(Default, Deserialize)]
@@ -154,7 +157,8 @@ impl BrowserCore {
             preferences: NotificationPreferences::default(),
             trusted_origin: None,
             identity_session: None,
-            join: None,
+            enrollment: None,
+            hosted_provisioning: None,
         }
     }
 
@@ -184,25 +188,41 @@ impl BrowserCore {
             | "_worker_checkpoint_identity"
             | "_worker_identity_metadata"
             | "_worker_transport_token"
-            | "_worker_rotate_identity"
-            | "_worker_parse_credential_file"
-            | "_worker_portable_identity_metadata"
-            | "_worker_export_credential" => {
+            | "_worker_rotate_identity" => {
                 self.identity_command(command, raw_args.ok_or_else(invalid)?)
             }
-            "_worker_join_start"
-            | "_worker_join_request"
-            | "_worker_join_open_offer"
-            | "_worker_join_claim"
-            | "_worker_join_challenge"
-            | "_worker_join_confirm"
-            | "_worker_join_cancel" => self.join_command(command, raw_args.ok_or_else(invalid)?),
+            "_worker_enrollment_generate_secret"
+            | "_worker_enrollment_new"
+            | "_worker_enrollment_new_owner_from_identity"
+            | "_worker_enrollment_checkpoint"
+            | "_worker_enrollment_create_owner"
+            | "_worker_enrollment_manual_challenge"
+            | "_worker_enrollment_complete_manual_challenge"
+            | "_worker_enrollment_finish_owner"
+            | "_worker_enrollment_finish_manual"
+            | "_worker_enrollment_create_phone_invitation"
+            | "_worker_enrollment_consume_created_phone_invitation"
+            | "_worker_enrollment_get_phone_qr"
+            | "_worker_enrollment_claim_phone_invitation"
+            | "_worker_enrollment_consume_phone_claim"
+            | "_worker_enrollment_phone_status"
+            | "_worker_enrollment_approve_phone_invitation"
+            | "_worker_enrollment_confirm_phone_invitation" => {
+                self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
+            }
+            "_worker_enrollment_prepare_hosted_owner"
+            | "_worker_enrollment_accept_hosted_grant"
+            | "_worker_enrollment_finish_hosted_owner" => {
+                self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
+            }
             #[cfg(test)]
             "open" => self.open(args_value(raw_args)?),
             "close" => {
                 self.client = None;
                 self.device_id = None;
                 self.identity_session = None;
+                self.enrollment = None;
+                self.hosted_provisioning = None;
                 self.context = HostContext::default();
                 self.gateways_known = false;
                 Ok(json!({}))
@@ -470,7 +490,6 @@ impl BrowserCore {
             contact_books: None,
             contacts_pending_count: None,
             contact_sync: None,
-            credential_export_available: Some(unlocked && self.identity_session.is_some()),
         })
         .map_err(|_| core(CoreError::Database))
     }
@@ -682,6 +701,26 @@ mod tests {
             core.dispatch(r#"{"command":"pairing"}"#)
                 .contains("unknown-command")
         );
+    }
+
+    #[test]
+    fn generated_enrollment_secret_is_private_and_has_six_words() {
+        let mut core = BrowserCore::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let public: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"enrollment_generate_secret","args":{}}"#),
+        )
+        .unwrap();
+        assert_eq!(public["ok"], false);
+        assert_eq!(public["error"]["code"], "unknown-command");
+
+        let private: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"_worker_enrollment_generate_secret","args":{}}"#),
+        )
+        .unwrap();
+        assert_eq!(private["ok"], true);
+        let passphrase = private["value"]["passphrase"].as_str().unwrap();
+        assert_eq!(passphrase.split_whitespace().count(), 6);
+        assert!(peppy_crypto::passphrase::passphrase_acceptable(passphrase));
     }
 
     #[test]
