@@ -311,6 +311,129 @@ describe("BrowserEnrollment", () => {
     expect(session.finishEnrollment).not.toHaveBeenCalled();
   });
 
+  it("uses the anonymous app session before the protected account endpoint for an unenrolled hosted browser", async () => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    const requestedPaths: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      requestedPaths.push(path);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: false });
+      if (path === "/hosted/v1/web/app-account") return json({ error: "unauthenticated" }, { status: 401 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "signin" });
+
+    expect(requestedPaths).toEqual(["/hosted/v1/enrollment/config", "/hosted/v1/web/app-session"]);
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_new", args: { origin, deviceName: "Peppy Browser" } });
+  });
+
+  it.each([
+    [{ classification: "eligible" }, "setup"],
+    [{ classification: "existing", vault_id: vaultId }, "locked"],
+  ] as const)("classifies signed-in hosted account %o as %s", async (account, stage) => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    const requestedPaths: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      requestedPaths.push(path);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "restored-csrf" });
+      if (path === "/hosted/v1/web/app-account") return json(account);
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage });
+    expect(requestedPaths).toEqual(["/hosted/v1/enrollment/config", "/hosted/v1/web/app-session", "/hosted/v1/web/app-account"]);
+  });
+
+  it.each([
+    { signed_in: "true", csrf_token: "csrf" },
+    { signed_in: true },
+    { signed_in: true, csrf_token: "" },
+    { signed_in: true, csrf_token: "x".repeat(4097) },
+  ])("fails closed for malformed hosted app sessions", async appSession => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/hosted/v1/web/app-session") return json(appSession);
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "error", errorCode: "enrollment-response" });
+    expect(fetcher.mock.calls.some(([input]) => pathOf(input) === "/hosted/v1/web/app-account")).toBe(false);
+  });
+
+  it.each(["ready", "locked"] as const)("restores hosted CSRF for an already %s browser without requesting the account", async phase => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    session.phase = phase;
+    session.identity = phase === "ready" ? { role: "owner" } : undefined;
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "restored-csrf" });
+      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: phase });
+    await enrollment.revokeDevice(deviceId);
+
+    expect(fetcher.mock.calls.some(([input]) => pathOf(input) === "/hosted/v1/web/app-account")).toBe(false);
+    expect(fetcher.mock.calls.at(-1)?.[1]).toMatchObject({ headers: { "X-Peppy-CSRF": "restored-csrf" } });
+    expect(session.phase).toBe(phase);
+  });
+
+  it("clears restored CSRF when a hosted browser is signed out", async () => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    const appSessions = [{ signed_in: true, csrf_token: "restored-csrf" }, { signed_in: false }];
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/hosted/v1/web/app-session") return json(appSessions.shift());
+      if (path === "/hosted/v1/web/app-account") return json({ classification: "existing", vault_id: vaultId });
+      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "signin" });
+    await enrollment.revokeDevice(deviceId);
+
+    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({});
+  });
+
+  it("returns hosted signin when the account session expires before the protected account request", async () => {
+    const core = { invoke: vi.fn(async () => ({})) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "restored-csrf" });
+      if (path === "/hosted/v1/web/app-account") return json({ error: "unauthenticated" }, { status: 401 });
+      if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ mode: "hosted", stage: "signin" });
+    await enrollment.revokeDevice(deviceId);
+
+    expect(fetcher.mock.calls.at(-1)?.[1]?.headers).toEqual({});
+  });
+
   it("uses the mode-specific CSRF header and bounds streamed JSON before parsing", async () => {
     const core = { invoke: vi.fn(async () => ({})) };
     const session = new TestSession();
@@ -318,7 +441,7 @@ describe("BrowserEnrollment", () => {
     const hostedFetcher = vi.fn<typeof fetch>(async input => {
       const path = pathOf(input);
       if (path === "/hosted/v1/enrollment/config") return json(instanceInfo(true, "hosted"));
-      if (path === "/v1/instance/session") return json({ csrf_token: "hosted-csrf", expires_in_seconds: 3600 });
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: false });
       if (path.includes("/revoke")) return json({ vault_id: vaultId, devices: [], storage_bytes: 0, quota_bytes: 1, replay_retention_days: 30 });
       throw new Error(`unexpected ${path}`);
     });

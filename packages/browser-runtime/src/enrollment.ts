@@ -35,9 +35,10 @@ export class BrowserEnrollment {
 
   public async discover(origin = this.origin): Promise<EnrollmentView> {
     try {
-       const info = await this.discoverInfo();
-       const mode = deploymentMode(info.mode);
-       this.viewValue = { ...this.viewValue, mode };
+      const info = await this.discoverInfo();
+      const mode = deploymentMode(info.mode);
+      this.viewValue = { ...this.viewValue, mode };
+      const signedIn = mode === "hosted" ? await this.hostedSession() : undefined;
       if (this.session.phase === "locked") {
         this.viewValue = { mode, stage: "locked", origin };
         return this.view();
@@ -50,10 +51,19 @@ export class BrowserEnrollment {
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
       await this.initializeFresh(origin);
-       if (mode === "hosted") {
-         const account = await this.hostedAccount();
-         this.viewValue = hostedStage(account, origin);
-       } else this.viewValue = { mode, stage: info.claimed === true ? "signin" : "setup", origin };
+      if (mode === "hosted") {
+        if (!signedIn) this.viewValue = { mode, stage: "signin", origin };
+        else {
+          try {
+            const account = await this.hostedAccount();
+            this.viewValue = hostedStage(account, origin);
+          } catch (error) {
+            if (!(error instanceof HttpStatusError) || error.status !== 401) throw error;
+            this.csrf = undefined;
+            this.viewValue = { mode, stage: "signin", origin };
+          }
+        }
+      } else this.viewValue = { mode, stage: info.claimed === true ? "signin" : "setup", origin };
     } catch (error) {
       this.fail(error);
     }
@@ -197,8 +207,8 @@ export class BrowserEnrollment {
     return this.managementRequest(`/v1/instance/devices/${encodeURIComponent(deviceId)}/revoke`, "POST");
   }
 
-  public setHostedCsrf(csrf: string): void {
-    if (!csrf || csrf.length > 4096) throw new Error("enrollment-response");
+  public setHostedCsrf(csrf: unknown): void {
+    if (typeof csrf !== "string" || !csrf || csrf.length > 4096) throw new Error("enrollment-response");
     this.csrf = csrf;
   }
 
@@ -225,6 +235,17 @@ export class BrowserEnrollment {
 
   private async hostedAccount(): Promise<Record<string, unknown>> {
     return this.request("/hosted/v1/web/app-account", "GET");
+  }
+
+  private async hostedSession(): Promise<boolean> {
+    const session = await this.request("/hosted/v1/web/app-session", "GET");
+    if (typeof session.signed_in !== "boolean") throw new Error("enrollment-response");
+    if (!session.signed_in) {
+      this.csrf = undefined;
+      return false;
+    }
+    this.setHostedCsrf(session.csrf_token);
+    return true;
   }
 
   private async initializeFresh(origin: string): Promise<void> {
