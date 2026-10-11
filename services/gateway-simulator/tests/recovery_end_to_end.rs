@@ -346,10 +346,11 @@ async fn enroll_fixture_device(
     runtime: &RouterRuntime,
     vault: &VaultFixture,
     role: &str,
-    byte: u8,
 ) -> Paired {
     let id = DeviceId::new();
-    let token = format!("recovery-fixture-{byte}-{id}");
+    let token: String = (0..3)
+        .map(|_| Uuid::new_v4().simple().to_string())
+        .collect();
     sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,'{}'::jsonb,$4,1)")
         .bind(vault.vault.0)
         .bind(id.0)
@@ -498,8 +499,8 @@ async fn encrypted_mms_survives_volume_restore_without_historical_carrier_effect
 
     let source_router = start_router(&source, true).await;
     let vault = create_vault(&source_router.pool).await;
-    let desktop_pair = enroll_fixture_device(&source_router, &vault, "device", 7).await;
-    let gateway_pair = enroll_fixture_device(&source_router, &vault, "gateway", 9).await;
+    let desktop_pair = enroll_fixture_device(&source_router, &vault, "device").await;
+    let gateway_pair = enroll_fixture_device(&source_router, &vault, "gateway").await;
     let desktop = core_client(root.path(), "recovery-desktop", &vault, desktop_pair.id);
     let png = fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media/valid-1x1.png"),
