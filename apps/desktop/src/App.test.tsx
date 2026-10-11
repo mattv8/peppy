@@ -106,15 +106,19 @@ describe("setup landing routing", () => {
   });
 
   it("returns to the selected conversation when add phone is cancelled", async () => {
+    const cancellation = deferred<void>();
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_add_phone).mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+    vi.mocked(bridge.enrollment_cancel).mockReturnValue(cancellation.promise);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
     fireEvent.click(await screen.findByText("Connect your phone"));
     fireEvent.click(document.getElementById("enrollment-add-phone-button")!);
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(bridge.enrollment_cancel).toHaveBeenCalledOnce());
-    expect(document.getElementById("conversation-stage")).toBeInTheDocument();
+    expect(bridge.enrollment_cancel).toHaveBeenCalledOnce();
+    expect(document.getElementById("conversation-stage")).not.toBeInTheDocument();
+    await act(async () => cancellation.resolve());
+    await waitFor(() => expect(document.getElementById("conversation-stage")).toBeInTheDocument());
   });
 
   it("refreshes after phone enrollment without requesting the legacy sync unlock", async () => {
