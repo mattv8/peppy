@@ -201,18 +201,18 @@ async fn create_challenge(
                 .try_into()
                 .map_err(|_| ManualError(StatusCode::CONFLICT, "challenge_identity_mismatch"))?;
             let existing_role = parse_role(existing.get("requested_role"))?;
-            let existing_context = manual_context(
-                origin.clone(),
+            let existing_context = manual_context(ManualContextFields {
+                origin: origin.clone(),
                 vault_id,
                 fingerprint,
                 key_epoch,
-                existing.get("id"),
-                existing_nonce,
-                existing_key,
-                request.device.device_id,
+                enrollment_id: existing.get("id"),
+                nonce: existing_nonce,
+                signing_key: existing_key,
+                device_id: request.device.device_id,
                 credential_digest,
-                existing_role,
-            );
+                role: existing_role,
+            });
             let existing_digest: [u8; 32] = Sha256::digest(
                 existing_context
                     .canonical_bytes()
@@ -264,18 +264,18 @@ async fn create_challenge(
     let enrollment_id = Uuid::new_v4();
     let mut nonce = [0; 32];
     libsodium_rs::random::fill_bytes(&mut nonce);
-    let context = manual_context(
-        origin.clone(),
+    let context = manual_context(ManualContextFields {
+        origin: origin.clone(),
         vault_id,
         fingerprint,
         key_epoch,
         enrollment_id,
         nonce,
-        signing_public_key,
-        request.device.device_id,
+        signing_key: signing_public_key,
+        device_id: request.device.device_id,
         credential_digest,
         role,
-    );
+    });
     let context_digest: [u8; 32] = Sha256::digest(
         context
             .canonical_bytes()
@@ -403,18 +403,18 @@ async fn complete_challenge(
         .try_into()
         .map_err(|_| ManualError(StatusCode::UNAUTHORIZED, "challenge_invalid"))?;
     let role = parse_role(row.get("requested_role"))?;
-    let context = manual_context(
+    let context = manual_context(ManualContextFields {
         origin,
         vault_id,
         fingerprint,
-        row.get::<i32, _>("key_epoch") as u32,
+        key_epoch: row.get::<i32, _>("key_epoch") as u32,
         enrollment_id,
         nonce,
         signing_key,
-        row.get("device_id"),
+        device_id: row.get("device_id"),
         credential_digest,
         role,
-    );
+    });
     let context_digest: [u8; 32] = Sha256::digest(
         context
             .canonical_bytes()
@@ -466,7 +466,7 @@ async fn complete_challenge(
     }))
 }
 
-fn manual_context(
+struct ManualContextFields {
     origin: String,
     vault_id: Uuid,
     fingerprint: [u8; 32],
@@ -477,7 +477,21 @@ fn manual_context(
     device_id: Uuid,
     credential_digest: [u8; 32],
     role: EnrollmentRole,
-) -> EnrollmentContext {
+}
+
+fn manual_context(fields: ManualContextFields) -> EnrollmentContext {
+    let ManualContextFields {
+        origin,
+        vault_id,
+        fingerprint,
+        key_epoch,
+        enrollment_id,
+        nonce,
+        signing_key,
+        device_id,
+        credential_digest,
+        role,
+    } = fields;
     EnrollmentContext {
         purpose: EnrollmentPurpose::Manual,
         canonical_origin: origin,

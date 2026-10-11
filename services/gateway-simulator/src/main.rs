@@ -259,11 +259,11 @@ fn store_enrollment_identity(
     identity: peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
     credential_file: &str,
 ) -> Result<(), String> {
-    fs::create_dir_all(&dir).map_err(|_| "SIMULATED state directory failed")?;
+    fs::create_dir_all(dir).map_err(|_| "SIMULATED state directory failed")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
             .map_err(|_| "SIMULATED state permissions failed")?;
     }
     let metadata = identity.metadata().clone();
@@ -283,9 +283,9 @@ fn store_enrollment_identity(
         &serde_json::to_vec_pretty(&bootstrap)
             .map_err(|_| "SIMULATED bootstrap encoding failed")?,
     )?;
-    let _ = key_file(&dir)?;
+    let _ = key_file(dir)?;
     if credential_file == CREDENTIAL_FILE {
-        let _ = read_or_create_route(&dir).map_err(|_| "SIMULATED route setup failed")?;
+        let _ = read_or_create_route(dir).map_err(|_| "SIMULATED route setup failed")?;
     }
     let credentials = SimulatorState {
         version: 1,

@@ -171,10 +171,10 @@ async fn claim_invitation(
     if row.get::<String, _>("origin") != origin {
         return Err(InvitationError(StatusCode::FORBIDDEN, "origin_mismatch"));
     }
-    if let Some(context) = hosted.as_ref() {
-        if row.get::<Uuid, _>("vault_id") != context.vault_id {
-            return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
-        }
+    if let Some(context) = hosted.as_ref()
+        && row.get::<Uuid, _>("vault_id") != context.vault_id
+    {
+        return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     if !row.get::<bool, _>("expires_valid") {
         expire(&mut tx, row.get("id")).await?;
@@ -241,10 +241,10 @@ async fn invitation_status(
     } else {
         None
     };
-    if let (Some(owner), Some(context)) = (owner.as_ref(), hosted.as_ref()) {
-        if owner.vault_id != context.vault_id {
-            return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
-        }
+    if let (Some(owner), Some(context)) = (owner.as_ref(), hosted.as_ref())
+        && owner.vault_id != context.vault_id
+    {
+        return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     request_origin(&state, &headers)?;
     let mut tx = match (owner.as_ref(), hosted.as_ref()) {
@@ -255,10 +255,10 @@ async fn invitation_status(
     .map_err(database)?;
     let row = sqlx::query("SELECT p.*,v.public_key_profile,p.expires_at > now() AS expires_valid,GREATEST(0,floor(extract(epoch FROM p.expires_at-now())))::bigint AS expires_remaining FROM phone_invitations p JOIN vaults v ON v.vault_id=p.vault_id WHERE p.id=$1")
         .bind(invitation_id).fetch_optional(&mut *tx).await.map_err(database)?.ok_or(InvitationError(StatusCode::NOT_FOUND, "invitation_not_found"))?;
-    if let Some(context) = hosted.as_ref() {
-        if row.get::<Uuid, _>("vault_id") != context.vault_id {
-            return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
-        }
+    if let Some(context) = hosted.as_ref()
+        && row.get::<Uuid, _>("vault_id") != context.vault_id
+    {
+        return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     if row.get::<String, _>("origin") != state.canonical_origin {
         return Err(InvitationError(StatusCode::FORBIDDEN, "origin_mismatch"));
@@ -369,10 +369,10 @@ async fn confirm_invitation(
     if row.get::<String, _>("origin") != state.canonical_origin {
         return Err(InvitationError(StatusCode::FORBIDDEN, "origin_mismatch"));
     }
-    if let Some(context) = hosted.as_ref() {
-        if row.get::<Uuid, _>("vault_id") != context.vault_id {
-            return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
-        }
+    if let Some(context) = hosted.as_ref()
+        && row.get::<Uuid, _>("vault_id") != context.vault_id
+    {
+        return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     if row
         .get::<Option<Vec<u8>>, _>("claim_secret_digest")
@@ -531,10 +531,10 @@ async fn authorize_owner(
         None
     };
     let owner = owner(state, headers).await?;
-    if let Some(account) = account {
-        if account.vault_id != owner.vault_id {
-            return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
-        }
+    if let Some(account) = account
+        && account.vault_id != owner.vault_id
+    {
+        return Err(InvitationError(StatusCode::FORBIDDEN, "foreign_vault"));
     }
     Ok(owner)
 }
@@ -600,14 +600,14 @@ async fn claim_rate_limit(
     buckets
         .retain(|_, bucket| now.duration_since(bucket.window).unwrap_or_default() < CLAIM_WINDOW);
     let key = hex::encode(key);
-    if buckets.len() >= CLAIM_BUCKET_CAP && !buckets.contains_key(&key) {
-        if let Some(oldest) = buckets
+    if buckets.len() >= CLAIM_BUCKET_CAP
+        && !buckets.contains_key(&key)
+        && let Some(oldest) = buckets
             .iter()
             .min_by_key(|(_, value)| value.window)
             .map(|(key, _)| key.clone())
-        {
-            buckets.remove(&oldest);
-        }
+    {
+        buckets.remove(&oldest);
     }
     let bucket = buckets.entry(key).or_insert(ClaimBucket {
         window: now,

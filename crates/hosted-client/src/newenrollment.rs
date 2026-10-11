@@ -137,7 +137,7 @@ enum PhoneFlow {
     },
     PendingTransferAdmission {
         context: EnrollmentContext,
-        handoff: VerifiedHandoff,
+        handoff: Box<VerifiedHandoff>,
     },
 }
 
@@ -506,7 +506,7 @@ impl EnrollmentClient {
             version: 1,
             purpose: "connect_phone".into(),
             origin: self.origin.clone(),
-            invitation_token: URL_SAFE_NO_PAD.encode(&**invitation_secret),
+            invitation_token: URL_SAFE_NO_PAD.encode(**invitation_secret),
             transfer_public_key: URL_SAFE_NO_PAD.encode(transfer.public_key()),
         })
         .map_err(|_| HostedClientError::InvalidRequest)
@@ -627,10 +627,9 @@ impl EnrollmentClient {
 
     /// Computes the locally verified six-digit SAS. It never accepts a server-provided code.
     pub fn phone_sas(&self, status_json: String) -> Result<String, HostedClientError> {
-        Ok(self
-            .phone_context(&parse(&status_json)?)?
+        self.phone_context(&parse(&status_json)?)?
             .sas()
-            .map_err(|_| HostedClientError::Crypto)?)
+            .map_err(|_| HostedClientError::Crypto)
     }
 
     /// Produces the owner approval. A transfer approval contains an authenticated encrypted root;
@@ -740,7 +739,7 @@ impl EnrollmentClient {
                     signature,
                     PhoneFlow::PendingTransferAdmission {
                         context: context.clone(),
-                        handoff,
+                        handoff: Box::new(handoff),
                     },
                 )
             }
@@ -802,7 +801,7 @@ impl EnrollmentClient {
         let (context, root, handoff) = match flow {
             PhoneFlow::PendingAdmission { context, root } => (context, Some(root), None),
             PhoneFlow::PendingTransferAdmission { context, handoff } => {
-                (context, None, Some(handoff))
+                (context, None, Some(*handoff))
             }
             _ => return Err(HostedClientError::InvalidRequest),
         };
@@ -992,7 +991,7 @@ impl EnrollmentClient {
                     .as_ref()
                     .ok_or(HostedClientError::InvalidRequest)?;
                 let verified = claim_authenticator_valid(
-                    &**invitation_secret,
+                    invitation_secret,
                     &self.origin,
                     &transcript.nonce,
                     &transfer.public_key(),
@@ -1027,7 +1026,7 @@ impl EnrollmentClient {
             }
             _ => return Err(HostedClientError::InvalidRequest),
         }
-        Ok(context_from_transcript(transcript)?)
+        context_from_transcript(transcript)
     }
 
     fn device(&self) -> Result<ProposedDevice, HostedClientError> {
@@ -1198,7 +1197,7 @@ fn decode_hex32(value: &str) -> Result<[u8; 32], HostedClientError> {
         return Err(HostedClientError::InvalidRequest);
     }
     let mut bytes = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
     }
     Ok(bytes)

@@ -39,7 +39,7 @@ test("generated mobile design resources are deterministic", () => {
 test("CSS and generated tokens retain coral action foreground contrast", () => {
   const css = readFileSync(path("packages/desktop-ui/src/peppy-tokens.css"), "utf8");
   const dark = themeTokens(css, ":root,");
-  const light = themeTokens(css, ".theme-light");
+  const light = themeTokens(css, ".theme-light {");
   const systemLight = themeTokens(css, ".theme-system", css.indexOf("@media (prefers-color-scheme: light)"));
 
   for (const [name, theme] of Object.entries({ dark, light, systemLight })) {

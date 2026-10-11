@@ -291,12 +291,14 @@ pub fn router(db: PgPool) -> Router {
         None,
         options,
         None,
-        Arc::new(CommunityAccessPolicy),
-        authorization,
-        crate::instance::configured_setup_token_digest()
-            .expect("setup token configuration must be valid")
-            .unwrap_or_else(crate::instance::disabled_setup_token_digest),
-        false,
+        RouterAuthorization {
+            policy: Arc::new(CommunityAccessPolicy),
+            enrollment: authorization,
+            setup_token_digest: crate::instance::configured_setup_token_digest()
+                .expect("setup token configuration must be valid")
+                .unwrap_or_else(crate::instance::disabled_setup_token_digest),
+            row_security: false,
+        },
     );
     maintenance.start();
     router
@@ -317,12 +319,14 @@ pub fn router_with_options(db: PgPool, options: TransportOptions) -> Router {
         None,
         options,
         None,
-        Arc::new(CommunityAccessPolicy),
-        authorization,
-        crate::instance::configured_setup_token_digest()
-            .expect("setup token configuration must be valid")
-            .unwrap_or_else(crate::instance::disabled_setup_token_digest),
-        false,
+        RouterAuthorization {
+            policy: Arc::new(CommunityAccessPolicy),
+            enrollment: authorization,
+            setup_token_digest: crate::instance::configured_setup_token_digest()
+                .expect("setup token configuration must be valid")
+                .unwrap_or_else(crate::instance::disabled_setup_token_digest),
+            row_security: false,
+        },
     );
     maintenance.start();
     router
@@ -340,15 +344,24 @@ pub fn router_with_options_and_relay(
         None,
         options,
         Some(relay_url),
-        Arc::new(CommunityAccessPolicy),
-        Arc::new(CommunityEnrollmentAuthorization::new(db.clone())),
-        crate::instance::configured_setup_token_digest()
-            .expect("setup token configuration must be valid")
-            .unwrap_or_else(crate::instance::disabled_setup_token_digest),
-        false,
+        RouterAuthorization {
+            policy: Arc::new(CommunityAccessPolicy),
+            enrollment: Arc::new(CommunityEnrollmentAuthorization::new(db.clone())),
+            setup_token_digest: crate::instance::configured_setup_token_digest()
+                .expect("setup token configuration must be valid")
+                .unwrap_or_else(crate::instance::disabled_setup_token_digest),
+            row_security: false,
+        },
     );
     maintenance.start();
     router
+}
+
+pub(crate) struct RouterAuthorization {
+    pub(crate) policy: Arc<dyn AccessPolicy>,
+    pub(crate) enrollment: Arc<dyn EnrollmentAuthorization>,
+    pub(crate) setup_token_digest: [u8; 32],
+    pub(crate) row_security: bool,
 }
 
 pub(crate) struct Maintenance {
@@ -374,11 +387,14 @@ pub(crate) fn build_router(
     initialized_storage: Option<Storage>,
     options: TransportOptions,
     explicit_relay_url: Option<url::Url>,
-    policy: Arc<dyn AccessPolicy>,
-    enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
-    setup_token_digest: [u8; 32],
-    row_security: bool,
+    authorization: RouterAuthorization,
 ) -> (Router, Maintenance) {
+    let RouterAuthorization {
+        policy,
+        enrollment: enrollment_authorization,
+        setup_token_digest,
+        row_security,
+    } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let storage = initialized_storage.or_else(|| {
         config

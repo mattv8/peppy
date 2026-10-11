@@ -161,10 +161,12 @@ impl ServerBuilder {
             health.storage(),
             options,
             None,
-            self.access_policy,
-            self.enrollment_authorization,
-            setup_token_digest,
-            self.row_security,
+            api::RouterAuthorization {
+                policy: self.access_policy,
+                enrollment: self.enrollment_authorization,
+                setup_token_digest,
+                row_security: self.row_security,
+            },
         );
         maintenance.db = maintenance_db;
         let router = Router::new()
