@@ -120,7 +120,9 @@ impl Server {
     }
     async fn enroll_fixture_device(&self, role: &str) -> Paired {
         let id = DeviceId::new();
-        let token = format!("fixture-{id}");
+        let token: String = (0..3)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect();
         sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,'{}'::jsonb,$4,1)")
             .bind(self.vault.0)
             .bind(id.0)
