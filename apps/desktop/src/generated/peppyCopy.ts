@@ -171,6 +171,10 @@ export const peppyCopy = {
   enrollment_setup_code: "Setup code",
   enrollment_admin_password: "Admin password",
   enrollment_allow_camera: "Allow camera access",
+  enrollment_setup_open: "This server is unclaimed. The first device to finish setup becomes its owner.",
+  enrollment_setup_protected: "This server's operator requires a setup code configured with PEPPY_SETUP_TOKEN.",
+  enrollment_error_invalid_setup_token: "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again.",
+  enrollment_error_already_claimed: "This server has already been set up. Connect with your admin password or vault shared secret instead.",
   passphrase_native_cta: "Enter passphrase securely",
   passphrase_native_note: "A secure system dialog will ask for your passphrase. Peppy's window never sees it.",
   permissions_login: "Open Peppy at login",
@@ -188,6 +192,8 @@ export const peppyCopy = {
   setup_choice_existing_hint: "Connect this device to your server, then add a phone if needed.",
   setup_choice_new: "I'm new to Peppy",
   setup_choice_new_hint: "Sign in, choose a plan, and create your vault.",
+  setup_self_hosted_prompts_hint_protected: "Your setup code, admin password, and vault shared secret will each be asked in a secure system prompt.",
+  setup_self_hosted_prompts_hint_open: "Your admin password and vault shared secret will each be asked in a secure system prompt.",
 } as const;
 
 export type PeppyCopyKey = keyof typeof peppyCopy;

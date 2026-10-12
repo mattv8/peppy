@@ -16,6 +16,29 @@ internal fun interface EnrollmentTransport {
     fun request(origin: String, method: String, path: String, body: String?, headers: JSONObject?): String?
 }
 
+internal data class InstanceDiscovery(val claimed: Boolean, val setupCodeRequired: Boolean)
+
+internal fun parseInstanceDiscovery(discovery: String): InstanceDiscovery? = try {
+    val instance = JSONObject(discovery)
+    val claimed = instance.get("claimed") as? Boolean ?: return null
+    val setupCodeRequired = (instance.opt("setup_required") as? Boolean) ?: true
+    InstanceDiscovery(claimed, setupCodeRequired)
+} catch (_: Exception) {
+    null
+}
+
+internal fun claimErrorResult(response: String?): ImportResult? = try {
+    if (response == null || response.length > MAX_CLAIM_ERROR_BYTES) null else when (JSONObject(response).opt("code")) {
+        "invalid_setup_token" -> ImportResult.SETUP_TOKEN_REJECTED
+        "instance_already_claimed" -> ImportResult.INSTANCE_ALREADY_CLAIMED
+        else -> null
+    }
+} catch (_: Exception) {
+    null
+}
+
+private const val MAX_CLAIM_ERROR_BYTES = 8 * 1024
+
 /** Native enrollment transport. Secret proofs stay inside [NativeEnrollmentClient]. */
 internal class EnrollmentHost(
     private val context: Context,
@@ -35,11 +58,7 @@ internal class EnrollmentHost(
 
     fun discover(origin: String): String? = request(origin, "GET", "/v1/instance", null)
 
-    fun claimedState(discovery: String): Boolean? = try {
-        JSONObject(discovery).takeIf { it.has("claimed") }?.getBoolean("claimed")
-    } catch (_: Exception) {
-        null
-    }
+    fun claimedState(discovery: String): Boolean? = parseInstanceDiscovery(discovery)?.claimed
 
     fun hasPendingOwner(origin: String): Boolean = try {
         checkpointStore.read(ownerCheckpointKey(origin)) != null
@@ -51,8 +70,9 @@ internal class EnrollmentHost(
         val client = clientFor(origin, Operation.OWNER)
         val body = client.createOwnerRequest(setupToken, adminPassword, secret)
         persistOwnerCheckpoint(origin, client.checkpoint())
-        val response = request(origin, "POST", "/v1/instance/claim", body)
+        val response = claimRequest(origin, body)
             ?: return ImportResult.NETWORK_ERROR
+        claimErrorResult(response)?.let { return it }
         val result = install(client.finishOwnerAdmission(response, secret))
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
             clearOwnerCheckpoint(origin)
@@ -237,6 +257,32 @@ internal class EnrollmentHost(
                 connection.outputStream.use { it.write(bytes) }
             }
             if (connection.responseCode in 200..299) connection.inputStream.use { GatewayHttp.readBounded(it, 64 * 1024) } else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun claimRequest(origin: String, body: String): String? {
+        if (CredentialParser.canonicalOrigin(origin) != origin) return null
+        transport?.let { return it.request(origin, "POST", "/v1/instance/claim", body, null) }
+        val connection = try { URL(origin + "/v1/instance/claim").openConnection() as HttpURLConnection } catch (_: Exception) { return null }
+        return try {
+            connection.instanceFollowRedirects = false
+            connection.requestMethod = "POST"
+            connection.connectTimeout = GatewayHttp.TIMEOUT_MS
+            connection.readTimeout = GatewayHttp.TIMEOUT_MS
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Content-Type", "application/json")
+            hostedAccountHeader(origin)?.let { connection.setRequestProperty("Peppy-Account-Session", it) }
+            val bytes = body.toByteArray()
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(bytes.size)
+            connection.outputStream.use { it.write(bytes) }
+            val successful = connection.responseCode in 200..299
+            val stream = if (successful) connection.inputStream else connection.errorStream
+            stream?.use { GatewayHttp.readBounded(it, if (successful) 64 * 1024 else MAX_CLAIM_ERROR_BYTES) }
         } catch (_: Exception) {
             null
         } finally {

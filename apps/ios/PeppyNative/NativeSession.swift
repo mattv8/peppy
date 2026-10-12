@@ -29,6 +29,22 @@ public struct PhoneEnrollmentStatus: Equatable, Sendable {
     public let requiresSharedSecret: Bool
 }
 
+public struct SelfHostedInstanceDiscovery: Equatable, Sendable {
+    public let origin: String
+    public let setupCodeRequired: Bool
+}
+
+private struct InstanceDiscoveryResponse: Decodable {
+    let mode: String
+    let claimed: Bool
+    let setupRequired: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case mode, claimed
+        case setupRequired = "setup_required"
+    }
+}
+
 /// Owns the single process-wide `NativeClient`, its Keychain-held secrets and foreground sync.
 /// All message state lives in the Rust core; this actor only moves opaque values.
 ///
@@ -125,6 +141,23 @@ public actor NativeSession {
             let enrollment = try producer.finishOwnerAdmission(response, passphrase: passphrase)
             return try self.activateVerifiedEnrollment(enrollment)
         }
+    }
+
+    /// Discovers self-hosted first-claim policy before accepting policy-dependent credentials.
+    public func discoverSelfHostedInstance(origin: String) async throws -> SelfHostedInstanceDiscovery {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let response = try await EnrollmentHost(origin: serverOrigin, transport: transport).discoverInstance()
+        guard let instance = try? JSONDecoder().decode(InstanceDiscoveryResponse.self, from: Data(response.utf8)),
+              instance.mode == "community" else {
+            throw ClientError.invalidResponse("instance discovery")
+        }
+        guard !instance.claimed else {
+            throw ClientError.server(status: 409, code: "instance_already_claimed")
+        }
+        return SelfHostedInstanceDiscovery(
+            origin: serverOrigin.serialized,
+            setupCodeRequired: instance.setupRequired != false
+        )
     }
 
     /// Completes direct manual shared-secret admission. The server never

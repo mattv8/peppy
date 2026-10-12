@@ -23,8 +23,8 @@ class TestSession implements EnrollmentSession {
   public publicIdentity(): EnrollmentIdentity | undefined { return this.identity; }
 }
 
-function instanceInfo(claimed: boolean, mode: "community" | "hosted" = "community") {
-  return { mode, claimed, setup_required: !claimed, password_auth: true, qr_pairing: true, shared_secret_pairing: true };
+function instanceInfo(claimed: boolean, mode: "community" | "hosted" = "community", setupRequired = !claimed) {
+  return { mode, claimed, setup_required: setupRequired, password_auth: true, qr_pairing: true, shared_secret_pairing: true };
 }
 
 function json(value: unknown, init?: ResponseInit): Response {
@@ -90,6 +90,98 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
 }
 
 describe("BrowserEnrollment", () => {
+  it("allows an explicitly open fresh claim without a setup token", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(false, "community", false));
+      if (path === "/v1/instance/claim") return json({ vault_id: vaultId, device_id: deviceId, role: "owner", session: { csrf_token: "csrf" } });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "setup", setupCodeRequired: false });
+    await expect(enrollment.createOwner({ adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready", owner: true });
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_create_owner", args: { adminPassword: "password-password", passphrase: "secret" } });
+  });
+
+  it("retries an open claim after a transient error without adding a setup token", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    let claimAttempts = 0;
+    const claimBodies: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(false, "community", false));
+      if (path === "/v1/instance/claim") {
+        claimBodies.push(String(init?.body));
+        claimAttempts += 1;
+        return claimAttempts === 1
+          ? new Response("temporarily unavailable", { status: 503 })
+          : json({ vault_id: vaultId, device_id: deviceId, role: "owner", session: { csrf_token: "csrf" } });
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.createOwner({ adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "error" });
+    await expect(enrollment.createOwner({ adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready", owner: true });
+    expect(claimBodies).toEqual([JSON.stringify({ operation_id: vaultId }), JSON.stringify({ operation_id: vaultId })]);
+    expect(core.invoke.mock.calls.filter(([request]) => request.command === "_worker_enrollment_create_owner")).toHaveLength(2);
+  });
+
+  it("rejects malformed discovery instead of treating it as an open server", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json({ mode: "community", setup_required: false });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "error", errorCode: "enrollment-response" });
+    expect(enrollment.view()).not.toHaveProperty("setupCodeRequired");
+  });
+
+  it("surfaces only known JSON claim error codes", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(false));
+      if (path === "/v1/instance/claim") return json({ code: "invalid_setup_token" }, { status: 401 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.createOwner({ setupToken: "wrong", adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "error", errorCode: "invalid_setup_token" });
+    expect(enrollment.view()).not.toHaveProperty("setupCodeRequired");
+  });
+
+  it("keeps unrecognized claim failures generic", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(false));
+      if (path === "/v1/instance/claim") return new Response("unexpected server detail", { status: 401 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.createOwner({ setupToken: "wrong", adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "error", errorCode: "http-401" });
+  });
+
   it("completes the self-hosted owner and phone contract without trusting server QR material", async () => {
     const statuses = [
       { state: "claimed", expires_in_seconds: 290, claim: {}, transcript: {}, encrypted_key_package: null, transfer_nonce: null, profile: null },

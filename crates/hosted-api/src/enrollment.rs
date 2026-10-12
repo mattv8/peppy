@@ -123,6 +123,7 @@ pub struct DeviceEnrollment {
 #[serde(deny_unknown_fields)]
 pub struct ClaimInstanceRequest {
     pub operation_id: Uuid,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub setup_token: String,
     pub admin_password: String,
     pub device: ProposedDevice,
@@ -439,5 +440,24 @@ mod tests {
         assert_eq!(session.session_token, None);
         let serialized = serde_json::to_value(session).unwrap();
         assert!(serialized.get("session_token").is_none());
+    }
+
+    #[test]
+    fn claim_accepts_an_omitted_setup_token_and_omits_an_empty_one() {
+        let request: ClaimInstanceRequest = serde_json::from_value(serde_json::json!({
+            "operation_id": Uuid::nil(),
+            "admin_password": "password",
+            "device": {"device_id": Uuid::nil(), "kind": "desktop", "name": "device", "signing_public_key": "key"},
+            "material": {"profile": {}, "check_header": "header", "fingerprint": "fingerprint", "key_epoch": 1, "admission_public_key": "key"},
+            "credential_digest": "digest"
+        }))
+        .unwrap();
+        assert!(request.setup_token.is_empty());
+        assert!(
+            serde_json::to_value(request)
+                .unwrap()
+                .get("setup_token")
+                .is_none()
+        );
     }
 }

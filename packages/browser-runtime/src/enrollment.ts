@@ -5,7 +5,7 @@ type DeploymentMode = "community" | "hosted";
 type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
 type SessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 
-export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string };
+export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean };
 export type EnrollmentSecrets = { setupToken?: string; adminPassword?: string; passphrase?: string };
 export type EnrollmentDevice = { device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean };
 export type InstanceManagement = { vault_id: string; devices: EnrollmentDevice[]; storage_bytes: number; quota_bytes: number; replay_retention_days: number };
@@ -26,6 +26,7 @@ export class BrowserEnrollment {
   private invitationId?: string;
   private enrollmentClient?: { origin: string; purpose: "fresh" | "owner" };
   private addPhonePending?: Promise<EnrollmentView>;
+  private setupCodeRequired = true;
   private readonly fetchBase: string;
 
   /** `origin` is the durable API identity; browser fetches remain on the app-origin proxy. */
@@ -35,8 +36,10 @@ export class BrowserEnrollment {
 
   public async discover(origin = this.origin): Promise<EnrollmentView> {
     try {
+      this.setupCodeRequired = true;
       const info = await this.discoverInfo();
       const mode = deploymentMode(info.mode);
+      if (mode === "community" && typeof info.claimed !== "boolean") throw new Error("enrollment-response");
       this.viewValue = { ...this.viewValue, mode };
       const signedIn = mode === "hosted" ? await this.hostedSession() : undefined;
       if (this.session.phase === "locked") {
@@ -63,7 +66,12 @@ export class BrowserEnrollment {
             this.viewValue = { mode, stage: "signin", origin };
           }
         }
-      } else this.viewValue = { mode, stage: info.claimed === true ? "signin" : "setup", origin };
+      } else {
+        this.setupCodeRequired = info.setup_required !== false;
+        this.viewValue = info.claimed === true
+        ? { mode, stage: "signin", origin }
+        : { mode, stage: "setup", origin, setupCodeRequired: this.setupCodeRequired };
+      }
     } catch (error) {
       this.fail(error);
     }
@@ -76,7 +84,7 @@ export class BrowserEnrollment {
     try {
       if (!secrets.passphrase) throw new Error("enrollment-state");
       if (this.viewValue.mode === "hosted") return this.createHostedOwner(secrets.passphrase);
-      if (!secrets.setupToken || !secrets.adminPassword) throw new Error("enrollment-state");
+      if (!secrets.adminPassword || (this.setupCodeRequired && !secrets.setupToken)) throw new Error("enrollment-state");
       const request = await this.rustRequest("_worker_enrollment_create_owner", secrets);
       const response = await this.request("/v1/instance/claim", "POST", request);
       this.captureClaimSession(response);
@@ -303,7 +311,7 @@ export class BrowserEnrollment {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (!response.ok) throw new HttpStatusError(response.status);
+    if (!response.ok) throw await HttpStatusError.fromResponse(response);
     if (response.status === 204) return {} as T;
     return JSON.parse(await readBoundedText(response)) as T;
   }
@@ -319,13 +327,23 @@ export class BrowserEnrollment {
   }
 
   private fail(error: unknown): void {
-    const errorCode = error instanceof HttpStatusError ? `http-${error.status}` : error instanceof Error ? error.message : "enrollment-error";
-    this.viewValue = { ...this.viewValue, stage: "error", errorCode };
+    const errorCode = error instanceof HttpStatusError ? error.code ?? `http-${error.status}` : error instanceof Error ? error.message : "enrollment-error";
+    const { setupCodeRequired: _setupCodeRequired, ...view } = this.viewValue;
+    this.viewValue = { ...view, stage: "error", errorCode };
   }
 }
 
 class HttpStatusError extends Error {
-  public constructor(public readonly status: number) { super(`http-${status}`); }
+  public constructor(public readonly status: number, public readonly code?: "invalid_setup_token" | "instance_already_claimed") { super(code ?? `http-${status}`); }
+
+  public static async fromResponse(response: Response): Promise<HttpStatusError> {
+    try {
+      const body: unknown = JSON.parse(await readBoundedText(response));
+      const code = record(body).code;
+      if (code === "invalid_setup_token" || code === "instance_already_claimed") return new HttpStatusError(response.status, code);
+    } catch {}
+    return new HttpStatusError(response.status);
+  }
 }
 
 function readyView(mode: DeploymentMode, origin: string, identity: EnrollmentIdentity): EnrollmentView {

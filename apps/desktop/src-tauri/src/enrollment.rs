@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 const DEVICE_NAME: &str = "Peppy Desktop";
 const HOSTED_ORIGIN: &str = "https://peppy.pro";
 const OWNER_CHECKPOINT_PREFIX: &str = "enrollment-owner:v1:";
+const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 #[derive(Default)]
 pub struct Controller {
@@ -52,6 +53,8 @@ pub struct EnrollmentView {
     verification_code: Option<String>,
     expires_in_seconds: Option<u32>,
     error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_code_required: Option<bool>,
 }
 
 impl Controller {
@@ -85,6 +88,10 @@ impl Controller {
             Some(_) if self.admin_session.is_some() => "locked",
             Some(_) => "signin",
         };
+        let setup_code_required = self.info.as_ref().and_then(|info| {
+            (stage == "setup" && info.mode == DeploymentMode::Community && !info.claimed)
+                .then_some(info.setup_required)
+        });
         EnrollmentView {
             mode,
             stage,
@@ -106,6 +113,7 @@ impl Controller {
                 .as_ref()
                 .map(|status| status.expires_in_seconds),
             error_code: None,
+            setup_code_required,
         }
     }
 
@@ -114,6 +122,17 @@ impl Controller {
             .as_deref()
             .ok_or_else(|| BridgeError::new("server-required", "Choose a server before enrolling."))
     }
+}
+
+/// Only an explicitly discovered, unclaimed community server without a setup requirement is open.
+/// Missing, claimed, and non-community state all fail closed to a native setup-token prompt.
+fn setup_code_required(controller: &std::sync::Mutex<Controller>) -> BridgeResult<bool> {
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    Ok(!matches!(
+        controller.info.as_ref(),
+        Some(info)
+            if info.mode == DeploymentMode::Community && !info.claimed && !info.setup_required
+    ))
 }
 
 /// A device identity already unlocked in this app for the selected origin.
@@ -252,8 +271,13 @@ where
     AF: std::future::Future<Output = BridgeResult<()>>,
 {
     let epoch = begin_owner_operation(controller)?;
-    let Some(setup_token) = prompt(PassphrasePurpose::SetupToken).await? else {
-        return Ok(false);
+    let setup_token = if setup_code_required(controller)? {
+        let Some(setup_token) = prompt(PassphrasePurpose::SetupToken).await? else {
+            return Ok(false);
+        };
+        setup_token
+    } else {
+        Zeroizing::new(String::new())
     };
     if !owner_operation_current(controller, epoch)? {
         return Ok(false);
@@ -371,13 +395,28 @@ fn http(origin: &str) -> BridgeResult<reqwest::Client> {
 
 async fn body(response: reqwest::Response) -> BridgeResult<String> {
     if !response.status().is_success() {
-        return Err(NetError::Status {
-            status: response.status().as_u16(),
-            code: None,
-        }
-        .into());
+        let error_code = read_bounded(response, MAX_ERROR_BODY_BYTES)
+            .await
+            .ok()
+            .and_then(|body| known_claim_error_code(&body));
+        return Err(BridgeError::new(
+            error_code.unwrap_or("server-rejected"),
+            "The server rejected the request.",
+        ));
     }
     String::from_utf8(read_bounded(response, MAX_JSON_BYTES).await?).map_err(|_| enrollment_error())
+}
+
+fn known_claim_error_code(body: &[u8]) -> Option<&'static str> {
+    match serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get("code")?
+        .as_str()?
+    {
+        "invalid_setup_token" => Some("invalid_setup_token"),
+        "instance_already_claimed" => Some("instance_already_claimed"),
+        _ => None,
+    }
 }
 
 async fn post(
@@ -739,7 +778,26 @@ pub async fn enrollment_create_owner(
             install_identity(app_ref, state_ref, identity, passphrase, expected_binding).await
         },
     )
-    .await?;
+    .await;
+    let completed = match completed {
+        Ok(completed) => completed,
+        Err(error)
+            if matches!(
+                error.code,
+                "invalid_setup_token" | "instance_already_claimed"
+            ) =>
+        {
+            let mut view = state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?
+                .view();
+            view.stage = "error";
+            view.error_code = Some(error.code.into());
+            return Ok(view);
+        }
+        Err(error) => return Err(error),
+    };
 
     let has_gateway = if completed {
         refresh_gateway_presence(&state).await?
@@ -1230,6 +1288,50 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
+    async fn open_setup_skips_the_native_setup_token_prompt_and_uses_an_empty_token() {
+        let controller = unclaimed_controller();
+        controller
+            .lock()
+            .unwrap()
+            .info
+            .as_mut()
+            .unwrap()
+            .setup_required = false;
+        let store = MemoryStore::default();
+        let prompted = Arc::new(Mutex::new(Vec::new()));
+        let prompted_by_test = prompted.clone();
+        let request = Arc::new(Mutex::new(None));
+        let request_by_test = request.clone();
+
+        assert!(create_owner_core(
+            &controller,
+            &store,
+            None,
+            move |purpose| {
+                prompted_by_test.lock().unwrap().push(purpose);
+                std::future::ready(prompt(purpose))
+            },
+            |_| std::future::ready(Ok(true)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            move |_, serialized| {
+                *request_by_test.lock().unwrap() = Some(serialized.clone());
+                std::future::ready(Ok(claim_response(&serialized, false)))
+            },
+            |_, _, _| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(
+            *prompted.lock().unwrap(),
+            vec![PassphrasePurpose::AdminPassword]
+        );
+        let request: ClaimInstanceRequest =
+            serde_json::from_str(request.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert!(request.setup_token.is_empty());
+    }
+
+    #[tokio::test]
     async fn lost_response_retry_reuses_operation_device_and_credential_metadata() {
         let controller = unclaimed_controller();
         let store = MemoryStore::default();
@@ -1478,6 +1580,36 @@ mod owner_retry_tests {
         set_identity_ready(&mut gateway, Some(EnrollmentRole::Gateway));
         assert_eq!(gateway.view().owner, Some(false));
         assert!(gateway.view().has_gateway.is_none());
+    }
+
+    #[test]
+    fn setup_policy_is_emitted_only_for_an_unclaimed_community_setup() {
+        let mut controller = unclaimed_controller().into_inner().unwrap();
+        assert_eq!(controller.view().setup_code_required, Some(true));
+
+        controller.info.as_mut().unwrap().setup_required = false;
+        assert_eq!(controller.view().setup_code_required, Some(false));
+
+        let ready = ready_controller();
+        assert_eq!(ready.view().setup_code_required, None);
+        assert_eq!(Controller::default().view().setup_code_required, None);
+    }
+
+    #[test]
+    fn claim_error_codes_are_whitelisted_from_bounded_json() {
+        assert_eq!(
+            known_claim_error_code(br#"{"code":"invalid_setup_token"}"#),
+            Some("invalid_setup_token")
+        );
+        assert_eq!(
+            known_claim_error_code(br#"{"code":"instance_already_claimed"}"#),
+            Some("instance_already_claimed")
+        );
+        assert_eq!(known_claim_error_code(b"invalid_setup_token"), None);
+        assert_eq!(
+            known_claim_error_code(br#"{"code":"unexpected_server_detail"}"#),
+            None
+        );
     }
 
     #[test]

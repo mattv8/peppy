@@ -86,10 +86,19 @@ path; it does not consume hosted env files or run private migrations.
 
 ## Database, storage, and billing boundaries
 
-- Community first claim requires an operator setup code. A nonempty configured
-  `PEPPY_SETUP_TOKEN` must contain at least 32 UTF-8 bytes; absent or empty
-  configuration generates a random first-start token, not an authorization
-  bypass. Do not log administrator passwords or vault shared secrets.
+- Community first claim is open when `PEPPY_SETUP_TOKEN` is absent or empty. A
+  nonempty configured value must contain at least 32 UTF-8 bytes and requires
+  that operator setup code for first claim. Do not generate or log a fallback
+  token; configure the same token on every replica. Existing unclaimed installs
+  become open when upgraded without the setting, so configure it before upgrade
+  if token protection is required. Keep the setup code, administrator password,
+  and vault shared secret distinct; never log any of them.
+- A stranger's completed first claim requires destructive deployment recovery,
+  not password reset or automatic reclaim. Stop only the affected deployment and
+  remove only its dedicated Peppy PostgreSQL and attachment state. Root Compose
+  uses `postgres-data`, `seaweed-volume-data`, and `seaweed-filer-data`, which
+  Docker project-prefixes. Inspect exact names before removal; never use blanket
+  volume deletion or delete shared external database/object-storage services.
 - Rate limits use the real socket peer. Forwarding headers affect that identity
   only when the socket peer matches explicit `TRUSTED_PROXY_CIDRS`; parse a
   bounded chain from right to left and fall back to the socket peer on malformed

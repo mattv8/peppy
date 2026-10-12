@@ -89,6 +89,8 @@ internal fun importMessage(result: ImportResult): String = when (result) {
     ImportResult.UPDATED -> "Credential refreshed for the same device. Local data and its protected key were kept."
     ImportResult.INVALID_CREDENTIAL -> "This file is not a valid Peppy v1 device credential (16 KiB maximum)."
     ImportResult.SERVER_REJECTED -> "The server did not accept this credential for its vault and device."
+    ImportResult.SETUP_TOKEN_REJECTED -> "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again."
+    ImportResult.INSTANCE_ALREADY_CLAIMED -> "This server has already been set up. Connect with your admin password or vault shared secret instead."
     ImportResult.NOT_A_GATEWAY -> "This credential belongs to a viewing device. Pair this phone as an SMS gateway instead."
     ImportResult.NETWORK_ERROR -> "Could not reach the Peppy server. Check the connection and try again."
     ImportResult.IDENTITY_MISMATCH -> "This phone is already bound to a different server, vault, or device. Import refused to protect existing data."

@@ -200,7 +200,7 @@ pub(super) struct ApiState {
     policy: Arc<dyn AccessPolicy>,
     row_security: bool,
     instance_origin: Option<url::Url>,
-    setup_token_digest: [u8; 32],
+    claim_policy: crate::instance::ClaimPolicy,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
 }
 struct RateAdmission {
@@ -294,9 +294,8 @@ pub fn router(db: PgPool) -> Router {
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: authorization,
-            setup_token_digest: crate::instance::configured_setup_token_digest()
-                .expect("setup token configuration must be valid")
-                .unwrap_or_else(crate::instance::disabled_setup_token_digest),
+            claim_policy: crate::instance::configured_claim_policy(false)
+                .expect("setup token configuration must be valid"),
             row_security: false,
         },
     );
@@ -322,9 +321,8 @@ pub fn router_with_options(db: PgPool, options: TransportOptions) -> Router {
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: authorization,
-            setup_token_digest: crate::instance::configured_setup_token_digest()
-                .expect("setup token configuration must be valid")
-                .unwrap_or_else(crate::instance::disabled_setup_token_digest),
+            claim_policy: crate::instance::configured_claim_policy(false)
+                .expect("setup token configuration must be valid"),
             row_security: false,
         },
     );
@@ -347,9 +345,8 @@ pub fn router_with_options_and_relay(
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: Arc::new(CommunityEnrollmentAuthorization::new(db.clone())),
-            setup_token_digest: crate::instance::configured_setup_token_digest()
-                .expect("setup token configuration must be valid")
-                .unwrap_or_else(crate::instance::disabled_setup_token_digest),
+            claim_policy: crate::instance::configured_claim_policy(false)
+                .expect("setup token configuration must be valid"),
             row_security: false,
         },
     );
@@ -360,7 +357,7 @@ pub fn router_with_options_and_relay(
 pub(crate) struct RouterAuthorization {
     pub(crate) policy: Arc<dyn AccessPolicy>,
     pub(crate) enrollment: Arc<dyn EnrollmentAuthorization>,
-    pub(crate) setup_token_digest: [u8; 32],
+    pub(crate) claim_policy: crate::instance::ClaimPolicy,
     pub(crate) row_security: bool,
 }
 
@@ -392,7 +389,7 @@ pub(crate) fn build_router(
     let RouterAuthorization {
         policy,
         enrollment: enrollment_authorization,
-        setup_token_digest,
+        claim_policy,
         row_security,
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
@@ -512,7 +509,7 @@ pub(crate) fn build_router(
         instance_origin: config
             .as_ref()
             .and_then(|config| config.public_api_url.clone()),
-        setup_token_digest,
+        claim_policy,
         trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs),
     });
     let router = match invitation_origin.as_ref().and_then(|origin| {
@@ -568,7 +565,7 @@ async fn instance_info(State(state): State<ApiState>) -> ApiResult<Json<Instance
     Ok(Json(InstanceInfo {
         mode: DeploymentMode::Community,
         claimed,
-        setup_required: !claimed,
+        setup_required: !claimed && state.claim_policy.requires_setup_token(),
         password_auth: claimed,
         qr_pairing: claimed,
         shared_secret_pairing: claimed,
@@ -921,9 +918,17 @@ async fn claim_instance(
     }
     drop(replay_transaction);
 
-    if state.setup_token_digest != crate::instance::digest(request.setup_token.as_bytes()) {
-        instance_account_admission(&state, peer, b"claim", "instance_claim_limited").await?;
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_setup_token"));
+    // Fresh claims consume a bounded admission before token validation or expensive
+    // material/password work. Replays intentionally retain their separate path.
+    instance_account_admission(&state, peer, b"claim", "instance_claim_limited").await?;
+    match state.claim_policy {
+        crate::instance::ClaimPolicy::Disabled => {
+            return Err(ApiError(StatusCode::CONFLICT, "instance_already_claimed"));
+        }
+        policy if !policy.authorizes(&request.setup_token) => {
+            return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_setup_token"));
+        }
+        _ => {}
     }
     let (admission_public_key, credential_digest) = validate_claim_material(&request)?;
     let signing_public_key = validate_proposed_device(&request.device)?;

@@ -4,6 +4,7 @@ import type {
   AppLockStatus, DraftInput, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SendDraftInput,
 } from "../../desktop/src/bridge";
+import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
 
@@ -11,7 +12,7 @@ type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: fal
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
 type PendingRequest = { resolve(value: unknown): void; reject(error: Error): void; timer: number };
 type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
-export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string };
+export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean };
 export type InstanceManagement = { vault_id: string; devices: Array<{ device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean }>; storage_bytes: number; quota_bytes: number; replay_retention_days: number };
 type EnrollmentSecretField = { name: string; label: string; autocomplete?: string };
 type OwnerClaimDraft = { passphrase: string; setupToken?: string; adminPassword?: string };
@@ -29,7 +30,7 @@ function unsupported(method: string): Promise<never> {
   return Promise.reject(new BrowserBridgeError("unsupported", `${method} is unavailable in the browser.`));
 }
 
-function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: Array<{ name: string; label: string; autocomplete?: string }> }): Promise<Record<string, string> | null> {
+function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: Array<{ name: string; label: string; autocomplete?: string }>; setupMode?: "open" | "protected" }): Promise<Record<string, string> | null> {
   activeSecretDialog?.();
   return new Promise((resolve) => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -41,6 +42,7 @@ function secretDialog(options: { id: string; title: string; description: string;
     dialog.setAttribute("aria-modal", "true");
     const form = document.createElement("form");
     form.id = `${options.id}-form`;
+    if (options.setupMode) form.dataset.setupMode = options.setupMode;
     form.method = "dialog";
     const heading = document.createElement("h2");
     heading.id = `${options.id}-heading`;
@@ -213,6 +215,7 @@ export class BrowserBridge implements DesktopBridge {
   private notificationContext?: { view: "conversations" | "notifications" | "settings" | "contacts"; conversationId?: string };
   private accountUrl?: string;
   private enrollmentMode: "community" | "hosted" = "community";
+  private setupCodeRequired = true;
   private ownerClaimDraft?: OwnerClaimDraft;
 
   public constructor(private readonly port: MessagePort, private readonly timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -361,6 +364,7 @@ export class BrowserBridge implements DesktopBridge {
   public async enrollment_discover(): Promise<EnrollmentView> {
     const view = await this.call<EnrollmentView>("enrollment_discover");
     this.enrollmentMode = view.mode;
+    this.setupCodeRequired = view.setupCodeRequired !== false;
     return this.finishOwnerClaim(view);
   }
   public async enrollment_status(): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_status")); }
@@ -371,7 +375,20 @@ export class BrowserBridge implements DesktopBridge {
   public enrollment_revoke_device(deviceId: string): Promise<InstanceManagement> { return this.call("enrollment_revoke_device", { deviceId }); }
   public async enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method })); }
   public async enrollment_create_owner(): Promise<EnrollmentView> {
-    const draft = this.ownerClaimDraft ?? await this.createOwnerClaimDraft();
+    let draft = this.ownerClaimDraft;
+    if (draft && this.enrollmentMode === "community" && this.setupCodeRequired && !draft.setupToken) {
+      const correction = await secretDialog({
+        id: "browser-enrollment-owner-code",
+        title: "Enter setup code",
+        description: peppyCopy.enrollment_setup_protected,
+        confirm: "Continue",
+        fields: [{ name: "setupToken", label: "Setup code", autocomplete: "off" }],
+        setupMode: "protected",
+      });
+      if (!correction) return this.enrollment_status();
+      draft = { ...draft, setupToken: correction.setupToken };
+    }
+    draft ??= await this.createOwnerClaimDraft();
     if (!draft) return this.enrollment_status();
     this.ownerClaimDraft = draft;
     return this.finishOwnerClaim(await this.call("enrollment_create_owner", draft));
@@ -416,8 +433,21 @@ export class BrowserBridge implements DesktopBridge {
   }
 
   private async createOwnerClaimDraft(): Promise<OwnerClaimDraft | undefined> {
+    const protectedSetup = this.setupCodeRequired;
     const credentials = this.enrollmentMode === "community"
-      ? await secretDialog({ id: "browser-enrollment-owner", title: "Set up your Peppy server", description: "Create your server administrator credentials.", confirm: "Continue", fields: [{ name: "setupToken", label: "Setup token", autocomplete: "off" }, { name: "adminPassword", label: "Admin password", autocomplete: "new-password" }] })
+      ? await secretDialog({
+        id: "browser-enrollment-owner",
+        title: "Set up your Peppy server",
+        description: protectedSetup
+          ? peppyCopy.enrollment_setup_protected
+          : peppyCopy.enrollment_setup_open,
+        confirm: "Continue",
+        fields: [
+          ...(protectedSetup ? [{ name: "setupToken", label: "Setup code", autocomplete: "off" }] : []),
+          { name: "adminPassword", label: "Admin password", autocomplete: "new-password" },
+        ],
+        setupMode: protectedSetup ? "protected" : "open",
+      })
       : {};
     if (!credentials) return undefined;
     const generated = await this.call<{ passphrase: string }>("enrollment_generate_secret");
@@ -426,6 +456,13 @@ export class BrowserBridge implements DesktopBridge {
   }
 
   private finishOwnerClaim(view: EnrollmentView): EnrollmentView {
+    if (view.stage === "error" && view.errorCode === "invalid_setup_token") {
+      this.setupCodeRequired = true;
+      if (this.ownerClaimDraft) {
+        const { setupToken: _setupToken, ...draft } = this.ownerClaimDraft;
+        this.ownerClaimDraft = draft;
+      }
+    }
     if (view.stage === "ready" || view.stage === "phone_connected") this.ownerClaimDraft = undefined;
     return view;
   }

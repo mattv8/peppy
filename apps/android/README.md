@@ -12,7 +12,23 @@ Hosted builds need a dedicated native-backend Google OAuth client ID through the
 
 Connect using the server address and shared secret, or scan the **Connect your phone** QR shown by an authorized web or desktop client. Compare the locally computed verification codes and approve the connection. Pairing supports encrypted key transfer or manual shared-secret entry. The server receives only an invitation digest and authenticated claim, never the QR secret or plaintext vault keys. Credentials and verified key caches are protected by Android Keystore.
 
-A web client, desktop or phone can create the first vault and become its owner. For a fresh self-hosted instance, the phone's setup wizard asks for the operator setup code and admin password, then generates the vault shared secret. A phone joining an existing vault is a gateway. The phone does not display a pairing QR or an **Add a computer** action; Settings contains no pairing QR.
+A web client, desktop or phone can create the first vault and become its owner.
+For a fresh self-hosted instance, the phone's setup wizard identifies whether
+first claim is open or token-protected. Open first claim needs no setup code;
+token-protected first claim requires the operator code and an admin password,
+then generates the vault shared secret. The setup code authorizes that initial
+claim only, the admin password authorizes server management, and the generated
+vault shared secret protects vault data. A phone joining an existing vault is a
+gateway. The phone does not display a pairing QR or an **Add a computer** action;
+Settings contains no pairing QR.
+
+Operators use a nonempty `PEPPY_SETUP_TOKEN` of at least 32 UTF-8 bytes for
+token-protected first claim and configure the same token on every replica. An
+absent or empty value is open; no fallback token is generated or logged. An
+unclaimed installation upgraded without that setting becomes open.
+For an unwanted stranger claim, the root
+[recovery procedure](../../README.md#recover-from-an-unwanted-first-claim)
+destroys only the affected deployment state; it is not password recovery.
 
 The Account tab shows the server-reported role and device roster. A device may disconnect itself; only a server-reported `owner` can remove another device or reveal the typed-`ERASE` vault-delete control. A gateway role does not grant owner privileges. Disconnect archives local encrypted state; it is not a reset or a claim that a revoked credential can resume sync.
 

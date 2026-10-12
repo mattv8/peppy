@@ -32,6 +32,9 @@ class DesktopHelperTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
+    def tls_environment(self, fake_bin, debug):
+        return {"DEBUG": debug, "PEPPY_DEV_TLS_DIR": str(pathlib.Path(fake_bin) / "tls")}
+
     def configure_macos_tools(self, fake_bin):
         self.fake_command(fake_bin, "uname", "echo Darwin")
         self.fake_command(fake_bin, "node", "echo v24.21.0")
@@ -169,54 +172,75 @@ class DesktopHelperTests(unittest.TestCase):
             self.assertFalse(opened.exists())
 
     def test_macos_dev_passes_absolute_dev_overlay_before_cargo_arguments(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_bin = pathlib.Path(temporary)
-            arguments = fake_bin / "pnpm-arguments"
-            self.configure_macos_tools(fake_bin)
-            self.fake_command(
-                fake_bin,
-                "pnpm",
-                f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"$@\" > '{arguments}'; fi",
-            )
+        cases = (
+            ("true", ["--features", "dev-local-tls"]),
+            ("false", []),
+        )
+        for debug, cargo_suffix in cases:
+            with self.subTest(debug=debug), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                arguments = fake_bin / "pnpm-arguments"
+                tls_directory = fake_bin / "tls"
+                self.configure_macos_tools(fake_bin)
+                self.fake_command(
+                    fake_bin,
+                    "pnpm",
+                    f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"$@\" > '{arguments}'; fi",
+                )
 
-            result = self.run_helper("dev", env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
+                result = self.run_helper(
+                    "dev",
+                    env={"PATH": f"{fake_bin}:{os.environ['PATH']}", **self.tls_environment(fake_bin, debug)},
+                )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                arguments.read_text().splitlines(),
-                [
-                    "--dir", "apps/desktop", "exec", "tauri", "dev", "--config",
-                    str(DEV_CONFIG), "--", "--locked",
-                ],
-            )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    arguments.read_text().splitlines(),
+                    [
+                        "--dir", "apps/desktop", "exec", "tauri", "dev", "--config",
+                        str(DEV_CONFIG), "--", "--locked", *cargo_suffix,
+                    ],
+                )
+                self.assertEqual((tls_directory / "ca.pem").exists(), debug == "true")
 
     def test_macos_build_passes_app_only_overlay_and_accepts_dev_bundle_without_dmg(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_bin = pathlib.Path(temporary)
-            target = fake_bin / "target"
-            arguments = fake_bin / "pnpm-arguments"
-            self.configure_macos_tools(fake_bin)
-            self.fake_command(
-                fake_bin,
-                "pnpm",
-                f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"$@\" > '{arguments}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi",
-            )
+        cases = (
+            ("true", ["--features", "dev-local-tls"]),
+            ("false", []),
+        )
+        for debug, cargo_suffix in cases:
+            with self.subTest(debug=debug), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                target = fake_bin / "target"
+                arguments = fake_bin / "pnpm-arguments"
+                tls_directory = fake_bin / "tls"
+                self.configure_macos_tools(fake_bin)
+                self.fake_command(
+                    fake_bin,
+                    "pnpm",
+                    f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s\\n' \"$@\" > '{arguments}'; mkdir -p \"${{CARGO_TARGET_DIR:?}}/release/bundle/macos/Peppy_dev.app\"; fi",
+                )
 
-            result = self.run_helper(
-                "build",
-                env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "CARGO_TARGET_DIR": str(target)},
-            )
+                result = self.run_helper(
+                    "build",
+                    env={
+                        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                        "CARGO_TARGET_DIR": str(target),
+                        **self.tls_environment(fake_bin, debug),
+                    },
+                )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                arguments.read_text().splitlines(),
-                [
-                    "--dir", "apps/desktop", "exec", "tauri", "build", "--bundles", "app",
-                    "--config", str(DEV_CONFIG), "--", "--locked",
-                ],
-            )
-            self.assertTrue((target / "release/bundle/macos/Peppy_dev.app").is_dir())
-            self.assertFalse((target / "release/bundle/macos/Peppy_dev.dmg").exists())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    arguments.read_text().splitlines(),
+                    [
+                        "--dir", "apps/desktop", "exec", "tauri", "build", "--bundles", "app",
+                        "--config", str(DEV_CONFIG), "--", "--locked", *cargo_suffix,
+                    ],
+                )
+                self.assertEqual((tls_directory / "ca.pem").exists(), debug == "true")
+                self.assertTrue((target / "release/bundle/macos/Peppy_dev.app").is_dir())
+                self.assertFalse((target / "release/bundle/macos/Peppy_dev.dmg").exists())
 
     def test_macos_build_rejects_missing_dev_bundle_after_successful_tool_run(self):
         with tempfile.TemporaryDirectory() as temporary:

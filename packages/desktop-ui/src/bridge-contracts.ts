@@ -57,6 +57,7 @@ export type EnrollmentView = {
   verificationCode?: string;
   expiresInSeconds?: number;
   errorCode?: string;
+  setupCodeRequired?: boolean;
 };
 export type HostedPreviewView = {
   scenario: string; screen: string; accountState: string; entitlementState: string;

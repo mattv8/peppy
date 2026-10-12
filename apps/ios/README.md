@@ -12,7 +12,24 @@ This SwiftUI app is a product **gateway-role client** with Mirroring, SMS, and A
 
 Connect with the server address and shared secret, or scan the single **Connect your phone** QR shown by a web or desktop owner. Compare the locally computed verification codes and approve the connection. The selected mode either transfers verified keys through an encrypted channel or asks for the shared secret in a native secure field. The server receives neither the QR secret nor plaintext vault keys. Identity installation uses the shared Rust verifier before credentials are persisted in Keychain.
 
-A browser, desktop or phone can be the first owner. Self-hosted first-run setup requires the operator setup code, an admin password, and saving a generated vault shared secret. A phone joining an existing vault remains a gateway-role client. There is no phone-displayed QR, reversed **Add a computer** flow, or credential-file onboarding. Hosted identity and billing remain separate from vault encryption.
+A browser, desktop or phone can be the first owner. The self-hosted first-run
+screen identifies whether the unclaimed server is open or token-protected. Open
+first claim needs no setup code; token-protected first claim requires the
+operator code and an admin password, then prompts to save a generated vault
+shared secret. That code authorizes only the initial claim, the admin password
+authorizes server management, and the generated vault shared secret protects
+vault data. A phone joining an existing vault remains a gateway-role client.
+There is no phone-displayed QR, reversed **Add a computer** flow, or
+credential-file onboarding. Hosted identity and billing remain separate from
+vault encryption.
+
+Use a nonempty `PEPPY_SETUP_TOKEN` of at least 32 UTF-8 bytes to require a setup
+code, and configure the same token on every replica. An absent or empty value is
+open, with no generated or logged fallback token. An unclaimed installation
+upgraded without this setting becomes open.
+The root [recovery procedure](../../README.md#recover-from-an-unwanted-first-claim)
+for an unwanted stranger claim destroys only the affected deployment state; it
+does not recover passwords.
 
 The Account tab uses the actual role returned by the server. A device can sign itself out; only an `owner` can remove another device and see the typed-`ERASE` vault-deletion control. Gateway capability or a SIM does not grant owner privileges. Disconnect archives the encrypted database, keys, and queued work locally; it is not destructive reset or proof that a revoked credential can resume sync. Keychain records are device-only and not synchronized or restored by backup.
 

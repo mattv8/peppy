@@ -8,7 +8,15 @@ struct SelfHostedEnrollmentState {
 
     var joining = false
     var ownerStep = OwnerStep.credentials
-    var origin = ""
+    var origin = "" {
+        didSet {
+            guard origin != oldValue else { return }
+            invalidateDiscovery()
+        }
+    }
+    private(set) var discoveredOrigin: String?
+    var setupCodeRequired = true
+    private var discoveryEpoch = 0
     var setupToken = ""
     var adminPassword = ""
     var confirmation = ""
@@ -18,8 +26,8 @@ struct SelfHostedEnrollmentState {
     var revealsGeneratedSecret = false
 
     var canContinueOwnerSetup: Bool {
-        !origin.isEmpty
-            && !setupToken.isEmpty
+        discoveredOrigin == origin
+            && (!setupCodeRequired || !setupToken.isEmpty)
             && adminPassword.utf8.count >= 12
             && adminPassword == confirmation
     }
@@ -48,6 +56,30 @@ struct SelfHostedEnrollmentState {
         clearSecrets()
     }
 
+    mutating func beginDiscovery() -> Int {
+        discoveryEpoch &+= 1
+        return discoveryEpoch
+    }
+
+    mutating func applyDiscovery(
+        canonicalOrigin: String,
+        setupCodeRequired: Bool,
+        requestedOrigin: String,
+        epoch: Int
+    ) {
+        guard !joining, origin == requestedOrigin, discoveryEpoch == epoch else { return }
+        origin = canonicalOrigin
+        discoveredOrigin = canonicalOrigin
+        self.setupCodeRequired = setupCodeRequired
+    }
+
+    mutating func invalidateDiscovery() {
+        discoveryEpoch &+= 1
+        discoveredOrigin = nil
+        setupCodeRequired = true
+        setupToken = ""
+    }
+
     mutating func clearSecrets() {
         ownerStep = .credentials
         setupToken = ""
@@ -57,5 +89,6 @@ struct SelfHostedEnrollmentState {
         generatedSecret = ""
         acknowledgedSecretSave = false
         revealsGeneratedSecret = false
+        invalidateDiscovery()
     }
 }

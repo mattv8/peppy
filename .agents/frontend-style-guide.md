@@ -220,15 +220,23 @@ Rules for disclosure:
   require the owner's explicit SAS checkbox before approval. The QR is not a
   credential or approval and has no Save action. Keep the stable stage and QR
   hooks in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
-- Native desktop requests the setup code, admin password, and vault shared
+- Native desktop requests the setup code only when discovery reports
+  token-protected first claim, then requests the admin password and vault shared
   secret in separate native secure prompts. App-lock credentials remain a
-  separate native gate. Browser-hosted secret prompts are DOM controls by
-  design: they remain accessible to same-origin JavaScript and must not be
-  described as native secure controls. Keep their values outside shared React
-  snapshots and clear their fields after use. See
+  separate native gate. Browser-hosted secret prompts are DOM controls by design:
+  they remain accessible to same-origin JavaScript and must not be described as
+  native secure controls. Keep their values outside shared React snapshots and
+  clear their fields after use. See
   [native enrollment](../apps/desktop/src-tauri/src/enrollment.rs),
   [native app lock](../apps/desktop/src-tauri/src/app_lock.rs), and
   [browser bridge](../apps/web/src/browser-bridge.ts).
+- Community first setup visibly identifies the server-advertised mode. Open
+  first claim says that the first device to complete setup becomes owner and
+  does not show a setup-code input. Token-protected first claim says that the
+  operator requires a code configured with `PEPPY_SETUP_TOKEN` and shows that
+  input. Preserve the distinct setup-code, administrator-password, and vault
+  shared-secret authorities. Missing policy remains conservative for older
+  servers; do not imply recovery or a reset control in the UI.
 - Default optional local lock settings to off. A lock must protect local UI
   access only; it does not replace account authorization, device credentials,
   or the vault shared secret. Enabling applies on the next launch. Enforce the
