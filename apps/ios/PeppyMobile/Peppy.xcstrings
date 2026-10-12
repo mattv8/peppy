@@ -1590,6 +1590,46 @@
           }
         }
       }
+    },
+    "peppy.enrollment_setup_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server is unclaimed. The first device to finish setup becomes its owner."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_setup_protected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server's operator requires a setup code configured with PEPPY_SETUP_TOKEN."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invalid_setup_token": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_already_claimed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server has already been set up. Connect with your admin password or vault shared secret instead."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

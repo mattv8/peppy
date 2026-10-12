@@ -135,14 +135,34 @@ final class AppModel {
     }
 
     func claimInstance(origin: String, setupToken: String, adminPassword: String, passphrase: String) async {
-        await run(.enrolling) {
-            try await $0.claimInstance(
+        activity = .enrolling
+        defer { activity = .idle }
+        do {
+            status = try await session.claimInstance(
                 origin: origin,
                 setupToken: setupToken,
                 adminPassword: adminPassword,
                 passphrase: passphrase,
                 deviceName: UIDevice.current.name
             )
+            lastError = nil
+            enrollmentBlocked = false
+        } catch {
+            let failure = error as? ClientError
+            lastError = setupErrorMessage(for: failure) ?? failure?.userMessage ?? "Unexpected error."
+        }
+    }
+
+    func discoverSelfHostedInstance(origin: String) async -> SelfHostedInstanceDiscovery? {
+        activity = .enrolling
+        defer { activity = .idle }
+        do {
+            let discovery = try await session.discoverSelfHostedInstance(origin: origin)
+            lastError = nil
+            return discovery
+        } catch {
+            lastError = setupErrorMessage(for: error as? ClientError) ?? "Could not check this server. Verify the URL and try again."
+            return nil
         }
     }
 
@@ -265,6 +285,17 @@ final class AppModel {
             case .localDatabaseMissing, .missingSecret, .identityMismatch: enrollmentBlocked = true
             default: break
             }
+        }
+    }
+
+    private func setupErrorMessage(for error: ClientError?) -> String? {
+        switch error {
+        case .server(_, "invalid_setup_token"):
+            String(localized: "peppy.enrollment_error_invalid_setup_token", table: "Peppy")
+        case .server(_, "instance_already_claimed"):
+            String(localized: "peppy.enrollment_error_already_claimed", table: "Peppy")
+        default:
+            nil
         }
     }
 }

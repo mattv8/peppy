@@ -3,11 +3,30 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use libsodium_rs::crypto_pwhash::{self, argon2id};
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
 
 const SESSION_TOKEN_BYTES: usize = 32;
 const MIN_CONFIGURED_SETUP_TOKEN_BYTES: usize = 32;
-static GENERATED_SETUP_TOKEN: OnceLock<String> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimPolicy {
+    Open,
+    TokenRequired([u8; 32]),
+    Disabled,
+}
+
+impl ClaimPolicy {
+    pub fn requires_setup_token(self) -> bool {
+        matches!(self, Self::TokenRequired(_))
+    }
+
+    pub fn authorizes(self, token: &str) -> bool {
+        match self {
+            Self::Open => true,
+            Self::TokenRequired(expected) => expected == digest(token.as_bytes()),
+            Self::Disabled => false,
+        }
+    }
+}
 
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
     if !(12..=1024).contains(&password.len()) {
@@ -47,6 +66,31 @@ pub fn configured_setup_token_digest() -> Result<Option<[u8; 32]>, &'static str>
     setup_token_digest_from_env(std::env::var("PEPPY_SETUP_TOKEN"))
 }
 
+/// Resolves the only first-claim policy used by community and hosted assembly.
+/// Row-security runtimes never expose community instance setup, even if a token
+/// was supplied by a shared environment.
+pub fn claim_policy(
+    row_security: bool,
+    setup_token: Option<&str>,
+) -> Result<ClaimPolicy, &'static str> {
+    if row_security {
+        return Ok(ClaimPolicy::Disabled);
+    }
+    setup_token
+        .filter(|token| !token.is_empty())
+        .map(operator_setup_token_digest)
+        .transpose()
+        .map(|digest| digest.map_or(ClaimPolicy::Open, ClaimPolicy::TokenRequired))
+}
+
+pub fn configured_claim_policy(row_security: bool) -> Result<ClaimPolicy, &'static str> {
+    if row_security {
+        return Ok(ClaimPolicy::Disabled);
+    }
+    configured_setup_token_digest()
+        .map(|digest| digest.map_or(ClaimPolicy::Open, ClaimPolicy::TokenRequired))
+}
+
 pub(crate) fn operator_setup_token_digest(token: &str) -> Result<[u8; 32], &'static str> {
     if token.len() < MIN_CONFIGURED_SETUP_TOKEN_BYTES {
         return Err("setup token must be at least 32 bytes");
@@ -56,8 +100,6 @@ pub(crate) fn operator_setup_token_digest(token: &str) -> Result<[u8; 32], &'sta
 
 /// Parses the optional `PEPPY_SETUP_TOKEN` value. Absent and empty values both
 /// mean "not configured", so Compose can forward an unset variable as `""`.
-/// Empty input never disables the first-claim requirement; the caller falls
-/// back to the generated first-claim token.
 fn setup_token_digest_from_env(
     value: Result<String, std::env::VarError>,
 ) -> Result<Option<[u8; 32]>, &'static str> {
@@ -69,35 +111,6 @@ fn setup_token_digest_from_env(
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err("invalid_setup_token"),
     }
-}
-
-/// Returns a setup token digest. Call this only after proving that the instance
-/// is unclaimed. The generated fallback is process-local and logged once so an
-/// operator can perform the first claim.
-pub fn setup_token_digest() -> Result<[u8; 32], &'static str> {
-    if let Some(configured) = configured_setup_token_digest()? {
-        return Ok(configured);
-    }
-    if let Some(token) = GENERATED_SETUP_TOKEN.get() {
-        return Ok(digest(token.as_bytes()));
-    }
-    let candidate = random_token()?;
-    if GENERATED_SETUP_TOKEN.set(candidate.clone()).is_ok() {
-        tracing::warn!(
-            setup_token = %candidate,
-            "generated process-local setup token; configure PEPPY_SETUP_TOKEN for replicas"
-        );
-    }
-    let token = GENERATED_SETUP_TOKEN
-        .get()
-        .expect("setup token is initialized before it is read");
-    Ok(digest(token.as_bytes()))
-}
-
-/// An unreachable digest used when setup is disabled for an already-claimed or
-/// hosted instance. No setup-shaped secret is generated or logged.
-pub fn disabled_setup_token_digest() -> [u8; 32] {
-    [0; 32]
 }
 
 #[cfg(test)]
@@ -132,6 +145,26 @@ mod tests {
         assert_eq!(
             setup_token_digest_from_env(Ok(token.clone())),
             Ok(Some(digest(token.as_bytes())))
+        );
+    }
+
+    #[test]
+    fn claim_policy_is_open_without_a_token_and_disabled_for_hosted() {
+        assert_eq!(claim_policy(false, None), Ok(ClaimPolicy::Open));
+        assert_eq!(claim_policy(false, Some("")), Ok(ClaimPolicy::Open));
+        assert_eq!(
+            claim_policy(false, Some(&"a".repeat(32))),
+            Ok(ClaimPolicy::TokenRequired(digest(
+                b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )))
+        );
+        assert_eq!(
+            claim_policy(true, Some(&"a".repeat(32))),
+            Ok(ClaimPolicy::Disabled)
+        );
+        assert_eq!(
+            claim_policy(true, Some("too-short")),
+            Ok(ClaimPolicy::Disabled)
         );
     }
 

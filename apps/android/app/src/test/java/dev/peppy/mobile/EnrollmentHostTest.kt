@@ -35,6 +35,20 @@ class EnrollmentHostTest {
         host.close()
     }
 
+    @Test fun discoveryRequiresActualJsonBooleansAndDefaultsMissingPolicyToProtected() {
+        assertEquals(InstanceDiscovery(false, false), parseInstanceDiscovery("{\"claimed\":false,\"setup_required\":false}"))
+        assertEquals(InstanceDiscovery(false, true), parseInstanceDiscovery("{\"claimed\":false}"))
+        assertNull(parseInstanceDiscovery("{\"claimed\":\"false\",\"setup_required\":false}"))
+        assertEquals(InstanceDiscovery(false, true), parseInstanceDiscovery("{\"claimed\":false,\"setup_required\":\"false\"}"))
+    }
+
+    @Test fun claimErrorsUseOnlyWhitelistedJsonCodes() {
+        assertEquals(ImportResult.SETUP_TOKEN_REJECTED, claimErrorResult("{\"code\":\"invalid_setup_token\"}"))
+        assertEquals(ImportResult.INSTANCE_ALREADY_CLAIMED, claimErrorResult("{\"code\":\"instance_already_claimed\"}"))
+        assertNull(claimErrorResult("invalid_setup_token"))
+        assertNull(claimErrorResult("{\"code\":\"unexpected\"}"))
+    }
+
     @Test fun ownerRetryRestoresOpaqueCheckpointInsteadOfGeneratingAnotherIdentity() {
         val store = MemorySecureStore()
         val requests = mutableListOf<JSONObject>()
@@ -62,6 +76,24 @@ class EnrollmentHostTest {
             requests[1].getJSONObject("device").getString("device_id"),
         )
         assertFalse(store.values.values.any { it.toString(Charsets.UTF_8).contains(secret) })
+    }
+
+    @Test fun openOwnerClaimOmitsAnEmptySetupToken() {
+        val request = mutableListOf<JSONObject>()
+        val transport = EnrollmentTransport { _, _, path, body, _ ->
+            if (path == "/v1/instance/claim") request += JSONObject(body!!)
+            null
+        }
+
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            assertEquals(
+                ImportResult.NETWORK_ERROR,
+                host.claimOwner("https://enroll.example", "", "password long enough", generateHostedPassphrase()),
+            )
+        }
+
+        assertEquals(1, request.size)
+        assertFalse(request.single().has("setup_token"))
     }
 
     @Test fun scannerGateRejectsDuplicateFramesAndLateCallbacks() {

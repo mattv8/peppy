@@ -68,26 +68,51 @@ struct SelfHostedEnrollmentView: View {
         Group {
             Section("Set up your Peppy server") {
                 serverURLField
-                SecureField("Operator setup code", text: $enrollment.setupToken)
-                    .textContentType(.oneTimeCode)
-                    .accessibilityIdentifier("self-hosted-setup-token")
-                SecureField("Admin password", text: $enrollment.adminPassword)
-                    .textContentType(.newPassword)
-                    .accessibilityIdentifier("self-hosted-admin-password")
-                SecureField("Confirm admin password", text: $enrollment.confirmation)
-                    .textContentType(.newPassword)
-                    .accessibilityIdentifier("self-hosted-admin-password-confirmation")
-                Text("The operator code claims this server. Your admin password manages it; neither is your vault shared secret.")
-                    .font(.footnote)
+                if enrollment.discoveredOrigin != nil {
+                    setupModeCredentials
+                }
             }
             Section {
-                Button("Continue") {
-                    enrollment.prepareOwnerSecret(using: generateHostedPassphrase)
+                if enrollment.discoveredOrigin == nil {
+                    Button("Check server") { discoverServer() }
+                        .disabled(enrollment.origin.isEmpty || isUnavailable)
+                        .accessibilityIdentifier("self-hosted-check-server")
+                } else {
+                    Button("Continue") {
+                        enrollment.prepareOwnerSecret(using: generateHostedPassphrase)
+                    }
+                    .disabled(!enrollment.canContinueOwnerSetup || isUnavailable)
+                    .accessibilityIdentifier("self-hosted-owner-continue")
                 }
-                .disabled(!enrollment.canContinueOwnerSetup || isUnavailable)
-                .accessibilityIdentifier("self-hosted-owner-continue")
                 modeButton
             }
+        }
+    }
+
+    private var setupModeCredentials: some View {
+        Group {
+            if enrollment.setupCodeRequired {
+                SecureField(String(localized: "peppy.enrollment_setup_code", table: "Peppy"), text: $enrollment.setupToken)
+                    .textContentType(.oneTimeCode)
+                    .accessibilityIdentifier("self-hosted-setup-token")
+                Text(String(localized: "peppy.enrollment_setup_protected", table: "Peppy"))
+                    .font(.footnote)
+                    .accessibilityIdentifier("self-hosted-setup-mode-hint")
+            } else {
+                Text(String(localized: "peppy.enrollment_setup_open", table: "Peppy"))
+                    .font(.footnote)
+                    .accessibilityIdentifier("self-hosted-setup-mode-hint")
+            }
+            SecureField("Admin password", text: $enrollment.adminPassword)
+                .textContentType(.newPassword)
+                .accessibilityIdentifier("self-hosted-admin-password")
+            SecureField("Confirm admin password", text: $enrollment.confirmation)
+                .textContentType(.newPassword)
+                .accessibilityIdentifier("self-hosted-admin-password-confirmation")
+            Text(enrollment.setupCodeRequired
+                ? "The setup code claims this server. Your admin password manages it; neither is your vault shared secret."
+                : "Your admin password manages this server. It is not your vault shared secret.")
+                .font(.footnote)
         }
     }
 
@@ -198,6 +223,21 @@ struct SelfHostedEnrollmentView: View {
                 passphrase: passphrase
             )
             finishIfReady()
+        }
+    }
+
+    private func discoverServer() {
+        let requestedOrigin = enrollment.origin
+        let epoch = enrollment.beginDiscovery()
+        Task {
+            guard let discovery = await model.discoverSelfHostedInstance(origin: requestedOrigin),
+                  !enrollment.joining else { return }
+            enrollment.applyDiscovery(
+                canonicalOrigin: discovery.origin,
+                setupCodeRequired: discovery.setupCodeRequired,
+                requestedOrigin: requestedOrigin,
+                epoch: epoch
+            )
         }
     }
 

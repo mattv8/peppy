@@ -124,6 +124,20 @@ This reference records non-obvious Peppy domain constraints. Related references:
   [claim API](../crates/hosted-api/src/enrollment.rs),
   [instance routes](../services/server/src/api.rs), and
   [gateway work filtering](../services/server/src/api/sync.rs).
+- Community setup policy is server-advertised: absent or empty
+  `PEPPY_SETUP_TOKEN` permits open first claim, while a nonempty token requires
+  at least 32 UTF-8 bytes and protects first claim. UI must visibly distinguish
+  these modes and request a code only when the server requires one. No token is
+  generated or logged as a fallback. Configure the same token on every replica.
+  Existing unclaimed installations upgraded without the setting become open;
+  operators who require protection must configure it before upgrade.
+- A stranger's completed first claim has no automatic reclaim or password
+  recovery path. Recovery requires stopping the affected deployment and removing
+  only its dedicated PostgreSQL and attachment state. For root Compose, inspect
+  the project-prefixed `postgres-data`, `seaweed-volume-data`, and
+  `seaweed-filer-data` volumes before destructive removal. Never blanket-delete
+  another project, shared database, bucket, or object store. See the root
+  [recovery procedure](../README.md#recover-from-an-unwanted-first-claim).
 - Hosted browser authorization uses a bounded PKCE code handoff with separate
   account and app-session audiences. Initialize enrollment identity with the
   canonical API origin, but fetch through the same-app-origin proxy; browser

@@ -24,6 +24,8 @@ enum class ImportResult {
     UPDATED,
     INVALID_CREDENTIAL,
     SERVER_REJECTED,
+    SETUP_TOKEN_REJECTED,
+    INSTANCE_ALREADY_CLAIMED,
     NOT_A_GATEWAY,
     NETWORK_ERROR,
     /** A different origin/vault/device is already bound to this install's database. */

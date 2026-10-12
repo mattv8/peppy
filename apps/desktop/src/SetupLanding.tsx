@@ -19,6 +19,22 @@ const methodHints: Record<Method, string> = {
   shared_secret: "After scanning, your phone asks for the vault shared secret. Enter it there, then compare the codes.",
 };
 
+const nativeSetupPromptHint = (mode: "open" | "protected") => {
+  const native = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (native) {
+    return copy(mode === "open" ? "setup_self_hosted_prompts_hint_open" : "setup_self_hosted_prompts_hint_protected");
+  }
+  return mode === "open"
+    ? "Your admin password and vault shared secret will be requested securely."
+    : "Your setup code, admin password, and vault shared secret will be requested securely.";
+};
+
+const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
+  if (errorCode === "invalid_setup_token") return copy("enrollment_error_invalid_setup_token");
+  if (errorCode === "instance_already_claimed") return copy("enrollment_error_already_claimed");
+  return "Peppy could not complete this step. Your server address was kept.";
+};
+
 type SelfHostedUrlError = "setup_self_hosted_url_invalid" | "setup_self_hosted_url_credentials" | "setup_self_hosted_url_path" | "setup_self_hosted_url_https_required";
 type SelfHostedUrlCheck = { origin: string | null; error: SelfHostedUrlError | null };
 
@@ -49,8 +65,8 @@ function Heading({ children }: { children: ReactNode }) {
   return <h2 tabIndex={-1}>{children}</h2>;
 }
 
-function Stage({ stage, children }: { stage: Stage; children: ReactNode }) {
-  return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage}>{children}</div>;
+function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open" | "protected"; children: ReactNode }) {
+  return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
 export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, onExit, onJoined, fixedOrigin, accountUrl }: {
@@ -406,10 +422,19 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             </div>
           </Stage>
         ) : (
-          <Stage stage="setup">
+          <Stage stage="setup" setupMode={view.setupCodeRequired === false ? "open" : "protected"}>
             <Heading>Set up your server</Heading>
-            <p>Peppy will ask for the setup code from your server operator, an admin password, and a generated shared secret. Each one is entered in a secure prompt.</p>
-            <p className="setup-hint">The admin password manages the server. It is not your vault secret.</p>
+            {view.setupCodeRequired === false ? (
+              <>
+                <p>{copy("enrollment_setup_open")}</p>
+                <p className="setup-hint">{nativeSetupPromptHint("open")}</p>
+              </>
+            ) : (
+              <>
+                <p>{copy("enrollment_setup_protected")}</p>
+                <p className="setup-hint">{nativeSetupPromptHint("protected")}</p>
+              </>
+            )}
             <div className="enrollment-actions">
               <button id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create server</button>
               <button id="enrollment-cancel-setup-button" className="secondary-button" disabled={busy} onClick={changeServer}>Cancel</button>
@@ -513,7 +538,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
         return (
           <Stage stage="error">
             <Heading>Something went wrong</Heading>
-            <p id="enrollment-error" role="alert">Peppy could not complete this step. Your server address was kept.</p>
+            <p id="enrollment-error" role="alert">{enrollmentErrorMessage(view.errorCode)}</p>
             <div className="enrollment-actions">
               <button id="enrollment-retry-button" className="primary-button" disabled={busy} onClick={() => retryRef.current()}>Retry</button>
             </div>

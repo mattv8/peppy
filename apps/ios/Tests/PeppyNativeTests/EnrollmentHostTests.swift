@@ -41,6 +41,82 @@ import Testing
         #expect(request.headers["Authorization"] == nil)
     }
 
+    @Test func discoveryUsesExplicitOpenPolicyOnly() async throws {
+        let transport = EnrollmentTransport(body: #"{"mode":"community","claimed":false,"setup_required":false}"#)
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(),
+            transport: transport,
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+
+        let discovery = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
+
+        #expect(discovery.origin == "https://enroll.example.test")
+        #expect(!discovery.setupCodeRequired)
+    }
+
+    @Test func discoveryWithoutPolicyRemainsProtected() async throws {
+        let transport = EnrollmentTransport(body: #"{"mode":"community","claimed":false}"#)
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(),
+            transport: transport,
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+
+        let discovery = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
+
+        #expect(discovery.setupCodeRequired)
+    }
+
+    @Test func malformedDiscoveryCannotAuthorizeOpenSetup() async throws {
+        let transport = EnrollmentTransport(body: "[]")
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(),
+            transport: transport,
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+
+        await #expect(throws: ClientError.invalidResponse("instance discovery")) {
+            _ = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
+        }
+    }
+
+    @Test(arguments: [
+        #"{"mode":"community","claimed":0,"setup_required":false}"#,
+        #"{"mode":"community","setup_required":false}"#,
+        #"{"mode":"hosted","claimed":false,"setup_required":false}"#,
+    ])
+    func discoveryRejectsMalformedCommunityPolicy(_ body: String) async throws {
+        let transport = EnrollmentTransport(body: body)
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(),
+            transport: transport,
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+
+        await #expect(throws: ClientError.invalidResponse("instance discovery")) {
+            _ = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
+        }
+    }
+
+    @Test func claimedDiscoveryDirectsTheUserToExistingAdmission() async throws {
+        let transport = EnrollmentTransport(body: #"{"mode":"community","claimed":true,"setup_required":false}"#)
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(),
+            transport: transport,
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+
+        await #expect(throws: ClientError.server(status: 409, code: "instance_already_claimed")) {
+            _ = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
+        }
+    }
+
     @Test func executesOnlyAValidClaimantStatusDescriptor() async throws {
         let transport = EnrollmentTransport()
         let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
@@ -60,12 +136,17 @@ import Testing
 private final class EnrollmentTransport: HTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var latest: HTTPRequest?
+    private let body: Data
+
+    init(body: String = "{}") {
+        self.body = Data(body.utf8)
+    }
 
     var request: HTTPRequest? { lock.withLock { latest } }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         lock.withLock { latest = request }
-        return HTTPResponse(status: 200, url: request.url, body: Data("{}".utf8))
+        return HTTPResponse(status: 200, url: request.url, body: body)
     }
 }
 

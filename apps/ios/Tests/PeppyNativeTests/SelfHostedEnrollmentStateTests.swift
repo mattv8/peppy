@@ -5,12 +5,55 @@ import Testing
     @Test func ownerCredentialsAdvanceWithoutRequiringVaultSecret() {
         var state = SelfHostedEnrollmentState()
         state.origin = "https://peppy.example"
+        let epoch = state.beginDiscovery()
+        state.applyDiscovery(canonicalOrigin: state.origin, setupCodeRequired: true, requestedOrigin: state.origin, epoch: epoch)
         state.setupToken = "operator-code"
         state.adminPassword = "long-admin-password"
         state.confirmation = state.adminPassword
 
         #expect(state.canContinueOwnerSetup)
         #expect(!state.canSubmitOwnerClaim)
+    }
+
+    @Test func openDiscoveryAllowsAnEmptySetupCode() {
+        var state = SelfHostedEnrollmentState()
+        state.origin = "https://peppy.example"
+        let epoch = state.beginDiscovery()
+        state.applyDiscovery(canonicalOrigin: "https://peppy.example", setupCodeRequired: false, requestedOrigin: state.origin, epoch: epoch)
+        state.adminPassword = "long-admin-password"
+        state.confirmation = state.adminPassword
+
+        #expect(state.canContinueOwnerSetup)
+    }
+
+    @Test func changingTheOriginInvalidatesOpenDiscovery() {
+        var state = SelfHostedEnrollmentState()
+        state.origin = "https://peppy.example"
+        let epoch = state.beginDiscovery()
+        state.applyDiscovery(canonicalOrigin: "https://peppy.example", setupCodeRequired: false, requestedOrigin: state.origin, epoch: epoch)
+        state.origin = "https://other.example"
+        state.adminPassword = "long-admin-password"
+        state.confirmation = state.adminPassword
+
+        #expect(!state.canContinueOwnerSetup)
+        #expect(state.setupCodeRequired)
+        #expect(state.setupToken.isEmpty)
+    }
+
+    @Test func modeSwitchRejectsAStaleDiscoveryForTheSameOrigin() {
+        var state = SelfHostedEnrollmentState()
+        state.origin = "https://peppy.example"
+        let epoch = state.beginDiscovery()
+        state.switchMode()
+        state.applyDiscovery(
+            canonicalOrigin: "https://peppy.example",
+            setupCodeRequired: false,
+            requestedOrigin: "https://peppy.example",
+            epoch: epoch
+        )
+
+        #expect(state.discoveredOrigin == nil)
+        #expect(state.setupCodeRequired)
     }
 
     @Test func ownerClaimRequiresSavedGeneratedSecret() {
@@ -55,6 +98,8 @@ import Testing
     private func validOwnerState() -> SelfHostedEnrollmentState {
         var state = SelfHostedEnrollmentState()
         state.origin = "https://peppy.example"
+        let epoch = state.beginDiscovery()
+        state.applyDiscovery(canonicalOrigin: state.origin, setupCodeRequired: true, requestedOrigin: state.origin, epoch: epoch)
         state.setupToken = "operator-code"
         state.adminPassword = "long-admin-password"
         state.confirmation = state.adminPassword
