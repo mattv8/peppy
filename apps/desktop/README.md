@@ -7,10 +7,22 @@ The desktop client uses Tauri with native Rust code and a web UI. It supports na
 ## Server setup and phone connections
 
 Enter your server address to discover its setup state. A fresh community instance
-can be claimed from this app using the operator setup code, a strong admin
-password, and a generated vault shared secret. Existing instances support admin
-sign-in and shared-secret enrollment. Passwords and shared secrets are handled by
-native dialogs rather than React fields or Tauri command arguments.
+shows whether first claim is open or token-protected. An open instance lets the
+first device that completes setup become owner; a token-protected instance also
+requires the operator setup code. The setup code authorizes initial claim only,
+the admin password authorizes server management, and the generated vault shared
+secret protects vault data. Existing instances support admin sign-in and
+shared-secret enrollment. Passwords and shared secrets are handled by native
+dialogs rather than React fields or Tauri command arguments.
+
+Operators configure token-protected first claim with a nonempty
+`PEPPY_SETUP_TOKEN` of at least 32 UTF-8 bytes, using the same token on every
+replica. An absent or empty value is open first claim; no token is generated or
+available in logs. Unclaimed deployments upgraded without the setting become
+open. If an unwanted stranger first claim occurs, follow the root
+[recovery procedure](../../README.md#recover-from-an-unwanted-first-claim): it
+destroys only the affected deployment's Peppy database and attachment state and
+is not password recovery.
 
 An enrolled owner uses **Add phone** from the main workbench. Scan the single
 **Connect your phone** QR, compare the verification codes, and approve the phone.

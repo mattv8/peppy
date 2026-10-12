@@ -41,8 +41,8 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// Explicit server assembly. Unlike the legacy API router helpers, this never
-/// reads process environment or starts background work while building routes.
+/// Explicit server assembly. Unlike the legacy API router helpers, this does
+/// not start background work while building routes.
 pub struct ServerBuilder {
     config: Config,
     runtime_db: PgPool,
@@ -76,8 +76,8 @@ impl ServerBuilder {
         }
     }
 
-    /// Supplies the operator setup token directly for embedders that already own
-    /// configuration, avoiding process-global environment mutation.
+    /// Supplies the operator setup token directly, overriding `PEPPY_SETUP_TOKEN`.
+    /// An empty token explicitly selects open first-claim setup.
     pub fn setup_token(mut self, token: impl Into<String>) -> Self {
         self.setup_token = Some(token.into());
         self
@@ -121,36 +121,15 @@ impl ServerBuilder {
             )
             .into());
         }
-        let explicit_setup_token_digest = self
-            .setup_token
-            .as_deref()
-            .map(instance::operator_setup_token_digest)
-            .transpose()
-            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        let claim_policy = match self.setup_token.as_deref() {
+            Some(token) => instance::claim_policy(self.row_security, Some(token)),
+            None => instance::configured_claim_policy(self.row_security),
+        }
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         let health = HealthState::from_database(&self.config, self.runtime_db.clone()).await?;
         let maintenance_db = self
             .maintenance_db
             .unwrap_or_else(|| self.runtime_db.clone());
-        let setup_token_digest = match explicit_setup_token_digest {
-            Some(digest) => digest,
-            None if self.row_security => instance::disabled_setup_token_digest(),
-            None => {
-                match instance::configured_setup_token_digest().map_err(std::io::Error::other)? {
-                    Some(configured) => configured,
-                    None => {
-                        let claimed: bool =
-                            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instance_admin)")
-                                .fetch_one(&self.runtime_db)
-                                .await?;
-                        if claimed {
-                            instance::disabled_setup_token_digest()
-                        } else {
-                            instance::setup_token_digest().map_err(std::io::Error::other)?
-                        }
-                    }
-                }
-            }
-        };
         let options = TransportOptions {
             replay_retention: self.config.replay_retention,
             ..TransportOptions::default()
@@ -164,7 +143,7 @@ impl ServerBuilder {
             api::RouterAuthorization {
                 policy: self.access_policy,
                 enrollment: self.enrollment_authorization,
-                setup_token_digest,
+                claim_policy,
                 row_security: self.row_security,
             },
         );

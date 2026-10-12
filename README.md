@@ -120,15 +120,82 @@ SMS and MMS move in plaintext outside Peppy's encryption boundary. A gateway rec
 ### First-run setup and device connections
 
 Open the server's HTTPS address in the web app, or connect a desktop or phone to
-that address. An unclaimed community server asks for its operator setup code,
-a new administrator password, and confirmation that you saved the generated
-vault shared secret. The initiating device becomes the first owner. The admin
-password controls server management; the shared secret protects vault data.
+that address. The setup screen identifies whether the unclaimed community server
+is **open** or **token-protected**. On an open server, the first device that
+completes setup becomes the owner. On a token-protected server, that device must
+also enter the operator setup code. Opening a page or fetching discovery data
+does not claim the server.
 
-Set `PEPPY_SETUP_TOKEN` to an operator code of at least 32 UTF-8 bytes, or read
-the generated code from the server's first-start logs. An absent or empty setting
-generates a code; it does not disable the setup check. Configure the same token
-on replicas.
+Set `PEPPY_SETUP_TOKEN` to a nonempty operator code of at least 32 UTF-8 bytes
+to require that code for the first claim. Configure the same token on every
+replica. Leave it absent or empty for open first claim; the server does not
+generate, log, or provide a fallback token. An existing unclaimed deployment
+upgraded without `PEPPY_SETUP_TOKEN` becomes open. Set the token before upgrading
+when token-protected first claim is required.
+
+Use a current client for open first claim. A current client treats an older
+generated-code server that does not advertise this policy conservatively and
+requests a setup code. A legacy client may unnecessarily show or require a
+setup-code field for an open server; that prompt does not mean the server is
+token-protected.
+
+The setup code authorizes only the initial claim. The new administrator password
+authorizes server management. The generated vault shared secret protects vault
+data and admission to that vault. Save the generated vault secret when prompted;
+none of these values can be recovered by looking in server logs.
+
+### Recover from an unwanted first claim
+
+If a stranger completes the first claim, there is no password-reset or automatic
+reclaim path. For an affected self-hosted deployment, stop it and remove only its
+Peppy database and attachment state, then start it again and complete setup
+privately. This permanently destroys the server's vault data and attachment
+ciphertext, along with all other state in those volumes; it is not general
+password recovery.
+
+The root Compose file defines the three state volumes as `postgres-data`,
+`seaweed-volume-data`, and `seaweed-filer-data`. Docker prefixes those names with
+the Compose project name. Before removal, inspect the exact project-prefixed
+names and Compose labels. Set the project name and every `--env-file` and `-f`
+option to the actual affected installation, including its community-image and TLS
+overlays where used. Do not use `docker compose down -v`, and never delete volumes
+from another project or shared storage.
+
+```sh
+# Set these to the affected deployment only. Do not use the persistent dev stack.
+: "${PROJECT:?Set PROJECT to the affected Compose project after inspection}"
+COMPOSE_ARGS=(
+  --project-name "$PROJECT"
+  --env-file /absolute/path/to/the/affected/.env
+  -f /absolute/path/to/docker-compose.yml
+  # Add every overlay used by this deployment, for example compose.community.yml
+  # and compose.caddy.yml. Do not omit its image or TLS overlay.
+)
+compose() { docker compose "${COMPOSE_ARGS[@]}" "$@"; }
+
+# Inspect the affected project's labeled volumes, then verify these three names.
+docker volume ls --filter "label=com.docker.compose.project=$PROJECT"
+VOLUMES=(
+  "${PROJECT}_postgres-data"
+  "${PROJECT}_seaweed-volume-data"
+  "${PROJECT}_seaweed-filer-data"
+)
+docker volume inspect "${VOLUMES[@]}"
+
+# Stop and remove only this deployment's service containers; this does not remove volumes.
+compose stop api migrate postgres seaweedfs
+compose rm -sf api migrate postgres seaweedfs
+
+# Destructive: removes only the inspected vault-data and attachment-ciphertext volumes.
+docker volume rm "${VOLUMES[@]}"
+
+# Restart with the same Compose files and environment.
+compose up -d
+```
+
+For an external PostgreSQL database or object store, clear only the dedicated
+Peppy database and dedicated Peppy attachment state for the affected deployment.
+Do not delete a shared database service, bucket, or object store wholesale.
 
 The web app's **Manage server** page lists devices, gateway status and storage
 usage, and supports device revocation. Quota and retention values are read-only.

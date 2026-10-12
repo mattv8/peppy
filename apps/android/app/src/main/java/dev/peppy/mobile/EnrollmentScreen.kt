@@ -68,14 +68,15 @@ internal class EnrollmentScanGate {
 internal fun canClaimOwner(
     ownerResume: Boolean,
     setupToken: String,
+    setupCodeRequired: Boolean,
     adminPassword: String,
     secret: String,
     saved: Boolean,
     busy: Boolean,
 ): Boolean =
-    secret.isNotBlank() &&
+        secret.isNotBlank() &&
         (ownerResume || saved) &&
-        (ownerResume || setupToken.isNotBlank()) &&
+        (!setupCodeRequired || setupToken.isNotBlank()) &&
         adminPassword.length >= 12 &&
         !busy
 
@@ -127,6 +128,8 @@ internal fun EnrollmentScreen(
     var phoneSecret by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf(false) }
     var ownerResume by remember { mutableStateOf(false) }
+    var setupCodeRequired by remember { mutableStateOf(true) }
+    var discoveryGeneration by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var phone by remember { mutableStateOf<EnrollmentHost.PhoneEnrollment?>(null) }
@@ -145,6 +148,8 @@ internal fun EnrollmentScreen(
     val invalidQr = stringResource(R.string.peppy_production_pairing_invalid_qr)
     val denied = stringResource(R.string.peppy_hosted_join_denied)
     val sasLabel = stringResource(R.string.peppy_production_pairing_sas_label)
+    val invalidSetupToken = stringResource(R.string.peppy_enrollment_error_invalid_setup_token)
+    val instanceAlreadyClaimed = stringResource(R.string.peppy_enrollment_error_already_claimed)
 
     fun run(block: () -> ImportResult) {
         if (busy) return
@@ -154,7 +159,12 @@ internal fun EnrollmentScreen(
             withContext(Dispatchers.Main) {
                 busy = false
                 if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) onEnrolled()
-                else error = importMessage(result)
+                else error = when (result) {
+                    ImportResult.SETUP_TOKEN_REJECTED -> invalidSetupToken
+                    ImportResult.INSTANCE_ALREADY_CLAIMED -> instanceAlreadyClaimed
+                    ImportResult.SERVER_REJECTED, ImportResult.NETWORK_ERROR -> networkFailed
+                    else -> importMessage(result)
+                }
             }
         }
     }
@@ -193,25 +203,29 @@ internal fun EnrollmentScreen(
                 Text(stringResource(R.string.peppy_self_hosted_headline))
                 OutlinedTextField(
                     origin,
-                    { origin = it; error = null },
+                    { origin = it; discoveryGeneration += 1; error = null },
                     label = { Text(stringResource(R.string.peppy_settings_server_origin)) },
                     modifier = Modifier.fillMaxWidth().testTag("enrollment-origin"),
                 )
                 Button(onClick = {
+                    val generation = discoveryGeneration
                     val canonical = CredentialParser.canonicalOrigin(origin)
                     if (canonical == null) {
                         error = networkFailed
                     } else {
                         busy = true
                         scope.launch(Dispatchers.IO) {
-                            val claimed = try { host.discover(canonical)?.let(host::claimedState) } catch (_: Exception) { null }
+                            val discovery = try { host.discover(canonical)?.let(::parseInstanceDiscovery) } catch (_: Exception) { null }
                             withContext(Dispatchers.Main) {
                                 busy = false
-                                if (claimed == null) error = networkFailed
+                                if (generation != discoveryGeneration) Unit
+                                else if (discovery == null) error = networkFailed
                                 else {
                                     origin = canonical
-                                    ownerResume = !claimed && host.hasPendingOwner(canonical)
-                                    stage = if (claimed) EnrollmentStage.MANUAL else EnrollmentStage.OWNER
+                                    setupToken = ""
+                                    setupCodeRequired = discovery.setupCodeRequired
+                                    ownerResume = !discovery.claimed && host.hasPendingOwner(canonical)
+                                    stage = if (discovery.claimed) EnrollmentStage.MANUAL else EnrollmentStage.OWNER
                                 }
                             }
                         }
@@ -225,7 +239,9 @@ internal fun EnrollmentScreen(
             }
             EnrollmentStage.OWNER -> {
                 Text(stringResource(R.string.peppy_provisioning_headline))
-                OutlinedTextField(setupToken, { setupToken = it }, label = { Text(stringResource(R.string.peppy_enrollment_setup_code)) }, modifier = Modifier.fillMaxWidth().testTag("setup-token"))
+                if (setupCodeRequired) {
+                    OutlinedTextField(setupToken, { setupToken = it }, label = { Text(stringResource(R.string.peppy_enrollment_setup_code)) }, modifier = Modifier.fillMaxWidth().testTag("setup-token"))
+                }
                 OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("admin-password"))
                 if (ownerResume) {
                     OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("owner-resume-secret"))
@@ -241,9 +257,14 @@ internal fun EnrollmentScreen(
                         )
                     }
                 }
+                Text(
+                    stringResource(if (setupCodeRequired) R.string.peppy_enrollment_setup_protected else R.string.peppy_enrollment_setup_open),
+                    Modifier.testTag("enrollment-setup-mode").semantics { liveRegion = LiveRegionMode.Polite },
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Button(
-                    onClick = { run { host.claimOwner(origin, setupToken, adminPassword, secret) } },
-                    enabled = canClaimOwner(ownerResume, setupToken, adminPassword, secret, saved, busy),
+                    onClick = { run { host.claimOwner(origin, if (setupCodeRequired) setupToken else "", adminPassword, secret) } },
+                    enabled = canClaimOwner(ownerResume, setupToken, setupCodeRequired, adminPassword, secret, saved, busy),
                     modifier = Modifier.testTag("claim-owner"),
                 ) { Text(stringResource(R.string.peppy_continue)) }
             }

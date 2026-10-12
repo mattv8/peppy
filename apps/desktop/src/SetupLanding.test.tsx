@@ -433,6 +433,46 @@ describe("SetupLanding", () => {
       expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
     });
 
+    it("explains open setup without claiming that a setup-code prompt will appear", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", setupCodeRequired: false }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+      await screen.findByRole("heading", { name: "Set up your server" });
+      const setup = document.getElementById("enrollment-setup")!;
+      expect(setup).toHaveAttribute("data-setup-mode", "open");
+      expect(setup).toHaveTextContent(peppyCopy.enrollment_setup_open);
+      expect(setup).not.toHaveTextContent("setup code");
+    });
+
+    it("uses protected setup copy when discovery omits the policy", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+      await screen.findByRole("heading", { name: "Set up your server" });
+      const setup = document.getElementById("enrollment-setup")!;
+      expect(setup).toHaveAttribute("data-setup-mode", "protected");
+      expect(setup).toHaveTextContent(peppyCopy.enrollment_setup_protected);
+    });
+
+    it("shows sanitized claim feedback for known native error codes", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", setupCodeRequired: true }));
+      vi.spyOn(bridge, "enrollment_create_owner")
+        .mockResolvedValueOnce(view({ stage: "error", errorCode: "invalid_setup_token" }))
+        .mockResolvedValueOnce(view({ stage: "ready", owner: true }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(peppyCopy.enrollment_error_invalid_setup_token);
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledTimes(2));
+    });
+
     it("cancels the setup stage back to the server address without a bridge call", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
       renderLanding({ mode: "self-hosted" });

@@ -257,7 +257,6 @@ impl EnrollmentClient {
         passphrase: String,
     ) -> Result<String, HostedClientError> {
         if self.mode != EnrollmentMode::Fresh
-            || setup_token.is_empty()
             || admin_password.len() < 12
             || admin_password.len() > 1024
         {
@@ -1699,6 +1698,21 @@ mod tests {
                 .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn first_owner_can_build_an_open_claim_without_a_setup_token() {
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
+        let request: ClaimInstanceRequest = parse(
+            &client
+                .create_owner_request(String::new(), "password long enough".into(), SECRET.into())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(request.setup_token.is_empty());
+        assert!(!client.checkpoint().unwrap().is_empty());
     }
 
     #[test]

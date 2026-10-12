@@ -38,6 +38,13 @@ reviews use `pnpm --dir packages/mobile-design check` for drift.
   automatic OS-permission requests, default-SMS role requests, or RCS claims.
   See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentScreen.kt)
   and [iOS enrollment UI](../apps/ios/PeppyMobile/PhoneEnrollmentView.swift).
+- First setup visibly identifies the server-advertised mode. Open first claim
+  says that the first device to complete setup becomes owner and omits setup-code
+  entry. Token-protected first claim states that the operator requires a code
+  configured with `PEPPY_SETUP_TOKEN` and shows it. Preserve separate setup-code,
+  administrator-password, and vault-shared-secret authorities. Treat missing
+  policy conservatively for older servers, and do not offer destructive recovery
+  or reset controls in the app.
 
 Use native typography and touch targets with a 4px spacing rhythm; do not copy
 desktop control dimensions. Use the coral graphic brand and semantic coral accents; coral is not normal-size text, follow the

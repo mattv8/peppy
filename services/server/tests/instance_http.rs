@@ -1,9 +1,4 @@
-use std::{
-    io::{self, Write},
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use axum::{
     Router,
@@ -93,6 +88,15 @@ impl Fixture {
 
     async fn restarted_community_app(&self) -> Router {
         ServerBuilder::community(config(self.pool.clone()), self.pool.clone())
+            .build()
+            .await
+            .unwrap()
+            .router()
+    }
+
+    async fn open_community_app(&self) -> Router {
+        ServerBuilder::community(config(self.pool.clone()), self.pool.clone())
+            .setup_token("")
             .build()
             .await
             .unwrap()
@@ -377,6 +381,17 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
 
     let mut wrong_token = claim_request(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "desktop");
     wrong_token["setup_token"] = json!("not-the-operator-token");
+    let mut absent_token = wrong_token.clone();
+    absent_token.as_object_mut().unwrap().remove("setup_token");
+    let absent_rejected = send(
+        app.clone(),
+        Method::POST,
+        "/v1/instance/claim",
+        Some(&absent_token),
+        &[],
+    )
+    .await;
+    assert_eq!(absent_rejected.status(), StatusCode::UNAUTHORIZED);
     let rejected = send_from(
         app.clone(),
         Method::POST,
@@ -387,27 +402,6 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
     )
     .await;
     assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
-    for attempt in 0..10 {
-        let spoofed = format!("203.0.113.{attempt}");
-        let limited = send(
-            app.clone(),
-            Method::POST,
-            "/v1/instance/claim",
-            Some(&wrong_token),
-            &[("x-forwarded-for", &spoofed)],
-        )
-        .await;
-        assert_eq!(limited.status(), StatusCode::UNAUTHORIZED);
-    }
-    let limited = send(
-        app.clone(),
-        Method::POST,
-        "/v1/instance/claim",
-        Some(&wrong_token),
-        &[("x-forwarded-for", "192.0.2.200")],
-    )
-    .await;
-    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
 
     let requests = [
         claim_request(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "desktop"),
@@ -466,6 +460,15 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
         .await
         .unwrap();
     assert_eq!((owner_count, vault_count), (1, 1));
+    let device_count: i64 = sqlx::query_scalar("SELECT count(*) FROM devices")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    let credential_count: i64 = sqlx::query_scalar("SELECT count(*) FROM device_credentials")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!((device_count, credential_count), (1, 1));
     let stored_request_digest: Vec<u8> =
         sqlx::query_scalar("SELECT request_digest FROM instance_admin")
             .fetch_one(&fixture.pool)
@@ -495,6 +498,33 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
     .await;
     assert_eq!(replay.status(), StatusCode::OK);
     assert_eq!(json_body(replay).await["replayed"], true);
+    let mut omitted_token_replay = winner_request.clone();
+    omitted_token_replay
+        .as_object_mut()
+        .unwrap()
+        .remove("setup_token");
+    let omitted_token_replay = send(
+        app.clone(),
+        Method::POST,
+        "/v1/instance/claim",
+        Some(&omitted_token_replay),
+        &[],
+    )
+    .await;
+    assert_eq!(omitted_token_replay.status(), StatusCode::OK);
+    assert_eq!(json_body(omitted_token_replay).await["replayed"], true);
+    let mut empty_token_replay = winner_request.clone();
+    empty_token_replay["setup_token"] = json!("");
+    let empty_token_replay = send(
+        app.clone(),
+        Method::POST,
+        "/v1/instance/claim",
+        Some(&empty_token_replay),
+        &[],
+    )
+    .await;
+    assert_eq!(empty_token_replay.status(), StatusCode::OK);
+    assert_eq!(json_body(empty_token_replay).await["replayed"], true);
 
     let mut wrong_password_retry = winner_request.clone();
     wrong_password_retry["admin_password"] = json!("different administrator password");
@@ -596,6 +626,78 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
     )
     .await;
     assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn exhausted_fresh_claim_admission_rejects_a_correct_setup_token() {
+    let fixture = Fixture::new().await;
+    let app = fixture.community_app().await;
+    let mut wrong_token = claim_request(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "desktop");
+    wrong_token["setup_token"] = json!("not-the-operator-token");
+
+    for _ in 0..10 {
+        let rejected = send(
+            app.clone(),
+            Method::POST,
+            "/v1/instance/claim",
+            Some(&wrong_token),
+            &[("x-forwarded-for", "198.51.100.42")],
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    }
+    let correct = send(
+        app,
+        Method::POST,
+        "/v1/instance/claim",
+        Some(&claim_request(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "desktop",
+        )),
+        &[],
+    )
+    .await;
+    assert_eq!(correct.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn open_community_claim_accepts_an_omitted_setup_token() {
+    let fixture = Fixture::new().await;
+    let app = fixture.open_community_app().await;
+
+    let discovery = send(app.clone(), Method::GET, "/v1/instance", None, &[]).await;
+    assert_eq!(json_body(discovery).await["setup_required"], false);
+
+    let mut claim = claim_request(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "desktop");
+    claim.as_object_mut().unwrap().remove("setup_token");
+    let claimed = send(app, Method::POST, "/v1/instance/claim", Some(&claim), &[]).await;
+    assert_eq!(claimed.status(), StatusCode::OK);
+
+    let discovery = send(
+        fixture.open_community_app().await,
+        Method::GET,
+        "/v1/instance",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        json_body(discovery).await,
+        json!({
+            "mode": "community",
+            "claimed": true,
+            "setup_required": false,
+            "password_auth": true,
+            "qr_pairing": true,
+            "shared_secret_pairing": true,
+        })
+    );
 
     fixture.cleanup().await;
 }
@@ -932,49 +1034,4 @@ async fn hosted_router_does_not_mount_community_instance_routes() {
     let response = send(app, Method::GET, "/v1/instance", None, &[]).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     fixture.cleanup().await;
-}
-
-#[derive(Clone, Default)]
-struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-struct CapturedWriter(CapturedLogs);
-
-impl Write for CapturedWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
-    type Writer = CapturedWriter;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        CapturedWriter(self.clone())
-    }
-}
-
-#[test]
-fn generated_startup_setup_token_is_emitted_and_matches_the_active_digest() {
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_writer(logs.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let active_digest = peppy_server::instance::setup_token_digest().unwrap();
-    let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
-    let token = output
-        .split("setup_token=")
-        .nth(1)
-        .and_then(|suffix| suffix.split_whitespace().next())
-        .expect("generated setup token must be available in the startup warning");
-    assert_eq!(URL_SAFE_NO_PAD.decode(token).unwrap().len(), 32);
-    assert_eq!(Sha256::digest(token.as_bytes()).as_slice(), active_digest);
 }

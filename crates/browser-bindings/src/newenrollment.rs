@@ -18,9 +18,14 @@ struct ExistingOwnerClient {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OwnerRequest {
+    #[serde(default = "empty_secret")]
     setup_token: SecretString,
     admin_password: SecretString,
     passphrase: SecretString,
+}
+
+fn empty_secret() -> SecretString {
+    SecretString(Zeroizing::new(String::new()))
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
