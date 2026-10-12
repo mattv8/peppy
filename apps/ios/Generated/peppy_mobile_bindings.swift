@@ -2002,7 +2002,11 @@ public func FfiConverterTypeNativeClient_lower(_ value: NativeClient) -> UInt64 
 
 public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
+    func acceptVaultRequestCreated(json: String) throws
+
     func approvePhoneInvitationRequest(statusJson: String, passphrase: String) throws  -> String
+
+    func beginVaultRequest(origin: String, inviteToken: String, displayName: String) throws  -> String
     
     /**
      * Abandons a local claimant flow; it does not perform a server-side cancellation.
@@ -2013,6 +2017,8 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
     func claimPhoneInvitationRequest(qrJson: String) throws  -> String
     
+    func clearVaultRequest() throws
+
     func completeManualChallengeRequest(challengeJson: String, passphrase: String) throws  -> String
     
     func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String?) throws  -> String
@@ -2021,9 +2027,11 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
     func consumePhoneClaim(claimJson: String) throws 
     
-    func createOwnerRequest(setupToken: String, adminPassword: String, passphrase: String) throws  -> String
+    func createOwnerRequest(setupToken: String, username: String, adminPassword: String, passphrase: String) throws  -> String
     
     func createPhoneInvitationRequest(method: NativeEnrollmentMethod) throws  -> String
+
+    func createVaultRequest(username: String, adminPassword: String, passphrase: String) throws  -> String
     
     func finishManualAdmission(responseJson: String, passphrase: String) throws  -> NativeEnrollmentIdentity
     
@@ -2031,7 +2039,13 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
     func finishPhoneAdmission(completeJson: String) throws  -> NativeEnrollmentIdentity
     
-    func manualChallengeRequest(vaultId: String?) throws  -> String
+    func hasPreparedOwnerMaterial() throws  -> Bool
+
+    func manualChallengeRequest(vaultId: String?, vaultOwner: String?) throws  -> String
+
+    func parseVaultRequestStatus(json: String) throws  -> String
+
+    func pendingVaultRequest() throws  -> NativePendingVaultRequest?
     
     func phoneSas(statusJson: String) throws  -> String
     
@@ -2039,6 +2053,10 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
      * Opaque claimant-authenticated polling descriptor for native transport only.
      */
     func phoneStatusRequest() throws  -> String
+
+    func vaultRequestAccepted() throws  -> Bool
+
+    func vaultRequestHeader() throws  -> String
     
 }
 open class NativeEnrollmentClient: NativeEnrollmentClientProtocol, @unchecked Sendable {
@@ -2094,6 +2112,15 @@ open class NativeEnrollmentClient: NativeEnrollmentClientProtocol, @unchecked Se
     
 
     
+open func acceptVaultRequestCreated(json: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_accept_vault_request_created(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+}
+}
+
 open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2101,6 +2128,18 @@ open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)t
             self.uniffiCloneHandle(),
         FfiConverterString.lower(statusJson),
         FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+
+open func beginVaultRequest(origin: String, inviteToken: String, displayName: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_begin_vault_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(origin),
+        FfiConverterString.lower(inviteToken),
+        FfiConverterString.lower(displayName),uniffiCallStatus
     )
 })
 }
@@ -2133,6 +2172,14 @@ open func claimPhoneInvitationRequest(qrJson: String)throws  -> String  {
         FfiConverterString.lower(qrJson),uniffiCallStatus
     )
 })
+}
+
+open func clearVaultRequest()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_clear_vault_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 open func completeManualChallengeRequest(challengeJson: String, passphrase: String)throws  -> String  {
@@ -2175,12 +2222,13 @@ open func consumePhoneClaim(claimJson: String)throws   {try rustCallWithError(Ff
 }
 }
     
-open func createOwnerRequest(setupToken: String, adminPassword: String, passphrase: String)throws  -> String  {
+open func createOwnerRequest(setupToken: String, username: String, adminPassword: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_owner_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(setupToken),
+        FfiConverterString.lower(username),
         FfiConverterString.lower(adminPassword),
         FfiConverterString.lower(passphrase),uniffiCallStatus
     )
@@ -2193,6 +2241,18 @@ open func createPhoneInvitationRequest(method: NativeEnrollmentMethod)throws  ->
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_phone_invitation_request(
             self.uniffiCloneHandle(),
         FfiConverterTypeNativeEnrollmentMethod_lower(method),uniffiCallStatus
+    )
+})
+}
+
+open func createVaultRequest(username: String, adminPassword: String, passphrase: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_vault_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(username),
+        FfiConverterString.lower(adminPassword),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
     )
 })
 }
@@ -2229,12 +2289,41 @@ open func finishPhoneAdmission(completeJson: String)throws  -> NativeEnrollmentI
 })
 }
     
-open func manualChallengeRequest(vaultId: String?)throws  -> String  {
+open func hasPreparedOwnerMaterial()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_has_prepared_owner_material(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func manualChallengeRequest(vaultId: String?, vaultOwner: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_manual_challenge_request(
             self.uniffiCloneHandle(),
-        FfiConverterOptionString.lower(vaultId),uniffiCallStatus
+        FfiConverterOptionString.lower(vaultId),
+        FfiConverterOptionString.lower(vaultOwner),uniffiCallStatus
+    )
+})
+}
+
+open func parseVaultRequestStatus(json: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_parse_vault_request_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+
+open func pendingVaultRequest()throws  -> NativePendingVaultRequest?  {
+    return try  FfiConverterOptionTypeNativePendingVaultRequest.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_pending_vault_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -2256,6 +2345,24 @@ open func phoneStatusRequest()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_phone_status_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func vaultRequestAccepted()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_accepted(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func vaultRequestHeader()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -5188,6 +5295,64 @@ public func FfiConverterTypeNativeOpenConfig_lower(_ value: NativeOpenConfig) ->
 }
 
 
+public struct NativePendingVaultRequest: Equatable, Hashable {
+    public var origin: String
+    public var requestId: String
+    public var displayName: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(origin: String, requestId: String, displayName: String) {
+        self.origin = origin
+        self.requestId = requestId
+        self.displayName = displayName
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativePendingVaultRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePendingVaultRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePendingVaultRequest {
+        return
+            try NativePendingVaultRequest(
+                origin: FfiConverterString.read(from: &buf),
+                requestId: FfiConverterString.read(from: &buf),
+                displayName: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePendingVaultRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterString.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.displayName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePendingVaultRequest_lift(_ buf: RustBuffer) throws -> NativePendingVaultRequest {
+    return try FfiConverterTypeNativePendingVaultRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePendingVaultRequest_lower(_ value: NativePendingVaultRequest) -> RustBuffer {
+    return FfiConverterTypeNativePendingVaultRequest.lower(value)
+}
+
+
 public struct NativePermit: Equatable, Hashable {
     public var state: NativePermitState
     /**
@@ -5559,6 +5724,60 @@ public func FfiConverterTypeNativeSnapshotReport_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeNativeSnapshotReport_lower(_ value: NativeSnapshotReport) -> RustBuffer {
     return FfiConverterTypeNativeSnapshotReport.lower(value)
+}
+
+
+public struct NativeVaultInvite: Equatable, Hashable {
+    public var origin: String
+    public var inviteToken: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(origin: String, inviteToken: String) {
+        self.origin = origin
+        self.inviteToken = inviteToken
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeVaultInvite: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeVaultInvite: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeVaultInvite {
+        return
+            try NativeVaultInvite(
+                origin: FfiConverterString.read(from: &buf),
+                inviteToken: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeVaultInvite, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterString.write(value.inviteToken, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeVaultInvite_lift(_ buf: RustBuffer) throws -> NativeVaultInvite {
+    return try FfiConverterTypeNativeVaultInvite.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeVaultInvite_lower(_ value: NativeVaultInvite) -> RustBuffer {
+    return FfiConverterTypeNativeVaultInvite.lower(value)
 }
 
 
@@ -7007,6 +7226,30 @@ fileprivate struct FfiConverterOptionTypeNativeCarrierCommand: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativePendingVaultRequest: FfiConverterRustBuffer {
+    typealias SwiftType = NativePendingVaultRequest?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativePendingVaultRequest.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativePendingVaultRequest.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeNativeSnapshotProgress: FfiConverterRustBuffer {
     typealias SwiftType = NativeSnapshotProgress?
 
@@ -7531,6 +7774,14 @@ public func newNativeExistingOwnerEnrollmentClient(origin: String, kind: NativeE
     )
 })
 }
+public func parseVaultInviteLink(link: String)throws  -> NativeVaultInvite  {
+    return try  FfiConverterTypeNativeVaultInvite_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_vault_invite_link(
+        FfiConverterString.lower(link),uniffiCallStatus
+    )
+})
+}
 public func restoreNativeEnrollmentClient(checkpoint: Data)throws  -> NativeEnrollmentClient  {
     return try  FfiConverterTypeNativeEnrollmentClient_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -7595,6 +7846,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_new_native_existing_owner_enrollment_client() != 16192) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_vault_invite_link() != 54424) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_restore_native_enrollment_client() != 36620) {
@@ -7930,7 +8184,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds() != 15882) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_accept_vault_request_created() != 58540) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_phone_invitation_request() != 23020) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_begin_vault_request() != 19106) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_phone_flow() != 56287) {
@@ -7940,6 +8200,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_claim_phone_invitation_request() != 8280) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_clear_vault_request() != 52725) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_complete_manual_challenge_request() != 29980) {
@@ -7954,10 +8217,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_phone_claim() != 14687) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_owner_request() != 33051) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_owner_request() != 55557) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_phone_invitation_request() != 43184) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_vault_request() != 54590) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_manual_admission() != 62181) {
@@ -7969,13 +8235,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_phone_admission() != 48135) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_manual_challenge_request() != 2106) {
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_has_prepared_owner_material() != 14666) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_manual_challenge_request() != 63272) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_parse_vault_request_status() != 11728) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_pending_vault_request() != 63047) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_sas() != 11797) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_status_request() != 62139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_accepted() != 4707) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header() != 50961) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_activate_into() != 62525) {

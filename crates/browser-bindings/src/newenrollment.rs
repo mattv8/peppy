@@ -20,6 +20,7 @@ struct ExistingOwnerClient {
 struct OwnerRequest {
     #[serde(default = "empty_secret")]
     setup_token: SecretString,
+    username: String,
     admin_password: SecretString,
     passphrase: SecretString,
 }
@@ -31,6 +32,36 @@ fn empty_secret() -> SecretString {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManualChallenge {
     vault_id: Option<String>,
+    vault_owner: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VaultInviteLink {
+    link: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BeginVaultRequest {
+    origin: String,
+    invite_token: String,
+    display_name: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VaultRequestCreatedInput {
+    json: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VaultRequestStatusInput {
+    json: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateVaultRequestInput {
+    username: String,
+    admin_password: SecretString,
+    passphrase: SecretString,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -253,6 +284,7 @@ impl BrowserCore {
                     .ok_or_else(unavailable)?
                     .create_owner_request(
                         std::mem::take(&mut *input.setup_token.0),
+                        input.username,
                         std::mem::take(&mut *input.admin_password.0),
                         std::mem::take(&mut *input.passphrase.0),
                     )
@@ -263,7 +295,94 @@ impl BrowserCore {
                 let input: ManualChallenge =
                     serde_json::from_str(raw.get()).map_err(|_| invalid())?;
                 Ok(
-                    json!({"request": self.enrollment.as_ref().ok_or_else(unavailable)?.manual_challenge_request(input.vault_id).map_err(|_| invalid())?}),
+                    json!({"request": self.enrollment.as_ref().ok_or_else(unavailable)?.manual_challenge_request(input.vault_id, input.vault_owner).map_err(|_| invalid())?}),
+                )
+            }
+            "_worker_enrollment_parse_vault_invite_link" => {
+                let input: VaultInviteLink =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let invite =
+                    peppy_hosted_client::newenrollment::EnrollmentClient::parse_vault_invite_link(
+                        &input.link,
+                    )
+                    .map_err(|_| invalid())?;
+                Ok(json!({"origin": invite.origin, "inviteToken": invite.invite_token}))
+            }
+            "_worker_enrollment_begin_vault_request" => {
+                let input: BeginVaultRequest =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let request = self
+                    .enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .begin_vault_request(input.origin, input.invite_token, input.display_name)
+                    .map_err(|_| invalid())?;
+                Ok(json!({"request": request}))
+            }
+            "_worker_enrollment_accept_vault_request_created" => {
+                let input: VaultRequestCreatedInput =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                self.enrollment
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .accept_vault_request_created(input.json)
+                    .map_err(|_| invalid())?;
+                Ok(json!({}))
+            }
+            "_worker_enrollment_vault_request_header" => {
+                empty_new_enrollment(raw)?;
+                Ok(
+                    json!({"header": self.enrollment.as_ref().ok_or_else(unavailable)?.vault_request_header().map_err(|_| invalid())?}),
+                )
+            }
+            "_worker_enrollment_parse_vault_request_status" => {
+                let input: VaultRequestStatusInput =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let state = self
+                    .enrollment
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .parse_vault_request_status(input.json)
+                    .map_err(|_| invalid())?;
+                Ok(json!({"state": state}))
+            }
+            "_worker_enrollment_create_vault" => {
+                let mut input: CreateVaultRequestInput =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let request = self
+                    .enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .create_vault_request(
+                        input.username,
+                        std::mem::take(&mut *input.admin_password.0),
+                        std::mem::take(&mut *input.passphrase.0),
+                    )
+                    .map_err(|_| invalid())?;
+                Ok(json!({"request": request}))
+            }
+            "_worker_enrollment_clear_vault_request" => {
+                empty_new_enrollment(raw)?;
+                self.enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .clear_vault_request();
+                Ok(json!({}))
+            }
+            "_worker_enrollment_pending_vault_request" => {
+                empty_new_enrollment(raw)?;
+                Ok(
+                    match self
+                        .enrollment
+                        .as_ref()
+                        .ok_or_else(unavailable)?
+                        .pending_vault_request()
+                    {
+                        Some((origin, request_id, display_name)) => {
+                            json!({"origin": origin, "requestId": request_id, "displayName": display_name})
+                        }
+                        None => Value::Null,
+                    },
                 )
             }
             "_worker_enrollment_complete_manual_challenge" => {
@@ -491,6 +610,24 @@ mod tests {
             serde_json::from_str(&core.dispatch(r#"{"command":"get_phone_qr","args":{}}"#))
                 .unwrap();
         assert_eq!(response["error"]["code"], "unknown-command");
+    }
+
+    #[test]
+    fn vault_invite_parser_is_allowlisted_only_for_the_private_worker() {
+        let mut core = BrowserCore::new(std::path::PathBuf::new());
+        let token = URL_SAFE_NO_PAD.encode([8; 32]);
+        let value = value(&dispatch(
+            &mut core,
+            "_worker_enrollment_parse_vault_invite_link",
+            &json!({"link": format!("https://enroll.example/#invite={token}")}).to_string(),
+        ));
+        assert_eq!(value["origin"], "https://enroll.example");
+        assert_eq!(value["inviteToken"], token);
+        let public: Value = serde_json::from_str(&core.dispatch(&format!(
+            r#"{{"command":"enrollment_parse_vault_invite_link","args":{{"link":"https://enroll.example/#invite={token}"}}}}"#
+        )))
+        .unwrap();
+        assert_eq!(public["error"]["code"], "unknown-command");
     }
 
     #[test]

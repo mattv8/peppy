@@ -125,6 +125,8 @@ pub struct ClaimInstanceRequest {
     pub operation_id: Uuid,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub setup_token: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
     pub admin_password: String,
     pub device: ProposedDevice,
     pub material: VaultMaterial,
@@ -152,6 +154,8 @@ pub struct ClaimInstanceResponse {
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceLoginRequest {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
     pub admin_password: String,
     pub client: ClientKind,
 }
@@ -183,6 +187,10 @@ pub struct InstanceManagement {
     pub storage_bytes: u64,
     pub quota_bytes: u64,
     pub replay_retention_days: u32,
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub username: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -190,7 +198,102 @@ pub struct InstanceManagement {
 pub struct AdmissionChallengeRequest {
     pub device: ProposedDevice,
     pub vault_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_owner: Option<String>,
     pub credential_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultRequestState {
+    Pending,
+    Approved,
+    Denied,
+    Completed,
+    Expired,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateVaultInviteResponse {
+    pub invite_id: Uuid,
+    pub invite_token: String,
+    pub expires_in_seconds: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VaultInviteSummary {
+    pub invite_id: Uuid,
+    pub state: String,
+    pub expires_in_seconds: u32,
+    pub created_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitVaultRequest {
+    pub request_id: Uuid,
+    pub invite_token: String,
+    pub display_name: String,
+    pub client: ClientKind,
+    pub request_secret_digest: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VaultRequestCreated {
+    pub request_id: Uuid,
+    pub expires_in_seconds: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VaultRequestStatus {
+    pub request_id: Uuid,
+    pub state: VaultRequestState,
+    pub expires_in_seconds: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VaultRequestSummary {
+    pub request_id: Uuid,
+    pub display_name: String,
+    pub client: ClientKind,
+    pub state: VaultRequestState,
+    pub created_at: String,
+    pub expires_in_seconds: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateVaultRequest {
+    pub request_id: Uuid,
+    pub request_secret: String,
+    pub operation_id: Uuid,
+    pub username: String,
+    pub admin_password: String,
+    pub device: ProposedDevice,
+    pub material: VaultMaterial,
+    pub credential_digest: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VaultSummary {
+    pub vault_id: Uuid,
+    pub username: String,
+    pub is_admin: bool,
+    pub device_count: u64,
+    pub storage_bytes: u64,
+    pub created_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InstanceEvent {
+    Snapshot { requests: Vec<VaultRequestSummary> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -351,10 +454,17 @@ pub mod routes {
     pub const INSTANCE_SESSION: &str = "/v1/instance/session";
     pub const INSTANCE_ACCOUNT: &str = "/v1/instance/account";
     pub const INSTANCE_MANAGEMENT: &str = "/v1/instance/management";
+    pub const INSTANCE_VAULTS: &str = "/v1/instance/vaults";
+    pub const INSTANCE_INVITES: &str = "/v1/instance/invites";
+    pub const INSTANCE_VAULT_REQUESTS: &str = "/v1/instance/vault-requests";
+    pub const INSTANCE_EVENTS: &str = "/v1/instance/events";
     pub const ENROLLMENT_CHALLENGES: &str = "/v1/enrollment/challenges";
     pub const ENROLLMENT_INVITATIONS: &str = "/v1/enrollment/invitations";
     pub const HOSTED_ENROLLMENT_CONFIG: &str = "/hosted/v1/enrollment/config";
 }
+
+pub const VAULT_REQUEST_HEADER: &str = "Peppy-Vault-Request";
+pub const KNOWN_STATE_HEADER: &str = "Peppy-Known-State";
 
 #[cfg(test)]
 mod tests {
@@ -459,5 +569,57 @@ mod tests {
                 .get("setup_token")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn owner_fields_remain_backward_compatible_when_omitted() {
+        let login: InstanceLoginRequest = serde_json::from_value(serde_json::json!({
+            "admin_password": "password", "client": "desktop"
+        }))
+        .unwrap();
+        assert!(login.username.is_empty());
+        assert!(
+            serde_json::to_value(login)
+                .unwrap()
+                .get("username")
+                .is_none()
+        );
+        let challenge: AdmissionChallengeRequest = serde_json::from_value(serde_json::json!({
+            "device": {"device_id": Uuid::nil(), "kind": "desktop", "name": "device", "signing_public_key": "key"},
+            "vault_id": null, "credential_digest": "digest"
+        }))
+        .unwrap();
+        assert_eq!(challenge.vault_owner, None);
+    }
+
+    #[test]
+    fn multi_vault_dtos_use_snake_case_and_backward_compatible_defaults() {
+        let management: InstanceManagement = serde_json::from_value(serde_json::json!({
+            "vault_id": Uuid::nil(), "devices": [], "storage_bytes": 0,
+            "quota_bytes": 0, "replay_retention_days": 30
+        }))
+        .unwrap();
+        assert!(!management.is_admin);
+        assert!(management.username.is_empty());
+
+        let event = InstanceEvent::Snapshot {
+            requests: vec![VaultRequestSummary {
+                request_id: Uuid::nil(),
+                display_name: "Ava".into(),
+                client: ClientKind::Ios,
+                state: VaultRequestState::Pending,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                expires_in_seconds: 60,
+            }],
+        };
+        assert_eq!(serde_json::to_value(event).unwrap()["type"], "snapshot");
+
+        let created = VaultRequestCreated {
+            request_id: Uuid::nil(),
+            expires_in_seconds: 60,
+        };
+        let value = serde_json::to_value(created).unwrap();
+        assert!(value.get("request_id").is_some());
+        assert!(value.get("expires_in_seconds").is_some());
     }
 }
