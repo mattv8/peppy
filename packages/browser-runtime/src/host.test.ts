@@ -259,7 +259,11 @@ describe("browser host RPC", () => {
     });
   });
 
-  it.each(["enrollment_create_owner", "enrollment_connect_shared_secret"])("starts sync when %s activates a ready session", async command => {
+  it.each([
+    ["enrollment_create_owner", { passphrase: "manual-passphrase" }],
+    ["enrollment_connect_shared_secret", { passphrase: "manual-passphrase" }],
+    ["enrollment_create_vault", { username: "taylor", adminPassword: "password-password", passphrase: "manual-passphrase" }],
+  ])("starts sync when %s activates a ready session", async (command, args) => {
     const session = new FakeSession();
     session.phase = "unenrolled";
     const start = vi.fn(async () => undefined);
@@ -272,12 +276,13 @@ describe("browser host RPC", () => {
       stop: async () => undefined,
       enrollmentCreateOwner: activate,
       enrollmentConnectSharedSecret: activate,
+      enrollmentCreateVault: activate,
     };
     const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: network as unknown as import("./host.js").BrowserNetwork });
     const attached = port();
     await host.attach(attached);
 
-    attached.emit({ id: 1, command, args: { passphrase: "manual-passphrase" } });
+    attached.emit({ id: 1, command, args });
 
     await eventually(() => start.mock.calls.length === 1);
     expect(attached.messages).toContainEqual({ event: "changed" });

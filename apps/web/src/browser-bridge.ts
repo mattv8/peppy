@@ -11,16 +11,43 @@ import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
 type PendingRequest = { resolve(value: unknown): void; reject(error: Error): void; timer: number };
-type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
-export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean };
-export type InstanceManagement = { vault_id: string; devices: Array<{ device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean }>; storage_bytes: number; quota_bytes: number; replay_retention_days: number };
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
+export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
+export type InstanceManagement = { vault_id: string; devices: Array<{ device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean }>; storage_bytes: number; quota_bytes: number; replay_retention_days: number; isAdmin: boolean; username: string };
+export type VaultSummary = { vaultId: string; username: string; isAdmin: boolean; deviceCount: number; storageBytes: number; createdAt: string };
+export type VaultInviteView = { inviteId: string; state: "active" | "used" | "revoked" | "expired"; expiresInSeconds: number; createdAt: string };
+export type VaultRequestView = { requestId: string; displayName: string; client: "browser" | "desktop" | "android" | "ios"; state: "pending" | "approved" | "denied" | "completed" | "expired"; createdAt: string; expiresInSeconds: number };
 type EnrollmentSecretField = { name: string; label: string; autocomplete?: string };
 type OwnerClaimDraft = { passphrase: string; setupToken?: string; adminPassword?: string };
+type VaultClaimDraft = { username: string; adminPassword: string; passphrase: string };
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 let activeSecretDialog: (() => void) | undefined;
+let capturedInviteLink = captureInviteLink();
+
+function captureInviteLink(): string | null {
+  if (typeof window === "undefined" || !window.location.hash.startsWith("#invite=")) return null;
+  const token = window.location.hash.slice("#invite=".length);
+  const link = `${window.location.origin}/#invite=${token}`;
+  window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
+  return link;
+}
+
+export function parseVaultRequestSnapshot(data: string): VaultRequestView[] {
+  const parsed: unknown = JSON.parse(data);
+  if (!isRecord(parsed) || parsed.type !== "snapshot" || !Array.isArray(parsed.requests)) throw new Error("Invalid vault request snapshot.");
+  return parsed.requests.map(request => {
+    if (!isRecord(request) || typeof request.request_id !== "string" || typeof request.display_name !== "string" || !isClient(request.client) || !isRequestState(request.state) || typeof request.created_at !== "string" || !isSafeInteger(request.expires_in_seconds)) throw new Error("Invalid vault request snapshot.");
+    return { requestId: request.request_id, displayName: request.display_name, client: request.client, state: request.state, createdAt: request.created_at, expiresInSeconds: request.expires_in_seconds };
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isSafeInteger(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
+function isClient(value: unknown): value is VaultRequestView["client"] { return value === "browser" || value === "desktop" || value === "android" || value === "ios"; }
+function isRequestState(value: unknown): value is VaultRequestView["state"] { return value === "pending" || value === "approved" || value === "denied" || value === "completed" || value === "expired"; }
 
 class BrowserBridgeError extends Error implements BridgeError {
   public constructor(public readonly code: string, message: string, public readonly currentRevision?: string) { super(message); }
@@ -217,6 +244,7 @@ export class BrowserBridge implements DesktopBridge {
   private enrollmentMode: "community" | "hosted" = "community";
   private setupCodeRequired = true;
   private ownerClaimDraft?: OwnerClaimDraft;
+  private vaultClaimDraft?: VaultClaimDraft;
 
   public constructor(private readonly port: MessagePort, private readonly timeoutMs = REQUEST_TIMEOUT_MS) {
     port.onmessage = (event: MessageEvent<RpcReply | WorkerEvent>) => this.receive(event.data);
@@ -314,6 +342,7 @@ export class BrowserBridge implements DesktopBridge {
   public dispose(): void {
     activeSecretDialog?.();
     this.ownerClaimDraft = undefined;
+    this.vaultClaimDraft = undefined;
     if (!this.stopped) {
       try { this.port.postMessage({ id: this.nextId++, command: "disconnect", args: {} }); } catch {}
     }
@@ -368,13 +397,51 @@ export class BrowserBridge implements DesktopBridge {
     return this.finishOwnerClaim(view);
   }
   public async enrollment_status(): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_status")); }
-  public enrollment_cancel(): Promise<void> { this.ownerClaimDraft = undefined; return this.call("enrollment_cancel"); }
+  public enrollment_cancel(): Promise<void> { this.ownerClaimDraft = undefined; this.vaultClaimDraft = undefined; return this.call("enrollment_cancel"); }
+  public enrollment_begin_vault_request(input: { inviteLink: string; displayName: string }): Promise<EnrollmentView> { return this.call("enrollment_begin_vault_request", input); }
+  public enrollment_vault_request_status(): Promise<EnrollmentView> { return this.call("enrollment_vault_request_status"); }
+  public async enrollment_create_vault(input: { username: string }): Promise<EnrollmentView> {
+    let draft = this.vaultClaimDraft;
+    if (!draft) {
+      const credentials = await secretDialog({ id: "browser-enrollment-vault", title: "Create your vault", description: "Set a password for this vault.", confirm: "Continue", fields: [{ name: "adminPassword", label: "Password", autocomplete: "new-password" }] });
+      if (!credentials) return this.enrollment_status();
+      const generated = await this.call<{ passphrase: string }>("enrollment_generate_secret");
+      if (!await generatedSecretDialog(generated.passphrase)) return this.enrollment_status();
+      draft = { username: input.username, adminPassword: credentials.adminPassword, passphrase: generated.passphrase };
+      this.vaultClaimDraft = draft;
+    }
+    if (!draft.adminPassword) {
+      const credentials = await secretDialog({ id: "browser-enrollment-vault-password", title: "Create your vault", description: "Enter a corrected password for this vault.", confirm: "Continue", fields: [{ name: "adminPassword", label: "Password", autocomplete: "new-password" }] });
+      if (!credentials) return this.enrollment_status();
+      draft = { ...draft, adminPassword: credentials.adminPassword };
+    }
+    draft = { ...draft, username: input.username };
+    this.vaultClaimDraft = draft;
+    const view = await this.call<EnrollmentView>("enrollment_create_vault", draft);
+    if (view.stage === "ready") this.vaultClaimDraft = undefined;
+    else if (view.stage === "error" && ["invalid_request", "invalid-request", "invalid_password", "invalid-password"].includes(view.errorCode ?? "")) {
+      this.vaultClaimDraft = { ...draft, adminPassword: "" };
+    }
+    return view;
+  }
+  public enrollment_pending_invite(): Promise<string | null> {
+    const inviteLink = capturedInviteLink;
+    capturedInviteLink = null;
+    return Promise.resolve(inviteLink);
+  }
   public enrollment_sign_out(): Promise<void> { return this.call("enrollment_sign_out"); }
   public enrollment_set_hosted_csrf(csrf: string): Promise<void> { return this.call("enrollment_set_hosted_csrf", { csrf }); }
   public enrollment_management(): Promise<InstanceManagement> { return this.call("enrollment_management"); }
   public enrollment_revoke_device(deviceId: string): Promise<InstanceManagement> { return this.call("enrollment_revoke_device", { deviceId }); }
+  public enrollment_list_vaults(): Promise<VaultSummary[]> { return this.call("enrollment_list_vaults"); }
+  public enrollment_create_invite(): Promise<{ inviteId: string; inviteLink: string; expiresInSeconds: number }> { return this.call("enrollment_create_invite"); }
+  public enrollment_list_invites(): Promise<VaultInviteView[]> { return this.call("enrollment_list_invites"); }
+  public enrollment_revoke_invite(inviteId: string): Promise<void> { return this.call("enrollment_revoke_invite", { inviteId }); }
+  public enrollment_list_vault_requests(): Promise<VaultRequestView[]> { return this.call("enrollment_list_vault_requests"); }
+  public enrollment_approve_vault_request(requestId: string): Promise<void> { return this.call("enrollment_approve_vault_request", { requestId }); }
+  public enrollment_deny_vault_request(requestId: string): Promise<void> { return this.call("enrollment_deny_vault_request", { requestId }); }
   public async enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method })); }
-  public async enrollment_create_owner(): Promise<EnrollmentView> {
+  public async enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView> {
     let draft = this.ownerClaimDraft;
     if (draft && this.enrollmentMode === "community" && this.setupCodeRequired && !draft.setupToken) {
       const correction = await secretDialog({
@@ -391,19 +458,19 @@ export class BrowserBridge implements DesktopBridge {
     draft ??= await this.createOwnerClaimDraft();
     if (!draft) return this.enrollment_status();
     this.ownerClaimDraft = draft;
-    return this.finishOwnerClaim(await this.call("enrollment_create_owner", draft));
+    return this.finishOwnerClaim(await this.call("enrollment_create_owner", { ...draft, ...(input?.username ? { username: input.username } : {}) }));
   }
-  public async enrollment_sign_in(): Promise<EnrollmentView> {
+  public async enrollment_sign_in(input?: { username?: string }): Promise<EnrollmentView> {
     if (this.enrollmentMode === "hosted") {
       const config = await fetchHostedWebConfig();
       if (!config) throw new BrowserBridgeError("unavailable", "Peppy could not start hosted sign-in.");
       await beginHostedAuthorization(config);
       return this.enrollment_status();
     }
-    return this.enrollmentSecretAction("enrollment_sign_in", "browser-enrollment-signin", "Sign in to Peppy", "Enter the server administrator password.", "Sign in", [{ name: "adminPassword", label: "Admin password", autocomplete: "current-password" }]);
+    return this.enrollmentSecretAction("enrollment_sign_in", "browser-enrollment-signin", "Sign in to Peppy", "Enter your account password.", "Sign in", [{ name: "adminPassword", label: "Password", autocomplete: "current-password" }], input);
   }
-  public async enrollment_connect_shared_secret(): Promise<EnrollmentView> {
-    return this.enrollmentSecretAction("enrollment_connect_shared_secret", "browser-enrollment-secret", "Enter device secret", "Enter the vault shared secret provided by an owner.", "Connect", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "one-time-code" }]);
+  public async enrollment_connect_shared_secret(input?: { vaultOwner?: string }): Promise<EnrollmentView> {
+    return this.enrollmentSecretAction("enrollment_connect_shared_secret", "browser-enrollment-secret", "Enter device secret", "Enter the vault shared secret provided by an owner.", "Connect", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "one-time-code" }], input);
   }
   public async enrollment_approve(): Promise<EnrollmentView> {
     return this.enrollmentSecretAction("enrollment_approve", "browser-enrollment-approve", "Approve phone", "Enter the vault shared secret after verifying the code on both devices.", "Approve", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "current-password" }]);
@@ -426,10 +493,10 @@ export class BrowserBridge implements DesktopBridge {
   }
   public hosted_provision(): Promise<void> { return unsupported("Hosted provisioning"); }
 
-  private async enrollmentSecretAction(command: string, id: string, title: string, description: string, confirm: string, fields: EnrollmentSecretField[]): Promise<EnrollmentView> {
+  private async enrollmentSecretAction(command: string, id: string, title: string, description: string, confirm: string, fields: EnrollmentSecretField[], input: Record<string, unknown> = {}): Promise<EnrollmentView> {
     const secret = await secretDialog({ id, title, description, confirm, fields });
     if (!secret) return this.enrollment_status();
-    return this.finishOwnerClaim(await this.call(command, secret));
+    return this.finishOwnerClaim(await this.call(command, { ...secret, ...input }));
   }
 
   private async createOwnerClaimDraft(): Promise<OwnerClaimDraft | undefined> {
@@ -463,7 +530,7 @@ export class BrowserBridge implements DesktopBridge {
         this.ownerClaimDraft = draft;
       }
     }
-    if (view.stage === "ready" || view.stage === "phone_connected") this.ownerClaimDraft = undefined;
+    if (view.stage === "ready" || view.stage === "phone_connected") { this.ownerClaimDraft = undefined; this.vaultClaimDraft = undefined; }
     return view;
   }
 

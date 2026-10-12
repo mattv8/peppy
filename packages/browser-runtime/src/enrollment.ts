@@ -2,13 +2,16 @@ const MAX_JSON_BYTES = 64 * 1024;
 const DEVICE_NAME = "Peppy Browser";
 
 type DeploymentMode = "community" | "hosted";
-type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
 type SessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 
-export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean };
+export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
 export type EnrollmentSecrets = { setupToken?: string; adminPassword?: string; passphrase?: string };
 export type EnrollmentDevice = { device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean };
-export type InstanceManagement = { vault_id: string; devices: EnrollmentDevice[]; storage_bytes: number; quota_bytes: number; replay_retention_days: number };
+export type InstanceManagement = { vault_id: string; devices: EnrollmentDevice[]; storage_bytes: number; quota_bytes: number; replay_retention_days: number; isAdmin: boolean; username: string };
+export type VaultSummary = { vaultId: string; username: string; isAdmin: boolean; deviceCount: number; storageBytes: number; createdAt: string };
+export type VaultInviteView = { inviteId: string; state: "active" | "used" | "revoked" | "expired"; expiresInSeconds: number; createdAt: string };
+export type VaultRequestView = { requestId: string; displayName: string; client: "browser" | "desktop" | "android" | "ios"; state: "pending" | "approved" | "denied" | "completed" | "expired"; createdAt: string; expiresInSeconds: number };
 export type EnrollmentIdentity = { role: "owner" | "device" | "gateway" };
 export interface EnrollmentCore { invoke(request: { command: string; args: Record<string, unknown> }): Promise<unknown>; }
 export interface EnrollmentSession {
@@ -26,6 +29,8 @@ export class BrowserEnrollment {
   private invitationId?: string;
   private enrollmentClient?: { origin: string; purpose: "fresh" | "owner" };
   private addPhonePending?: Promise<EnrollmentView>;
+  private vaultRequestGeneration = 0;
+  private vaultRequestStatusPending?: Promise<EnrollmentView>;
   private setupCodeRequired = true;
   private readonly fetchBase: string;
 
@@ -42,6 +47,7 @@ export class BrowserEnrollment {
       if (mode === "community" && typeof info.claimed !== "boolean") throw new Error("enrollment-response");
       this.viewValue = { ...this.viewValue, mode };
       const signedIn = mode === "hosted" ? await this.hostedSession() : undefined;
+      if (mode === "community" && info.claimed === true) await this.restoreCommunitySession();
       if (this.session.phase === "locked") {
         this.viewValue = { mode, stage: "locked", origin };
         return this.view();
@@ -68,9 +74,11 @@ export class BrowserEnrollment {
         }
       } else {
         this.setupCodeRequired = info.setup_required !== false;
-        this.viewValue = info.claimed === true
-        ? { mode, stage: "signin", origin }
-        : { mode, stage: "setup", origin, setupCodeRequired: this.setupCodeRequired };
+        const pending = await this.pendingVaultRequest();
+        if (pending?.origin === origin) this.viewValue = { mode, stage: "invite_waiting", origin, displayName: pending.displayName };
+        else this.viewValue = info.claimed === true
+          ? { mode, stage: "signin", origin }
+          : { mode, stage: "setup", origin, setupCodeRequired: this.setupCodeRequired };
       }
     } catch (error) {
       this.fail(error);
@@ -80,12 +88,12 @@ export class BrowserEnrollment {
 
   public async generateSecret(): Promise<string> { return required(await this.core.invoke({ command: "_worker_enrollment_generate_secret", args: {} }), "passphrase"); }
 
-  public async createOwner(secrets: EnrollmentSecrets): Promise<EnrollmentView> {
+  public async createOwner(secrets: EnrollmentSecrets, username?: string): Promise<EnrollmentView> {
     try {
       if (!secrets.passphrase) throw new Error("enrollment-state");
       if (this.viewValue.mode === "hosted") return this.createHostedOwner(secrets.passphrase);
       if (!secrets.adminPassword || (this.setupCodeRequired && !secrets.setupToken)) throw new Error("enrollment-state");
-      const request = await this.rustRequest("_worker_enrollment_create_owner", secrets);
+      const request = await this.rustRequest("_worker_enrollment_create_owner", { ...secrets, username: username ?? "" });
       const response = await this.request("/v1/instance/claim", "POST", request);
       this.captureClaimSession(response);
       await this.session.finishEnrollment("_worker_enrollment_finish_owner", JSON.stringify(response), secrets.passphrase);
@@ -97,10 +105,10 @@ export class BrowserEnrollment {
     return this.view();
   }
 
-  public async signIn(adminPassword: string): Promise<EnrollmentView> {
+  public async signIn(adminPassword: string, username?: string): Promise<EnrollmentView> {
     try {
       if (this.viewValue.mode === "hosted") return this.view();
-      const response = await this.request("/v1/instance/session", "POST", { admin_password: adminPassword, client: "browser" });
+      const response = await this.request("/v1/instance/session", "POST", { username: username ?? "", admin_password: adminPassword, client: "browser" });
       this.captureSession(response);
       this.viewValue = { ...this.viewValue, stage: "locked" };
     } catch (error) {
@@ -109,7 +117,7 @@ export class BrowserEnrollment {
     return this.view();
   }
 
-  public async connectSharedSecret(passphrase: string): Promise<EnrollmentView> {
+  public async connectSharedSecret(passphrase: string, vaultOwner?: string): Promise<EnrollmentView> {
     try {
       if (this.session.phase === "locked") {
         await this.session.unlock(passphrase);
@@ -117,7 +125,7 @@ export class BrowserEnrollment {
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
-      const challenge = await this.request("/v1/enrollment/challenges", "POST", await this.rustRequest("_worker_enrollment_manual_challenge", { vaultId: undefined }));
+      const challenge = await this.request("/v1/enrollment/challenges", "POST", await this.rustRequest("_worker_enrollment_manual_challenge", { vaultId: undefined, vaultOwner }));
       const proof = await this.rustRequest("_worker_enrollment_complete_manual_challenge", { challengeJson: JSON.stringify(challenge), passphrase });
       const id = required(challenge, "enrollment_id");
       const complete = await this.request(`/v1/enrollment/challenges/${encodeURIComponent(id)}/complete`, "POST", proof);
@@ -125,6 +133,10 @@ export class BrowserEnrollment {
       this.enrollmentClient = undefined;
       this.viewValue = readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
     } catch (error) {
+      if (error instanceof HttpStatusError && error.code === "vault_owner_required") {
+        this.viewValue = { ...this.viewValue, stage: "locked", vaultOwnerRequired: true };
+        return this.view();
+      }
       this.fail(error);
     }
     return this.view();
@@ -197,6 +209,12 @@ export class BrowserEnrollment {
   }
 
   public async cancel(): Promise<void> {
+    this.vaultRequestGeneration += 1;
+    if (await this.pendingVaultRequest()) {
+      await this.core.invoke({ command: "_worker_enrollment_clear_vault_request", args: {} });
+      this.viewValue = { mode: this.viewValue.mode, stage: "signin", origin: this.origin };
+      return;
+    }
     if (this.invitationId) await this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}`, "DELETE", undefined, true);
     this.resetOwnerInvitation();
     this.viewValue = { ...this.viewValue, stage: "ready", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined };
@@ -214,6 +232,97 @@ export class BrowserEnrollment {
     if (!isDeviceId(deviceId)) return Promise.reject({ code: "invalid-request" });
     return this.managementRequest(`/v1/instance/devices/${encodeURIComponent(deviceId)}/revoke`, "POST");
   }
+
+  public async beginVaultRequest(inviteLink: string, displayName: string): Promise<EnrollmentView> {
+    try {
+      this.vaultRequestGeneration += 1;
+      const invite = record(await this.core.invoke({ command: "_worker_enrollment_parse_vault_invite_link", args: { link: inviteLink } }));
+      const inviteOrigin = required(invite, "origin");
+      const request = await this.rustRequest("_worker_enrollment_begin_vault_request", { origin: inviteOrigin, inviteToken: required(invite, "inviteToken"), displayName });
+      const created = await this.request("/v1/instance/vault-requests", "POST", request);
+      await this.core.invoke({ command: "_worker_enrollment_accept_vault_request_created", args: { json: JSON.stringify(created) } });
+      this.viewValue = { mode: "community", stage: "invite_waiting", origin: inviteOrigin, displayName, expiresInSeconds: safeInteger(record(created).expires_in_seconds) };
+    } catch (error) {
+      if (isDefinitiveVaultRequestRejection(error)) await this.core.invoke({ command: "_worker_enrollment_clear_vault_request", args: {} });
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async vaultRequestStatus(): Promise<EnrollmentView> {
+    if (this.vaultRequestStatusPending) return this.vaultRequestStatusPending;
+    const generation = this.vaultRequestGeneration;
+    const poll = this.pollVaultRequestStatus(generation);
+    this.vaultRequestStatusPending = poll;
+    try {
+      return await poll;
+    } finally {
+      if (this.vaultRequestStatusPending === poll) this.vaultRequestStatusPending = undefined;
+    }
+  }
+
+  private async pollVaultRequestStatus(generation: number): Promise<EnrollmentView> {
+    try {
+      const pending = record(await this.core.invoke({ command: "_worker_enrollment_pending_vault_request", args: {} }));
+      const requestId = required(pending, "requestId");
+      const header = required(await this.core.invoke({ command: "_worker_enrollment_vault_request_header", args: {} }), "header");
+      const status = await this.request(`/v1/instance/vault-requests/${encodeURIComponent(requestId)}?wait=15`, "GET", undefined, false, { "Peppy-Vault-Request": header, "Peppy-Known-State": this.viewValue.stage === "invite_approved" ? "approved" : "pending" });
+      const parsed = required(await this.core.invoke({ command: "_worker_enrollment_parse_vault_request_status", args: { json: JSON.stringify(status) } }), "state");
+      const expiresInSeconds = safeInteger(record(status).expires_in_seconds);
+      const stage = ({ pending: "invite_waiting", approved: "invite_approved", denied: "invite_denied", expired: "invite_expired", completed: "invite_denied" } as const)[parsed as "pending" | "approved" | "denied" | "expired" | "completed"];
+      if (!stage) throw new Error("enrollment-response");
+      if (generation !== this.vaultRequestGeneration) return this.view();
+      if (parsed === "completed") {
+        this.viewValue = { ...this.viewValue, stage: "error", errorCode: "vault_request_completed", expiresInSeconds };
+        return this.view();
+      }
+      this.viewValue = { ...this.viewValue, stage, expiresInSeconds };
+      if (parsed === "denied" || parsed === "expired") await this.core.invoke({ command: "_worker_enrollment_clear_vault_request", args: {} });
+    } catch (error) {
+      if (generation !== this.vaultRequestGeneration) return this.view();
+      if (isTransientVaultRequestFailure(error)) throw error;
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async createVault(username: string, secrets: Pick<EnrollmentSecrets, "adminPassword" | "passphrase">): Promise<EnrollmentView> {
+    try {
+      if (!secrets.adminPassword || !secrets.passphrase) throw new Error("enrollment-state");
+      const request = await this.rustRequest("_worker_enrollment_create_vault", { username, adminPassword: secrets.adminPassword, passphrase: secrets.passphrase });
+      const response = await this.request("/v1/instance/vaults", "POST", request);
+      this.captureClaimSession(response);
+      await this.session.finishEnrollment("_worker_enrollment_finish_owner", JSON.stringify(response), secrets.passphrase);
+      this.enrollmentClient = undefined;
+      this.viewValue = readyView("community", this.origin, this.requireIdentity());
+    } catch (error) {
+      if (error instanceof HttpStatusError && (error.code === "username_taken" || error.code === "invalid_username")) {
+        this.viewValue = { ...this.viewValue, stage: "invite_approved", errorCode: error.code };
+      } else {
+        this.fail(error);
+      }
+    }
+    return this.view();
+  }
+
+  public async pendingVaultRequest(): Promise<{ origin: string; requestId: string; displayName: string } | null> {
+    const pending = await this.core.invoke({ command: "_worker_enrollment_pending_vault_request", args: {} });
+    if (pending === null) return null;
+    const value = record(pending);
+    return { origin: required(value, "origin"), requestId: required(value, "requestId"), displayName: required(value, "displayName") };
+  }
+
+  public async listVaults(): Promise<VaultSummary[]> { return array(await this.request("/v1/instance/vaults", "GET")).map(vaultSummary); }
+  public async createInvite(): Promise<{ inviteId: string; inviteLink: string; expiresInSeconds: number }> {
+    const value = record(await this.request("/v1/instance/invites", "POST"));
+    const inviteToken = required(value, "invite_token");
+    return { inviteId: required(value, "invite_id"), inviteLink: `${this.origin}/#invite=${inviteToken}`, expiresInSeconds: requiredInteger(value, "expires_in_seconds") };
+  }
+  public async listInvites(): Promise<VaultInviteView[]> { return array(await this.request("/v1/instance/invites", "GET")).map(vaultInvite); }
+  public revokeInvite(inviteId: string): Promise<void> { return this.request(`/v1/instance/invites/${encodeURIComponent(inviteId)}`, "DELETE", undefined, false).then(() => undefined); }
+  public async listVaultRequests(): Promise<VaultRequestView[]> { return array(await this.request("/v1/instance/vault-requests", "GET")).map(vaultRequest); }
+  public approveVaultRequest(requestId: string): Promise<void> { return this.request(`/v1/instance/vault-requests/${encodeURIComponent(requestId)}/approve`, "POST").then(() => undefined); }
+  public denyVaultRequest(requestId: string): Promise<void> { return this.request(`/v1/instance/vault-requests/${encodeURIComponent(requestId)}/deny`, "POST").then(() => undefined); }
 
   public setHostedCsrf(csrf: unknown): void {
     if (typeof csrf !== "string" || !csrf || csrf.length > 4096) throw new Error("enrollment-response");
@@ -243,6 +352,18 @@ export class BrowserEnrollment {
 
   private async hostedAccount(): Promise<Record<string, unknown>> {
     return this.request("/hosted/v1/web/app-account", "GET");
+  }
+
+  private async restoreCommunitySession(): Promise<void> {
+    try {
+      const session = await this.request("/v1/instance/session", "GET");
+      const csrf = session.csrf_token;
+      if (typeof csrf !== "string" || !csrf || csrf.length > 4096) throw new Error("enrollment-response");
+      this.csrf = csrf;
+    } catch (error) {
+      if (!(error instanceof HttpStatusError) || error.status !== 401) throw error;
+      this.csrf = undefined;
+    }
   }
 
   private async hostedSession(): Promise<boolean> {
@@ -298,7 +419,7 @@ export class BrowserEnrollment {
     }
   }
 
-  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown, authenticated = false): Promise<T> {
+  private async request<T = Record<string, unknown>>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown, authenticated = false, extraHeaders: Record<string, string> = {}): Promise<T> {
     const token = authenticated ? this.session.tokenForTransport() : undefined;
     const csrfHeader = this.viewValue.mode === "hosted" ? "X-Peppy-CSRF" : "X-Peppy-CSRF-Token";
     const response = await this.fetcher(new URL(path, this.fetchBase), {
@@ -308,6 +429,7 @@ export class BrowserEnrollment {
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(this.csrf && method !== "GET" ? { [csrfHeader]: this.csrf } : {}),
+        ...extraHeaders,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -333,14 +455,22 @@ export class BrowserEnrollment {
   }
 }
 
+function isDefinitiveVaultRequestRejection(error: unknown): boolean {
+  return error instanceof HttpStatusError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429;
+}
+
+function isTransientVaultRequestFailure(error: unknown): boolean {
+  return !(error instanceof HttpStatusError) || error.status === 408 || error.status === 429 || error.status >= 500;
+}
+
 class HttpStatusError extends Error {
-  public constructor(public readonly status: number, public readonly code?: "invalid_setup_token" | "instance_already_claimed") { super(code ?? `http-${status}`); }
+  public constructor(public readonly status: number, public readonly code?: string) { super(code ?? `http-${status}`); }
 
   public static async fromResponse(response: Response): Promise<HttpStatusError> {
     try {
       const body: unknown = JSON.parse(await readBoundedText(response));
       const code = record(body).code;
-      if (code === "invalid_setup_token" || code === "instance_already_claimed") return new HttpStatusError(response.status, code);
+      if (typeof code === "string") return new HttpStatusError(response.status, code);
     } catch {}
     return new HttpStatusError(response.status);
   }
@@ -403,7 +533,7 @@ function isDeviceId(value: string): boolean { return /^[0-9a-f]{8}-(?:[0-9a-f]{4
 function management(value: Record<string, unknown>): InstanceManagement {
   const devices = value.devices;
   if (!isDeviceId(required(value, "vault_id")) || !Array.isArray(devices) || safeInteger(value.storage_bytes) === undefined || safeInteger(value.quota_bytes) === undefined || safeInteger(value.replay_retention_days) === undefined) throw new Error("enrollment-response");
-  return { vault_id: required(value, "vault_id"), devices: devices.map(device), storage_bytes: value.storage_bytes as number, quota_bytes: value.quota_bytes as number, replay_retention_days: value.replay_retention_days as number };
+  return { vault_id: required(value, "vault_id"), devices: devices.map(device), storage_bytes: value.storage_bytes as number, quota_bytes: value.quota_bytes as number, replay_retention_days: value.replay_retention_days as number, isAdmin: value.is_admin === true, username: typeof value.username === "string" ? value.username : "" };
 }
 function device(value: unknown): EnrollmentDevice {
   const entry = record(value);
@@ -412,3 +542,9 @@ function device(value: unknown): EnrollmentDevice {
   if (!isDeviceId(required(entry, "device_id")) || !["browser", "desktop", "android", "ios"].includes(kind) || !["owner", "device", "gateway"].includes(role) || typeof entry.name !== "string" || typeof entry.revoked !== "boolean" || typeof entry.gateway_online !== "boolean") throw new Error("enrollment-response");
   return { device_id: required(entry, "device_id"), name: entry.name, kind: kind as EnrollmentDevice["kind"], role: role as EnrollmentDevice["role"], revoked: entry.revoked, gateway_online: entry.gateway_online };
 }
+function array(value: unknown): unknown[] { if (!Array.isArray(value)) throw new Error("enrollment-response"); return value; }
+function requiredInteger(value: Record<string, unknown>, key: string): number { const output = safeInteger(value[key]); if (output === undefined) throw new Error("enrollment-response"); return output; }
+function vaultSummary(value: unknown): VaultSummary { const entry = record(value); return { vaultId: required(entry, "vault_id"), username: required(entry, "username"), isAdmin: boolean(entry, "is_admin"), deviceCount: requiredInteger(entry, "device_count"), storageBytes: requiredInteger(entry, "storage_bytes"), createdAt: required(entry, "created_at") }; }
+function vaultInvite(value: unknown): VaultInviteView { const entry = record(value); const state = required(entry, "state"); if (!["active", "used", "revoked", "expired"].includes(state)) throw new Error("enrollment-response"); return { inviteId: required(entry, "invite_id"), state: state as VaultInviteView["state"], expiresInSeconds: requiredInteger(entry, "expires_in_seconds"), createdAt: required(entry, "created_at") }; }
+function vaultRequest(value: unknown): VaultRequestView { const entry = record(value); const client = required(entry, "client"); const state = required(entry, "state"); if (!["browser", "desktop", "android", "ios"].includes(client) || !["pending", "approved", "denied", "completed", "expired"].includes(state)) throw new Error("enrollment-response"); return { requestId: required(entry, "request_id"), displayName: required(entry, "display_name"), client: client as VaultRequestView["client"], state: state as VaultRequestView["state"], createdAt: required(entry, "created_at"), expiresInSeconds: requiredInteger(entry, "expires_in_seconds") }; }
+function boolean(value: Record<string, unknown>, key: string): boolean { if (typeof value[key] !== "boolean") throw new Error("enrollment-response"); return value[key] as boolean; }

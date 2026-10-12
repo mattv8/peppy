@@ -49,7 +49,7 @@ export type HostedAccountView = { available: boolean; signedIn: boolean; account
 /** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
 export type EnrollmentView = {
   mode: "community" | "hosted";
-  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error";
+  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
   origin?: string;
   owner?: boolean;
   hasGateway?: boolean;
@@ -58,6 +58,9 @@ export type EnrollmentView = {
   expiresInSeconds?: number;
   errorCode?: string;
   setupCodeRequired?: boolean;
+  vaultOwnerRequired?: boolean;
+  displayName?: string;
+  username?: string;
 };
 export type HostedPreviewView = {
   scenario: string; screen: string; accountState: string; entitlementState: string;
@@ -123,9 +126,13 @@ export interface DesktopBridge {
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
   enrollment_discover(origin?: string): Promise<EnrollmentView>;
-  enrollment_create_owner(): Promise<EnrollmentView>;
-  enrollment_sign_in(): Promise<EnrollmentView>;
-  enrollment_connect_shared_secret(): Promise<EnrollmentView>;
+  enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView>;
+  enrollment_sign_in(input?: { username?: string }): Promise<EnrollmentView>;
+  enrollment_connect_shared_secret(input?: { vaultOwner?: string }): Promise<EnrollmentView>;
+  enrollment_begin_vault_request(input: { inviteLink: string; displayName: string }): Promise<EnrollmentView>;
+  enrollment_vault_request_status(): Promise<EnrollmentView>;
+  enrollment_create_vault(input: { username: string }): Promise<EnrollmentView>;
+  enrollment_pending_invite?(): Promise<string | null>;
   enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
   enrollment_status(): Promise<EnrollmentView>;
   enrollment_approve(): Promise<EnrollmentView>;

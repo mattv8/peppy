@@ -3,7 +3,7 @@ import { BrowserCore, type CoreResult, type EmscriptenCoreModule } from "./core.
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./owner.js";
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
-import { BrowserEnrollment, type EnrollmentView, type InstanceManagement } from "./enrollment.js";
+import { BrowserEnrollment, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
 import { BrowserScheduler } from "./scheduler.js";
 import { OriginTransport } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
@@ -48,10 +48,14 @@ export interface BrowserNetwork {
   start(): Promise<void>;
   stop(): Promise<void>;
   enrollmentDiscover(origin?: string): Promise<EnrollmentView>;
-  enrollmentCreateOwner(secrets: { setupToken?: string; adminPassword?: string; passphrase: string }): Promise<EnrollmentView>;
-  enrollmentSignIn(adminPassword: string): Promise<EnrollmentView>;
+  enrollmentCreateOwner(secrets: { setupToken?: string; adminPassword?: string; passphrase: string }, username?: string): Promise<EnrollmentView>;
+  enrollmentSignIn(adminPassword: string, username?: string): Promise<EnrollmentView>;
   enrollmentSetHostedCsrf(csrf: string): Promise<void>;
-  enrollmentConnectSharedSecret(passphrase: string): Promise<EnrollmentView>;
+  enrollmentConnectSharedSecret(passphrase: string, vaultOwner?: string): Promise<EnrollmentView>;
+  enrollmentBeginVaultRequest(inviteLink: string, displayName: string): Promise<EnrollmentView>;
+  enrollmentVaultRequestStatus(): Promise<EnrollmentView>;
+  enrollmentCreateVault(username: string, secrets: { adminPassword: string; passphrase: string }): Promise<EnrollmentView>;
+  enrollmentPendingVaultRequest(): Promise<{ origin: string; requestId: string; displayName: string } | null>;
   enrollmentAddPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
   enrollmentStatus(): Promise<EnrollmentView>;
   enrollmentApprove(passphrase: string): Promise<EnrollmentView>;
@@ -60,6 +64,13 @@ export interface BrowserNetwork {
   enrollmentGenerateSecret(): Promise<string>;
   enrollmentManagement(): Promise<InstanceManagement>;
   enrollmentRevokeDevice(deviceId: string): Promise<InstanceManagement>;
+  enrollmentListVaults(): Promise<VaultSummary[]>;
+  enrollmentCreateInvite(): Promise<{ inviteId: string; inviteLink: string; expiresInSeconds: number }>;
+  enrollmentListInvites(): Promise<VaultInviteView[]>;
+  enrollmentRevokeInvite(inviteId: string): Promise<void>;
+  enrollmentListVaultRequests(): Promise<VaultRequestView[]>;
+  enrollmentApproveVaultRequest(requestId: string): Promise<void>;
+  enrollmentDenyVaultRequest(requestId: string): Promise<void>;
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
   wake?(): void;
@@ -119,11 +130,17 @@ const ENROLLMENT_MUTATIONS = new Set([
   "enrollment_cancel",
   "enrollment_sign_out",
   "enrollment_revoke_device",
+  "enrollment_begin_vault_request",
+  "enrollment_create_vault",
+  "enrollment_revoke_invite",
+  "enrollment_approve_vault_request",
+  "enrollment_deny_vault_request",
 ]);
 
 const ENROLLMENT_ACTIVATIONS = new Set([
   "enrollment_create_owner",
   "enrollment_connect_shared_secret",
+  "enrollment_create_vault",
 ]);
 
 function isReadyEnrollmentView(value: unknown): boolean {
@@ -484,11 +501,19 @@ export class BrowserWorkerHost {
       const csrf = secretString(request.args, "csrf");
       const passphrase = secretString(request.args, "passphrase");
       const method = request.args.method;
+      const username = typeof request.args.username === "string" ? request.args.username : undefined;
+      const vaultOwner = typeof request.args.vaultOwner === "string" ? request.args.vaultOwner : undefined;
+      const inviteLink = typeof request.args.inviteLink === "string" ? request.args.inviteLink : undefined;
+      const displayName = typeof request.args.displayName === "string" ? request.args.displayName : undefined;
       const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
-       : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase })
-          : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "")
+       : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username)
+          : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "", username)
             : request.command === "enrollment_set_hosted_csrf" && csrf ? (await network.enrollmentSetHostedCsrf(csrf), undefined)
-            : request.command === "enrollment_connect_shared_secret" && passphrase ? await network.enrollmentConnectSharedSecret(passphrase)
+            : request.command === "enrollment_connect_shared_secret" && passphrase ? await network.enrollmentConnectSharedSecret(passphrase, vaultOwner)
+              : request.command === "enrollment_begin_vault_request" && inviteLink && displayName ? await network.enrollmentBeginVaultRequest(inviteLink, displayName)
+                : request.command === "enrollment_vault_request_status" ? await network.enrollmentVaultRequestStatus()
+                  : request.command === "enrollment_create_vault" && username && passphrase && adminPassword ? await network.enrollmentCreateVault(username, { adminPassword, passphrase })
+                    : request.command === "enrollment_pending_vault_request" ? await network.enrollmentPendingVaultRequest()
               : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
                 : request.command === "enrollment_status" ? await network.enrollmentStatus()
                   : request.command === "enrollment_approve" && passphrase ? await network.enrollmentApprove(passphrase)
@@ -496,9 +521,16 @@ export class BrowserWorkerHost {
         : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
                         : request.command === "enrollment_generate_secret" ? { passphrase: await network.enrollmentGenerateSecret() }
                           : request.command === "enrollment_management" ? await network.enrollmentManagement()
-                            : request.command === "enrollment_revoke_device" && typeof request.args.deviceId === "string" ? await network.enrollmentRevokeDevice(request.args.deviceId)
-                          : undefined;
-      if (value === undefined && request.command !== "enrollment_cancel" && request.command !== "enrollment_sign_out") throw { code: "invalid-request" };
+                             : request.command === "enrollment_revoke_device" && typeof request.args.deviceId === "string" ? await network.enrollmentRevokeDevice(request.args.deviceId)
+                               : request.command === "enrollment_list_vaults" ? await network.enrollmentListVaults()
+                                 : request.command === "enrollment_create_invite" ? await network.enrollmentCreateInvite()
+                                   : request.command === "enrollment_list_invites" ? await network.enrollmentListInvites()
+                                     : request.command === "enrollment_revoke_invite" && typeof request.args.inviteId === "string" ? (await network.enrollmentRevokeInvite(request.args.inviteId), undefined)
+                                       : request.command === "enrollment_list_vault_requests" ? await network.enrollmentListVaultRequests()
+                                         : request.command === "enrollment_approve_vault_request" && typeof request.args.requestId === "string" ? (await network.enrollmentApproveVaultRequest(request.args.requestId), undefined)
+                                           : request.command === "enrollment_deny_vault_request" && typeof request.args.requestId === "string" ? (await network.enrollmentDenyVaultRequest(request.args.requestId), undefined)
+                           : undefined;
+      if (value === undefined && !["enrollment_cancel", "enrollment_sign_out", "enrollment_revoke_invite", "enrollment_approve_vault_request", "enrollment_deny_vault_request"].includes(request.command)) throw { code: "invalid-request" };
       return { id: request.id, ok: true, value };
     } catch (error: unknown) { return { id: request.id, ok: false, error: errorFor(error) }; }
   }
@@ -579,10 +611,14 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       stop: stopNetwork,
       subscribeChanges(listener) { changeListeners.add(listener); return () => changeListeners.delete(listener); },
       async enrollmentDiscover(origin) { return enrollment?.discover(origin) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
-      async enrollmentCreateOwner(secrets) { return enrollment?.createOwner(secrets) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
-       async enrollmentSignIn(adminPassword) { return enrollment?.signIn(adminPassword) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentCreateOwner(secrets, username) { return enrollment?.createOwner(secrets, username) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+        async enrollmentSignIn(adminPassword, username) { return enrollment?.signIn(adminPassword, username) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentSetHostedCsrf(csrf) { enrollment?.setHostedCsrf(csrf); },
-      async enrollmentConnectSharedSecret(passphrase) { return enrollment?.connectSharedSecret(passphrase) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentConnectSharedSecret(passphrase, vaultOwner) { return enrollment?.connectSharedSecret(passphrase, vaultOwner) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentBeginVaultRequest(inviteLink, displayName) { return enrollment?.beginVaultRequest(inviteLink, displayName) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentVaultRequestStatus() { return enrollment?.vaultRequestStatus() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentCreateVault(username, secrets) { return enrollment?.createVault(username, secrets) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentPendingVaultRequest() { return enrollment?.pendingVaultRequest() ?? null; },
       async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentStatus() { return enrollment?.status() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentApprove(passphrase) { return enrollment?.approve(passphrase) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
@@ -590,7 +626,14 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       async enrollmentSignOut() { await enrollment?.signOut(); },
       async enrollmentGenerateSecret() { if (!enrollment) throw { code: "unavailable" }; return enrollment.generateSecret(); },
       async enrollmentManagement() { if (!enrollment) throw { code: "unavailable" }; return enrollment.management(); },
-      async enrollmentRevokeDevice(deviceId) { if (!enrollment) throw { code: "unavailable" }; return enrollment.revokeDevice(deviceId); },
+       async enrollmentRevokeDevice(deviceId) { if (!enrollment) throw { code: "unavailable" }; return enrollment.revokeDevice(deviceId); },
+       async enrollmentListVaults() { if (!enrollment) throw { code: "unavailable" }; return enrollment.listVaults(); },
+       async enrollmentCreateInvite() { if (!enrollment) throw { code: "unavailable" }; return enrollment.createInvite(); },
+       async enrollmentListInvites() { if (!enrollment) throw { code: "unavailable" }; return enrollment.listInvites(); },
+       async enrollmentRevokeInvite(inviteId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.revokeInvite(inviteId); },
+       async enrollmentListVaultRequests() { if (!enrollment) throw { code: "unavailable" }; return enrollment.listVaultRequests(); },
+       async enrollmentApproveVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.approveVaultRequest(requestId); },
+       async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
     },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
