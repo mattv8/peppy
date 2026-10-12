@@ -6,11 +6,12 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Extension, Path, State},
     http::{HeaderMap, Method, StatusCode},
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ipnet::IpNet;
 use peppy_crypto::enrollment::{
     EnrollmentContext, EnrollmentPurpose, EnrollmentRole as CryptoEnrollmentRole,
     verify_admission_signature, verify_device_proof,
@@ -22,7 +23,12 @@ use peppy_hosted_api::enrollment::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -34,6 +40,9 @@ use crate::{
 const CHALLENGE_TTL_SECONDS: i64 = 120;
 const MAX_ACTIVE_CHALLENGES_PER_VAULT: i64 = 100;
 const MAX_FAILED_PROOFS: i32 = 5;
+const MANUAL_OWNER_LIMIT: u8 = 5;
+const MANUAL_OWNER_WINDOW: Duration = Duration::from_secs(60);
+const MAX_MANUAL_OWNER_SOURCES: usize = 1024;
 
 /// Dependencies deliberately supplied by the API assembler rather than read
 /// from process configuration. `hosted` means every request requires the
@@ -44,6 +53,13 @@ pub struct EnrollmentRouterState {
     pub authorization: Arc<dyn EnrollmentAuthorization>,
     pub hosted: bool,
     canonical_origin: String,
+    manual_owner_admissions: Arc<std::sync::Mutex<HashMap<IpAddr, ManualOwnerAdmission>>>,
+    trusted_proxy_cidrs: Arc<Vec<IpNet>>,
+}
+
+struct ManualOwnerAdmission {
+    window: Instant,
+    count: u8,
 }
 
 impl EnrollmentRouterState {
@@ -58,7 +74,14 @@ impl EnrollmentRouterState {
             authorization,
             hosted,
             canonical_origin: canonical_configured_origin(&configured_origin)?,
+            manual_owner_admissions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            trusted_proxy_cidrs: Arc::new(Vec::new()),
         })
+    }
+
+    pub fn with_trusted_proxy_cidrs(mut self, trusted_proxy_cidrs: Vec<IpNet>) -> Self {
+        self.trusted_proxy_cidrs = Arc::new(trusted_proxy_cidrs);
+        self
     }
 }
 
@@ -79,6 +102,7 @@ pub fn router(state: EnrollmentRouterState) -> Router {
 
 async fn create_challenge(
     State(state): State<EnrollmentRouterState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(request): Json<AdmissionChallengeRequest>,
 ) -> Result<Json<AdmissionChallenge>, ManualError> {
@@ -97,10 +121,11 @@ async fn create_challenge(
         })
         .await;
 
-    let (vault_id, role) = match authorization {
+    let (vault_id, role, authenticated) = match authorization {
         Ok(context) => (
             context.vault_id,
             role_from_authorization(&context.role, request.device.kind)?,
+            true,
         ),
         Err(_) if state.hosted => {
             return Err(ManualError(
@@ -109,8 +134,17 @@ async fn create_challenge(
             ));
         }
         Err(_) => (
-            community_vault(&state.db, request.vault_id).await?,
+            community_vault(
+                &state,
+                request.vault_id,
+                request.vault_owner.as_deref(),
+                peer.map(|Extension(ConnectInfo(peer))| peer),
+                &headers,
+                true,
+            )
+            .await?,
             public_role(request.device.kind),
+            false,
         ),
     };
     let origin = community_origin.unwrap_or_else(|| state.canonical_origin.clone());
@@ -120,6 +154,20 @@ async fn create_challenge(
             .is_some_and(|requested| requested != vault_id)
     {
         return Err(ManualError(StatusCode::FORBIDDEN, "foreign_vault"));
+    }
+    if !state.hosted && authenticated && request.vault_owner.is_some() {
+        let selected = community_vault(
+            &state,
+            None,
+            request.vault_owner.as_deref(),
+            None,
+            &headers,
+            false,
+        )
+        .await?;
+        if selected != vault_id {
+            return Err(ManualError(StatusCode::FORBIDDEN, "foreign_vault"));
+        }
     }
 
     let mut transaction = scope::begin(&state.db, vault_id)
@@ -513,16 +561,148 @@ fn manual_context(fields: ManualContextFields) -> EnrollmentContext {
     }
 }
 
-async fn community_vault(db: &PgPool, requested: Option<Uuid>) -> Result<Uuid, ManualError> {
-    let vault_id = sqlx::query_scalar("SELECT vault_id FROM instance_admin WHERE singleton = TRUE")
-        .fetch_optional(db)
-        .await
-        .map_err(database_error)?
-        .ok_or(ManualError(StatusCode::CONFLICT, "instance_unclaimed"))?;
-    if requested.is_some_and(|value| value != vault_id) {
-        return Err(ManualError(StatusCode::FORBIDDEN, "foreign_vault"));
+async fn community_vault(
+    state: &EnrollmentRouterState,
+    requested: Option<Uuid>,
+    owner: Option<&str>,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    admit_owner: bool,
+) -> Result<Uuid, ManualError> {
+    let owner = normalize_owner_selector(owner)?;
+    if admit_owner && owner.is_some() {
+        admit_manual_owner_source(
+            &state.manual_owner_admissions,
+            peer.map(|peer| resolve_client_ip(peer, headers, &state.trusted_proxy_cidrs)),
+        )?;
+    }
+    let vault_id = if let Some(requested) = requested {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vault_owners WHERE vault_id=$1)")
+                .bind(requested)
+                .fetch_one(&state.db)
+                .await
+                .map_err(database_error)?;
+        if !exists {
+            return Err(ManualError(StatusCode::NOT_FOUND, "vault_not_found"));
+        }
+        requested
+    } else if let Some(owner) = owner.as_deref() {
+        sqlx::query_scalar("SELECT vault_id FROM vault_owners WHERE username=$1")
+            .bind(owner)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(database_error)?
+            .ok_or(ManualError(StatusCode::NOT_FOUND, "vault_not_found"))?
+    } else {
+        let owners: Vec<Uuid> =
+            sqlx::query_scalar("SELECT vault_id FROM vault_owners ORDER BY created_at LIMIT 2")
+                .fetch_all(&state.db)
+                .await
+                .map_err(database_error)?;
+        match owners.as_slice() {
+            [] => return Err(ManualError(StatusCode::CONFLICT, "instance_unclaimed")),
+            [vault_id] => *vault_id,
+            _ => return Err(ManualError(StatusCode::CONFLICT, "vault_owner_required")),
+        }
+    };
+    if let (Some(_), Some(owner)) = (requested, owner) {
+        let selected =
+            sqlx::query_scalar::<_, Uuid>("SELECT vault_id FROM vault_owners WHERE username=$1")
+                .bind(owner)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(database_error)?
+                .ok_or(ManualError(StatusCode::NOT_FOUND, "vault_not_found"))?;
+        if selected != vault_id {
+            return Err(ManualError(StatusCode::FORBIDDEN, "foreign_vault"));
+        }
     }
     Ok(vault_id)
+}
+
+fn normalize_owner_selector(owner: Option<&str>) -> Result<Option<String>, ManualError> {
+    let Some(owner) = owner.map(str::trim).filter(|owner| !owner.is_empty()) else {
+        return Ok(None);
+    };
+    let owner = owner.to_ascii_lowercase();
+    let valid = (1..=32).contains(&owner.len())
+        && owner.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        });
+    if valid {
+        Ok(Some(owner))
+    } else {
+        Err(ManualError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_username",
+        ))
+    }
+}
+
+fn admit_manual_owner_source(
+    admissions: &std::sync::Mutex<HashMap<IpAddr, ManualOwnerAdmission>>,
+    source: Option<IpAddr>,
+) -> Result<(), ManualError> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let now = Instant::now();
+    let mut admissions = admissions
+        .lock()
+        .expect("manual owner admissions lock poisoned");
+    admissions.retain(|_, admission| now.duration_since(admission.window) < MANUAL_OWNER_WINDOW);
+    if !admissions.contains_key(&source)
+        && admissions.len() >= MAX_MANUAL_OWNER_SOURCES
+        && let Some(source) = admissions.keys().next().copied()
+    {
+        admissions.remove(&source);
+    }
+    let admission = admissions.entry(source).or_insert(ManualOwnerAdmission {
+        window: now,
+        count: 0,
+    });
+    admission.count = admission.count.saturating_add(1);
+    if admission.count > MANUAL_OWNER_LIMIT {
+        return Err(ManualError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "manual_owner_limited",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
+    if !trusted.iter().any(|network| network.contains(&peer.ip())) {
+        return peer.ip();
+    }
+    let forwarded: Vec<_> = headers.get_all("x-forwarded-for").iter().collect();
+    if forwarded.len() != 1 || forwarded[0].as_bytes().len() > 8192 {
+        return peer.ip();
+    }
+    let Some(hops) = std::str::from_utf8(forwarded[0].as_bytes())
+        .ok()
+        .and_then(|value| {
+            let hops: Vec<_> = value.split(',').map(str::trim).collect();
+            (1..=16)
+                .contains(&hops.len())
+                .then_some(hops)
+                .filter(|hops| hops.iter().all(|hop| !hop.is_empty()))
+        })
+        .and_then(|hops| {
+            hops.into_iter()
+                .map(|hop| hop.parse().ok())
+                .collect::<Option<Vec<IpAddr>>>()
+        })
+    else {
+        return peer.ip();
+    };
+    hops.into_iter()
+        .rev()
+        .find(|hop| !trusted.iter().any(|network| network.contains(hop)))
+        .unwrap_or_else(|| peer.ip())
 }
 
 fn validate_device(device: &ProposedDevice) -> Result<[u8; 32], ManualError> {

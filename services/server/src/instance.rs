@@ -5,6 +5,7 @@ use libsodium_rs::crypto_pwhash::{self, argon2id};
 use sha2::{Digest, Sha256};
 
 const SESSION_TOKEN_BYTES: usize = 32;
+const BROWSER_CSRF_DOMAIN: &[u8] = b"peppy:instance-browser-csrf:v1\0";
 const MIN_CONFIGURED_SETUP_TOKEN_BYTES: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,13 @@ pub fn random_token() -> Result<String, &'static str> {
     let mut bytes = [0; SESSION_TOKEN_BYTES];
     libsodium_rs::random::fill_bytes(&mut bytes);
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub fn browser_csrf_token(session_token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(BROWSER_CSRF_DOMAIN);
+    digest.update(session_token.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest.finalize())
 }
 
 pub fn configured_setup_token_digest() -> Result<Option<[u8; 32]>, &'static str> {

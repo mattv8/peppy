@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 15] = [
+const UP: [&str; 16] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -19,9 +19,10 @@ const UP: [&str; 15] = [
     include_str!("../migrations/0013_pairing_join_requests.sql"),
     include_str!("../migrations/0014_enrollment.sql"),
     include_str!("../migrations/0015_remove_legacy_pairing.sql"),
+    include_str!("../migrations/0016_multi_vault.sql"),
 ];
 
-const DOWN: [&str; 15] = [
+const DOWN: [&str; 16] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -37,6 +38,7 @@ const DOWN: [&str; 15] = [
     include_str!("../migrations/down/0013_pairing_join_requests.down.sql"),
     include_str!("../migrations/down/0014_enrollment.down.sql"),
     include_str!("../migrations/down/0015_remove_legacy_pairing.down.sql"),
+    include_str!("../migrations/down/0016_multi_vault.down.sql"),
 ];
 
 #[tokio::test]
@@ -60,6 +62,7 @@ async fn migrations_round_trip_in_an_isolated_schema() {
         run(&mut database, migration).await;
         seed_populated_downgrade_case(&mut database, version).await;
         run(&mut database, DOWN[version]).await;
+        assert_populated_downgrade_case(&mut database, version).await;
         assert_eq!(
             schema_fingerprint(&mut database, &schema).await,
             predecessor
@@ -94,6 +97,25 @@ async fn migrations_round_trip_in_an_isolated_schema() {
         .unwrap();
 }
 
+async fn assert_populated_downgrade_case(database: &mut PgConnection, version: usize) {
+    if version != 15 {
+        return;
+    }
+    let admin: (Uuid, String, Vec<u8>) =
+        sqlx::query_as("SELECT vault_id, password_hash, request_digest FROM instance_admin")
+            .fetch_one(&mut *database)
+            .await
+            .unwrap();
+    assert_eq!(admin.0, Uuid::from_u128(0x20));
+    assert_eq!(admin.1, "hash");
+    assert_eq!(admin.2, vec![1; 32]);
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_sessions")
+        .fetch_one(&mut *database)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 0, "0016 invalidates old vault-bound sessions");
+}
+
 async fn run(database: &mut PgConnection, migration: &str) {
     run_result(database, migration).await.unwrap();
 }
@@ -102,7 +124,9 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(!table_exists(database, "pairing_challenges").await);
     assert!(!table_exists(database, "pairing_intents").await);
     assert!(!table_exists(database, "pairing_join_requests").await);
-    assert!(table_exists(database, "instance_admin").await);
+    assert!(table_exists(database, "vault_owners").await);
+    assert!(table_exists(database, "vault_invites").await);
+    assert!(table_exists(database, "vault_requests").await);
     assert!(table_exists(database, "device_admissions").await);
     assert!(table_exists(database, "phone_invitations").await);
     assert!(index_exists(database, "device_wake_jobs_lease_due").await);
@@ -147,6 +171,19 @@ async fn seed_populated_downgrade_case(database: &mut PgConnection, version: usi
             .execute(&mut *database)
             .await
             .unwrap();
+        }
+        15 => {
+            run(database, "
+                INSERT INTO vaults(vault_id, public_key_profile, encrypted_vault_check_header, key_epoch, profile_fingerprint)
+                VALUES ('00000000-0000-0000-0000-000000000020', '{}', '\\x01', 1, repeat('b', 64)),
+                       ('00000000-0000-0000-0000-000000000021', '{}', '\\x01', 1, repeat('c', 64));
+                INSERT INTO vault_owners(vault_id, username, password_hash, is_admin, operation_id, request_digest)
+                VALUES ('00000000-0000-0000-0000-000000000020', 'admin', 'hash', TRUE, '00000000-0000-0000-0000-000000000022', decode(repeat('01', 32), 'hex')),
+                       ('00000000-0000-0000-0000-000000000021', 'owner', 'hash', FALSE, '00000000-0000-0000-0000-000000000023', decode(repeat('02', 32), 'hex'));
+                INSERT INTO instance_sessions(token_digest, vault_id, expires_at) VALUES (decode(repeat('03', 32), 'hex'), '00000000-0000-0000-0000-000000000020', now() + interval '1 hour');
+                INSERT INTO vault_invites(id, token_digest, created_by, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000024', decode(repeat('04', 32), 'hex'), '00000000-0000-0000-0000-000000000020', 'used', now() + interval '1 hour');
+                INSERT INTO vault_requests(id, invite_id, display_name, client_kind, secret_digest, state, expires_at) VALUES ('00000000-0000-0000-0000-000000000025', '00000000-0000-0000-0000-000000000024', 'requester', 'desktop', decode(repeat('05', 32), 'hex'), 'pending', now() + interval '1 hour');
+            ").await;
         }
         _ => {}
     }

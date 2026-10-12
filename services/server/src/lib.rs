@@ -18,9 +18,16 @@ pub async fn serve<S>(
 where
     S: std::future::Future<Output = ()> + Send + 'static,
 {
+    let (stream_shutdown, stream_shutdown_receiver) = tokio::sync::watch::channel(false);
+    let shutdown = async move {
+        shutdown.await;
+        let _ = stream_shutdown.send(true);
+    };
     axum::serve(
         listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
+        router
+            .layer(axum::Extension(stream_shutdown_receiver))
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)
     .await
