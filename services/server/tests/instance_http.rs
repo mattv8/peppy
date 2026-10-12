@@ -451,7 +451,7 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
     assert!(!native_token.is_empty());
     assert!(winner_body["session"]["csrf_token"].is_null());
 
-    let owner_count: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_admin")
+    let owner_count: i64 = sqlx::query_scalar("SELECT count(*) FROM vault_owners")
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
@@ -470,7 +470,7 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
         .unwrap();
     assert_eq!((device_count, credential_count), (1, 1));
     let stored_request_digest: Vec<u8> =
-        sqlx::query_scalar("SELECT request_digest FROM instance_admin")
+        sqlx::query_scalar("SELECT request_digest FROM vault_owners")
             .fetch_one(&fixture.pool)
             .await
             .unwrap();
@@ -791,7 +791,7 @@ async fn exact_claim_replays_after_restart_without_setup_authority() {
     let replay_session = replay["session"]["session_token"].as_str().unwrap();
     assert_ne!(replay_session, initial_session);
 
-    let owner_count: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_admin")
+    let owner_count: i64 = sqlx::query_scalar("SELECT count(*) FROM vault_owners")
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
@@ -905,6 +905,43 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
     )
     .await;
     assert_eq!(account.status(), StatusCode::OK);
+
+    let restored_session = send(
+        app.clone(),
+        Method::GET,
+        "/v1/instance/session",
+        None,
+        &[("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(restored_session.status(), StatusCode::OK);
+    assert_eq!(restored_session.headers()["cache-control"], "no-store");
+    let restored_body = json_body(restored_session).await;
+    assert_eq!(restored_body["csrf_token"], csrf);
+    assert!(restored_body.get("session_token").is_none());
+
+    let raw_browser_token = cookie
+        .strip_prefix("Peppy-Instance-Session=")
+        .expect("session cookie contains the browser token");
+    let native_session_restore = send(
+        app.clone(),
+        Method::GET,
+        "/v1/instance/session",
+        None,
+        &[("peppy-instance-session", raw_browser_token)],
+    )
+    .await;
+    assert_eq!(native_session_restore.status(), StatusCode::UNAUTHORIZED);
+
+    let cross_origin_restore = send(
+        app.clone(),
+        Method::GET,
+        "/v1/instance/session",
+        None,
+        &[("origin", "https://attacker.example"), ("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(cross_origin_restore.status(), StatusCode::FORBIDDEN);
 
     let manual = json!({
         "device": {
@@ -1031,7 +1068,32 @@ async fn browser_claim_login_logout_and_revoke_enforce_cookie_origin_and_csrf_co
 async fn hosted_router_does_not_mount_community_instance_routes() {
     let fixture = Fixture::new().await;
     let app = fixture.hosted_app().await;
-    let response = send(app, Method::GET, "/v1/instance", None, &[]).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for (method, path) in [
+        (Method::GET, "/v1/instance"),
+        (Method::POST, "/v1/instance/claim"),
+        (Method::GET, "/v1/instance/session"),
+        (Method::POST, "/v1/instance/session"),
+        (Method::GET, "/v1/instance/vaults"),
+        (Method::POST, "/v1/instance/invites"),
+        (Method::GET, "/v1/instance/vault-requests"),
+        (Method::POST, "/v1/instance/vault-requests"),
+        (
+            Method::GET,
+            "/v1/instance/vault-requests/00000000-0000-0000-0000-000000000000",
+        ),
+        (
+            Method::POST,
+            "/v1/instance/vault-requests/00000000-0000-0000-0000-000000000000/approve",
+        ),
+        (
+            Method::POST,
+            "/v1/instance/vault-requests/00000000-0000-0000-0000-000000000000/deny",
+        ),
+        (Method::POST, "/v1/instance/vaults"),
+        (Method::GET, "/v1/instance/events"),
+    ] {
+        let response = send(app.clone(), method, path, None, &[]).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     fixture.cleanup().await;
 }

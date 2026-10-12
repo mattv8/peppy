@@ -79,7 +79,7 @@ async fn app() -> (
     sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,$2,$3,1,$4)")
         .bind(vault).bind(serde_json::json!({"vault_id": vault, "key_epoch": 1}))
         .bind(vec![9u8, 8, 7]).bind(&fingerprint).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO instance_admin(singleton,vault_id,operation_id,request_digest,password_hash) VALUES(TRUE,$1,$2,$3,'test')")
+    sqlx::query("INSERT INTO vault_owners(vault_id,username,operation_id,request_digest,password_hash,is_admin) VALUES($1,'admin',$2,$3,'test',TRUE)")
         .bind(vault).bind(Uuid::new_v4()).bind(vec![1u8; 32]).execute(&pool).await.unwrap();
     let profile = KeyProfile::new(vault, 1).unwrap();
     let root = derive_root_key("correct horse battery staple", &profile).unwrap();
@@ -133,6 +133,52 @@ async fn call_with_origin(
     (app, status, serde_json::from_slice(&body).unwrap())
 }
 
+fn challenge_request(
+    vault_id: Option<Uuid>,
+    vault_owner: Option<&str>,
+) -> AdmissionChallengeRequest {
+    let device = crypto_sign::KeyPair::generate().unwrap();
+    AdmissionChallengeRequest {
+        device: ProposedDevice {
+            device_id: Uuid::new_v4(),
+            kind: ClientKind::Desktop,
+            name: "selector test".into(),
+            signing_public_key: URL_SAFE_NO_PAD.encode(device.public_key.as_bytes()),
+        },
+        vault_id,
+        vault_owner: vault_owner.map(str::to_owned),
+        credential_digest: hex::encode(Uuid::new_v4().as_bytes().repeat(2)),
+    }
+}
+
+async fn add_vault(pool: &PgPool, username: &str) -> Uuid {
+    let vault = Uuid::new_v4();
+    let fingerprint = "22".repeat(32);
+    sqlx::query("INSERT INTO vaults(vault_id,public_key_profile,encrypted_vault_check_header,key_epoch,profile_fingerprint) VALUES($1,$2,$3,1,$4)")
+        .bind(vault)
+        .bind(serde_json::json!({"vault_id": vault, "key_epoch": 1}))
+        .bind(vec![9u8, 8, 7])
+        .bind(&fingerprint)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO vault_owners(vault_id,username,operation_id,request_digest,password_hash,is_admin) VALUES($1,$2,$3,$4,'test',FALSE)")
+        .bind(vault)
+        .bind(username)
+        .bind(Uuid::new_v4())
+        .bind(vec![2u8; 32])
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) SELECT $1,key_epoch,$2,admission_public_key FROM vault_admission_keys LIMIT 1")
+        .bind(vault)
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .unwrap();
+    vault
+}
+
 #[tokio::test]
 async fn manual_challenge_rejects_wrong_psk_and_replay_and_expiry() {
     let (mut app, pool, schema, vault, admission) = app().await;
@@ -147,6 +193,7 @@ async fn manual_challenge_rejects_wrong_psk_and_replay_and_expiry() {
             signing_public_key: URL_SAFE_NO_PAD.encode(device.public_key.as_bytes()),
         },
         vault_id: Some(vault),
+        vault_owner: None,
         credential_digest: digest.clone(),
     };
     let hosted_app = router(
@@ -311,6 +358,7 @@ async fn manual_challenge_rejects_wrong_psk_and_replay_and_expiry() {
             signing_public_key: URL_SAFE_NO_PAD.encode(device.public_key.as_bytes()),
         },
         vault_id: Some(vault),
+        vault_owner: None,
         credential_digest: "33".repeat(32),
     };
     let (next, status, renewal_json) = call(
@@ -347,6 +395,115 @@ async fn manual_challenge_rejects_wrong_psk_and_replay_and_expiry() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn manual_challenge_selects_multi_vaults_without_owner_enumeration() {
+    let (app, pool, schema, vault, _) = app().await;
+
+    let (_, status, selected) = call(
+        app.clone(),
+        "/v1/enrollment/challenges",
+        serde_json::to_value(challenge_request(None, None)).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["vault_id"], vault.to_string());
+
+    let (_, status, selected) = call(
+        app.clone(),
+        "/v1/enrollment/challenges",
+        serde_json::to_value(challenge_request(Some(vault), None)).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["vault_id"], vault.to_string());
+
+    let second = add_vault(&pool, "second").await;
+    let (_, status, selected) = call(
+        app.clone(),
+        "/v1/enrollment/challenges",
+        serde_json::to_value(challenge_request(Some(second), None)).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["vault_id"], second.to_string());
+
+    let (_, status, selected) = call(
+        app.clone(),
+        "/v1/enrollment/challenges",
+        serde_json::to_value(challenge_request(None, Some("SECOND"))).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(selected["vault_id"], second.to_string());
+
+    for (request, expected_status, expected_error) in [
+        (
+            challenge_request(Some(Uuid::new_v4()), None),
+            StatusCode::NOT_FOUND,
+            "vault_not_found",
+        ),
+        (
+            challenge_request(None, Some("missing")),
+            StatusCode::NOT_FOUND,
+            "vault_not_found",
+        ),
+        (
+            challenge_request(Some(vault), Some("second")),
+            StatusCode::FORBIDDEN,
+            "foreign_vault",
+        ),
+        (
+            challenge_request(None, None),
+            StatusCode::CONFLICT,
+            "vault_owner_required",
+        ),
+        (
+            challenge_request(None, Some("  ")),
+            StatusCode::CONFLICT,
+            "vault_owner_required",
+        ),
+        (
+            challenge_request(None, Some("bad owner")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_username",
+        ),
+    ] {
+        let (_, status, body) = call(
+            app.clone(),
+            "/v1/enrollment/challenges",
+            serde_json::to_value(request).unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected_status);
+        assert_eq!(body["error"], expected_error);
+    }
+
+    sqlx::query("INSERT INTO instance_sessions(token_digest,vault_id,expires_at) VALUES($1,$2,now()+interval '1 hour')")
+        .bind(peppy_server::instance::digest(b"session").as_slice())
+        .bind(vault)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::post("/v1/enrollment/challenges")
+                .header("origin", "https://peppy.test")
+                .header("content-type", "application/json")
+                .header("peppy-instance-session", "session")
+                .body(Body::from(
+                    serde_json::to_string(&challenge_request(Some(second), None)).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&pool)
         .await

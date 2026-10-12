@@ -1,4 +1,5 @@
 mod attachments;
+mod instance;
 mod key_profiles;
 mod sync;
 
@@ -117,9 +118,9 @@ impl EnrollmentAuthorization for CommunityEnrollmentAuthorization {
             let Some(token) = token else {
                 return Err(axum::http::StatusCode::UNAUTHORIZED);
             };
-            let row = sqlx::query("SELECT admin.vault_id, sessions.csrf_digest FROM instance_sessions sessions CROSS JOIN instance_admin admin WHERE sessions.token_digest=$1 AND sessions.revoked_at IS NULL AND sessions.expires_at>now()")
-                .bind(crate::instance::digest(token.as_bytes()).as_slice())
-                .fetch_optional(&self.db).await.map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?
+            let row = instance::lookup_session(&self.db, token)
+                .await
+                .map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?
                 .ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
             if browser {
                 let origin = request
@@ -135,13 +136,13 @@ impl EnrollmentAuthorization for CommunityEnrollmentAuthorization {
                     .get("x-peppy-csrf-token")
                     .and_then(|value| value.to_str().ok())
                     .ok_or(axum::http::StatusCode::FORBIDDEN)?;
-                let expected: Option<Vec<u8>> = row.get("csrf_digest");
+                let expected = row.1;
                 if expected.as_deref() != Some(crate::instance::digest(csrf.as_bytes()).as_slice())
                 {
                     return Err(axum::http::StatusCode::FORBIDDEN);
                 }
             }
-            let vault_id = row.get("vault_id");
+            let vault_id = row.0.vault_id;
             Ok(EnrollmentAuthContext {
                 vault_id,
                 device_id: None,
@@ -186,10 +187,14 @@ use uuid::Uuid;
 use crate::{config::Config, scope, storage::Storage};
 
 const TOKEN_BYTES_HEX: usize = 96;
+/// Fixed dummy hash checked for unknown usernames so login spends comparable Argon2id
+/// time. Its parameters match the libsodium INTERACTIVE limits used for stored admin hashes.
+const DUMMY_ADMIN_PASSWORD_HASH: &str =
+    "$argon2id$v=19$m=65536,t=2,p=1$c2FsdHNhbHRzYWx0cw$EwM3PQ8nhmqXBdGiYHhvPYGBuA1jw0dz45Etz12Z1TQ";
 
 #[derive(Clone)]
 pub(super) struct ApiState {
-    db: PgPool,
+    pub(super) db: PgPool,
     committed: tokio::sync::broadcast::Sender<(Uuid, i64)>,
     storage: Option<Storage>,
     vault_attachment_quota_bytes: i64,
@@ -197,6 +202,9 @@ pub(super) struct ApiState {
     options: Arc<TransportOptions>,
     instance_account_admissions: Arc<tokio::sync::Mutex<InstanceAccountAdmissions>>,
     instance_password_slots: Arc<tokio::sync::Semaphore>,
+    pub(super) instance_events: tokio::sync::broadcast::Sender<()>,
+    pub(super) event_stream_slots: Arc<tokio::sync::Semaphore>,
+    pub(super) event_stream_sessions: Arc<std::sync::Mutex<HashMap<Vec<u8>, usize>>>,
     policy: Arc<dyn AccessPolicy>,
     row_security: bool,
     instance_origin: Option<url::Url>,
@@ -372,10 +380,36 @@ pub(crate) struct Maintenance {
 impl Maintenance {
     pub(crate) fn start(self) {
         sync::spawn_maintenance(self.db.clone(), &self.committed, self.storage, self.options);
+        spawn_instance_maintenance(self.db.clone());
         if let Some(relay_url) = self.relay_url {
             spawn_wake_maintenance(self.db, &self.committed, relay_url);
         }
     }
+}
+
+fn spawn_instance_maintenance(db: PgPool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3_600));
+        loop {
+            interval.tick().await;
+            let result = sqlx::query(
+                "DELETE FROM vault_requests WHERE (state IN ('denied', 'completed') OR (state IN ('pending', 'approved') AND expires_at < now())) AND created_at < now() - interval '30 days'",
+            )
+            .execute(&db)
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "instance request retention sweep failed");
+            }
+            let result = sqlx::query(
+                "DELETE FROM vault_invites WHERE (state IN ('revoked', 'used') OR (state = 'active' AND expires_at < now())) AND created_at < now() - interval '30 days'",
+            )
+            .execute(&db)
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "instance invite retention sweep failed");
+            }
+        }
+    });
 }
 
 pub(crate) fn build_router(
@@ -477,19 +511,7 @@ pub(crate) fn build_router(
     let router = if row_security {
         router
     } else {
-        router
-            .route("/v1/instance", get(instance_info))
-            .route("/v1/instance/claim", post(claim_instance))
-            .route(
-                "/v1/instance/session",
-                post(instance_login).delete(instance_logout),
-            )
-            .route("/v1/instance/account", get(instance_account))
-            .route("/v1/instance/management", get(instance_management))
-            .route(
-                "/v1/instance/devices/{device_id}/revoke",
-                post(instance_revoke_device),
-            )
+        router.merge(instance::routes())
     };
     let router = router.with_state(ApiState {
         db: db.clone(),
@@ -504,13 +526,16 @@ pub(crate) fn build_router(
             sources: HashMap::new(),
         })),
         instance_password_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        instance_events: tokio::sync::broadcast::channel(64).0,
+        event_stream_slots: Arc::new(tokio::sync::Semaphore::new(32)),
+        event_stream_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         policy,
         row_security,
         instance_origin: config
             .as_ref()
             .and_then(|config| config.public_api_url.clone()),
         claim_policy,
-        trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs),
+        trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs.clone()),
     });
     let router = match invitation_origin.as_ref().and_then(|origin| {
         crate::enrollment::manual::EnrollmentRouterState::new(
@@ -520,6 +545,7 @@ pub(crate) fn build_router(
             origin.clone(),
         )
         .ok()
+        .map(|state| state.with_trusted_proxy_cidrs(trusted_proxy_cidrs.clone()))
     }) {
         Some(state) => router.merge(crate::enrollment::manual::router(state)),
         None => router,
@@ -549,19 +575,20 @@ pub(crate) fn build_router(
 }
 
 #[derive(Debug)]
-pub(super) struct ApiError(StatusCode, &'static str);
+pub(super) struct ApiError(pub(super) StatusCode, pub(super) &'static str);
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         (self.0, Json(json!({"code":self.1}))).into_response()
     }
 }
-type ApiResult<T> = Result<T, ApiError>;
+pub(super) type ApiResult<T> = Result<T, ApiError>;
 
-async fn instance_info(State(state): State<ApiState>) -> ApiResult<Json<InstanceInfo>> {
-    let claimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM instance_admin)")
-        .fetch_one(&state.db)
-        .await
-        .map_err(|error| database_unavailable(&error, "instance_info"))?;
+pub(super) async fn instance_info(State(state): State<ApiState>) -> ApiResult<Json<InstanceInfo>> {
+    let claimed: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM vault_owners WHERE is_admin)")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|error| database_unavailable(&error, "instance_info"))?;
     Ok(Json(InstanceInfo {
         mode: DeploymentMode::Community,
         claimed,
@@ -600,7 +627,7 @@ fn decode_b64url<const N: usize>(value: &str, code: &'static str) -> Result<[u8;
         .ok_or(ApiError(StatusCode::UNPROCESSABLE_ENTITY, code))
 }
 
-fn validate_proposed_device(
+pub(super) fn validate_proposed_device(
     device: &peppy_hosted_api::enrollment::ProposedDevice,
 ) -> Result<[u8; 32], ApiError> {
     crate::enrollment::validate_device_name(&device.name)
@@ -608,7 +635,7 @@ fn validate_proposed_device(
     decode_b64url(&device.signing_public_key, "invalid_signing_public_key")
 }
 
-fn validate_claim_material(
+pub(super) fn validate_claim_material(
     request: &ClaimInstanceRequest,
 ) -> Result<([u8; 32], [u8; 32]), ApiError> {
     let profile_vault = validate_profile(
@@ -641,32 +668,34 @@ fn validate_claim_material(
     ))
 }
 
-fn instance_request_digest(request: &ClaimInstanceRequest) -> Result<[u8; 32], ApiError> {
-    let mut public_request = serde_json::to_value(request)
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_claim"))?;
-    let fields = public_request
-        .as_object_mut()
-        .ok_or(ApiError(StatusCode::BAD_REQUEST, "invalid_claim"))?;
-    fields.remove("admin_password");
-    fields.remove("setup_token");
-    serde_json::to_vec(&public_request)
-        .map(|bytes| Sha256::digest(bytes).into())
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_claim"))
+pub(super) fn validate_owner_material(
+    material: &VaultMaterial,
+    credential_digest: &str,
+) -> Result<([u8; 32], [u8; 32]), ApiError> {
+    validate_profile(&material.profile, &material.fingerprint, material.key_epoch)
+        .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_vault_material"))?;
+    Ok((
+        decode_b64url(
+            &material.admission_public_key,
+            "invalid_admission_public_key",
+        )?,
+        decode_hex_digest(credential_digest)?,
+    ))
 }
 
-async fn create_instance_session(
+pub(super) async fn create_instance_session(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client: ClientKind,
+    vault_id: Uuid,
 ) -> ApiResult<InstanceSession> {
     let session_token = crate::instance::random_token()
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"))?;
     let csrf_token = matches!(client, ClientKind::Browser)
-        .then(crate::instance::random_token)
-        .transpose()
-        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "session_unavailable"))?;
-    sqlx::query("INSERT INTO instance_sessions(token_digest, csrf_digest, expires_at) VALUES($1, $2, now() + interval '12 hours')")
+        .then(|| crate::instance::browser_csrf_token(&session_token));
+    sqlx::query("INSERT INTO instance_sessions(token_digest, csrf_digest, vault_id, expires_at) VALUES($1, $2, $3, now() + interval '12 hours')")
         .bind(crate::instance::digest(session_token.as_bytes()).as_slice())
         .bind(csrf_token.as_ref().map(|token| crate::instance::digest(token.as_bytes()).to_vec()))
+        .bind(vault_id)
         .execute(&mut **transaction)
         .await
         .map_err(|error| database_unavailable(&error, "instance_session_create"))?;
@@ -677,7 +706,7 @@ async fn create_instance_session(
     })
 }
 
-async fn hash_admin_password(
+pub(super) async fn hash_admin_password(
     slots: Arc<tokio::sync::Semaphore>,
     password: String,
 ) -> ApiResult<String> {
@@ -691,7 +720,7 @@ async fn hash_admin_password(
         .map_err(|code| ApiError(StatusCode::SERVICE_UNAVAILABLE, code))
 }
 
-async fn password_matches_admin(
+pub(super) async fn password_matches_admin(
     slots: Arc<tokio::sync::Semaphore>,
     hash: String,
     password: String,
@@ -705,7 +734,7 @@ async fn password_matches_admin(
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "password_verify_failed"))
 }
 
-fn instance_origin_matches(state: &ApiState, headers: &HeaderMap) -> bool {
+pub(super) fn instance_origin_matches(state: &ApiState, headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get("origin").and_then(|value| value.to_str().ok()) else {
         return false;
     };
@@ -738,7 +767,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<&str> {
         .find_map(|part| part.trim().strip_prefix("Peppy-Instance-Session="))
 }
 
-fn instance_session_token(headers: &HeaderMap) -> Option<(&str, bool)> {
+pub(super) fn instance_session_token(headers: &HeaderMap) -> Option<(&str, bool)> {
     cookie_token(headers)
         .map(|token| (token, true))
         .or_else(|| {
@@ -749,35 +778,7 @@ fn instance_session_token(headers: &HeaderMap) -> Option<(&str, bool)> {
         })
 }
 
-async fn instance_admin_session(
-    state: &ApiState,
-    headers: &HeaderMap,
-    require_csrf: bool,
-) -> ApiResult<Uuid> {
-    let (token, browser) = instance_session_token(headers)
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid_session"))?;
-    let row = sqlx::query("SELECT admin.vault_id, sessions.csrf_digest FROM instance_sessions sessions CROSS JOIN instance_admin admin WHERE sessions.token_digest=$1 AND sessions.revoked_at IS NULL AND sessions.expires_at>now()")
-        .bind(crate::instance::digest(token.as_bytes()).as_slice())
-        .fetch_optional(&state.db).await
-        .map_err(|error| database_unavailable(&error, "instance_session_lookup"))?
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid_session"))?;
-    if require_csrf && browser {
-        if !instance_origin_matches(state, headers) {
-            return Err(ApiError(StatusCode::FORBIDDEN, "invalid_origin"));
-        }
-        let csrf = headers
-            .get("x-peppy-csrf-token")
-            .and_then(|value| value.to_str().ok())
-            .ok_or(ApiError(StatusCode::FORBIDDEN, "invalid_csrf"))?;
-        let expected: Option<Vec<u8>> = row.get("csrf_digest");
-        if expected.as_deref() != Some(crate::instance::digest(csrf.as_bytes()).as_slice()) {
-            return Err(ApiError(StatusCode::FORBIDDEN, "invalid_csrf"));
-        }
-    }
-    Ok(row.get("vault_id"))
-}
-
-fn instance_session_response(
+pub(super) fn instance_session_response(
     mut session: InstanceSession,
     client: ClientKind,
 ) -> ApiResult<Response> {
@@ -802,7 +803,7 @@ fn instance_session_response(
     Ok(response)
 }
 
-fn instance_claim_response(
+pub(super) fn instance_claim_response(
     vault_id: Uuid,
     device_id: Uuid,
     replayed: bool,
@@ -872,7 +873,12 @@ async fn replay_existing_instance_claim(
     {
         return Err(ApiError(StatusCode::CONFLICT, "instance_already_claimed"));
     }
-    let session = create_instance_session(&mut transaction, request.device.kind).await?;
+    let session = create_instance_session(
+        &mut transaction,
+        request.device.kind,
+        existing.get("vault_id"),
+    )
+    .await?;
     transaction
         .commit()
         .await
@@ -897,13 +903,13 @@ async fn claim_instance(
     {
         return Err(ApiError(StatusCode::FORBIDDEN, "invalid_origin"));
     }
-    let request_digest = instance_request_digest(&request)?;
+    let request_digest = instance::request_digest(&request, &["admin_password", "setup_token"])?;
     let mut replay_transaction = state
         .db
         .begin()
         .await
         .map_err(|error| database_unavailable(&error, "instance_claim_begin"))?;
-    if let Some(existing) = sqlx::query("SELECT vault_id, operation_id, request_digest, password_hash FROM instance_admin FOR UPDATE")
+    if let Some(existing) = sqlx::query("SELECT vault_id, operation_id, request_digest, password_hash FROM vault_owners WHERE is_admin FOR UPDATE")
         .fetch_optional(&mut *replay_transaction).await.map_err(|error| database_unavailable(&error, "instance_claim_lookup"))?
     {
         return replay_existing_instance_claim(
@@ -930,6 +936,7 @@ async fn claim_instance(
         }
         _ => {}
     }
+    let username = instance::normalize_claim_username(&request.username)?;
     let (admission_public_key, credential_digest) = validate_claim_material(&request)?;
     let signing_public_key = validate_proposed_device(&request.device)?;
     crate::instance::validate_password(&request.admin_password)
@@ -945,7 +952,7 @@ async fn claim_instance(
         .begin()
         .await
         .map_err(|error| database_unavailable(&error, "instance_claim_begin"))?;
-    if let Some(existing) = sqlx::query("SELECT vault_id, operation_id, request_digest, password_hash FROM instance_admin FOR UPDATE")
+    if let Some(existing) = sqlx::query("SELECT vault_id, operation_id, request_digest, password_hash FROM vault_owners WHERE is_admin FOR UPDATE")
         .fetch_optional(&mut *transaction).await.map_err(|error| database_unavailable(&error, "instance_claim_lookup"))?
     {
         return replay_existing_instance_claim(
@@ -993,10 +1000,10 @@ async fn claim_instance(
     )
     .await
     .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_owner_metadata"))?;
-    sqlx::query("INSERT INTO instance_admin(singleton, vault_id, operation_id, request_digest, password_hash) VALUES(TRUE, $1, $2, $3, $4)")
-        .bind(vault_id).bind(request.operation_id).bind(request_digest.as_slice()).bind(password_hash)
+    sqlx::query("INSERT INTO vault_owners(vault_id, username, password_hash, is_admin, operation_id, request_digest) VALUES($1, $2, $3, TRUE, $4, $5)")
+        .bind(vault_id).bind(username).bind(password_hash).bind(request.operation_id).bind(request_digest.as_slice())
         .execute(&mut *transaction).await.map_err(|error| unique_conflict(error, "instance_already_claimed", "instance_claim_insert"))?;
-    let session = create_instance_session(&mut transaction, request.device.kind).await?;
+    let session = create_instance_session(&mut transaction, request.device.kind, vault_id).await?;
     transaction
         .commit()
         .await
@@ -1027,11 +1034,21 @@ async fn instance_login(
         .begin()
         .await
         .map_err(|error| database_unavailable(&error, "instance_login_begin"))?;
-    let password_hash: String = sqlx::query_scalar("SELECT password_hash FROM instance_admin")
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|error| database_unavailable(&error, "instance_login_lookup"))?
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid_admin_password"))?;
+    let owner = if request.username.trim().is_empty() {
+        sqlx::query("SELECT vault_id, password_hash FROM vault_owners WHERE is_admin")
+            .fetch_optional(&mut *transaction)
+            .await
+    } else {
+        let username = instance::normalize_username(&request.username)?;
+        sqlx::query("SELECT vault_id, password_hash FROM vault_owners WHERE username=$1")
+            .bind(username)
+            .fetch_optional(&mut *transaction)
+            .await
+    }
+    .map_err(|error| database_unavailable(&error, "instance_login_lookup"))?;
+    let (vault_id, password_hash) = owner
+        .map(|row| (Some(row.get("vault_id")), row.get("password_hash")))
+        .unwrap_or((None, DUMMY_ADMIN_PASSWORD_HASH.into()));
     if !password_matches_admin(
         state.instance_password_slots.clone(),
         password_hash,
@@ -1041,7 +1058,10 @@ async fn instance_login(
     {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_admin_password"));
     }
-    let session = create_instance_session(&mut transaction, request.client).await?;
+    let Some(vault_id) = vault_id else {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid_admin_password"));
+    };
+    let session = create_instance_session(&mut transaction, request.client, vault_id).await?;
     transaction
         .commit()
         .await
@@ -1049,8 +1069,11 @@ async fn instance_login(
     instance_session_response(session, request.client)
 }
 
-async fn instance_logout(State(state): State<ApiState>, headers: HeaderMap) -> ApiResult<Response> {
-    instance_admin_session(&state, &headers, true).await?;
+pub(super) async fn instance_logout(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    instance::require_session(&state, &headers, true).await?;
     let (token, browser) = instance_session_token(&headers)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid_session"))?;
     sqlx::query("UPDATE instance_sessions SET revoked_at = now() WHERE token_digest = $1 AND revoked_at IS NULL")
@@ -1111,11 +1134,13 @@ async fn instance_devices(db: &PgPool, vault_id: Uuid) -> ApiResult<Vec<Enrollme
         .collect()
 }
 
-async fn instance_account(
+pub(super) async fn instance_account(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<InstanceAccount>> {
-    let vault_id = instance_admin_session(&state, &headers, false).await?;
+    let vault_id = instance::require_session(&state, &headers, false)
+        .await?
+        .vault_id;
     let row = sqlx::query("SELECT v.public_key_profile, v.encrypted_vault_check_header, v.profile_fingerprint, v.key_epoch, keys.admission_public_key FROM vaults v JOIN vault_admission_keys keys ON keys.vault_id=v.vault_id AND keys.key_epoch=v.key_epoch WHERE v.vault_id=$1")
         .bind(vault_id).fetch_one(&state.db).await
         .map_err(|error| database_unavailable(&error, "instance_account"))?;
@@ -1134,11 +1159,11 @@ async fn instance_account(
     }))
 }
 
-async fn instance_management(
+pub(super) async fn instance_management(
     State(state): State<ApiState>,
     headers: HeaderMap,
 ) -> ApiResult<Json<InstanceManagement>> {
-    let vault_id = instance_admin_session(&state, &headers, false)
+    let session = instance::require_session(&state, &headers, false)
         .await
         .map_err(|error| {
             if error.0 == StatusCode::UNAUTHORIZED {
@@ -1147,6 +1172,7 @@ async fn instance_management(
                 error
             }
         })?;
+    let vault_id = session.vault_id;
     let storage_bytes: i64 = sqlx::query_scalar(
         "SELECT COALESCE(sum(ciphertext_bytes), 0)::bigint FROM attachments WHERE vault_id=$1",
     )
@@ -1164,15 +1190,19 @@ async fn instance_management(
             .replay_retention
             .as_secs()
             .saturating_div(86_400) as u32,
+        is_admin: session.is_admin,
+        username: session.username,
     }))
 }
 
-async fn instance_revoke_device(
+pub(super) async fn instance_revoke_device(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(device_id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    let vault_id = instance_admin_session(&state, &headers, true).await?;
+    let vault_id = instance::require_session(&state, &headers, true)
+        .await?
+        .vault_id;
     let mut tx = scope::begin(&state.db, vault_id)
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_begin"))?;
@@ -1215,7 +1245,7 @@ async fn instance_revoke_device(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn database_unavailable(error: &sqlx::Error, operation: &'static str) -> ApiError {
+pub(super) fn database_unavailable(error: &sqlx::Error, operation: &'static str) -> ApiError {
     tracing::warn!(operation, error_kind = %error, "database operation failed");
     ApiError(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
 }
@@ -1226,7 +1256,11 @@ fn insert_error(error: sqlx::Error, operation: &'static str) -> ApiError {
 
 /// A unique violation is a client conflict with `code`; anything else is a
 /// logged transient database failure.
-fn unique_conflict(error: sqlx::Error, code: &'static str, operation: &'static str) -> ApiError {
+pub(super) fn unique_conflict(
+    error: sqlx::Error,
+    code: &'static str,
+    operation: &'static str,
+) -> ApiError {
     if error
         .as_database_error()
         .and_then(|database| database.code())
@@ -1389,7 +1423,11 @@ fn profile_ok(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn validate_profile(profile: &Value, fingerprint: &str, epoch: u32) -> Result<Uuid, &'static str> {
+pub(super) fn validate_profile(
+    profile: &Value,
+    fingerprint: &str,
+    epoch: u32,
+) -> Result<Uuid, &'static str> {
     if !profile_ok(fingerprint) || epoch == 0 {
         return Err("invalid profile fingerprint or epoch");
     }
@@ -1505,7 +1543,7 @@ const INSTANCE_ACCOUNT_SOURCE_LIMIT: u8 = 10;
 const INSTANCE_ACCOUNT_GLOBAL_LIMIT: u16 = 100;
 const INSTANCE_ACCOUNT_ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 
-async fn instance_account_admission(
+pub(super) async fn instance_account_admission(
     state: &ApiState,
     peer: Option<IpAddr>,
     operation: &[u8],
