@@ -1630,6 +1630,546 @@
           }
         }
       }
+    },
+    "peppy.enrollment_username_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Username"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_setup_username_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This will be your username for this server. Pre-set to admin."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_username_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave empty if you set up this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_vault_username_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a username for your new vault on this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose how to connect to this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_password_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_password_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with your username and password."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_connect_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect this device"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_connect_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect with your vault shared secret."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_invite_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Have an invite link?"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_invite_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use an invite link to request a new vault on this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_request_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request a vault"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_request_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste the invite link you received, then enter a display name so the admin can identify your request."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_link_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Invite link"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_link_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://…"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_link_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste the full link from the admin."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_display_name_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your name"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_display_name_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "How you appear to the admin while approving. Not your username."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_request_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send request"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_cancel_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for approval"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request has been sent. The admin will review it shortly."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can leave and return — your request is saved."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_poll_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking approval status…"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the admin to approve your request."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request approved"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a username for your vault. Your password and vault secret will be requested securely."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_secure_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A secure prompt will ask for your password and vault shared secret. Peppy never sees them in this window."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_create_vault_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create vault"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request was approved."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_denied_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request denied"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_denied_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The admin denied this request. Ask them for a new invite link to try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_expired_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request expired"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_expired_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request expired before the admin could approve it. Ask them for a new invite link."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_restart_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start over"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_denied_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request was denied."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_expired_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request expired."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_vault_owner_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vault owner username"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_vault_owner_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server has multiple vaults. Enter the username of the vault you want to connect to."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_admin_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admin access is required for this action."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_foreign_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request refers to a different vault. Check the server address and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_vault_owner_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the username for the vault you want to connect to."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_request_not_approved": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request has not been approved yet, or the approval window expired."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_username_taken": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This username is already taken. Choose a different one."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_operation_conflict": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A conflicting operation is already in progress. Try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invite_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This invite link is not valid, or it has already been used."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_request_not_found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This vault request could not be found. It may have expired."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_vault_not_found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The requested vault could not be found on this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invalid_username": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usernames must start with a letter or digit, use only a–z, 0–9, dash, dot, or underscore, and be 1–32 characters."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invalid_display_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your display name must be between 1 and 64 characters."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_vault_request_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many requests from this device. Wait a moment and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_create_vault_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many vault creation attempts. Wait a moment and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_manual_owner_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many connection attempts. Wait a moment and try again."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

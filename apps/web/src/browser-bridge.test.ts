@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserBridge } from "./browser-bridge";
+import { BrowserBridge, parseVaultRequestSnapshot } from "./browser-bridge";
 
 class TestPort {
   public onmessage: ((event: MessageEvent) => void) | null = null;
@@ -21,6 +21,31 @@ function stubShowModal(showModal = vi.fn()): () => void {
 }
 
 describe("BrowserBridge", () => {
+  it("parses only server-shaped vault request snapshots", () => {
+    expect(parseVaultRequestSnapshot(JSON.stringify({ type: "snapshot", requests: [{ request_id: "request", display_name: "Taylor", client: "browser", state: "pending", created_at: "2026-10-12T00:00:00Z", expires_in_seconds: 60 }] }))).toEqual([{ requestId: "request", displayName: "Taylor", client: "browser", state: "pending", createdAt: "2026-10-12T00:00:00Z", expiresInSeconds: 60 }]);
+    expect(() => parseVaultRequestSnapshot("{}")).toThrow("Invalid vault request snapshot.");
+  });
+
+  it("captures and scrubs an invite fragment before bridge use", async () => {
+    history.replaceState(null, "", "/#invite=invite-token");
+    vi.resetModules();
+    const module = await import("./browser-bridge");
+    const bridge = new module.BrowserBridge(new TestPort() as unknown as MessagePort);
+    await expect(bridge.enrollment_pending_invite()).resolves.toBe(`${location.origin}/#invite=invite-token`);
+    await expect(bridge.enrollment_pending_invite()).resolves.toBeNull();
+    expect(location.hash).toBe("");
+    bridge.dispose();
+  });
+
+  it("canonicalizes a captured invite without retaining its tracking path", async () => {
+    history.replaceState(null, "", "/join/anything?tracking=value#invite=invite-token");
+    vi.resetModules();
+    const module = await import("./browser-bridge");
+    const bridge = new module.BrowserBridge(new TestPort() as unknown as MessagePort);
+    await expect(bridge.enrollment_pending_invite()).resolves.toBe(`${location.origin}/#invite=invite-token`);
+    bridge.dispose();
+  });
+
   it("maps bridge calls to typed worker RPC and receives replies", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

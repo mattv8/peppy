@@ -13,6 +13,7 @@ type Stage = EnrollmentView["stage"];
 const copy = (key: PeppyCopyKey) => peppyCopy[key];
 const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone"]);
 const pollIntervalMs = 4_000;
+const invitePollBackoffMs = [1_000, 2_000, 5_000, 10_000];
 const qrOptions = { errorCorrectionLevel: "M" as const, margin: 4, width: 512 };
 const methodHints: Record<Method, string> = {
   transfer: "Approve only after the codes match. Your phone then receives this device's vault keys directly.",
@@ -32,6 +33,12 @@ const nativeSetupPromptHint = (mode: "open" | "protected") => {
 const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "invalid_setup_token") return copy("enrollment_error_invalid_setup_token");
   if (errorCode === "instance_already_claimed") return copy("enrollment_error_already_claimed");
+  if (errorCode === "invite_invalid") return copy("enrollment_error_invite_invalid");
+  if (errorCode === "vault_owner_required") return copy("enrollment_error_vault_owner_required");
+  if (errorCode === "username_taken") return "That username is already in use. Choose another.";
+  if (errorCode === "invalid_username") return "Choose a valid username.";
+  if (errorCode === "vault_request_completed") return "This vault request was already completed. Contact an owner if you need access.";
+  if (errorCode === "request_completed_without_material") return "This vault request was already completed. Start a new request to try again.";
   return "Peppy could not complete this step. Your server address was kept.";
 };
 
@@ -94,15 +101,25 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
   const [connectedOrigin, setConnectedOrigin] = useState<string | null>(fixedOrigin ?? null);
   const [selfHostedUrlBlurred, setSelfHostedUrlBlurred] = useState(false);
+  const [signinPath, setSigninPath] = useState<"chooser" | "password" | "invite">("chooser");
+  const [username, setUsername] = useState("admin");
+  const [vaultOwner, setVaultOwner] = useState("");
+  const [inviteLink, setInviteLink] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [vaultUsername, setVaultUsername] = useState("");
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState === "visible");
   const bodyRef = useRef<HTMLDivElement>(null);
   const choice = useRef<HTMLButtonElement>(null);
   const modeSelect = useRef<HTMLSelectElement>(null);
   const verifyCheckbox = useRef<HTMLInputElement>(null);
+  const inviteLinkInput = useRef<HTMLInputElement>(null);
   const joined = useRef(false);
   const provisioning = useRef(false);
   const discoverStarted = useRef(false);
   const fixedStarted = useRef(false);
   const enrollEpoch = useRef(0);
+  const invitePollEpoch = useRef(0);
   const accountFetchEpoch = useRef(0);
   const signInEpoch = useRef(0);
   const enrollmentActive = useRef(false);
@@ -141,6 +158,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const resetEnrollment = () => {
     enrollEpoch.current += 1;
+    invitePollEpoch.current += 1;
     cancelActive();
     enrollmentActive.current = false;
     stageRef.current = null;
@@ -169,9 +187,21 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
 
   const discover = (origin?: string) => runEnrollment(() => bridge.enrollment_discover(origin), () => discover(origin));
-  const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner(), createOwner);
-  const signInEnrollment = () => runEnrollment(() => bridge.enrollment_sign_in(), signInEnrollment);
-  const connectSharedSecret = () => runEnrollment(() => bridge.enrollment_connect_shared_secret(), connectSharedSecret);
+  const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner({ username }), createOwner);
+  const signInEnrollment = () => runEnrollment(() => bridge.enrollment_sign_in({ username }), signInEnrollment);
+  const connectSharedSecret = () => runEnrollment(() => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), connectSharedSecret);
+  const beginVaultRequest = () => runEnrollment(async () => {
+    setInviteError(null);
+    try { return await bridge.enrollment_begin_vault_request({ inviteLink, displayName }); }
+    catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "invite_invalid") {
+        setInviteError(copy("enrollment_error_invite_invalid"));
+        return { mode: "community", stage: "invite_request" };
+      }
+      throw error;
+    }
+  }, beginVaultRequest);
+  const createVault = () => runEnrollment(() => bridge.enrollment_create_vault({ username: vaultUsername }), createVault);
   const addPhone = (next: Method) => {
     setMethod(next);
     void runEnrollment(() => bridge.enrollment_add_phone(next), () => addPhone(next));
@@ -182,6 +212,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const refreshStatus = () => runEnrollment(() => bridge.enrollment_status(), refreshStatus);
   const cancelPairing = () => {
+    invitePollEpoch.current += 1;
     if (addingPhone) {
       enrollEpoch.current += 1;
       enrollmentActive.current = false;
@@ -301,6 +332,48 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   }, [route]);
 
   const stage = view?.stage ?? null;
+  useEffect(() => {
+    if (stage !== "locked") setVaultOwner("");
+    if (stage !== "signin") setSigninPath("chooser");
+  }, [stage]);
+  useEffect(() => {
+    if (stage !== "signin" || signinPath !== "chooser" || !bridge.enrollment_pending_invite) return;
+    let live = true;
+    void bridge.enrollment_pending_invite().then(link => {
+      if (live && link) {
+        setInviteLink(link);
+        setSigninPath("invite");
+        requestAnimationFrame(() => inviteLinkInput.current?.focus());
+      }
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [stage, signinPath]);
+  useEffect(() => {
+    const updateVisibility = () => setPageVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+  useEffect(() => {
+    if (stage !== "invite_waiting" || !pageVisible) return;
+    const epoch = ++invitePollEpoch.current;
+    let timer: number | undefined;
+    let attempt = 0;
+    const poll = async () => {
+      if (epoch !== invitePollEpoch.current || document.visibilityState !== "visible") return;
+      try {
+        const next = await bridge.enrollment_vault_request_status();
+        if (epoch !== invitePollEpoch.current) return;
+        attempt = 0;
+        apply(next);
+        if (next.stage === "invite_waiting") timer = window.setTimeout(poll, 0);
+      } catch {
+        if (epoch !== invitePollEpoch.current) return;
+        timer = window.setTimeout(poll, invitePollBackoffMs[Math.min(attempt++, invitePollBackoffMs.length - 1)]);
+      }
+    };
+    void poll();
+    return () => { invitePollEpoch.current += 1; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [pageVisible, stage]);
   const payload = stage === "waiting_phone" ? view?.qrPayload : undefined;
   useEffect(() => {
     if (!payload) {
@@ -401,6 +474,21 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     );
   };
 
+  const renderInviteRequestFields = () => {
+    const inviteLinkDescription = inviteError ? "enrollment-invite-link-error enrollment-invite-link-hint" : "enrollment-invite-link-hint";
+    return <>
+      <div id="enrollment-invite-link-field" className="setup-url-field">
+        <label>{copy("enrollment_invite_link_label")}<input ref={inviteLinkInput} id="enrollment-invite-link" type="url" autoComplete="off" value={inviteLink} onChange={event => setInviteLink(event.target.value)} aria-invalid={inviteError ? "true" : undefined} aria-describedby={inviteLinkDescription} /></label>
+        {inviteError && <span id="enrollment-invite-link-error" className="setup-field-error" aria-live="polite">{inviteError}</span>}
+        <span id="enrollment-invite-link-hint" className="setup-hint">{copy("enrollment_invite_link_hint")}</span>
+      </div>
+      <div id="enrollment-display-name-field" className="setup-url-field">
+        <label>{copy("enrollment_display_name_label")}<input id="enrollment-display-name" type="text" maxLength={64} autoComplete="name" value={displayName} onChange={event => setDisplayName(event.target.value)} aria-describedby="enrollment-display-name-hint" /></label>
+        <span id="enrollment-display-name-hint" className="setup-hint">{copy("enrollment_display_name_hint")}</span>
+      </div>
+    </>;
+  };
+
   const renderStage = (view: EnrollmentView): ReactNode => {
     const hosted = view.mode === "hosted";
     switch (view.stage) {
@@ -435,6 +523,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
                 <p className="setup-hint">{nativeSetupPromptHint("protected")}</p>
               </>
             )}
+            <div id="enrollment-setup-username-field" className="setup-url-field"><label>{copy("enrollment_username_label")}<input id="enrollment-setup-username" type="text" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} aria-describedby="enrollment-setup-username-hint" /></label><span id="enrollment-setup-username-hint" className="setup-hint">{copy("enrollment_setup_username_hint")}</span></div>
             <div className="enrollment-actions">
               <button id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create server</button>
               <button id="enrollment-cancel-setup-button" className="secondary-button" disabled={busy} onClick={changeServer}>Cancel</button>
@@ -442,14 +531,16 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           </Stage>
         );
       case "signin":
+        if (!hosted && signinPath === "password") return <Stage stage="signin"><Heading>Sign in to your server</Heading><div id="enrollment-signin-username-field" className="setup-url-field"><label>{copy("enrollment_username_label")}<input id="enrollment-signin-username" type="text" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} aria-describedby="enrollment-signin-username-hint" /></label><span id="enrollment-signin-username-hint" className="setup-hint">{copy("enrollment_signin_username_hint")}</span></div><div className="enrollment-actions"><button id="enrollment-signin-button" className="primary-button" disabled={busy} onClick={() => void signInEnrollment()}>{copy("enrollment_signin_cta")}</button><button id="enrollment-signin-back-button" className="secondary-button" onClick={() => setSigninPath("chooser")}>{copy("back")}</button></div></Stage>;
+        if (!hosted && signinPath === "invite") return <Stage stage="invite_request"><Heading>{copy("enrollment_invite_request_headline")}</Heading><p>{copy("enrollment_invite_request_body")}</p>{renderInviteRequestFields()}<div className="enrollment-actions"><button id="enrollment-invite-submit-button" className="primary-button" disabled={busy || !inviteLink || !displayName} onClick={() => void beginVaultRequest()}>{copy("enrollment_invite_request_cta")}</button><button id="enrollment-invite-cancel-button" className="secondary-button" onClick={() => setSigninPath("chooser")}>{copy("enrollment_invite_cancel_cta")}</button></div></Stage>;
         return (
           <Stage stage="signin">
             <Heading>{hosted ? copy("hosted_sign_in_headline") : "Sign in to your server"}</Heading>
-            <p>{hosted ? "Sign in to your Peppy account to continue. Signing in does not unlock your vault." : "Sign in with the admin password in the secure prompt. Signing in does not unlock your vault."}</p>
-            {!hosted && <p id="enrollment-signin-shared-secret-hint" className="setup-hint">The admin password manages this server. The vault shared secret connects this device to encrypted data.</p>}
-            <div className="enrollment-actions">
-              <button id="enrollment-signin-button" className="primary-button" disabled={busy} onClick={() => void signInEnrollment()}>Sign in</button>
-              {!hosted && <button id="enrollment-signin-shared-secret-button" className="secondary-button" disabled={busy} onClick={() => void connectSharedSecret()}>Connect with shared secret</button>}
+            <p>{hosted ? "Sign in to your Peppy account to continue. Signing in does not unlock your vault." : copy("enrollment_signin_body")}</p>
+            <div className={hosted ? "enrollment-actions" : "chooser-buttons"}>
+              <button id="enrollment-signin-password-button" className={hosted ? "primary-button" : "chooser-button"} disabled={busy} onClick={() => hosted ? void signInEnrollment() : setSigninPath("password")}>{hosted ? "Sign in" : <><span className="chooser-button-label">{copy("enrollment_signin_password_label")}</span><span className="chooser-button-hint">{copy("enrollment_signin_password_hint")}</span></>}</button>
+              {!hosted && <button id="enrollment-signin-connect-button" className="chooser-button" disabled={busy} onClick={() => void connectSharedSecret()}><span className="chooser-button-label">{copy("enrollment_signin_connect_label")}</span><span className="chooser-button-hint">{copy("enrollment_signin_connect_hint")}</span></button>}
+              {!hosted && <button id="enrollment-signin-invite-button" className="chooser-button" disabled={busy} onClick={() => setSigninPath("invite")}><span className="chooser-button-label">{copy("enrollment_signin_invite_label")}</span><span className="chooser-button-hint">{copy("enrollment_signin_invite_hint")}</span></button>}
             </div>
           </Stage>
         );
@@ -458,11 +549,23 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           <Stage stage="locked">
             <Heading>Connect this device</Heading>
             <p>Enter the shared secret from your server owner in the secure prompt. Signing in alone does not unlock messages.</p>
+            {view.vaultOwnerRequired && <div id="enrollment-vault-owner-field" className="setup-url-field"><label>{copy("enrollment_vault_owner_label")}<input id="enrollment-vault-owner" type="text" autoComplete="username" value={vaultOwner} onChange={event => setVaultOwner(event.target.value)} /></label><span className="setup-hint">{copy("enrollment_vault_owner_hint")}</span></div>}
             <div className="enrollment-actions">
               <button id="enrollment-shared-secret-button" className="primary-button" disabled={busy} onClick={() => void connectSharedSecret()}>Enter shared secret</button>
             </div>
           </Stage>
         );
+      case "invite_request":
+        return <Stage stage="invite_request"><Heading>{copy("enrollment_invite_request_headline")}</Heading><p>{copy("enrollment_invite_request_body")}</p>{renderInviteRequestFields()}<div className="enrollment-actions"><button id="enrollment-invite-submit-button" className="primary-button" disabled={busy || !inviteLink || !displayName} onClick={() => void beginVaultRequest()}>{copy("enrollment_invite_request_cta")}</button><button id="enrollment-invite-cancel-button" className="secondary-button" onClick={() => void cancelPairing()}>{copy("enrollment_invite_cancel_cta")}</button></div></Stage>;
+      case "invite_waiting":
+        return <Stage stage="invite_waiting"><Heading>{copy("enrollment_invite_waiting_headline")}</Heading><p>{copy("enrollment_invite_waiting_body")}</p><p className="setup-hint">{copy("enrollment_invite_waiting_hint")}</p><div id="enrollment-invite-waiting-status" className="visually-hidden" aria-live="polite" aria-atomic="true">{copy("enrollment_invite_poll_status")}</div><div className="enrollment-actions"><button id="enrollment-invite-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>{copy("enrollment_invite_cancel_cta")}</button></div></Stage>;
+      case "invite_approved":
+        return <Stage stage="invite_approved"><Heading>{copy("enrollment_invite_approved_headline")}</Heading><p>{copy("enrollment_invite_approved_body")}</p>{view.errorCode && <p id="enrollment-vault-error" role="alert">{enrollmentErrorMessage(view.errorCode)}</p>}<div id="enrollment-vault-username-field" className="setup-url-field"><label>{copy("enrollment_username_label")}<input id="enrollment-vault-username" type="text" autoComplete="username" value={vaultUsername} onChange={event => setVaultUsername(event.target.value)} aria-describedby="enrollment-vault-username-hint" /></label><span id="enrollment-vault-username-hint" className="setup-hint">{copy("enrollment_vault_username_hint")}</span></div><p className="setup-hint">{copy("enrollment_invite_approved_secure_hint")}</p><div className="enrollment-actions"><button id="enrollment-create-vault-button" className="primary-button" disabled={busy || !vaultUsername} onClick={() => void createVault()}>{copy("enrollment_create_vault_cta")}</button><button id="enrollment-invite-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>{copy("enrollment_invite_cancel_cta")}</button></div></Stage>;
+      case "invite_denied":
+      case "invite_expired": {
+        const denied = view.stage === "invite_denied";
+        return <Stage stage={view.stage}><Heading>{copy(denied ? "enrollment_invite_denied_headline" : "enrollment_invite_expired_headline")}</Heading><p role="alert">{copy(denied ? "enrollment_invite_denied_body" : "enrollment_invite_expired_body")}</p><div className="enrollment-actions"><button id="enrollment-invite-restart-button" className="secondary-button" onClick={() => void cancelPairing()}>{copy("enrollment_invite_restart_cta")}</button></div></Stage>;
+      }
       case "ready":
         if (view.hasGateway && !addingPhone) return <Stage stage="ready"><p role="status">Phone connected.</p></Stage>;
         if (!view.owner) {
@@ -535,6 +638,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           </Stage>
         );
       case "error":
+        if (view.errorCode === "vault_request_completed" || view.errorCode === "request_completed_without_material") {
+          return <Stage stage="error"><Heading>Vault request completed</Heading><p id="enrollment-error" role="alert">{enrollmentErrorMessage(view.errorCode)}</p><div className="enrollment-actions"><button id="enrollment-invite-restart-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>{copy("enrollment_invite_restart_cta")}</button></div></Stage>;
+        }
         return (
           <Stage stage="error">
             <Heading>Something went wrong</Heading>
@@ -553,6 +659,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     : stage === "verify_phone" ? "Compare the verification code before approving."
       : stage === "phone_connected" ? "Phone connected. Finish setup on your phone."
         : stage === "expired" ? "This code expired."
+          : stage === "invite_waiting" ? copy("enrollment_invite_waiting_live_status")
+          : stage === "invite_approved" ? copy("enrollment_invite_approved_live_status")
+          : stage === "invite_denied" ? copy("enrollment_invite_denied_live_status")
+          : stage === "invite_expired" ? copy("enrollment_invite_expired_live_status")
           : stage === "error" ? "Something went wrong."
             : "";
 

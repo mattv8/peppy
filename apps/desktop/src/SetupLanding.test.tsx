@@ -415,6 +415,38 @@ describe("SetupLanding", () => {
   });
 
   describe("sanitized enrollment stages", () => {
+    it("opens the invite request form from a claimed-server chooser", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      fireEvent.click(await screen.findByRole("button", { name: /have an invite link/i }));
+
+      expect(screen.getByLabelText(peppyCopy.enrollment_invite_link_label)).toBeInTheDocument();
+      expect(screen.getByLabelText(peppyCopy.enrollment_display_name_label)).toBeInTheDocument();
+    });
+
+    it("keeps an invalid browser invite error inline with its form", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin" }));
+      vi.spyOn(bridge, "enrollment_begin_vault_request").mockRejectedValue({ code: "invite_invalid" });
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      fireEvent.click(await screen.findByRole("button", { name: /have an invite link/i }));
+      fireEvent.change(screen.getByLabelText(peppyCopy.enrollment_invite_link_label), { target: { value: "https://community.example/#invite=invalid" } });
+      fireEvent.change(screen.getByLabelText(peppyCopy.enrollment_display_name_label), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByRole("button", { name: peppyCopy.enrollment_invite_request_cta }));
+
+      expect(await screen.findByText(peppyCopy.enrollment_error_invite_invalid)).toBeVisible();
+      expect(screen.getByLabelText(peppyCopy.enrollment_invite_link_label)).toHaveAttribute("aria-invalid", "true");
+    });
+
+    it("offers a terminal restart rather than generic retry for a completed request without material", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "error", errorCode: "request_completed_without_material" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("heading", { name: "Vault request completed" })).toBeVisible();
+      expect(screen.getByRole("button", { name: peppyCopy.enrollment_invite_restart_cta })).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    });
     it("sends the entered server origin to discovery and renders no secret fields", async () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
@@ -488,6 +520,7 @@ describe("SetupLanding", () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: /sign in with your username/i }));
       fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
       await waitFor(() => expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce());
       expect(document.body).not.toHaveTextContent(/admin password/i);
@@ -510,16 +543,28 @@ describe("SetupLanding", () => {
       renderLanding({ fixedOrigin: "https://community.example" });
       expect(await screen.findByRole("heading", { name: "Sign in to your server" })).toBeInTheDocument();
       expect(document.body).not.toHaveTextContent(/peppy account|hosted/i);
-      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+      fireEvent.click(screen.getByRole("button", { name: /sign in with your username/i }));
+      fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
       await waitFor(() => expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce());
       expect(bridge.hosted_sign_in).not.toHaveBeenCalled();
+    });
+
+    it("shows the vault-owner field when sign-in requires an owner selection", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "community" }));
+      vi.spyOn(bridge, "enrollment_sign_in").mockResolvedValue(view({ stage: "locked", vaultOwnerRequired: true }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      fireEvent.click(await screen.findByRole("button", { name: /sign in with your username/i }));
+      fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+
+      expect(await screen.findByLabelText(peppyCopy.enrollment_vault_owner_label)).toBeVisible();
+      expect(screen.getByRole("button", { name: "Enter shared secret" })).toBeVisible();
     });
 
     it("lets a community user connect with the shared secret without an admin sign-in", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", mode: "community", origin: "https://community.example" }));
       renderLanding({ fixedOrigin: "https://community.example" });
-      expect(await screen.findByText("The admin password manages this server. The vault shared secret connects this device to encrypted data.")).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "Connect with shared secret" }));
+      fireEvent.click(await screen.findByRole("button", { name: /connect this device/i }));
       await waitFor(() => expect(bridge.enrollment_connect_shared_secret).toHaveBeenCalledOnce());
       expect(bridge.enrollment_sign_in).not.toHaveBeenCalled();
       expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
@@ -540,7 +585,7 @@ describe("SetupLanding", () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Connect with shared secret" }));
+      fireEvent.click(await screen.findByRole("button", { name: /connect this device/i }));
       expect(await screen.findByRole("alert")).toHaveTextContent("Your server address was kept");
       expect(screen.getByLabelText("Server URL")).toHaveValue("https://server.example");
     });

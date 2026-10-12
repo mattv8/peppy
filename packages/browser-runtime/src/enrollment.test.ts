@@ -68,6 +68,7 @@ class LifecycleCore {
       if (this.state !== "owner-invitation") throw new Error("unavailable");
       return { qr: "local-secret-qr" };
     }
+    if (command === "_worker_enrollment_pending_vault_request") return null;
     return {};
   });
 
@@ -79,6 +80,7 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
     const path = pathOf(input);
     if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
     if (path === "/v1/instance") return json(instanceInfo(statuses.length > 0));
+    if (path === "/v1/instance/session" && init?.method === "GET") return json({ code: "invalid_session" }, { status: 401 });
     if (path === "/v1/instance/claim") return json({ vault_id: vaultId, device_id: deviceId, replayed: false, session: { csrf_token: "csrf", expires_in_seconds: 43_200 } });
     if (path === "/v1/enrollment/challenges") return json({ enrollment_id: challengeId });
     if (path.endsWith("/complete")) return json({ vault_id: vaultId, device_id: deviceId, role: "owner", material: {} });
@@ -90,6 +92,105 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
 }
 
 describe("BrowserEnrollment", () => {
+  it("restores community CSRF before a fresh worker sends a mutation", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "restored-csrf" });
+      if (path === "/v1/instance/invites" && init?.method === "POST") return json({ invite_id: invitationId, invite_token: "invite", expires_in_seconds: 600 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "ready", owner: true });
+    await enrollment.createInvite();
+
+    expect(fetcher).toHaveBeenLastCalledWith(expect.any(URL), expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-Peppy-CSRF-Token": "restored-csrf" }),
+    }));
+  });
+
+  it("restores community CSRF while the local identity remains locked", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "locked";
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "restored-locked-csrf" });
+      if (path === "/v1/instance/invites" && init?.method === "POST") return json({ invite_id: invitationId, invite_token: "invite", expires_in_seconds: 600 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "locked" });
+    await enrollment.createInvite();
+
+    expect(fetcher).toHaveBeenLastCalledWith(expect.any(URL), expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-Peppy-CSRF-Token": "restored-locked-csrf" }),
+    }));
+  });
+
+  it("does not clear a completed vault request after importing its identity", async () => {
+    const core = {
+      invoke: vi.fn(async ({ command }: { command: string }) => {
+        if (command === "_worker_enrollment_new") return {};
+        if (command === "_worker_enrollment_create_vault") return { request: JSON.stringify({ request_id: "request" }) };
+        return {};
+      }),
+    };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const path = pathOf(input);
+      if (path === "/v1/instance/vaults") return json({ vault_id: vaultId, device_id: deviceId, role: "owner", session: {} });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.createVault("taylor", { adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready" });
+    expect(core.invoke).not.toHaveBeenCalledWith({ command: "_worker_enrollment_clear_vault_request", args: {} });
+  });
+
+  it("clears a rejected vault request but retains transient submission material", async () => {
+    const core = {
+      invoke: vi.fn(async ({ command }: { command: string }) => {
+        if (command === "_worker_enrollment_parse_vault_invite_link") return { origin, inviteToken: "invite" };
+        if (command === "_worker_enrollment_begin_vault_request") return { request: JSON.stringify({ request_id: "request" }) };
+        return {};
+      }),
+    };
+    const session = new TestSession();
+    const rejected = new BrowserEnrollment(core, session, origin, async () => json({ code: "invite_invalid" }, { status: 400 }));
+    await rejected.beginVaultRequest("https://peppy.test/#invite=invite", "Taylor");
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_clear_vault_request", args: {} });
+
+    core.invoke.mockClear();
+    const unavailable = new BrowserEnrollment(core, session, origin, async () => new Response("temporary", { status: 503 }));
+    await unavailable.beginVaultRequest("https://peppy.test/#invite=invite", "Taylor");
+    expect(core.invoke).not.toHaveBeenCalledWith({ command: "_worker_enrollment_clear_vault_request", args: {} });
+  });
+
+  it("keeps an approved request available for a corrected username", async () => {
+    const core = {
+      invoke: vi.fn(async ({ command }: { command: string }) => {
+        if (command === "_worker_enrollment_create_vault") return { request: JSON.stringify({ request_id: "request" }) };
+        return {};
+      }),
+    };
+    const session = new TestSession();
+    const enrollment = new BrowserEnrollment(core, session, origin, async () => json({ code: "username_taken" }, { status: 409 }));
+
+    await expect(enrollment.createVault("taken", { adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "invite_approved", errorCode: "username_taken" });
+    expect(core.invoke).toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_create_vault", args: expect.objectContaining({ username: "taken" }) }));
+  });
   it("allows an explicitly open fresh claim without a setup token", async () => {
     const core = new LifecycleCore();
     const session = new TestSession();
@@ -104,7 +205,7 @@ describe("BrowserEnrollment", () => {
 
     await expect(enrollment.discover()).resolves.toMatchObject({ stage: "setup", setupCodeRequired: false });
     await expect(enrollment.createOwner({ adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready", owner: true });
-    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_create_owner", args: { adminPassword: "password-password", passphrase: "secret" } });
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_create_owner", args: { adminPassword: "password-password", passphrase: "secret", username: "" } });
   });
 
   it("retries an open claim after a transient error without adding a setup token", async () => {
@@ -195,6 +296,7 @@ describe("BrowserEnrollment", () => {
       if (command === "_worker_enrollment_get_phone_qr") return { qr: "local-secret-qr" };
       if (command === "_worker_enrollment_phone_status") return { sas: "123 456" };
       if (command === "_worker_enrollment_approve_phone_invitation") return { request: JSON.stringify({ transcript_hash: "hash", encrypted_key_package: "cipher", transfer_nonce: "nonce" }) };
+      if (command === "_worker_enrollment_pending_vault_request") return null;
       return {};
     }) };
     const session = new TestSession();
@@ -314,7 +416,8 @@ describe("BrowserEnrollment", () => {
     const fetchBase = "https://app.peppy.test";
     const requestedUrls: string[] = [];
     const core = { invoke: vi.fn(async ({ command }: { command: string }) =>
-      command === "_worker_enrollment_create_owner" ? { request: JSON.stringify({ operation_id: vaultId }) } : {}) };
+      command === "_worker_enrollment_create_owner" ? { request: JSON.stringify({ operation_id: vaultId }) }
+        : command === "_worker_enrollment_pending_vault_request" ? null : {}) };
     const session = new TestSession();
     const fetcher = vi.fn<typeof fetch>(async input => {
       const url = new URL(String(input));
@@ -341,14 +444,16 @@ describe("BrowserEnrollment", () => {
     const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
       if (command === "_worker_enrollment_manual_challenge") return { request: JSON.stringify({ device: { device_id: deviceId }, vault_id: null, credential_digest: "digest" }) };
       if (command === "_worker_enrollment_complete_manual_challenge") return { request: JSON.stringify({ admission_signature: "proof", device_signature: "proof", credential_digest: "digest" }) };
+      if (command === "_worker_enrollment_pending_vault_request") return null;
       return {};
     }) };
     const session = new TestSession();
     session.finishEnrollment.mockImplementationOnce(async () => { session.phase = "ready"; session.identity = { role: "device" }; });
-    const fetcher = vi.fn<typeof fetch>(async input => {
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const path = pathOf(input);
       if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
       if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ code: "invalid_session" }, { status: 401 });
       if (path === "/v1/enrollment/challenges") return json({ enrollment_id: challengeId, origin, vault_id: vaultId, profile: {}, fingerprint: "a".repeat(64), key_epoch: 1, device: {}, requested_role: "device", nonce: "nonce", credential_digest: "digest", expires_in_seconds: 300 });
       return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: { profile: {}, check_header: "header", fingerprint: "a".repeat(64), key_epoch: 1, admission_public_key: "key" } });
     });
@@ -360,12 +465,59 @@ describe("BrowserEnrollment", () => {
     expect(enrollment.view()).not.toHaveProperty("hasGateway");
   });
 
+  it("restores community CSRF for an unenrolled browser on /manage before an invite mutation", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "fresh-restored-csrf" });
+      if (path === "/v1/instance/invites" && init?.method === "POST") return json({ invite_id: invitationId, invite_token: "invite", expires_in_seconds: 600 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "signin" });
+    await enrollment.createInvite();
+
+    expect(fetcher).toHaveBeenLastCalledWith(expect.any(URL), expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-Peppy-CSRF-Token": "fresh-restored-csrf" }),
+    }));
+  });
+
+  it("clears transient CSRF without a header when a fresh browser has no community session cookie", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ code: "invalid_session" }, { status: 401 });
+      if (path === "/v1/instance/invites" && init?.method === "POST") return json({ invite_id: invitationId, invite_token: "invite", expires_in_seconds: 600 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "signin" });
+    await enrollment.createInvite();
+
+    const headers = fetcher.mock.calls.at(-1)?.[1]?.headers as Record<string, string>;
+    expect(headers).not.toHaveProperty("X-Peppy-CSRF-Token");
+  });
+
   it("reuses an unlocked owner and unlocks a locked local identity without starting new-device admission", async () => {
     const readyCore = { invoke: vi.fn(async () => ({})) };
     const readySession = new TestSession();
     readySession.phase = "ready";
     readySession.identity = { role: "owner" };
-    const fetcher = vi.fn<typeof fetch>(async input => pathOf(input) === "/hosted/v1/enrollment/config" ? json({}, { status: 404 }) : json(instanceInfo(true)));
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      return json(instanceInfo(true));
+    });
     const ready = new BrowserEnrollment(readyCore, readySession, origin, fetcher);
 
     await expect(ready.discover()).resolves.toEqual(expect.objectContaining({ stage: "ready", owner: true }));
@@ -577,7 +729,8 @@ describe("BrowserEnrollment", () => {
       credential_digest: "b".repeat(64),
     };
     const core = { invoke: vi.fn(async ({ command }: { command: string }) =>
-      command === "_worker_enrollment_create_owner" ? { request: JSON.stringify(ownerRequest) } : {}) };
+      command === "_worker_enrollment_create_owner" ? { request: JSON.stringify(ownerRequest) }
+        : command === "_worker_enrollment_pending_vault_request" ? null : {}) };
     vi.stubGlobal("fetch", defaultFetch);
     try {
       const session = new TestSession();
