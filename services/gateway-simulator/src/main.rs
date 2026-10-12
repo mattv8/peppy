@@ -311,6 +311,7 @@ async fn claim_owner(dir: PathBuf) -> Result<(), String> {
     let request = enrollment
         .create_owner_request(
             demo_setup_token()?,
+            "admin".into(),
             demo_admin_password()?,
             passphrase.clone(),
         )
@@ -335,7 +336,7 @@ async fn admit(
     let mut enrollment = EnrollmentClient::new(origin.clone(), kind, name.into())
         .map_err(|_| "SIMULATED enrollment setup failed")?;
     let challenge_request = enrollment
-        .manual_challenge_request(None)
+        .manual_challenge_request(None, None)
         .map_err(|_| "SIMULATED enrollment challenge request failed")?;
     let challenge =
         post_enrollment_request(&origin, "/v1/enrollment/challenges", challenge_request).await?;

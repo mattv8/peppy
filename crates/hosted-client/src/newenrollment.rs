@@ -16,16 +16,18 @@ pub use peppy_hosted_api::enrollment::ClientKind;
 use peppy_hosted_api::enrollment::{
     AdmissionChallenge, AdmissionChallengeRequest, AdmissionComplete, ApproveInvitationRequest,
     ClaimInstanceRequest, ClaimInstanceResponse, ClaimInvitationRequest, CompleteAdmissionRequest,
-    ConfirmInvitationRequest, CreateInvitationRequest, EnrollmentMethod, EnrollmentRole,
-    EnrollmentState, EnrollmentTranscript, InvitationClaim, InvitationCreated, InvitationStatus,
-    PhonePairingQr, ProposedDevice, VaultMaterial,
+    ConfirmInvitationRequest, CreateInvitationRequest, CreateVaultRequest, EnrollmentMethod,
+    EnrollmentRole, EnrollmentState, EnrollmentTranscript, InvitationClaim, InvitationCreated,
+    InvitationStatus, PhonePairingQr, ProposedDevice, SubmitVaultRequest, VaultMaterial,
+    VaultRequestCreated, VaultRequestState, VaultRequestStatus,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-const CHECKPOINT_VERSION: u8 = 2;
+const CHECKPOINT_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EnrollmentMode {
@@ -43,6 +45,7 @@ pub struct EnrollmentClient {
     owner: Option<OwnerMaterial>,
     phone: Option<PhoneFlow>,
     manual: Option<ManualAdmission>,
+    vault_request: Option<VaultRequest>,
     mode: EnrollmentMode,
 }
 
@@ -50,6 +53,21 @@ struct OwnerMaterial {
     operation_id: Uuid,
     profile: KeyProfile,
     header: VaultCheckHeader,
+}
+
+struct VaultRequest {
+    request_id: Uuid,
+    invite_token: String,
+    display_name: String,
+    secret: Zeroizing<String>,
+    accepted: Cell<bool>,
+}
+
+/// Canonical invite facts that are safe to pass through host bridge arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultInvite {
+    pub origin: String,
+    pub invite_token: String,
 }
 
 /// A verified root handoff that can only be activated by native code.  It has no public root,
@@ -152,6 +170,22 @@ struct Checkpoint {
     signing_seed: Vec<u8>,
     credential: String,
     owner: Option<OwnerCheckpoint>,
+    vault_request: Option<VaultRequestCheckpoint>,
+    existing_owner: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointV2 {
+    #[serde(rename = "version")]
+    _version: u8,
+    origin: String,
+    kind: ClientKind,
+    device_name: String,
+    device_id: Uuid,
+    signing_seed: Vec<u8>,
+    credential: String,
+    owner: Option<OwnerCheckpoint>,
     existing_owner: bool,
 }
 
@@ -163,10 +197,25 @@ struct OwnerCheckpoint {
     header: VaultCheckHeader,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultRequestCheckpoint {
+    request_id: Uuid,
+    invite_token: String,
+    display_name: String,
+    secret: String,
+    #[serde(default)]
+    accepted: bool,
+}
+
 impl Drop for Checkpoint {
     fn drop(&mut self) {
         self.signing_seed.zeroize();
         self.credential.zeroize();
+        if let Some(request) = &mut self.vault_request {
+            request.invite_token.zeroize();
+            request.secret.zeroize();
+        }
     }
 }
 
@@ -200,6 +249,7 @@ impl EnrollmentClient {
             owner: None,
             phone: None,
             manual: None,
+            vault_request: None,
             mode: EnrollmentMode::Fresh,
         })
     }
@@ -234,7 +284,10 @@ impl EnrollmentClient {
 
     /// Confirms that protected pending first-owner state belongs to this canonical origin.
     pub fn is_pending_owner_creation_for_origin(&self, origin: &str) -> bool {
-        self.mode == EnrollmentMode::Fresh && self.owner.is_some() && self.origin == origin
+        self.mode == EnrollmentMode::Fresh
+            && self.owner.is_some()
+            && self.vault_request.is_none()
+            && self.origin == origin
     }
 
     /// Checks a resumed first-owner passphrase against the checkpointed public vault header.
@@ -253,6 +306,7 @@ impl EnrollmentClient {
     pub fn create_owner_request(
         &mut self,
         setup_token: String,
+        username: String,
         admin_password: String,
         passphrase: String,
     ) -> Result<String, HostedClientError> {
@@ -266,19 +320,7 @@ impl EnrollmentClient {
         if !peppy_crypto::passphrase::passphrase_acceptable(&passphrase) {
             return Err(HostedClientError::InvalidRequest);
         }
-        if self.owner.is_none() {
-            let profile =
-                KeyProfile::new(Uuid::new_v4(), 1).map_err(|_| HostedClientError::Crypto)?;
-            let root =
-                derive_root_key(&passphrase, &profile).map_err(|_| HostedClientError::Crypto)?;
-            let header = create_vault_check_header(&root, profile.clone())
-                .map_err(|_| HostedClientError::Crypto)?;
-            self.owner = Some(OwnerMaterial {
-                operation_id: Uuid::new_v4(),
-                profile,
-                header,
-            });
-        }
+        self.prepare_owner_material(&passphrase)?;
         let owner = self.owner.as_ref().ok_or(HostedClientError::Crypto)?;
         let root =
             derive_root_key(&passphrase, &owner.profile).map_err(|_| HostedClientError::Crypto)?;
@@ -289,6 +331,7 @@ impl EnrollmentClient {
         let request = ClaimInstanceRequest {
             operation_id: owner.operation_id,
             setup_token,
+            username,
             admin_password,
             device: self.device()?,
             material,
@@ -300,6 +343,7 @@ impl EnrollmentClient {
     pub fn manual_challenge_request(
         &self,
         vault_id: Option<String>,
+        vault_owner: Option<String>,
     ) -> Result<String, HostedClientError> {
         if self.mode != EnrollmentMode::Fresh {
             return Err(HostedClientError::InvalidRequest);
@@ -310,7 +354,224 @@ impl EnrollmentClient {
         serde_json::to_string(&AdmissionChallengeRequest {
             device: self.device()?,
             vault_id,
+            vault_owner,
             credential_digest: credential_digest(&self.credential),
+        })
+        .map_err(|_| HostedClientError::InvalidRequest)
+    }
+
+    /// Parses only canonical HTTPS web invite links accepted by the enrollment client.
+    pub fn parse_vault_invite_link(link: &str) -> Result<VaultInvite, HostedClientError> {
+        let url = url::Url::parse(link).map_err(|_| HostedClientError::InvalidRequest)?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.path() != "/"
+        {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        let fragment = url.fragment().ok_or(HostedClientError::InvalidRequest)?;
+        let invite_token = fragment
+            .strip_prefix("invite=")
+            .filter(|token| !token.contains('&'))
+            .ok_or(HostedClientError::InvalidRequest)?
+            .to_owned();
+        decode_b64_32(&invite_token)?;
+        let mut origin = url;
+        origin.set_fragment(None);
+        origin.set_path("");
+        let origin = canonical_origin(origin.as_str())?;
+        Ok(VaultInvite {
+            origin,
+            invite_token,
+        })
+    }
+
+    /// Creates the requester-authenticated submission body once and reuses it until cleared.
+    pub fn begin_vault_request(
+        &mut self,
+        origin: String,
+        invite_token: String,
+        display_name: String,
+    ) -> Result<String, HostedClientError> {
+        if self.mode != EnrollmentMode::Fresh || canonical_origin(&origin)? != self.origin {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        if let Some(request) = &self.vault_request {
+            return self.submit_vault_request(request);
+        }
+        if display_name.is_empty()
+            || display_name.len() > 64
+            || display_name.chars().any(char::is_control)
+        {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        decode_b64_32(&invite_token)?;
+        let mut secret = [0_u8; 32];
+        libsodium_rs::random::fill_bytes(&mut secret);
+        self.vault_request = Some(VaultRequest {
+            request_id: Uuid::new_v4(),
+            invite_token,
+            display_name,
+            secret: Zeroizing::new(URL_SAFE_NO_PAD.encode(secret)),
+            accepted: Cell::new(false),
+        });
+        secret.zeroize();
+        self.submit_vault_request(
+            self.vault_request
+                .as_ref()
+                .ok_or(HostedClientError::Crypto)?,
+        )
+    }
+
+    pub fn accept_vault_request_created(
+        &self,
+        created_json: String,
+    ) -> Result<(), HostedClientError> {
+        let created: VaultRequestCreated = parse(&created_json)?;
+        let request = self
+            .vault_request
+            .as_ref()
+            .ok_or(HostedClientError::InvalidRequest)?;
+        if created.request_id != request.request_id || created.expires_in_seconds == 0 {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        request.accepted.set(true);
+        Ok(())
+    }
+
+    /// Returns the request secret for the `Peppy-Vault-Request` HTTP header.
+    pub fn vault_request_header(&self) -> Result<String, HostedClientError> {
+        Ok(self
+            .vault_request
+            .as_ref()
+            .ok_or(HostedClientError::InvalidRequest)?
+            .secret
+            .to_string())
+    }
+
+    /// Returns whether this client has an accepted request that may be used to create a vault.
+    pub fn vault_request_accepted(&self) -> bool {
+        self.vault_request
+            .as_ref()
+            .is_some_and(|request| request.accepted.get())
+    }
+
+    /// Returns whether locally prepared owner material is available for recovery.
+    pub fn has_prepared_owner_material(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    pub fn parse_vault_request_status(
+        &self,
+        status_json: String,
+    ) -> Result<String, HostedClientError> {
+        let status: VaultRequestStatus = parse(&status_json)?;
+        let request = self
+            .vault_request
+            .as_ref()
+            .ok_or(HostedClientError::InvalidRequest)?;
+        if status.request_id != request.request_id {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        request.accepted.set(true);
+        Ok(match status.state {
+            VaultRequestState::Pending => "pending",
+            VaultRequestState::Approved => "approved",
+            VaultRequestState::Denied => "denied",
+            VaultRequestState::Completed => "completed",
+            VaultRequestState::Expired => "expired",
+        }
+        .into())
+    }
+
+    pub fn create_vault_request(
+        &mut self,
+        username: String,
+        admin_password: String,
+        passphrase: String,
+    ) -> Result<String, HostedClientError> {
+        if self.mode != EnrollmentMode::Fresh
+            || admin_password.len() < 12
+            || admin_password.len() > 1024
+        {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        let username = normalize_username(&username)?;
+        let (request_id, request_secret) = {
+            let request = self
+                .vault_request
+                .as_ref()
+                .ok_or(HostedClientError::InvalidRequest)?;
+            if !request.accepted.get() {
+                return Err(HostedClientError::InvalidRequest);
+            }
+            (request.request_id, request.secret.to_string())
+        };
+        let passphrase = Zeroizing::new(passphrase);
+        if !peppy_crypto::passphrase::passphrase_acceptable(&passphrase) {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        self.prepare_owner_material(&passphrase)?;
+        let owner = self.owner.as_ref().ok_or(HostedClientError::Crypto)?;
+        let root =
+            derive_root_key(&passphrase, &owner.profile).map_err(|_| HostedClientError::Crypto)?;
+        verify_vault_check_header(&root, &owner.profile, &owner.header)
+            .map_err(|_| HostedClientError::InvalidRequest)?;
+        let admission = derive_admission_keypair(&root).map_err(|_| HostedClientError::Crypto)?;
+        serde_json::to_string(&CreateVaultRequest {
+            request_id,
+            request_secret,
+            operation_id: owner.operation_id,
+            username,
+            admin_password,
+            device: self.device()?,
+            material: vault_material(&owner.profile, &owner.header, admission.public_key())?,
+            credential_digest: credential_digest(&self.credential),
+        })
+        .map_err(|_| HostedClientError::InvalidRequest)
+    }
+
+    pub fn clear_vault_request(&mut self) {
+        self.vault_request = None;
+        self.owner = None;
+    }
+
+    pub fn pending_vault_request(&self) -> Option<(String, String, String)> {
+        self.vault_request.as_ref().map(|request| {
+            (
+                self.origin.clone(),
+                request.request_id.to_string(),
+                request.display_name.clone(),
+            )
+        })
+    }
+
+    fn prepare_owner_material(&mut self, passphrase: &str) -> Result<(), HostedClientError> {
+        if self.owner.is_none() {
+            let profile =
+                KeyProfile::new(Uuid::new_v4(), 1).map_err(|_| HostedClientError::Crypto)?;
+            let root =
+                derive_root_key(passphrase, &profile).map_err(|_| HostedClientError::Crypto)?;
+            let header = create_vault_check_header(&root, profile.clone())
+                .map_err(|_| HostedClientError::Crypto)?;
+            self.owner = Some(OwnerMaterial {
+                operation_id: Uuid::new_v4(),
+                profile,
+                header,
+            });
+        }
+        Ok(())
+    }
+
+    fn submit_vault_request(&self, request: &VaultRequest) -> Result<String, HostedClientError> {
+        serde_json::to_string(&SubmitVaultRequest {
+            request_id: request.request_id,
+            invite_token: request.invite_token.clone(),
+            display_name: request.display_name.clone(),
+            client: self.kind,
+            request_secret_digest: lowercase_hex(&Sha256::digest(request.secret.as_bytes())),
         })
         .map_err(|_| HostedClientError::InvalidRequest)
     }
@@ -885,14 +1146,47 @@ impl EnrollmentClient {
                 profile: owner.profile.clone(),
                 header: owner.header.clone(),
             }),
+            vault_request: self
+                .vault_request
+                .as_ref()
+                .map(|request| VaultRequestCheckpoint {
+                    request_id: request.request_id,
+                    invite_token: request.invite_token.clone(),
+                    display_name: request.display_name.clone(),
+                    secret: request.secret.to_string(),
+                    accepted: request.accepted.get(),
+                }),
             existing_owner: self.mode == EnrollmentMode::ExistingOwner,
         })
         .map_err(|_| HostedClientError::Crypto)
     }
 
     pub fn restore(checkpoint: Vec<u8>) -> Result<Self, HostedClientError> {
-        let mut checkpoint: Checkpoint =
-            serde_json::from_slice(&checkpoint).map_err(|_| HostedClientError::InvalidRequest)?;
+        let version = serde_json::from_slice::<serde_json::Value>(&checkpoint)
+            .ok()
+            .and_then(|value| value.get("version")?.as_u64())
+            .ok_or(HostedClientError::InvalidRequest)?;
+        let mut checkpoint = match version {
+            3 => serde_json::from_slice::<Checkpoint>(&checkpoint)
+                .map_err(|_| HostedClientError::InvalidRequest)?,
+            2 => {
+                let checkpoint: CheckpointV2 = serde_json::from_slice(&checkpoint)
+                    .map_err(|_| HostedClientError::InvalidRequest)?;
+                Checkpoint {
+                    version: CHECKPOINT_VERSION,
+                    origin: checkpoint.origin,
+                    kind: checkpoint.kind,
+                    device_name: checkpoint.device_name,
+                    device_id: checkpoint.device_id,
+                    signing_seed: checkpoint.signing_seed,
+                    credential: checkpoint.credential,
+                    owner: checkpoint.owner,
+                    vault_request: None,
+                    existing_owner: checkpoint.existing_owner,
+                }
+            }
+            _ => return Err(HostedClientError::InvalidRequest),
+        };
         if checkpoint.version != CHECKPOINT_VERSION
             || canonical_origin(&checkpoint.origin)? != checkpoint.origin
             || checkpoint.device_name.is_empty()
@@ -927,6 +1221,27 @@ impl EnrollmentClient {
         if checkpoint.existing_owner && owner.is_none() {
             return Err(HostedClientError::InvalidRequest);
         }
+        let vault_request = checkpoint
+            .vault_request
+            .take()
+            .map(|request| {
+                if request.display_name.is_empty()
+                    || request.display_name.len() > 64
+                    || request.display_name.chars().any(char::is_control)
+                    || decode_b64_32(&request.invite_token).is_err()
+                    || decode_b64_32(&request.secret).is_err()
+                {
+                    return Err(HostedClientError::InvalidRequest);
+                }
+                Ok(VaultRequest {
+                    request_id: request.request_id,
+                    invite_token: request.invite_token,
+                    display_name: request.display_name,
+                    secret: Zeroizing::new(request.secret),
+                    accepted: Cell::new(request.accepted),
+                })
+            })
+            .transpose()?;
         Ok(Self {
             origin: std::mem::take(&mut checkpoint.origin),
             kind: checkpoint.kind,
@@ -937,6 +1252,7 @@ impl EnrollmentClient {
             owner,
             phone: None,
             manual: None,
+            vault_request,
             mode: if checkpoint.existing_owner {
                 EnrollmentMode::ExistingOwner
             } else {
@@ -1227,6 +1543,19 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn normalize_username(raw: &str) -> Result<String, HostedClientError> {
+    let username = raw.trim().to_ascii_lowercase();
+    let valid = (1..=32).contains(&username.len())
+        && username.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        });
+    valid
+        .then_some(username)
+        .ok_or(HostedClientError::InvalidRequest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1244,7 +1573,12 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let owner_request: ClaimInstanceRequest = parse(
             &owner
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into(),
+                )
                 .unwrap(),
         )
         .unwrap();
@@ -1427,7 +1761,12 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let owner_request: ClaimInstanceRequest = parse(
             &owner
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into(),
+                )
                 .unwrap(),
         )
         .unwrap();
@@ -1535,7 +1874,12 @@ mod tests {
         let mut owner =
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         owner
-            .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                SECRET.into(),
+            )
             .unwrap();
         owner
             .create_phone_invitation(EnrollmentMethod::Transfer)
@@ -1593,7 +1937,12 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let request: ClaimInstanceRequest = parse(
             &owner
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into(),
+                )
                 .unwrap(),
         )
         .unwrap();
@@ -1656,7 +2005,12 @@ mod tests {
         let mut owner =
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let first = owner
-            .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                SECRET.into(),
+            )
             .unwrap();
         let checkpoint = owner.checkpoint().unwrap();
         let mut resumed = EnrollmentClient::restore(checkpoint).unwrap();
@@ -1665,6 +2019,7 @@ mod tests {
             resumed
                 .create_owner_request(
                     "setup".into(),
+                    "admin".into(),
                     "password long enough".into(),
                     "wrong secret with enough separate words".into(),
                 )
@@ -1672,7 +2027,12 @@ mod tests {
         );
         assert_eq!(
             resumed
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into()
+                )
                 .unwrap(),
             first
         );
@@ -1687,6 +2047,7 @@ mod tests {
                 client
                     .create_owner_request(
                         "setup".into(),
+                        "admin".into(),
                         "password long enough".into(),
                         passphrase.into()
                     )
@@ -1695,7 +2056,12 @@ mod tests {
         }
         assert!(
             client
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into()
+                )
                 .is_ok()
         );
     }
@@ -1706,7 +2072,12 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let request: ClaimInstanceRequest = parse(
             &client
-                .create_owner_request(String::new(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    String::new(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into(),
+                )
                 .unwrap(),
         )
         .unwrap();
@@ -1721,7 +2092,12 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let request: ClaimInstanceRequest = parse(
             &fresh
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into(),
+                )
                 .unwrap(),
         )
         .unwrap();
@@ -1738,7 +2114,12 @@ mod tests {
         .unwrap();
         assert!(
             owner
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into()
+                )
                 .is_err()
         );
         let invitation: CreateInvitationRequest = parse(
@@ -1767,7 +2148,12 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
         let owner_request: ClaimInstanceRequest = parse(
             &owner
-                .create_owner_request("setup".into(), "password long enough".into(), SECRET.into())
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    SECRET.into(),
+                )
                 .unwrap(),
         )
         .unwrap();
@@ -1777,7 +2163,7 @@ mod tests {
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Android, "phone".into()).unwrap();
         let request: AdmissionChallengeRequest = parse(
             &joiner
-                .manual_challenge_request(Some(profile.vault_id.to_string()))
+                .manual_challenge_request(Some(profile.vault_id.to_string()), None)
                 .unwrap(),
         )
         .unwrap();
@@ -1818,5 +2204,233 @@ mod tests {
             .finish_manual_admission(serde_json::to_string(&complete).unwrap(), SECRET.into())
             .unwrap();
         assert_eq!(identity.metadata().device_id, challenge.device.device_id);
+    }
+
+    #[test]
+    fn vault_invite_links_accept_only_canonical_safe_origins_and_tokens() {
+        let token = URL_SAFE_NO_PAD.encode([9; 32]);
+        let invite = EnrollmentClient::parse_vault_invite_link(&format!(
+            "https://enroll.example/#invite={token}"
+        ))
+        .unwrap();
+        assert_eq!(invite.origin, "https://enroll.example");
+        assert_eq!(invite.invite_token, token);
+        for link in [
+            format!("https://user@enroll.example/#invite={token}"),
+            format!("https://enroll.example/?x=1#invite={token}"),
+            "https://enroll.example/#invite=short".into(),
+            format!("https://enroll.example/#other={token}"),
+            format!("http://example.test/#invite={token}"),
+            format!("http://localhost:8080/#invite={token}"),
+            format!("http://127.0.0.1/#invite={token}"),
+        ] {
+            assert!(
+                EnrollmentClient::parse_vault_invite_link(&link).is_err(),
+                "{link}"
+            );
+        }
+    }
+
+    #[test]
+    fn vault_request_recovery_preserves_acceptance_and_owner_material() {
+        let token = URL_SAFE_NO_PAD.encode([3; 32]);
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Android, "phone".into()).unwrap();
+        let first = client
+            .begin_vault_request(ORIGIN.into(), token, "Taylor".into())
+            .unwrap();
+        let retry = client
+            .begin_vault_request(
+                ORIGIN.into(),
+                URL_SAFE_NO_PAD.encode([4; 32]),
+                "Other".into(),
+            )
+            .unwrap();
+        assert_eq!(first, retry);
+        let submit: SubmitVaultRequest = parse(&first).unwrap();
+        assert!(
+            client
+                .create_vault_request("taylor".into(), "password-password".into(), SECRET.into())
+                .is_err()
+        );
+        assert!(!client.vault_request_accepted());
+        assert!(!client.has_prepared_owner_material());
+        client
+            .accept_vault_request_created(
+                serde_json::to_string(&VaultRequestCreated {
+                    request_id: submit.request_id,
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(client.vault_request_accepted());
+        let create = client
+            .create_vault_request("taylor".into(), "password-password".into(), SECRET.into())
+            .unwrap();
+        assert!(client.has_prepared_owner_material());
+        let retried_create = client
+            .create_vault_request("taylor".into(), "password-password".into(), SECRET.into())
+            .unwrap();
+        let create: CreateVaultRequest = parse(&create).unwrap();
+        let retried_create: CreateVaultRequest = parse(&retried_create).unwrap();
+        assert_eq!(create.operation_id, retried_create.operation_id);
+        assert_eq!(create.material.profile, retried_create.material.profile);
+        assert_eq!(create.device, retried_create.device);
+        let checkpoint = client.checkpoint().unwrap();
+        let mut restored = EnrollmentClient::restore(checkpoint).unwrap();
+        assert_eq!(
+            restored.pending_vault_request().unwrap().1,
+            submit.request_id.to_string()
+        );
+        assert_eq!(restored.vault_request_header().unwrap().len(), 43);
+        assert!(restored.vault_request_accepted());
+        assert!(restored.has_prepared_owner_material());
+        let approved = VaultRequestStatus {
+            request_id: submit.request_id,
+            state: VaultRequestState::Approved,
+            expires_in_seconds: 60,
+        };
+        assert_eq!(
+            restored
+                .parse_vault_request_status(serde_json::to_string(&approved).unwrap())
+                .unwrap(),
+            "approved"
+        );
+        let wrong = VaultRequestStatus {
+            request_id: Uuid::new_v4(),
+            ..approved
+        };
+        assert!(
+            restored
+                .parse_vault_request_status(serde_json::to_string(&wrong).unwrap())
+                .is_err()
+        );
+        assert!(restored.vault_request_accepted());
+        let completed = VaultRequestStatus {
+            request_id: submit.request_id,
+            state: VaultRequestState::Completed,
+            expires_in_seconds: 60,
+        };
+        restored
+            .parse_vault_request_status(serde_json::to_string(&completed).unwrap())
+            .unwrap();
+        let recovered_create: CreateVaultRequest = parse(
+            &restored
+                .create_vault_request("taylor".into(), "password-password".into(), SECRET.into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered_create.operation_id, create.operation_id);
+        assert_eq!(recovered_create.material.profile, create.material.profile);
+        assert!(!restored.is_pending_owner_creation_for_origin(ORIGIN));
+        restored.clear_vault_request();
+        assert!(!restored.is_pending_owner_creation_for_origin(ORIGIN));
+    }
+
+    #[test]
+    fn restored_unaccepted_request_requires_matching_status_before_create() {
+        let token = URL_SAFE_NO_PAD.encode([7; 32]);
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Ios, "phone".into()).unwrap();
+        let submit: SubmitVaultRequest = parse(
+            &client
+                .begin_vault_request(ORIGIN.into(), token, "Taylor".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut restored = EnrollmentClient::restore(client.checkpoint().unwrap()).unwrap();
+
+        assert!(!restored.vault_request_accepted());
+        assert!(
+            restored
+                .create_vault_request("taylor".into(), "password-password".into(), SECRET.into())
+                .is_err()
+        );
+        assert!(
+            restored
+                .parse_vault_request_status(
+                    serde_json::to_string(&VaultRequestStatus {
+                        request_id: Uuid::new_v4(),
+                        state: VaultRequestState::Approved,
+                        expires_in_seconds: 60,
+                    })
+                    .unwrap(),
+                )
+                .is_err()
+        );
+        assert!(!restored.vault_request_accepted());
+
+        restored
+            .parse_vault_request_status(
+                serde_json::to_string(&VaultRequestStatus {
+                    request_id: submit.request_id,
+                    state: VaultRequestState::Approved,
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(restored.vault_request_accepted());
+        assert!(
+            restored
+                .create_vault_request("taylor".into(), "password-password".into(), SECRET.into())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn vault_creation_normalizes_username_before_checkpoint_retries() {
+        let token = URL_SAFE_NO_PAD.encode([8; 32]);
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "desktop".into()).unwrap();
+        let submit: SubmitVaultRequest = parse(
+            &client
+                .begin_vault_request(ORIGIN.into(), token, "Taylor".into())
+                .unwrap(),
+        )
+        .unwrap();
+        client
+            .accept_vault_request_created(
+                serde_json::to_string(&VaultRequestCreated {
+                    request_id: submit.request_id,
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let first: CreateVaultRequest = parse(
+            &client
+                .create_vault_request(" Taylor ".into(), "password-password".into(), SECRET.into())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut restored = EnrollmentClient::restore(client.checkpoint().unwrap()).unwrap();
+        let retry: CreateVaultRequest = parse(
+            &restored
+                .create_vault_request("TAYLOR".into(), "password-password".into(), SECRET.into())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first.username, "taylor");
+        assert_eq!(first.operation_id, retry.operation_id);
+        assert_eq!(first.username, retry.username);
+        assert!(
+            restored
+                .create_vault_request("   ".into(), "password-password".into(), SECRET.into())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoint_v2_restores_without_a_vault_request() {
+        let client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "desktop".into()).unwrap();
+        let mut checkpoint: serde_json::Value =
+            serde_json::from_slice(&client.checkpoint().unwrap()).unwrap();
+        checkpoint["version"] = serde_json::json!(2);
+        checkpoint.as_object_mut().unwrap().remove("vault_request");
+        let restored = EnrollmentClient::restore(serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        assert!(restored.pending_vault_request().is_none());
     }
 }

@@ -25,6 +25,19 @@ pub struct NativeEnrollmentIdentityMetadata {
     pub header_json: String,
 }
 
+#[derive(Clone, uniffi::Record)]
+pub struct NativeVaultInvite {
+    pub origin: String,
+    pub invite_token: String,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct NativePendingVaultRequest {
+    pub origin: String,
+    pub request_id: String,
+    pub display_name: String,
+}
+
 fn enrollment_error(_: peppy_hosted_client::HostedClientError) -> MobileBindingsError {
     MobileBindingsError::InvalidRequest
 }
@@ -45,6 +58,17 @@ pub fn new_native_enrollment_client(
             .map_err(enrollment_error)?,
         ),
     }))
+}
+
+#[uniffi::export]
+pub fn parse_vault_invite_link(link: String) -> Result<NativeVaultInvite, MobileBindingsError> {
+    let invite =
+        peppy_hosted_client::newenrollment::EnrollmentClient::parse_vault_invite_link(&link)
+            .map_err(enrollment_error)?;
+    Ok(NativeVaultInvite {
+        origin: invite.origin,
+        invite_token: invite.invite_token,
+    })
 }
 
 #[uniffi::export]
@@ -116,13 +140,14 @@ impl NativeEnrollmentClient {
     pub fn create_owner_request(
         &self,
         setup_token: String,
+        username: String,
         admin_password: String,
         passphrase: String,
     ) -> Result<String, MobileBindingsError> {
         self.inner
             .lock()
             .map_err(|_| MobileBindingsError::Crypto)?
-            .create_owner_request(setup_token, admin_password, passphrase)
+            .create_owner_request(setup_token, username, admin_password, passphrase)
             .map_err(enrollment_error)
     }
 
@@ -139,12 +164,104 @@ impl NativeEnrollmentClient {
     pub fn manual_challenge_request(
         &self,
         vault_id: Option<String>,
+        vault_owner: Option<String>,
     ) -> Result<String, MobileBindingsError> {
         self.inner
             .lock()
             .map_err(|_| MobileBindingsError::Crypto)?
-            .manual_challenge_request(vault_id)
+            .manual_challenge_request(vault_id, vault_owner)
             .map_err(enrollment_error)
+    }
+
+    pub fn begin_vault_request(
+        &self,
+        origin: String,
+        invite_token: String,
+        display_name: String,
+    ) -> Result<String, MobileBindingsError> {
+        self.inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .begin_vault_request(origin, invite_token, display_name)
+            .map_err(enrollment_error)
+    }
+
+    pub fn accept_vault_request_created(&self, json: String) -> Result<(), MobileBindingsError> {
+        self.inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .accept_vault_request_created(json)
+            .map_err(enrollment_error)
+    }
+
+    pub fn vault_request_header(&self) -> Result<String, MobileBindingsError> {
+        self.inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .vault_request_header()
+            .map_err(enrollment_error)
+    }
+
+    pub fn vault_request_accepted(&self) -> Result<bool, MobileBindingsError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .vault_request_accepted())
+    }
+
+    pub fn has_prepared_owner_material(&self) -> Result<bool, MobileBindingsError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .has_prepared_owner_material())
+    }
+
+    pub fn parse_vault_request_status(&self, json: String) -> Result<String, MobileBindingsError> {
+        self.inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .parse_vault_request_status(json)
+            .map_err(enrollment_error)
+    }
+
+    pub fn create_vault_request(
+        &self,
+        username: String,
+        admin_password: String,
+        passphrase: String,
+    ) -> Result<String, MobileBindingsError> {
+        self.inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .create_vault_request(username, admin_password, passphrase)
+            .map_err(enrollment_error)
+    }
+
+    pub fn clear_vault_request(&self) -> Result<(), MobileBindingsError> {
+        self.inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .clear_vault_request();
+        Ok(())
+    }
+
+    pub fn pending_vault_request(
+        &self,
+    ) -> Result<Option<NativePendingVaultRequest>, MobileBindingsError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| MobileBindingsError::Crypto)?
+            .pending_vault_request()
+            .map(
+                |(origin, request_id, display_name)| NativePendingVaultRequest {
+                    origin,
+                    request_id,
+                    display_name,
+                },
+            ))
     }
 
     pub fn complete_manual_challenge_request(

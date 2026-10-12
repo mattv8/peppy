@@ -703,6 +703,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_new_native_existing_owner_enrollment_client(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_vault_invite_link(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_restore_native_enrollment_client(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox(
@@ -925,13 +927,19 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_accept_vault_request_created(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_phone_invitation_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_begin_vault_request(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_phone_flow(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_checkpoint(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_claim_phone_invitation_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_clear_vault_request(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_complete_manual_challenge_request(
     ): Int
@@ -945,17 +953,29 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_phone_invitation_request(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_vault_request(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_manual_admission(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_owner_admission(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_phone_admission(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_has_prepared_owner_material(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_manual_challenge_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_parse_vault_request_status(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_pending_vault_request(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_sas(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_status_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_accepted(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_activate_into(
     ): Int
@@ -1227,7 +1247,11 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_free_nativeenrollmentclient(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_accept_vault_request_created(`ptr`: Long,`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_approve_phone_invitation_request(`ptr`: Long,`statusJson`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_begin_vault_request(`ptr`: Long,`origin`: RustBuffer.ByValue,`inviteToken`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_cancel_phone_flow(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1235,6 +1259,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_claim_phone_invitation_request(`ptr`: Long,`qrJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_clear_vault_request(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_complete_manual_challenge_request(`ptr`: Long,`challengeJson`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_confirm_phone_invitation_request(`ptr`: Long,`statusJson`: RustBuffer.ByValue,`sharedSecret`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1243,9 +1269,11 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_phone_claim(`ptr`: Long,`claimJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_owner_request(`ptr`: Long,`setupToken`: RustBuffer.ByValue,`adminPassword`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_owner_request(`ptr`: Long,`setupToken`: RustBuffer.ByValue,`username`: RustBuffer.ByValue,`adminPassword`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_phone_invitation_request(`ptr`: Long,`method`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_vault_request(`ptr`: Long,`username`: RustBuffer.ByValue,`adminPassword`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_finish_manual_admission(`ptr`: Long,`responseJson`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1253,11 +1281,21 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_finish_phone_admission(`ptr`: Long,`completeJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
-    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_manual_challenge_request(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_has_prepared_owner_material(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_manual_challenge_request(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`vaultOwner`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_parse_vault_request_status(`ptr`: Long,`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_pending_vault_request(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_phone_sas(`ptr`: Long,`statusJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_phone_status_request(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_accepted(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_clone_nativeenrollmentidentity(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1297,6 +1335,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_new_native_existing_owner_enrollment_client(`origin`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`deviceName`: RustBuffer.ByValue,`profileJson`: RustBuffer.ByValue,`headerJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_vault_invite_link(`link`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_restore_native_enrollment_client(`checkpoint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun ffi_peppy_mobile_bindings_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1458,6 +1498,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_new_native_existing_owner_enrollment_client() and 0xFFFF) != 16192) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_vault_invite_link() and 0xFFFF) != 54424) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_restore_native_enrollment_client() and 0xFFFF) != 36620) {
@@ -1793,7 +1836,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativehostedsession_expires_in_seconds() and 0xFFFF) != 15882) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_accept_vault_request_created() and 0xFFFF) != 58540) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_phone_invitation_request() and 0xFFFF) != 23020) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_begin_vault_request() and 0xFFFF) != 19106) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_phone_flow() and 0xFFFF) != 56287) {
@@ -1803,6 +1852,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_claim_phone_invitation_request() and 0xFFFF) != 8280) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_clear_vault_request() and 0xFFFF) != 52725) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_complete_manual_challenge_request() and 0xFFFF) != 29980) {
@@ -1817,10 +1869,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_phone_claim() and 0xFFFF) != 14687) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_owner_request() and 0xFFFF) != 33051) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_owner_request() and 0xFFFF) != 55557) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_phone_invitation_request() and 0xFFFF) != 43184) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_create_vault_request() and 0xFFFF) != 54590) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_manual_admission() and 0xFFFF) != 62181) {
@@ -1832,13 +1887,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_finish_phone_admission() and 0xFFFF) != 48135) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_manual_challenge_request() and 0xFFFF) != 2106) {
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_has_prepared_owner_material() and 0xFFFF) != 14666) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_manual_challenge_request() and 0xFFFF) != 63272) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_parse_vault_request_status() and 0xFFFF) != 11728) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_pending_vault_request() and 0xFFFF) != 63047) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_sas() and 0xFFFF) != 11797) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_phone_status_request() and 0xFFFF) != 62139) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_accepted() and 0xFFFF) != 4707) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header() and 0xFFFF) != 50961) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_activate_into() and 0xFFFF) != 62525) {
@@ -4276,8 +4346,12 @@ public object FfiConverterTypeNativeClient: FfiConverter<NativeClient, Long> {
 
 public interface NativeEnrollmentClientInterface {
     
+    fun `acceptVaultRequestCreated`(`json`: kotlin.String)
+
     fun `approvePhoneInvitationRequest`(`statusJson`: kotlin.String, `passphrase`: kotlin.String): kotlin.String
     
+    fun `beginVaultRequest`(`origin`: kotlin.String, `inviteToken`: kotlin.String, `displayName`: kotlin.String): kotlin.String
+
     /**
      * Abandons a local claimant flow; it does not perform a server-side cancellation.
      */
@@ -4287,6 +4361,8 @@ public interface NativeEnrollmentClientInterface {
     
     fun `claimPhoneInvitationRequest`(`qrJson`: kotlin.String): kotlin.String
     
+    fun `clearVaultRequest`()
+
     fun `completeManualChallengeRequest`(`challengeJson`: kotlin.String, `passphrase`: kotlin.String): kotlin.String
     
     fun `confirmPhoneInvitationRequest`(`statusJson`: kotlin.String, `sharedSecret`: kotlin.String?): kotlin.String
@@ -4295,17 +4371,25 @@ public interface NativeEnrollmentClientInterface {
     
     fun `consumePhoneClaim`(`claimJson`: kotlin.String)
     
-    fun `createOwnerRequest`(`setupToken`: kotlin.String, `adminPassword`: kotlin.String, `passphrase`: kotlin.String): kotlin.String
+    fun `createOwnerRequest`(`setupToken`: kotlin.String, `username`: kotlin.String, `adminPassword`: kotlin.String, `passphrase`: kotlin.String): kotlin.String
     
     fun `createPhoneInvitationRequest`(`method`: NativeEnrollmentMethod): kotlin.String
     
+    fun `createVaultRequest`(`username`: kotlin.String, `adminPassword`: kotlin.String, `passphrase`: kotlin.String): kotlin.String
+
     fun `finishManualAdmission`(`responseJson`: kotlin.String, `passphrase`: kotlin.String): NativeEnrollmentIdentity
     
     fun `finishOwnerAdmission`(`responseJson`: kotlin.String, `passphrase`: kotlin.String): NativeEnrollmentIdentity
     
     fun `finishPhoneAdmission`(`completeJson`: kotlin.String): NativeEnrollmentIdentity
     
-    fun `manualChallengeRequest`(`vaultId`: kotlin.String?): kotlin.String
+    fun `hasPreparedOwnerMaterial`(): kotlin.Boolean
+
+    fun `manualChallengeRequest`(`vaultId`: kotlin.String?, `vaultOwner`: kotlin.String?): kotlin.String
+
+    fun `parseVaultRequestStatus`(`json`: kotlin.String): kotlin.String
+
+    fun `pendingVaultRequest`(): NativePendingVaultRequest?
     
     fun `phoneSas`(`statusJson`: kotlin.String): kotlin.String
     
@@ -4314,6 +4398,10 @@ public interface NativeEnrollmentClientInterface {
      */
     fun `phoneStatusRequest`(): kotlin.String
     
+    fun `vaultRequestAccepted`(): kotlin.Boolean
+
+    fun `vaultRequestHeader`(): kotlin.String
+
     companion object
 }
 
@@ -4419,6 +4507,20 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     }
 
     
+    @Throws(MobileBindingsException::class)override fun `acceptVaultRequestCreated`(`json`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_accept_vault_request_created(
+        it,
+
+        FfiConverterString.lower(`json`),_status)
+}
+    }
+
+
+
+
     @Throws(MobileBindingsException::class)override fun `approvePhoneInvitationRequest`(`statusJson`: kotlin.String, `passphrase`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -4435,6 +4537,23 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     
 
     
+    @Throws(MobileBindingsException::class)override fun `beginVaultRequest`(`origin`: kotlin.String, `inviteToken`: kotlin.String, `displayName`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_begin_vault_request(
+        it,
+
+        FfiConverterString.lower(`origin`),
+        FfiConverterString.lower(`inviteToken`),
+        FfiConverterString.lower(`displayName`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Abandons a local claimant flow; it does not perform a server-side cancellation.
      */
@@ -4480,6 +4599,19 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     
 
     
+    @Throws(MobileBindingsException::class)override fun `clearVaultRequest`()
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_clear_vault_request(
+        it,
+        _status)
+}
+    }
+
+
+
+
     @Throws(MobileBindingsException::class)override fun `completeManualChallengeRequest`(`challengeJson`: kotlin.String, `passphrase`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -4540,7 +4672,7 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     
 
     
-    @Throws(MobileBindingsException::class)override fun `createOwnerRequest`(`setupToken`: kotlin.String, `adminPassword`: kotlin.String, `passphrase`: kotlin.String): kotlin.String {
+    @Throws(MobileBindingsException::class)override fun `createOwnerRequest`(`setupToken`: kotlin.String, `username`: kotlin.String, `adminPassword`: kotlin.String, `passphrase`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
@@ -4548,6 +4680,7 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
         it,
         
         FfiConverterString.lower(`setupToken`),
+        FfiConverterString.lower(`username`),
         FfiConverterString.lower(`adminPassword`),
         FfiConverterString.lower(`passphrase`),_status)
 }
@@ -4572,6 +4705,23 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     
 
     
+    @Throws(MobileBindingsException::class)override fun `createVaultRequest`(`username`: kotlin.String, `adminPassword`: kotlin.String, `passphrase`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_create_vault_request(
+        it,
+
+        FfiConverterString.lower(`username`),
+        FfiConverterString.lower(`adminPassword`),
+        FfiConverterString.lower(`passphrase`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(MobileBindingsException::class)override fun `finishManualAdmission`(`responseJson`: kotlin.String, `passphrase`: kotlin.String): NativeEnrollmentIdentity {
             return FfiConverterTypeNativeEnrollmentIdentity.lift(
     callWithHandle {
@@ -4619,14 +4769,58 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     
 
     
-    @Throws(MobileBindingsException::class)override fun `manualChallengeRequest`(`vaultId`: kotlin.String?): kotlin.String {
+    @Throws(MobileBindingsException::class)override fun `hasPreparedOwnerMaterial`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_has_prepared_owner_material(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(MobileBindingsException::class)override fun `manualChallengeRequest`(`vaultId`: kotlin.String?, `vaultOwner`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_manual_challenge_request(
         it,
         
-        FfiConverterOptionalString.lower(`vaultId`),_status)
+        FfiConverterOptionalString.lower(`vaultId`),
+        FfiConverterOptionalString.lower(`vaultOwner`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(MobileBindingsException::class)override fun `parseVaultRequestStatus`(`json`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_parse_vault_request_status(
+        it,
+
+        FfiConverterString.lower(`json`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(MobileBindingsException::class)override fun `pendingVaultRequest`(): NativePendingVaultRequest? {
+            return FfiConverterOptionalTypeNativePendingVaultRequest.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_pending_vault_request(
+        it,
+        _status)
 }
     }
     )
@@ -4666,6 +4860,34 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     
 
     
+    @Throws(MobileBindingsException::class)override fun `vaultRequestAccepted`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_accepted(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(MobileBindingsException::class)override fun `vaultRequestHeader`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
 
     
 
@@ -7912,6 +8134,49 @@ public object FfiConverterTypeNativeOpenConfig: FfiConverterRustBuffer<NativeOpe
 
 
 
+data class NativePendingVaultRequest (
+    var `origin`: kotlin.String
+    ,
+    var `requestId`: kotlin.String
+    ,
+    var `displayName`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePendingVaultRequest: FfiConverterRustBuffer<NativePendingVaultRequest> {
+    override fun read(buf: ByteBuffer): NativePendingVaultRequest {
+        return NativePendingVaultRequest(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePendingVaultRequest) = (
+            FfiConverterString.allocationSize(value.`origin`) +
+            FfiConverterString.allocationSize(value.`requestId`) +
+            FfiConverterString.allocationSize(value.`displayName`)
+    )
+
+    override fun write(value: NativePendingVaultRequest, buf: ByteBuffer) {
+            FfiConverterString.write(value.`origin`, buf)
+            FfiConverterString.write(value.`requestId`, buf)
+            FfiConverterString.write(value.`displayName`, buf)
+    }
+}
+
+
+
 data class NativePermit (
     var `state`: NativePermitState
     , 
@@ -8192,6 +8457,44 @@ public object FfiConverterTypeNativeSnapshotReport: FfiConverterRustBuffer<Nativ
             FfiConverterULong.write(value.`duplicate`, buf)
             FfiConverterULong.write(value.`quarantined`, buf)
             FfiConverterString.write(value.`receiveCursor`, buf)
+    }
+}
+
+
+
+data class NativeVaultInvite (
+    var `origin`: kotlin.String
+    ,
+    var `inviteToken`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeVaultInvite: FfiConverterRustBuffer<NativeVaultInvite> {
+    override fun read(buf: ByteBuffer): NativeVaultInvite {
+        return NativeVaultInvite(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeVaultInvite) = (
+            FfiConverterString.allocationSize(value.`origin`) +
+            FfiConverterString.allocationSize(value.`inviteToken`)
+    )
+
+    override fun write(value: NativeVaultInvite, buf: ByteBuffer) {
+            FfiConverterString.write(value.`origin`, buf)
+            FfiConverterString.write(value.`inviteToken`, buf)
     }
 }
 
@@ -9177,6 +9480,38 @@ public object FfiConverterOptionalTypeNativeCarrierCommand: FfiConverterRustBuff
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeNativePendingVaultRequest: FfiConverterRustBuffer<NativePendingVaultRequest?> {
+    override fun read(buf: ByteBuffer): NativePendingVaultRequest? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativePendingVaultRequest.read(buf)
+    }
+
+    override fun allocationSize(value: NativePendingVaultRequest?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativePendingVaultRequest.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativePendingVaultRequest?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativePendingVaultRequest.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeNativeSnapshotProgress: FfiConverterRustBuffer<NativeSnapshotProgress?> {
     override fun read(buf: ByteBuffer): NativeSnapshotProgress? {
         if (buf.get().toInt() == 0) {
@@ -9809,6 +10144,18 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
     )
     }
     
+
+    @Throws(MobileBindingsException::class) fun `parseVaultInviteLink`(`link`: kotlin.String): NativeVaultInvite {
+            return FfiConverterTypeNativeVaultInvite.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_vault_invite_link(
+
+
+        FfiConverterString.lower(`link`),_status)
+}
+    )
+    }
+
 
     @Throws(MobileBindingsException::class) fun `restoreNativeEnrollmentClient`(`checkpoint`: kotlin.ByteArray): NativeEnrollmentClient {
             return FfiConverterTypeNativeEnrollmentClient.lift(
