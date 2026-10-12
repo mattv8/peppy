@@ -134,13 +134,14 @@ final class AppModel {
         await run(.unlocking) { try await $0.unlock(passphrase: passphrase) }
     }
 
-    func claimInstance(origin: String, setupToken: String, adminPassword: String, passphrase: String) async {
+    func claimInstance(origin: String, setupToken: String, username: String, adminPassword: String, passphrase: String) async {
         activity = .enrolling
         defer { activity = .idle }
         do {
             status = try await session.claimInstance(
                 origin: origin,
                 setupToken: setupToken,
+                username: username,
                 adminPassword: adminPassword,
                 passphrase: passphrase,
                 deviceName: UIDevice.current.name
@@ -166,15 +167,72 @@ final class AppModel {
         }
     }
 
-    func joinWithSharedSecret(origin: String, vaultID: String?, passphrase: String) async {
+    func joinWithSharedSecret(origin: String, vaultID: String?, vaultOwner: String?, passphrase: String) async {
         await run(.enrolling) {
             try await $0.joinWithSharedSecret(
                 origin: origin,
                 vaultID: vaultID,
+                vaultOwner: vaultOwner,
                 passphrase: passphrase,
                 deviceName: UIDevice.current.name
             )
         }
+    }
+
+    func signIn(origin: String, username: String, password: String) async -> Bool {
+        activity = .enrolling
+        defer { activity = .idle }
+        do {
+            try await session.signIn(origin: origin, username: username, password: password)
+            lastError = nil
+            return true
+        } catch {
+            lastError = (error as? ClientError)?.userMessage ?? "Could not sign in to this server."
+            return false
+        }
+    }
+
+    func beginVaultRequest(inviteLink: String, displayName: String, expectedOrigin: String?) async -> VaultRequestProgress? {
+        activity = .enrolling
+        defer { activity = .idle }
+        do {
+            let progress = try await session.beginVaultRequest(inviteLink: inviteLink, displayName: displayName, expectedOrigin: expectedOrigin, deviceName: UIDevice.current.name)
+            lastError = nil
+            return progress
+        } catch {
+            lastError = (error as? ClientError)?.userMessage ?? "Could not send the vault request."
+            return nil
+        }
+    }
+
+    func pendingVaultRequest(origin: String) async -> VaultRequestProgress? {
+        do { return try await session.pendingVaultRequest(origin: origin) }
+        catch { lastError = (error as? ClientError)?.userMessage; return nil }
+    }
+
+    func vaultRequestStatus(origin: String) async -> VaultRequestProgress? {
+        do { return try await session.vaultRequestStatus(origin: origin) }
+        catch is CancellationError { return nil }
+        catch ClientError.canceled { return nil }
+        catch { lastError = (error as? ClientError)?.userMessage ?? "Could not check the vault request."; return nil }
+    }
+
+    func createVault(origin: String, username: String, adminPassword: String, passphrase: String) async {
+        await run(.enrolling) {
+            try await $0.createVault(origin: origin, username: username, adminPassword: adminPassword, passphrase: passphrase)
+        }
+    }
+
+    func cancelVaultRequest(origin: String) {
+        Task { try? await session.cancelVaultRequest(origin: origin) }
+    }
+
+    func vaultRequestRecoveryRequired() {
+        lastError = "This vault request completed, but its local recovery material is unavailable. Ask the server admin for a new invite."
+    }
+
+    func vaultRequestRecoveryRetained() {
+        lastError = "Your prepared vault request is kept securely on this device. Return with the shared secret you saved to finish creating the vault."
     }
 
     func beginPhoneEnrollment(qr: String) async -> PhoneEnrollmentStatus? {
@@ -182,6 +240,10 @@ final class AppModel {
         defer { activity = .idle }
         do { return try await session.beginPhoneEnrollment(qrPayload: qr, deviceName: UIDevice.current.name) }
         catch { lastError = (error as? ClientError)?.userMessage ?? "Could not scan this enrollment code."; return nil }
+    }
+
+    func isVaultInviteLink(_ value: String) async -> Bool {
+        (try? await session.vaultInviteOrigin(link: value)) != nil
     }
 
     func phoneEnrollmentStatus() async -> PhoneEnrollmentStatus? {

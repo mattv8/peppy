@@ -95,6 +95,34 @@ import Testing
         #expect(state.canSubmitJoin)
     }
 
+    @Test func vaultCreationRequiresAnAcknowledgedStableGeneratedSecret() {
+        var state = SelfHostedEnrollmentState()
+        state.vaultUsername = "family"
+        state.vaultPassword = "long-owner-password"
+        state.vaultPasswordConfirmation = state.vaultPassword
+        state.prepareVaultSecret { "first stable secret" }
+        state.prepareVaultSecret { "replacement secret" }
+
+        #expect(!state.canSubmitVaultCreation)
+        state.acknowledgedSecretSave = true
+        #expect(state.canSubmitVaultCreation)
+        #expect(state.generatedSecret == "first stable secret")
+    }
+
+    @Test func inviteResetClearsPreparedSecretButLeavesClaimedOriginAvailable() {
+        var state = SelfHostedEnrollmentState()
+        state.origin = "https://peppy.example"
+        state.claimedChooserActive = true
+        state.beginInviteRequest(link: "https://peppy.example/#invite=token")
+        state.prepareVaultSecret { "saved secret" }
+
+        state.clearInvite()
+
+        #expect(state.inviteStage == .none)
+        #expect(state.generatedSecret.isEmpty)
+        #expect(state.origin == "https://peppy.example")
+    }
+
     private func validOwnerState() -> SelfHostedEnrollmentState {
         var state = SelfHostedEnrollmentState()
         state.origin = "https://peppy.example"

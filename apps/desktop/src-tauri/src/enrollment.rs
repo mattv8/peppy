@@ -14,7 +14,8 @@ use peppy_hosted_api::enrollment::{
     EnrollmentState, InstanceInfo, InstanceLoginRequest, InvitationCreated, InvitationStatus,
 };
 use peppy_hosted_client::newenrollment::{EnrollmentClient, NativeEnrollmentIdentity};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tauri::{AppHandle, State, WebviewWindow};
 use zeroize::Zeroizing;
@@ -22,6 +23,7 @@ use zeroize::Zeroizing;
 const DEVICE_NAME: &str = "Peppy Desktop";
 const HOSTED_ORIGIN: &str = "https://peppy.pro";
 const OWNER_CHECKPOINT_PREFIX: &str = "enrollment-owner:v1:";
+const VAULT_REQUEST_CHECKPOINT_PREFIX: &str = "enrollment-vault-request:v1:";
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 #[derive(Default)]
@@ -38,6 +40,8 @@ pub struct Controller {
     invitation: Option<InvitationStatus>,
     owner_resume: bool,
     owner_passphrase: Option<Zeroizing<String>>,
+    vault_request_state: Option<String>,
+    vault_creation_in_flight: bool,
     operation_epoch: u64,
 }
 
@@ -55,6 +59,10 @@ pub struct EnrollmentView {
     error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     setup_code_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vault_owner_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
 }
 
 impl Controller {
@@ -63,6 +71,10 @@ impl Controller {
             Some(DeploymentMode::Hosted) => "hosted",
             _ => "community",
         };
+        let pending_request = self
+            .client
+            .as_ref()
+            .and_then(EnrollmentClient::pending_vault_request);
         let stage = match self.info.as_ref() {
             None => "server",
             Some(_)
@@ -84,6 +96,24 @@ impl Controller {
                 "waiting_phone"
             }
             Some(_) if self.ready => "ready",
+            Some(_)
+                if matches!(self.vault_request_state.as_deref(), Some("approved"))
+                    || (matches!(self.vault_request_state.as_deref(), Some("completed"))
+                        && self
+                            .client
+                            .as_ref()
+                            .is_some_and(EnrollmentClient::has_prepared_owner_material)) =>
+            {
+                "invite_approved"
+            }
+            Some(_) if matches!(self.vault_request_state.as_deref(), Some("completed")) => "error",
+            Some(_) if matches!(self.vault_request_state.as_deref(), Some("denied")) => {
+                "invite_denied"
+            }
+            Some(_) if matches!(self.vault_request_state.as_deref(), Some("expired")) => {
+                "invite_expired"
+            }
+            Some(_) if pending_request.is_some() => "invite_waiting",
             Some(info) if !info.claimed || info.setup_required => "setup",
             Some(_) if self.admin_session.is_some() => "locked",
             Some(_) => "signin",
@@ -112,8 +142,11 @@ impl Controller {
                 .invitation
                 .as_ref()
                 .map(|status| status.expires_in_seconds),
-            error_code: None,
+            error_code: matches!(self.vault_request_state.as_deref(), Some("completed"))
+                .then_some("request_completed_without_material".into()),
             setup_code_required,
+            vault_owner_required: None,
+            display_name: pending_request.map(|(_, _, display_name)| display_name),
         }
     }
 
@@ -192,6 +225,131 @@ fn owner_checkpoint_key(origin: &str) -> String {
     format!("{OWNER_CHECKPOINT_PREFIX}{origin}")
 }
 
+fn vault_request_checkpoint_key(origin: &str) -> String {
+    let digest = Sha256::digest(origin.as_bytes());
+    format!("{VAULT_REQUEST_CHECKPOINT_PREFIX}{digest:x}")
+}
+
+fn tombstone_vault_request_checkpoint(store: &dyn SecretStore, origin: &str) -> BridgeResult<()> {
+    store.set(&vault_request_checkpoint_key(origin), b"")
+}
+
+fn definitive_vault_request_error(code: &str) -> bool {
+    matches!(
+        code,
+        "invite_invalid" | "request_not_found" | "invalid_username" | "username_taken"
+    )
+}
+
+/// Clears the vault request while the caller already holds the controller lock. Callers must
+/// have verified `operation_epoch` under that same guard so a stale finish cannot wipe a newer
+/// request or its checkpoint.
+fn clear_vault_request_locked(
+    controller: &mut Controller,
+    store: &dyn SecretStore,
+    origin: &str,
+) -> BridgeResult<()> {
+    controller
+        .client
+        .as_mut()
+        .map(EnrollmentClient::clear_vault_request);
+    controller.vault_request_state = None;
+    controller.vault_creation_in_flight = false;
+    tombstone_vault_request_checkpoint(store, origin)
+}
+
+/// Resubmits an unaccepted vault request. Definitive rejections finish the request as expired;
+/// transient failures keep the persisted checkpoint so the same submission can be retried.
+async fn resubmit_unaccepted_vault_request<Submit, Fut>(
+    enrollment: &std::sync::Mutex<Controller>,
+    store: &dyn SecretStore,
+    epoch: u64,
+    origin: &str,
+    request: String,
+    checkpoint: &[u8],
+    submit: Submit,
+) -> BridgeResult<Option<EnrollmentView>>
+where
+    Submit: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = BridgeResult<String>>,
+{
+    {
+        let controller = enrollment.lock().map_err(|_| BridgeError::host_state())?;
+        if controller.operation_epoch != epoch {
+            return Ok(Some(controller.view()));
+        }
+        store.set(&vault_request_checkpoint_key(origin), checkpoint)?;
+    }
+    let created = match submit(request).await {
+        Ok(created) => created,
+        Err(error) if definitive_vault_request_error(error.code) => {
+            let mut controller = enrollment.lock().map_err(|_| BridgeError::host_state())?;
+            if controller.operation_epoch != epoch {
+                return Ok(Some(controller.view()));
+            }
+            clear_vault_request_locked(&mut controller, store, origin)?;
+            controller.vault_request_state = Some("expired".into());
+            return Ok(Some(controller.view()));
+        }
+        Err(error) => return Err(error),
+    };
+    let controller = enrollment.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.operation_epoch != epoch {
+        return Ok(Some(controller.view()));
+    }
+    let client = controller.client.as_ref().ok_or_else(enrollment_error)?;
+    client
+        .accept_vault_request_created(created)
+        .map_err(|_| enrollment_error())?;
+    let checkpoint = client.checkpoint().map_err(|_| enrollment_error())?;
+    store.set(&vault_request_checkpoint_key(origin), &checkpoint)?;
+    Ok(None)
+}
+
+fn restore_pending_vault_request(
+    store: &dyn SecretStore,
+    origin: &str,
+) -> BridgeResult<Option<EnrollmentClient>> {
+    let Some(bytes) = store
+        .get(&vault_request_checkpoint_key(origin))?
+        .filter(|bytes| !bytes.is_empty())
+    else {
+        return Ok(None);
+    };
+    match EnrollmentClient::restore(bytes.to_vec())
+        .ok()
+        .filter(|client| {
+            client
+                .pending_vault_request()
+                .is_some_and(|(request_origin, _, _)| request_origin == origin)
+        }) {
+        Some(client) => Ok(Some(client)),
+        None => {
+            tombstone_vault_request_checkpoint(store, origin)?;
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsernameInput {
+    username: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultOwnerInput {
+    vault_owner: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeginVaultRequestInput {
+    invite_link: String,
+    display_name: String,
+}
+
 fn tombstone_owner_checkpoint(store: &dyn SecretStore, origin: &str) -> BridgeResult<()> {
     store.set(&owner_checkpoint_key(origin), b"")
 }
@@ -249,6 +407,7 @@ async fn create_owner_core<P, PF, C, CF, G, H, HF, A, AF>(
     controller: &std::sync::Mutex<Controller>,
     store: &dyn SecretStore,
     expected_binding: Option<crate::credentials::Binding>,
+    username: String,
     mut prompt: P,
     confirm_generated: C,
     generate: G,
@@ -332,6 +491,7 @@ where
         let request = client
             .create_owner_request(
                 setup_token.to_string(),
+                username,
                 admin_password.to_string(),
                 passphrase.to_string(),
             )
@@ -415,6 +575,14 @@ fn known_claim_error_code(body: &[u8]) -> Option<&'static str> {
     {
         "invalid_setup_token" => Some("invalid_setup_token"),
         "instance_already_claimed" => Some("instance_already_claimed"),
+        "invalid_username" => Some("invalid_username"),
+        "username_taken" => Some("username_taken"),
+        "vault_owner_required" => Some("vault_owner_required"),
+        "vault_not_found" => Some("vault_not_found"),
+        "invite_invalid" => Some("invite_invalid"),
+        "request_not_found" => Some("request_not_found"),
+        "request_not_approved" => Some("request_not_approved"),
+        "operation_conflict" => Some("operation_conflict"),
         _ => None,
     }
 }
@@ -606,6 +774,12 @@ pub async fn enrollment_discover(
     } else {
         None
     };
+    let pending_vault_request = if response.mode == DeploymentMode::Community && existing.is_none()
+    {
+        restore_pending_vault_request(&*state.store, &selected)?
+    } else {
+        None
+    };
     let resumed_pending = pending_owner.is_some();
     // An existing device stays ready with its own credential; only an owner gets an invitation client.
     let client = match (existing, pending_owner) {
@@ -621,6 +795,7 @@ pub async fn enrollment_discover(
         ),
         (Some(ExistingIdentity::Device), _) => None,
         (None, Some(client)) => Some(client),
+        (None, None) if pending_vault_request.is_some() => pending_vault_request,
         (None, None) => Some(
             EnrollmentClient::new(selected.clone(), ClientKind::Desktop, DEVICE_NAME.into())
                 .map_err(|_| enrollment_error())?,
@@ -666,6 +841,15 @@ fn apply_discovery(
     }
     controller.owner_resume = resumed_pending;
     controller.owner_passphrase = None;
+    controller.vault_request_state = controller
+        .client
+        .as_ref()
+        .and_then(EnrollmentClient::pending_vault_request)
+        .map(|_| "pending".into());
+    controller.vault_creation_in_flight = controller
+        .client
+        .as_ref()
+        .is_some_and(EnrollmentClient::has_prepared_owner_material);
     controller.has_gateway = has_gateway;
     set_identity_ready(controller, existing_role);
 }
@@ -723,6 +907,7 @@ pub async fn enrollment_create_owner(
     app: AppHandle,
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
+    input: Option<UsernameInput>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
     if state
@@ -752,6 +937,7 @@ pub async fn enrollment_create_owner(
         &state_ref.enrollment,
         &*state_ref.store,
         expected_binding,
+        input.and_then(|value| value.username).unwrap_or_default(),
         |purpose| dialogs::passphrase(app_ref, purpose),
         |message| async move {
             dialogs::confirm(
@@ -826,6 +1012,7 @@ pub async fn enrollment_sign_in(
     app: AppHandle,
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
+    input: Option<UsernameInput>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
     if state
@@ -860,6 +1047,7 @@ pub async fn enrollment_sign_in(
         .origin()?
         .to_owned();
     let request = serde_json::to_string(&InstanceLoginRequest {
+        username: input.and_then(|value| value.username).unwrap_or_default(),
         admin_password: password.to_string(),
         client: ClientKind::Desktop,
     })
@@ -892,6 +1080,7 @@ pub async fn enrollment_connect_shared_secret(
     app: AppHandle,
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
+    input: Option<VaultOwnerInput>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
     let expected_binding = state.config()?.active_binding().cloned();
@@ -913,13 +1102,13 @@ pub async fn enrollment_connect_shared_secret(
                 .client
                 .as_ref()
                 .ok_or_else(enrollment_error)?
-                .manual_challenge_request(None)
+                .manual_challenge_request(None, input.and_then(|value| value.vault_owner))
                 .map_err(|_| enrollment_error())?,
         )
     };
     let client = http(&origin)?;
     let account_session = hosted_account_header(&state, &hosted).await?;
-    let challenge_json = post(
+    let challenge_json = match post(
         &client,
         &origin,
         enrollment::routes::ENROLLMENT_CHALLENGES,
@@ -927,7 +1116,21 @@ pub async fn enrollment_connect_shared_secret(
         None,
         account_session.as_ref().map(|value| value.as_str()),
     )
-    .await?;
+    .await
+    {
+        Err(error) if error.code == "vault_owner_required" => {
+            let mut view = state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?
+                .view();
+            view.stage = "locked";
+            view.vault_owner_required = Some(true);
+            return Ok(view);
+        }
+        Err(error) => return Err(error),
+        Ok(response) => response,
+    };
     let challenge: AdmissionChallenge =
         serde_json::from_str(&challenge_json).map_err(|_| enrollment_error())?;
     let complete_request = state
@@ -974,6 +1177,430 @@ pub async fn enrollment_connect_shared_secret(
         stage: "ready",
         ..controller.view()
     })
+}
+
+#[tauri::command]
+pub async fn enrollment_begin_vault_request(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    input: BeginVaultRequestInput,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    let invite = EnrollmentClient::parse_vault_invite_link(&input.invite_link)
+        .map_err(|_| enrollment_error())?;
+    let epoch = begin_owner_operation(&state.enrollment)?;
+    let (origin, request, checkpoint) = {
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        if controller.operation_epoch != epoch {
+            return Ok(controller.view());
+        }
+        if controller.origin.as_deref() != Some(invite.origin.as_str()) {
+            return Err(BridgeError::new(
+                "invite_invalid",
+                "This invite belongs to a different server.",
+            ));
+        }
+        if controller.client.is_none() {
+            controller.client = Some(
+                EnrollmentClient::new(
+                    invite.origin.clone(),
+                    ClientKind::Desktop,
+                    DEVICE_NAME.into(),
+                )
+                .map_err(|_| enrollment_error())?,
+            );
+        }
+        let client = controller.client.as_mut().ok_or_else(enrollment_error)?;
+        let request = client
+            .begin_vault_request(
+                invite.origin.clone(),
+                invite.invite_token,
+                input.display_name,
+            )
+            .map_err(|_| enrollment_error())?;
+        let checkpoint = Zeroizing::new(client.checkpoint().map_err(|_| enrollment_error())?);
+        controller.vault_request_state = Some("pending".into());
+        (invite.origin, request, checkpoint)
+    };
+    {
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        if controller.operation_epoch != epoch {
+            return Ok(controller.view());
+        }
+        state
+            .store
+            .set(&vault_request_checkpoint_key(&origin), &checkpoint)?;
+    }
+    if !owner_operation_current(&state.enrollment, epoch)? {
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    let response = match post(
+        &http(&origin)?,
+        &origin,
+        enrollment::routes::INSTANCE_VAULT_REQUESTS,
+        request,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if definitive_vault_request_error(error.code) => {
+            let mut controller = state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?;
+            if controller.operation_epoch != epoch {
+                return Ok(controller.view());
+            }
+            clear_vault_request_locked(&mut controller, &*state.store, &origin)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    if controller.operation_epoch != epoch {
+        return Ok(controller.view());
+    }
+    controller
+        .client
+        .as_ref()
+        .ok_or_else(enrollment_error)?
+        .accept_vault_request_created(response)
+        .map_err(|_| enrollment_error())?;
+    let checkpoint = controller
+        .client
+        .as_ref()
+        .ok_or_else(enrollment_error)?
+        .checkpoint()
+        .map_err(|_| enrollment_error())?;
+    state
+        .store
+        .set(&vault_request_checkpoint_key(&origin), &checkpoint)?;
+    Ok(controller.view())
+}
+
+#[tauri::command]
+pub async fn enrollment_vault_request_status(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    let epoch = begin_owner_operation(&state.enrollment)?;
+    let resubmit = {
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let origin = controller.origin()?.to_owned();
+        let Some(client) = controller.client.as_mut() else {
+            return Err(enrollment_error());
+        };
+        if !client.vault_request_accepted() {
+            let request = client
+                .begin_vault_request(origin.clone(), String::new(), String::new())
+                .map_err(|_| enrollment_error())?;
+            let checkpoint = client.checkpoint().map_err(|_| enrollment_error())?;
+            Some((origin, request, checkpoint))
+        } else {
+            None
+        }
+    };
+    if let Some((origin, request, checkpoint)) = resubmit {
+        let terminal = resubmit_unaccepted_vault_request(
+            &state.enrollment,
+            &*state.store,
+            epoch,
+            &origin,
+            request,
+            &checkpoint,
+            |request| {
+                let origin = origin.clone();
+                async move {
+                    post(
+                        &http(&origin)?,
+                        &origin,
+                        enrollment::routes::INSTANCE_VAULT_REQUESTS,
+                        request,
+                        None,
+                        None,
+                    )
+                    .await
+                }
+            },
+        )
+        .await?;
+        if let Some(view) = terminal {
+            return Ok(view);
+        }
+    }
+    let (origin, request_id, secret, known_state) = {
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let (origin, request_id, _) = controller
+            .client
+            .as_ref()
+            .and_then(EnrollmentClient::pending_vault_request)
+            .ok_or_else(enrollment_error)?;
+        let secret = controller
+            .client
+            .as_ref()
+            .ok_or_else(enrollment_error)?
+            .vault_request_header()
+            .map_err(|_| enrollment_error())?;
+        (
+            origin,
+            request_id,
+            secret,
+            controller
+                .vault_request_state
+                .clone()
+                .unwrap_or_else(|| "pending".into()),
+        )
+    };
+    let response = match body(
+        http(&origin)?
+            .get(format!(
+                "{origin}{}/{request_id}?wait=15",
+                enrollment::routes::INSTANCE_VAULT_REQUESTS
+            ))
+            .header(enrollment::VAULT_REQUEST_HEADER, secret)
+            .header(enrollment::KNOWN_STATE_HEADER, known_state)
+            .send()
+            .await
+            .map_err(|_| NetError::Offline)?,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if error.code == "request_not_found" => {
+            let mut controller = state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?;
+            if controller.operation_epoch != epoch {
+                return Ok(controller.view());
+            }
+            clear_vault_request_locked(&mut controller, &*state.store, &origin)?;
+            controller.vault_request_state = Some("expired".into());
+            return Ok(controller.view());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    if controller.operation_epoch != epoch {
+        return Ok(controller.view());
+    }
+    let status = controller
+        .client
+        .as_ref()
+        .ok_or_else(enrollment_error)?
+        .parse_vault_request_status(response)
+        .map_err(|_| enrollment_error())?;
+    controller.vault_request_state = Some(status.clone());
+    if matches!(status.as_str(), "denied" | "expired") {
+        controller
+            .client
+            .as_mut()
+            .ok_or_else(enrollment_error)?
+            .clear_vault_request();
+        tombstone_vault_request_checkpoint(&*state.store, &origin)?;
+    }
+    Ok(controller.view())
+}
+
+#[tauri::command]
+pub async fn enrollment_create_vault(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: UsernameInput,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    let epoch = begin_owner_operation(&state.enrollment)?;
+    let Some(password) = dialogs::passphrase(&app, PassphrasePurpose::AdminPassword).await? else {
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    };
+    if !owner_operation_current(&state.enrollment, epoch)? {
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    let retained = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .owner_passphrase
+        .clone();
+    let passphrase = if let Some(passphrase) = retained {
+        passphrase
+    } else {
+        let has_saved_material = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .client
+            .as_ref()
+            .is_some_and(EnrollmentClient::has_prepared_owner_material);
+        if has_saved_material {
+            let Some(passphrase) = dialogs::passphrase(&app, PassphrasePurpose::Unlock).await?
+            else {
+                return Ok(state
+                    .enrollment
+                    .lock()
+                    .map_err(|_| BridgeError::host_state())?
+                    .view());
+            };
+            passphrase
+        } else {
+            let passphrase = Zeroizing::new(peppy_crypto::passphrase::generate_passphrase());
+            if !dialogs::confirm(&app, "Save vault recovery secret", &format!("Save this recovery secret before continuing. It is required to add devices:\n\n{}", passphrase.as_str()), "I saved it").await? {
+                return Ok(state.enrollment.lock().map_err(|_| BridgeError::host_state())?.view());
+            }
+            passphrase
+        }
+    };
+    let expected_binding = state.config()?.active_binding().cloned();
+    let (origin, request, checkpoint) = {
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        if controller.operation_epoch != epoch {
+            return Ok(controller.view());
+        }
+        let origin = controller.origin()?.to_owned();
+        let client = controller.client.as_mut().ok_or_else(enrollment_error)?;
+        if client
+            .owner_passphrase_matches(&passphrase)
+            .is_ok_and(|matches| !matches)
+        {
+            return Err(wrong_owner_passphrase());
+        }
+        let request = client
+            .create_vault_request(
+                input.username.unwrap_or_default(),
+                password.to_string(),
+                passphrase.to_string(),
+            )
+            .map_err(|_| enrollment_error())?;
+        let checkpoint = Zeroizing::new(client.checkpoint().map_err(|_| enrollment_error())?);
+        controller.owner_passphrase = Some(Zeroizing::new(passphrase.to_string()));
+        controller.vault_creation_in_flight = true;
+        (origin, request, checkpoint)
+    };
+    state
+        .store
+        .set(&vault_request_checkpoint_key(&origin), &checkpoint)?;
+    let response = match post(
+        &http(&origin)?,
+        &origin,
+        enrollment::routes::INSTANCE_VAULTS,
+        request,
+        None,
+        None,
+    )
+    .await
+    {
+        Err(error) if matches!(error.code, "username_taken" | "invalid_username") => {
+            let mut controller = state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?;
+            controller.vault_request_state = Some("approved".into());
+            let mut view = controller.view();
+            view.error_code = Some(error.code.into());
+            return Ok(view);
+        }
+        Err(error)
+            if error.code == "request_not_approved"
+                && !state
+                    .enrollment
+                    .lock()
+                    .map_err(|_| BridgeError::host_state())?
+                    .client
+                    .as_ref()
+                    .is_some_and(EnrollmentClient::has_prepared_owner_material) =>
+        {
+            let mut controller = state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?;
+            if controller.operation_epoch != epoch {
+                return Ok(controller.view());
+            }
+            clear_vault_request_locked(&mut controller, &*state.store, &origin)?;
+            controller.vault_request_state = Some("expired".into());
+            return Ok(controller.view());
+        }
+        Err(error) => return Err(error),
+        Ok(response) => response,
+    };
+    let identity = {
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        if controller.operation_epoch != epoch {
+            return Ok(controller.view());
+        }
+        controller
+            .client
+            .as_ref()
+            .ok_or_else(enrollment_error)?
+            .finish_owner_admission(response, passphrase.to_string())
+            .map_err(|_| enrollment_error())?
+    };
+    install_identity(&app, &state, identity, passphrase, expected_binding).await?;
+    // The identity is durably imported; never retain the request secret merely because a later
+    // UI operation was cancelled or superseded.
+    tombstone_vault_request_checkpoint(&*state.store, &origin)?;
+    if !owner_operation_current(&state.enrollment, epoch)? {
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    controller
+        .client
+        .as_mut()
+        .ok_or_else(enrollment_error)?
+        .clear_vault_request();
+    controller.vault_request_state = None;
+    controller.vault_creation_in_flight = false;
+    controller.owner_passphrase = None;
+    controller.ready = true;
+    controller.owner = true;
+    Ok(controller.view())
 }
 
 #[tauri::command]
@@ -1208,9 +1835,28 @@ pub async fn enrollment_cancel(
         .lock()
         .map_err(|_| BridgeError::host_state())?;
     controller.operation_epoch = controller.operation_epoch.wrapping_add(1);
+    if !controller.vault_creation_in_flight {
+        if let Some(origin) = controller.origin.clone() {
+            if controller
+                .client
+                .as_ref()
+                .and_then(EnrollmentClient::pending_vault_request)
+                .is_some()
+            {
+                controller
+                    .client
+                    .as_mut()
+                    .expect("checked above")
+                    .clear_vault_request();
+                tombstone_vault_request_checkpoint(&*state.store, &origin)?;
+            }
+        }
+    }
     controller.client = None;
     controller.owner_passphrase = None;
     controller.owner_resume = false;
+    controller.vault_request_state = None;
+    controller.vault_creation_in_flight = false;
     controller.invitation_id = None;
     controller.invitation = None;
     Ok(())
@@ -1244,20 +1890,22 @@ mod owner_retry_tests {
     const RECOVERY_SECRET: &str = "alpha bravo charlie delta echo foxtrot";
 
     fn unclaimed_controller() -> Mutex<Controller> {
-        let mut controller = Controller::default();
-        controller.origin = Some(ORIGIN.into());
-        controller.info = Some(InstanceInfo {
-            mode: DeploymentMode::Community,
-            claimed: false,
-            setup_required: true,
-            password_auth: true,
-            qr_pairing: true,
-            shared_secret_pairing: true,
-        });
-        controller.client = Some(
-            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap(),
-        );
-        Mutex::new(controller)
+        Mutex::new(Controller {
+            origin: Some(ORIGIN.into()),
+            info: Some(InstanceInfo {
+                mode: DeploymentMode::Community,
+                claimed: false,
+                setup_required: true,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            }),
+            client: Some(
+                EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into())
+                    .unwrap(),
+            ),
+            ..Controller::default()
+        })
     }
 
     fn claim_response(request: &str, replayed: bool) -> String {
@@ -1307,6 +1955,7 @@ mod owner_retry_tests {
             &controller,
             &store,
             None,
+            String::new(),
             move |purpose| {
                 prompted_by_test.lock().unwrap().push(purpose);
                 std::future::ready(prompt(purpose))
@@ -1344,6 +1993,7 @@ mod owner_retry_tests {
             &controller,
             &store,
             None,
+            String::new(),
             |purpose| std::future::ready(prompt(purpose)),
             |_| std::future::ready(Ok(true)),
             || Zeroizing::new(RECOVERY_SECRET.into()),
@@ -1377,6 +2027,7 @@ mod owner_retry_tests {
             &controller,
             &store,
             None,
+            String::new(),
             |purpose| std::future::ready(prompt(purpose)),
             |_| std::future::ready(Ok(true)),
             || panic!("an immediate retry must retain the generated secret"),
@@ -1443,6 +2094,7 @@ mod owner_retry_tests {
             &pending
                 .create_owner_request(
                     "setup-token".into(),
+                    "admin".into(),
                     "password long enough".into(),
                     RECOVERY_SECRET.into(),
                 )
@@ -1476,6 +2128,7 @@ mod owner_retry_tests {
             &controller,
             &store,
             None,
+            String::new(),
             |purpose| {
                 std::future::ready(match purpose {
                     PassphrasePurpose::Unlock => Ok(Some(Zeroizing::new(
@@ -1502,6 +2155,7 @@ mod owner_retry_tests {
             &restored
                 .create_owner_request(
                     "setup-token".into(),
+                    "admin".into(),
                     "password long enough".into(),
                     RECOVERY_SECRET.into(),
                 )
@@ -1525,6 +2179,7 @@ mod owner_retry_tests {
             &controller,
             &store,
             None,
+            String::new(),
             move |purpose| {
                 if purpose == PassphrasePurpose::SetupToken {
                     cancel_owner_operation(&prompt_controller).unwrap();
@@ -1548,17 +2203,18 @@ mod owner_retry_tests {
     }
 
     fn ready_controller() -> Controller {
-        let mut controller = Controller::default();
-        controller.origin = Some(ORIGIN.into());
-        controller.info = Some(InstanceInfo {
-            mode: DeploymentMode::Community,
-            claimed: true,
-            setup_required: false,
-            password_auth: true,
-            qr_pairing: true,
-            shared_secret_pairing: true,
-        });
-        controller
+        Controller {
+            origin: Some(ORIGIN.into()),
+            info: Some(InstanceInfo {
+                mode: DeploymentMode::Community,
+                claimed: true,
+                setup_required: false,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            }),
+            ..Controller::default()
+        }
     }
 
     #[test]
@@ -1610,6 +2266,214 @@ mod owner_retry_tests {
             known_claim_error_code(br#"{"code":"unexpected_server_detail"}"#),
             None
         );
+        assert_eq!(
+            known_claim_error_code(br#"{"code":"vault_owner_required"}"#),
+            Some("vault_owner_required")
+        );
+    }
+
+    async fn unaccepted_resubmit_fixture() -> (Mutex<Controller>, MemoryStore, String, Vec<u8>) {
+        let controller = unclaimed_controller();
+        let (request, checkpoint) = {
+            let mut guard = controller.lock().unwrap();
+            guard.vault_request_state = Some("pending".into());
+            let client = guard.client.as_mut().unwrap();
+            let request = client
+                .begin_vault_request(ORIGIN.into(), "A".repeat(43), "Taylor".into())
+                .unwrap();
+            (request, client.checkpoint().unwrap())
+        };
+        (controller, MemoryStore::default(), request, checkpoint)
+    }
+
+    #[tokio::test]
+    async fn definitive_resubmit_rejection_finishes_request_as_invite_expired() {
+        let (controller, store, request, checkpoint) = unaccepted_resubmit_fixture().await;
+        let epoch = controller.lock().unwrap().operation_epoch;
+        let view = resubmit_unaccepted_vault_request(
+            &controller,
+            &store,
+            epoch,
+            ORIGIN,
+            request,
+            &checkpoint,
+            |_| async {
+                Err::<String, _>(BridgeError::new(
+                    "invite_invalid",
+                    "This invite is no longer valid.",
+                ))
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(view.stage, "invite_expired");
+        assert!(store
+            .get(&vault_request_checkpoint_key(ORIGIN))
+            .unwrap()
+            .is_none_or(|bytes| bytes.is_empty()));
+        assert!(controller
+            .lock()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .pending_vault_request()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_definitive_rejection_preserves_a_newer_pending_request() {
+        let (controller, store, request, checkpoint) = unaccepted_resubmit_fixture().await;
+        let epoch = controller.lock().unwrap().operation_epoch;
+        let old_request_id = controller
+            .lock()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .pending_vault_request()
+            .unwrap()
+            .1;
+        let (newer_controller, _, _, _) = unaccepted_resubmit_fixture().await;
+        let newer_client = newer_controller.lock().unwrap().client.take().unwrap();
+        let newer_request_id = newer_client.pending_vault_request().unwrap().1;
+        let newer_checkpoint = newer_client.checkpoint().unwrap();
+        assert_ne!(newer_request_id, old_request_id);
+
+        let view = resubmit_unaccepted_vault_request(
+            &controller,
+            &store,
+            epoch,
+            ORIGIN,
+            request,
+            &checkpoint,
+            |_| async {
+                // A cancel followed by a new begin advances the epoch and installs a newer request.
+                {
+                    let mut guard = controller.lock().unwrap();
+                    guard.operation_epoch = guard.operation_epoch.wrapping_add(1);
+                    guard.vault_request_state = Some("pending".into());
+                    guard.client = Some(newer_client);
+                }
+                store
+                    .set(&vault_request_checkpoint_key(ORIGIN), &newer_checkpoint)
+                    .unwrap();
+                Err::<String, _>(BridgeError::new(
+                    "invite_invalid",
+                    "This invite is no longer valid.",
+                ))
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(view.stage, "invite_expired");
+        let guard = controller.lock().unwrap();
+        assert_eq!(guard.vault_request_state.as_deref(), Some("pending"));
+        assert_eq!(
+            guard
+                .client
+                .as_ref()
+                .unwrap()
+                .pending_vault_request()
+                .map(|pending| pending.1),
+            Some(newer_request_id)
+        );
+        drop(guard);
+        assert_eq!(
+            store
+                .get(&vault_request_checkpoint_key(ORIGIN))
+                .unwrap()
+                .map(|bytes| bytes.to_vec()),
+            Some(newer_checkpoint)
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_resubmit_failure_keeps_the_pending_checkpoint_for_retry() {
+        for code in ["offline", "server-rejected"] {
+            let (controller, store, request, checkpoint) = unaccepted_resubmit_fixture().await;
+            let epoch = controller.lock().unwrap().operation_epoch;
+            let error = resubmit_unaccepted_vault_request(
+                &controller,
+                &store,
+                epoch,
+                ORIGIN,
+                request,
+                &checkpoint,
+                |_| async move { Err::<String, _>(BridgeError::new(code, "transient")) },
+            )
+            .await
+            .err()
+            .unwrap();
+
+            assert_eq!(error.code, code);
+            assert!(store
+                .get(&vault_request_checkpoint_key(ORIGIN))
+                .unwrap()
+                .is_some_and(|bytes| !bytes.is_empty()));
+            let guard = controller.lock().unwrap();
+            assert_eq!(guard.vault_request_state.as_deref(), Some("pending"));
+            assert!(guard
+                .client
+                .as_ref()
+                .unwrap()
+                .pending_vault_request()
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn vault_request_checkpoint_key_is_origin_specific_and_nonrevealing() {
+        let first = vault_request_checkpoint_key(ORIGIN);
+        let second = vault_request_checkpoint_key("https://other.example");
+        assert_ne!(first, second);
+        assert!(!first.contains("community.example"));
+        assert!(first.starts_with(VAULT_REQUEST_CHECKPOINT_PREFIX));
+    }
+
+    #[test]
+    fn restored_unaccepted_request_reuses_the_exact_submission_until_accepted() {
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        let first = client
+            .begin_vault_request(ORIGIN.into(), "A".repeat(43), "Taylor".into())
+            .unwrap();
+        let restored = EnrollmentClient::restore(client.checkpoint().unwrap()).unwrap();
+        assert!(!restored.vault_request_accepted());
+        let mut restored = restored;
+        let replay = restored
+            .begin_vault_request(ORIGIN.into(), String::new(), String::new())
+            .unwrap();
+        assert_eq!(first, replay);
+    }
+
+    #[test]
+    fn accepted_checkpoint_retains_prepared_creation_material_for_replay() {
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        client
+            .begin_vault_request(ORIGIN.into(), "A".repeat(43), "Taylor".into())
+            .unwrap();
+        let (_, request_id, _) = client.pending_vault_request().unwrap();
+        client
+            .accept_vault_request_created(format!(
+                "{{\"request_id\":\"{request_id}\",\"expires_in_seconds\":60}}"
+            ))
+            .unwrap();
+        client
+            .create_vault_request(
+                "taylor".into(),
+                "password long enough".into(),
+                RECOVERY_SECRET.into(),
+            )
+            .unwrap();
+        let restored = EnrollmentClient::restore(client.checkpoint().unwrap()).unwrap();
+        assert!(restored.vault_request_accepted());
+        assert!(restored.has_prepared_owner_material());
     }
 
     #[test]

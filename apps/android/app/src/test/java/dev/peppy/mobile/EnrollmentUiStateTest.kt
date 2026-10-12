@@ -1,6 +1,8 @@
 package dev.peppy.mobile
 
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -38,5 +40,12 @@ class EnrollmentUiStateTest {
 
     @Test fun openOwnerResumePermitsAnEmptySetupCode() {
         assertTrue(canClaimOwner(true, "", false, strongAdminPassword, secret, false, false))
+    }
+
+    @Test fun enrollmentErrorCodesMapToGeneratedNativeCopy() {
+        assertEquals(R.string.peppy_enrollment_error_vault_owner_required, enrollmentErrorMessage("vault_owner_required"))
+        assertEquals(R.string.peppy_enrollment_error_invite_invalid, enrollmentErrorMessage("invite_invalid"))
+        assertEquals(R.string.peppy_enrollment_error_create_vault_limited, enrollmentErrorMessage("create_vault_limited"))
+        assertNull(enrollmentErrorMessage("untrusted_server_message"))
     }
 }

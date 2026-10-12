@@ -17,6 +17,40 @@ import Testing
         #expect(request.body == Data("{\"operation_id\":\"request-owned-by-rust\"}".utf8))
     }
 
+    @Test func vaultRequestPollingUsesTheProtectedHeaderAndBoundedWait() async throws {
+        let transport = EnrollmentTransport()
+        let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
+        let host = EnrollmentHost(origin: origin, transport: transport)
+        let id = "4a440c5f-8cae-4e4b-aae2-7472c64a08a1"
+
+        _ = try await host.vaultRequestStatus(id: id, secret: "opaque-request-secret", knownState: "pending")
+
+        let request = try #require(transport.request)
+        #expect(request.url.path == "/v1/instance/vault-requests/\(id)")
+        #expect(URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems == [URLQueryItem(name: "wait", value: "15")])
+        #expect(request.headers["Peppy-Vault-Request"] == "opaque-request-secret")
+        #expect(request.headers["Peppy-Known-State"] == "pending")
+    }
+
+    @Test func restartResubmitsTheProtectedUnacceptedRequestBeforePolling() async throws {
+        let transport = RecoveringVaultRequestTransport()
+        let store = InMemorySecureStore()
+        let token = Data(repeating: 0, count: 32).base64EncodedString().replacingOccurrences(of: "=", with: "")
+        let link = "https://enroll.example.test/#invite=\(token)"
+        let first = NativeSession(secureStore: store, transport: transport, databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+
+        await #expect(throws: URLError(.notConnectedToInternet)) {
+            _ = try await first.beginVaultRequest(inviteLink: link, displayName: "Taylor", expectedOrigin: nil, deviceName: "iPhone")
+        }
+
+        let restored = NativeSession(secureStore: store, transport: transport, databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+        let progress = try await restored.vaultRequestStatus(origin: "https://enroll.example.test")
+
+        #expect(progress.state == "pending")
+        #expect(transport.submissions == 2)
+        #expect(transport.statusRequests == 1)
+    }
+
     @Test func rejectsAnInvitationIdentifierThatIsNotCanonicalUUID() async throws {
         let transport = EnrollmentTransport()
         let origin = try ServerOrigin(canonical: "https://enroll.example.test", allowLoopbackHTTP: false)
@@ -103,7 +137,7 @@ import Testing
         }
     }
 
-    @Test func claimedDiscoveryDirectsTheUserToExistingAdmission() async throws {
+    @Test func claimedDiscoveryReturnsTheExistingAdmissionChooser() async throws {
         let transport = EnrollmentTransport(body: #"{"mode":"community","claimed":true,"setup_required":false}"#)
         let session = NativeSession(
             secureStore: InMemorySecureStore(),
@@ -112,9 +146,8 @@ import Testing
             allowLoopbackHTTP: false
         )
 
-        await #expect(throws: ClientError.server(status: 409, code: "instance_already_claimed")) {
-            _ = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
-        }
+        let discovery = try await session.discoverSelfHostedInstance(origin: "https://enroll.example.test")
+        #expect(discovery.claimed)
     }
 
     @Test func executesOnlyAValidClaimantStatusDescriptor() async throws {
@@ -147,6 +180,39 @@ private final class EnrollmentTransport: HTTPTransport, @unchecked Sendable {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         lock.withLock { latest = request }
         return HTTPResponse(status: 200, url: request.url, body: body)
+    }
+}
+
+private final class RecoveringVaultRequestTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var requestID = ""
+    private var firstSubmission = true
+    private(set) var submissions = 0
+    private(set) var statusRequests = 0
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        try lock.withLock {
+            switch (request.method, request.url.path) {
+            case ("POST", "/v1/instance/vault-requests"):
+                submissions += 1
+                let body = try #require(request.body)
+                requestID = try #require((JSONSerialization.jsonObject(with: body) as? [String: Any])?["request_id"] as? String)
+                if firstSubmission {
+                    firstSubmission = false
+                    throw URLError(.notConnectedToInternet)
+                }
+                return response(request, ["request_id": requestID, "expires_in_seconds": 60])
+            case ("GET", "/v1/instance/vault-requests/\(requestID)"):
+                statusRequests += 1
+                return response(request, ["request_id": requestID, "state": "pending", "expires_in_seconds": 60])
+            default:
+                return HTTPResponse(status: 404, url: request.url, body: Data("{\"code\":\"request_not_found\"}".utf8))
+            }
+        }
+    }
+
+    private func response(_ request: HTTPRequest, _ body: [String: Any]) -> HTTPResponse {
+        HTTPResponse(status: 200, url: request.url, body: try! JSONSerialization.data(withJSONObject: body))
     }
 }
 
