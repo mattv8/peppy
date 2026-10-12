@@ -122,9 +122,9 @@ SMS and MMS move in plaintext outside Peppy's encryption boundary. A gateway rec
 Open the server's HTTPS address in the web app, or connect a desktop or phone to
 that address. The setup screen identifies whether the unclaimed community server
 is **open** or **token-protected**. On an open server, the first device that
-completes setup becomes the owner. On a token-protected server, that device must
-also enter the operator setup code. Opening a page or fetching discovery data
-does not claim the server.
+completes setup becomes the administrator and creates the first vault. On a
+token-protected server, that device must also enter the operator setup code.
+Opening a page or fetching discovery data does not claim the server.
 
 Set `PEPPY_SETUP_TOKEN` to a nonempty operator code of at least 32 UTF-8 bytes
 to require that code for the first claim. Configure the same token on every
@@ -139,10 +139,42 @@ requests a setup code. A legacy client may unnecessarily show or require a
 setup-code field for an open server; that prompt does not mean the server is
 token-protected.
 
-The setup code authorizes only the initial claim. The new administrator password
-authorizes server management. The generated vault shared secret protects vault
-data and admission to that vault. Save the generated vault secret when prompted;
-none of these values can be recovered by looking in server logs.
+The setup code authorizes only the initial claim. The owner username and password
+authorize management of that owner's vault; the administrator owner can also
+manage the server. The generated vault shared secret protects vault data and
+admission to that vault. Keep the username/password and the vault secret
+separate, and save the generated secret when prompted. None of these values can
+be recovered by looking in server logs.
+
+#### Add family vaults
+
+After the first claim, the administrator uses **Manage server** to create a
+one-time invite link. Send that link to the intended requester. The requester
+opens the link, provides a display name, and waits for the administrator to
+approve or deny the request in the live **Manage server** view. After approval,
+the requester chooses a distinct owner username and password, creates a new vault
+shared secret, and finishes setup as that vault's owner. The owner can then
+manage that vault's devices and storage; they do not gain administrator access or
+access to other vaults.
+
+Do not publish invite links. An invite token authorizes one vault request, not
+access to an existing vault or its shared secret. Vaults are not listed on public
+setup screens.
+
+Existing installations that migrate to this model name their existing
+administrator owner `admin`. Sign-in accepts an empty username for that
+administrator, but entering `admin` explicitly is equivalent. Each additional
+owner signs in with their own username and password.
+
+On the browser, a pending invite request exists only in the current page's
+memory. Reloading that page loses the request checkpoint while leaving the invite
+consumed. The administrator must deny the orphaned request or let it expire, then
+issue a new invite.
+
+Live administrator updates use server-sent events (SSE). The server permits at
+most four SSE streams for an administrator session and 32 streams in one server
+process. These limits are per process, so running replicas weakens the effective
+deployment-wide limit.
 
 ### Recover from an unwanted first claim
 
@@ -196,6 +228,13 @@ compose up -d
 For an external PostgreSQL database or object store, clear only the dedicated
 Peppy database and dedicated Peppy attachment state for the affected deployment.
 Do not delete a shared database service, bucket, or object store wholesale.
+
+#### Downgrade warning
+
+The multi-vault database down migration is lossy for secondary web logins. It
+preserves each secondary vault and its data, but removes the secondary owner's
+server login. Downgrade only with a recovery plan for the affected owners; it is
+not a way to remove their vault data.
 
 The web app's **Manage server** page lists devices, gateway status and storage
 usage, and supports device revocation. Quota and retention values are read-only.
