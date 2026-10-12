@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 #if canImport(PeppyBindings)
 import PeppyBindings
 #endif
@@ -32,6 +33,16 @@ public struct PhoneEnrollmentStatus: Equatable, Sendable {
 public struct SelfHostedInstanceDiscovery: Equatable, Sendable {
     public let origin: String
     public let setupCodeRequired: Bool
+    public let claimed: Bool
+}
+
+public struct VaultRequestProgress: Equatable, Sendable {
+    public let origin: String
+    public let requestID: String
+    public let displayName: String
+    public let state: String
+    public let accepted: Bool
+    public let hasPreparedOwnerMaterial: Bool
 }
 
 private struct InstanceDiscoveryResponse: Decodable {
@@ -70,6 +81,9 @@ public actor NativeSession {
     private var phoneProducer: NativeEnrollmentRequestProducer?
     private var phoneClaimContext: PhoneClaimContext?
     private var phoneConfirmationRequest: String?
+    private var vaultRequestProducer: NativeEnrollmentRequestProducer?
+    private var vaultRequestOrigin: String?
+    private var instanceSession: (origin: String, token: String, vaultID: String)?
 
     public init(
         secureStore: any SecureStore,
@@ -132,11 +146,11 @@ public actor NativeSession {
     /// Claims an unowned community instance using Rust-generated request and
     /// identity objects. The credential is stored only after the verified root
     /// package has activated the native core.
-    public func claimInstance(origin: String, setupToken: String, adminPassword: String, passphrase: String, deviceName: String) async throws -> SessionStatus {
+    public func claimInstance(origin: String, setupToken: String, username: String, adminPassword: String, passphrase: String, deviceName: String) async throws -> SessionStatus {
         try await changeEnrollment {
             let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
             let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
-            let request = try producer.createOwnerRequest(setupToken: setupToken, adminPassword: adminPassword, passphrase: passphrase)
+            let request = try producer.createOwnerRequest(setupToken: setupToken, username: username, adminPassword: adminPassword, passphrase: passphrase)
             let response = try await EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin)).submitOwnerClaim(request)
             let enrollment = try producer.finishOwnerAdmission(response, passphrase: passphrase)
             return try self.activateVerifiedEnrollment(enrollment)
@@ -151,23 +165,22 @@ public actor NativeSession {
               instance.mode == "community" else {
             throw ClientError.invalidResponse("instance discovery")
         }
-        guard !instance.claimed else {
-            throw ClientError.server(status: 409, code: "instance_already_claimed")
-        }
         return SelfHostedInstanceDiscovery(
             origin: serverOrigin.serialized,
-            setupCodeRequired: instance.setupRequired != false
+            setupCodeRequired: instance.setupRequired != false,
+            claimed: instance.claimed
         )
     }
 
     /// Completes direct manual shared-secret admission. The server never
     /// receives the secret: the generated client creates the proof locally.
-    public func joinWithSharedSecret(origin: String, vaultID: String?, passphrase: String, deviceName: String) async throws -> SessionStatus {
+    public func joinWithSharedSecret(origin: String, vaultID: String?, vaultOwner: String?, passphrase: String, deviceName: String) async throws -> SessionStatus {
         try await changeEnrollment {
             let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
             let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
-            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin))
-            let request = try producer.manualChallengeRequest(vaultID: vaultID)
+            let session = self.instanceSession?.origin == serverOrigin.serialized ? self.instanceSession?.token : nil
+            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), instanceSession: session)
+            let request = try producer.manualChallengeRequest(vaultID: vaultID, vaultOwner: vaultOwner)
             let challenge = try await host.requestManualChallenge(request)
             guard let id = (try JSONSerialization.jsonObject(with: Data(challenge.utf8)) as? [String: Any])?["enrollment_id"] as? String else {
                 throw ClientError.invalidResponse("manual challenge")
@@ -177,6 +190,162 @@ public actor NativeSession {
             let enrollment = try producer.finishManualAdmission(response, passphrase: passphrase)
             return try self.activateVerifiedEnrollment(enrollment)
         }
+    }
+
+    /// Password login is scoped to one instance vault. It is kept in memory only and does not create a browser cookie.
+    public func signIn(origin: String, username: String, password: String) async throws {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let host = EnrollmentHost(origin: serverOrigin, transport: transport)
+        let response = try await host.signIn(username: username, password: password)
+        guard let session = try JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any],
+              let token = session["session_token"] as? String, !token.isEmpty else {
+            throw ClientError.invalidResponse("instance login")
+        }
+        let accountHost = EnrollmentHost(origin: serverOrigin, transport: transport, instanceSession: token)
+        let account = try await accountHost.instanceAccount()
+        guard let value = try JSONSerialization.jsonObject(with: Data(account.utf8)) as? [String: Any],
+              let vaultID = value["vault_id"] as? String else { throw ClientError.invalidResponse("instance account") }
+        instanceSession = (origin: serverOrigin.serialized, token: token, vaultID: vaultID)
+    }
+
+    /// Starts an invite request only after its opaque Rust checkpoint has been protected locally.
+    public func beginVaultRequest(inviteLink: String, displayName: String, expectedOrigin: String?, deviceName: String) async throws -> VaultRequestProgress {
+        let invite = try parseVaultInviteLink(link: inviteLink)
+        let origin = try ServerOrigin(canonical: invite.origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        if let expectedOrigin, !expectedOrigin.isEmpty,
+           try ServerOrigin(canonical: expectedOrigin, allowLoopbackHTTP: allowLoopbackHTTP).serialized != origin.serialized {
+            throw ClientError.originMismatch
+        }
+        let producer = try restoredVaultRequestProducer(for: origin.serialized)
+            ?? NativeEnrollmentRequestProducer(origin: origin.serialized, deviceName: deviceName)
+        let request = try producer.beginVaultRequest(origin: origin.serialized, inviteToken: invite.inviteToken, displayName: displayName)
+        try saveVaultRequestCheckpoint(producer, origin: origin.serialized)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+        do {
+            let response = try await host.submitVaultRequest(request)
+            try producer.acceptVaultRequestCreated(response)
+            try saveVaultRequestCheckpoint(producer, origin: origin.serialized)
+            return try vaultProgress(producer: producer, state: "pending")
+        } catch {
+            if isDefinitiveInviteSubmissionFailure(error) { try clearVaultRequest(origin: origin.serialized, producer: producer) }
+            throw error
+        }
+    }
+
+    public func vaultInviteOrigin(link: String) throws -> String {
+        try ServerOrigin(canonical: parseVaultInviteLink(link: link).origin, allowLoopbackHTTP: allowLoopbackHTTP).serialized
+    }
+
+    public func pendingVaultRequest(origin: String) throws -> VaultRequestProgress? {
+        let producer = try restoredVaultRequestProducer(for: origin)
+        guard let producer, try producer.pendingVaultRequest() != nil else { return nil }
+        return try vaultProgress(producer: producer, state: try producer.hasPreparedOwnerMaterial() ? "approved" : "pending")
+    }
+
+    /// Performs one foreground long-poll. The transport request timeout is 20 seconds while the server wait is 15.
+    public func vaultRequestStatus(origin: String, knownState: String? = "pending") async throws -> VaultRequestProgress {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        guard let producer = try restoredVaultRequestProducer(for: serverOrigin.serialized),
+              let pending = try producer.pendingVaultRequest() else { throw ClientError.notEnrolled }
+        let host = EnrollmentHost(origin: serverOrigin, transport: transport, accountSession: try await hostedSession(for: serverOrigin))
+        if try !producer.vaultRequestAccepted() {
+            let request = try producer.beginVaultRequest(origin: serverOrigin.serialized, inviteToken: "", displayName: "")
+            try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+            do {
+                try producer.acceptVaultRequestCreated(await host.submitVaultRequest(request))
+                try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+            } catch {
+                if isDefinitiveInviteSubmissionFailure(error) { try clearVaultRequest(origin: serverOrigin.serialized, producer: producer) }
+                throw error
+            }
+        }
+        let response: String
+        do {
+            response = try await host.vaultRequestStatus(id: pending.requestId, secret: try producer.vaultRequestHeader(), knownState: knownState)
+        } catch {
+            if case .server(404, "request_not_found") = ClientError.wrap(error) {
+                try clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+                return VaultRequestProgress(origin: pending.origin, requestID: pending.requestId, displayName: pending.displayName, state: "expired", accepted: false, hasPreparedOwnerMaterial: false)
+            }
+            throw error
+        }
+        let state = try producer.parseVaultRequestStatus(response)
+        if state == "denied" || state == "expired" {
+            try clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+        } else {
+            try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+        }
+        return try vaultProgress(producer: producer, state: state)
+    }
+
+    /// The caller supplies the explicitly saved generated secret. Rust retains prepared material in the checkpoint,
+    /// so retrying after a dropped response never silently creates a replacement secret.
+    public func createVault(origin: String, username: String, adminPassword: String, passphrase: String) async throws -> SessionStatus {
+        try await changeEnrollment {
+            let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
+            guard let producer = try self.restoredVaultRequestProducer(for: serverOrigin.serialized) else { throw ClientError.notEnrolled }
+            let request = try producer.createVaultRequest(username: username, adminPassword: adminPassword, passphrase: passphrase)
+            try self.saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin))
+            let response = try await host.createVault(request)
+            let enrollment = try producer.finishOwnerAdmission(response, passphrase: passphrase)
+            let status = try self.activateVerifiedEnrollment(enrollment)
+            try self.clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+            return status
+        }
+    }
+
+    public func cancelVaultRequest(origin: String) throws {
+        guard let producer = try restoredVaultRequestProducer(for: origin) else { return }
+        guard try !producer.hasPreparedOwnerMaterial() else { return }
+        try clearVaultRequest(origin: origin, producer: producer)
+    }
+
+    private func restoredVaultRequestProducer(for origin: String) throws -> NativeEnrollmentRequestProducer? {
+        if vaultRequestOrigin == origin, let vaultRequestProducer { return vaultRequestProducer }
+        guard let checkpoint = try store.secure.read(vaultRequestAccount(origin)) else { return nil }
+        let producer = try NativeEnrollmentRequestProducer(checkpoint: checkpoint)
+        guard let pending = try producer.pendingVaultRequest(), pending.origin == origin else {
+            throw ClientError.invalidResponse("vault request checkpoint")
+        }
+        vaultRequestProducer = producer
+        vaultRequestOrigin = origin
+        return producer
+    }
+
+    private func saveVaultRequestCheckpoint(_ producer: NativeEnrollmentRequestProducer, origin: String) throws {
+        try store.secure.upsert(vaultRequestAccount(origin), producer.checkpoint())
+        vaultRequestProducer = producer
+        vaultRequestOrigin = origin
+    }
+
+    private func clearVaultRequest(origin: String, producer: NativeEnrollmentRequestProducer) throws {
+        try producer.clearVaultRequest()
+        try store.secure.delete(vaultRequestAccount(origin))
+        vaultRequestProducer = nil
+        vaultRequestOrigin = nil
+    }
+
+    private func vaultProgress(producer: NativeEnrollmentRequestProducer, state: String) throws -> VaultRequestProgress {
+        guard let pending = try producer.pendingVaultRequest() else { throw ClientError.notEnrolled }
+        return VaultRequestProgress(
+            origin: pending.origin,
+            requestID: pending.requestId,
+            displayName: pending.displayName,
+            state: state,
+            accepted: try producer.vaultRequestAccepted(),
+            hasPreparedOwnerMaterial: try producer.hasPreparedOwnerMaterial()
+        )
+    }
+
+    private func isDefinitiveInviteSubmissionFailure(_ error: Error) -> Bool {
+        guard case let ClientError.server(status, _) = ClientError.wrap(error) else { return false }
+        return (400..<500).contains(status) && status != 408 && status != 429
+    }
+
+    private func vaultRequestAccount(_ origin: String) -> String {
+        let digest = SHA256.hash(data: Data(origin.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "vault-request:v1:\(digest)"
     }
 
     public func beginPhoneEnrollment(qrPayload: String, deviceName: String) async throws -> PhoneEnrollmentStatus {

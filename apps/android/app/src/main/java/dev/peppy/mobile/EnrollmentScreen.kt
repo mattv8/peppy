@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -42,9 +43,14 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import uniffi.peppy_mobile_bindings.generateHostedPassphrase
 
-private enum class EnrollmentStage { SERVER, OWNER, MANUAL, PHONE }
+private enum class EnrollmentStage {
+    SERVER, OWNER, CLAIMED_CHOOSER, SIGNIN, MANUAL, PHONE,
+    INVITE_REQUEST, INVITE_WAITING, INVITE_APPROVED, INVITE_DENIED, INVITE_EXPIRED,
+}
 
 /** Fixed mask so the hidden generated secret's length is not revealed. */
 private const val MASKED_SECRET = "••••••••"
@@ -116,12 +122,23 @@ internal fun EnrollmentScreen(
     },
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val host = remember(context) { EnrollmentHost(context) }
     val scanGate = remember { EnrollmentScanGate() }
     var stage by remember { mutableStateOf(if (initialOrigin == null) EnrollmentStage.SERVER else EnrollmentStage.PHONE) }
     var origin by remember { mutableStateOf(initialOrigin.orEmpty()) }
     var setupToken by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("admin") }
+    var vaultOwner by remember { mutableStateOf("") }
+    var vaultOwnerRequired by remember { mutableStateOf(false) }
+    var inviteLink by remember { mutableStateOf("") }
+    var displayName by remember { mutableStateOf("") }
+    var vaultUsername by remember { mutableStateOf("") }
+    var recoverySecretRequired by remember { mutableStateOf(false) }
+    var enrollmentForeground by remember { mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
+    var inviteState by remember { mutableStateOf(EnrollmentHost.VaultRequestState.PENDING) }
+    var inviteGeneration by remember { mutableStateOf(0) }
     var adminPassword by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
     var revealSecret by remember { mutableStateOf(false) }
@@ -159,11 +176,15 @@ internal fun EnrollmentScreen(
             withContext(Dispatchers.Main) {
                 busy = false
                 if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) onEnrolled()
-                else error = when (result) {
+                else {
+                    val errorCode = host.takeErrorCode()
+                    if (errorCode == "vault_owner_required") vaultOwnerRequired = true
+                    error = enrollmentErrorMessage(errorCode)?.let(context::getString) ?: when (result) {
                     ImportResult.SETUP_TOKEN_REJECTED -> invalidSetupToken
                     ImportResult.INSTANCE_ALREADY_CLAIMED -> instanceAlreadyClaimed
                     ImportResult.SERVER_REJECTED, ImportResult.NETWORK_ERROR -> networkFailed
                     else -> importMessage(result)
+                    }
                 }
             }
         }
@@ -192,6 +213,13 @@ internal fun EnrollmentScreen(
             phone?.close()
             host.close()
         }
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, _ ->
+            enrollmentForeground = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Column(
@@ -225,7 +253,12 @@ internal fun EnrollmentScreen(
                                     setupToken = ""
                                     setupCodeRequired = discovery.setupCodeRequired
                                     ownerResume = !discovery.claimed && host.hasPendingOwner(canonical)
-                                    stage = if (discovery.claimed) EnrollmentStage.MANUAL else EnrollmentStage.OWNER
+                                    if (discovery.claimed && host.pendingVaultRequest(canonical)) {
+                                        stage = EnrollmentStage.INVITE_WAITING
+                                    } else {
+                                        host.takeErrorCode()?.let { error = importMessage(ImportResult.STORAGE_ERROR) }
+                                        stage = if (discovery.claimed) EnrollmentStage.CLAIMED_CHOOSER else EnrollmentStage.OWNER
+                                    }
                                 }
                             }
                         }
@@ -242,6 +275,7 @@ internal fun EnrollmentScreen(
                 if (setupCodeRequired) {
                     OutlinedTextField(setupToken, { setupToken = it }, label = { Text(stringResource(R.string.peppy_enrollment_setup_code)) }, modifier = Modifier.fillMaxWidth().testTag("setup-token"))
                 }
+                OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("enrollment-username"))
                 OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("admin-password"))
                 if (ownerResume) {
                     OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("owner-resume-secret"))
@@ -263,16 +297,106 @@ internal fun EnrollmentScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Button(
-                    onClick = { run { host.claimOwner(origin, if (setupCodeRequired) setupToken else "", adminPassword, secret) } },
+                    onClick = { run { host.claimOwner(origin, username, if (setupCodeRequired) setupToken else "", adminPassword, secret) } },
                     enabled = canClaimOwner(ownerResume, setupToken, setupCodeRequired, adminPassword, secret, saved, busy),
                     modifier = Modifier.testTag("claim-owner"),
                 ) { Text(stringResource(R.string.peppy_continue)) }
             }
+            EnrollmentStage.CLAIMED_CHOOSER -> {
+                Text(stringResource(R.string.peppy_enrollment_signin_body), Modifier.testTag("claimed-chooser-screen"))
+                Button(onClick = { stage = EnrollmentStage.SIGNIN }, modifier = Modifier.testTag("claimed-chooser-signin")) { Text(stringResource(R.string.peppy_enrollment_signin_password_label)) }
+                OutlinedButton(onClick = { stage = EnrollmentStage.MANUAL }, modifier = Modifier.testTag("claimed-chooser-connect")) { Text(stringResource(R.string.peppy_enrollment_signin_connect_label)) }
+                OutlinedButton(onClick = { stage = EnrollmentStage.INVITE_REQUEST }, modifier = Modifier.testTag("claimed-chooser-invite")) { Text(stringResource(R.string.peppy_enrollment_signin_invite_label)) }
+                OutlinedButton(onClick = { stage = EnrollmentStage.PHONE }, modifier = Modifier.testTag("scan-phone-qr")) { Text(stringResource(R.string.peppy_scan_qr)) }
+            }
+            EnrollmentStage.SIGNIN -> {
+                Text(stringResource(R.string.peppy_enrollment_signin_password_label))
+                OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("signin-username"))
+                Text(stringResource(R.string.peppy_enrollment_signin_username_hint), style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("signin-password"))
+                Button(onClick = {
+                    busy = true
+                    scope.launch(Dispatchers.IO) {
+                        val signedIn = host.signIn(origin, username, adminPassword)
+                        withContext(Dispatchers.Main) {
+                            busy = false
+                            if (signedIn) stage = EnrollmentStage.MANUAL
+                            else error = enrollmentErrorMessage(host.takeErrorCode())?.let(context::getString) ?: networkFailed
+                        }
+                    }
+                }, enabled = adminPassword.isNotBlank() && !busy, modifier = Modifier.testTag("signin-submit")) { Text(stringResource(R.string.peppy_enrollment_signin_cta)) }
+                OutlinedButton(onClick = { stage = EnrollmentStage.CLAIMED_CHOOSER }, modifier = Modifier.testTag("signin-back")) { Text(stringResource(R.string.peppy_cancel)) }
+            }
             EnrollmentStage.MANUAL -> {
                 Text(stringResource(R.string.peppy_production_existing_vault))
+                if (vaultOwnerRequired) {
+                    OutlinedTextField(vaultOwner, { vaultOwner = it }, label = { Text(stringResource(R.string.peppy_enrollment_vault_owner_label)) }, modifier = Modifier.fillMaxWidth().testTag("manual-vault-owner"))
+                    Text(stringResource(R.string.peppy_enrollment_vault_owner_hint), style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("manual-secret"))
-                Button(onClick = { run { host.joinWithSecret(origin, secret) } }, enabled = secret.isNotBlank() && !busy, modifier = Modifier.testTag("manual-enroll")) { Text(stringResource(R.string.peppy_continue)) }
+                Button(onClick = { run { host.joinWithSecret(origin, vaultOwner.takeIf(String::isNotBlank), secret) } }, enabled = secret.isNotBlank() && !busy, modifier = Modifier.testTag("manual-enroll")) { Text(stringResource(R.string.peppy_continue)) }
                 OutlinedButton(onClick = { stage = EnrollmentStage.PHONE }, modifier = Modifier.testTag("scan-phone-qr")) { Text(stringResource(R.string.peppy_scan_qr)) }
+            }
+            EnrollmentStage.INVITE_REQUEST -> {
+                Text(stringResource(R.string.peppy_enrollment_invite_request_headline), Modifier.testTag("invite-request-screen"))
+                OutlinedTextField(inviteLink, { inviteLink = it }, label = { Text(stringResource(R.string.peppy_enrollment_invite_link_label)) }, modifier = Modifier.fillMaxWidth().testTag("invite-link-input"))
+                OutlinedTextField(displayName, { displayName = it }, label = { Text(stringResource(R.string.peppy_enrollment_display_name_label)) }, modifier = Modifier.fillMaxWidth().testTag("display-name-input"))
+                Button(onClick = {
+                    val generation = ++inviteGeneration
+                    busy = true
+                    scope.launch(Dispatchers.IO) {
+                        val result = host.beginVaultRequest(origin, inviteLink, displayName)
+                        withContext(Dispatchers.Main) {
+                            if (generation == inviteGeneration) {
+                                busy = false
+                                if (result == null) error = enrollmentErrorMessage(host.takeErrorCode())?.let(context::getString) ?: networkFailed
+                                else { inviteState = result; stage = EnrollmentStage.INVITE_WAITING; error = null }
+                            }
+                        }
+                    }
+                }, enabled = inviteLink.isNotBlank() && displayName.isNotBlank() && !busy, modifier = Modifier.testTag("invite-submit")) { Text(stringResource(R.string.peppy_enrollment_invite_request_cta)) }
+                OutlinedButton(onClick = { stage = EnrollmentStage.CLAIMED_CHOOSER }, modifier = Modifier.testTag("invite-cancel")) { Text(stringResource(R.string.peppy_enrollment_invite_cancel_cta)) }
+            }
+            EnrollmentStage.INVITE_WAITING -> {
+                Text(stringResource(R.string.peppy_enrollment_invite_waiting_headline), Modifier.testTag("invite-waiting-screen").semantics { liveRegion = LiveRegionMode.Polite })
+                Text(stringResource(R.string.peppy_enrollment_invite_waiting_body))
+                LaunchedEffect(stage, origin, inviteGeneration, enrollmentForeground) {
+                    var backoff = 1_000L
+                    while (stage == EnrollmentStage.INVITE_WAITING && enrollmentForeground) {
+                        val observedGeneration = inviteGeneration
+                        when (withContext(Dispatchers.IO) { host.vaultRequestStatus(origin, inviteState) }) {
+                            EnrollmentHost.VaultRequestState.APPROVED -> if (observedGeneration == inviteGeneration && stage == EnrollmentStage.INVITE_WAITING) {
+                                recoverySecretRequired = withContext(Dispatchers.IO) { host.hasPreparedVaultCreation(origin) }
+                                stage = EnrollmentStage.INVITE_APPROVED
+                            }
+                            EnrollmentHost.VaultRequestState.DENIED -> if (observedGeneration == inviteGeneration && stage == EnrollmentStage.INVITE_WAITING) stage = EnrollmentStage.INVITE_DENIED
+                            EnrollmentHost.VaultRequestState.EXPIRED -> if (observedGeneration == inviteGeneration && stage == EnrollmentStage.INVITE_WAITING) stage = EnrollmentStage.INVITE_EXPIRED
+                            EnrollmentHost.VaultRequestState.PENDING -> { backoff = 1_000L; inviteState = EnrollmentHost.VaultRequestState.PENDING }
+                            null -> { delay(backoff); backoff = minOf(backoff * 2, 10_000L) }
+                        }
+                    }
+                }
+                OutlinedButton(onClick = { ++inviteGeneration; stage = EnrollmentStage.CLAIMED_CHOOSER; scope.launch(Dispatchers.IO) { host.cancelVaultRequest(origin) } }, modifier = Modifier.testTag("invite-cancel")) { Text(stringResource(R.string.peppy_enrollment_invite_cancel_cta)) }
+            }
+            EnrollmentStage.INVITE_APPROVED -> {
+                Text(stringResource(R.string.peppy_enrollment_invite_approved_headline), Modifier.testTag("invite-approved-screen").semantics { liveRegion = LiveRegionMode.Assertive })
+                Text(stringResource(R.string.peppy_enrollment_invite_approved_body))
+                OutlinedTextField(vaultUsername, { vaultUsername = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("vault-username"))
+                Text(stringResource(R.string.peppy_enrollment_invite_approved_secure_hint), style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("vault-password"))
+                if (recoverySecretRequired) {
+                    OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("recovery-vault-secret"))
+                } else {
+                    if (secret.isEmpty()) Button(onClick = { secret = generateHostedPassphrase() }, modifier = Modifier.testTag("generate-vault-secret")) { Text(stringResource(R.string.peppy_passphrase_generate_cta)) }
+                    if (secret.isNotEmpty()) GeneratedSecretControls(secret, revealSecret, saved, { revealSecret = !revealSecret }, { saved = it })
+                }
+                Button(onClick = { run { host.createVault(origin, vaultUsername, adminPassword, secret) } }, enabled = vaultUsername.isNotBlank() && adminPassword.length >= 12 && secret.isNotBlank() && (recoverySecretRequired || saved) && !busy, modifier = Modifier.testTag("create-vault-submit")) { Text(stringResource(R.string.peppy_enrollment_create_vault_cta)) }
+            }
+            EnrollmentStage.INVITE_DENIED, EnrollmentStage.INVITE_EXPIRED -> {
+                val expired = stage == EnrollmentStage.INVITE_EXPIRED
+                Text(stringResource(if (expired) R.string.peppy_enrollment_invite_expired_headline else R.string.peppy_enrollment_invite_denied_headline), Modifier.testTag(if (expired) "invite-expired-screen" else "invite-denied-screen").semantics { liveRegion = LiveRegionMode.Assertive })
+                Text(stringResource(if (expired) R.string.peppy_enrollment_invite_expired_body else R.string.peppy_enrollment_invite_denied_body))
+                OutlinedButton(onClick = { ++inviteGeneration; stage = EnrollmentStage.CLAIMED_CHOOSER; scope.launch(Dispatchers.IO) { host.cancelVaultRequest(origin) } }, modifier = Modifier.testTag("invite-restart")) { Text(stringResource(R.string.peppy_enrollment_invite_restart_cta)) }
             }
             EnrollmentStage.PHONE -> {
                 Text(stringResource(R.string.peppy_hosted_join_headline))
@@ -291,13 +415,21 @@ internal fun EnrollmentScreen(
                                     var accepted = false
                                     var candidate: EnrollmentHost.PhoneEnrollment? = null
                                     try {
-                                        candidate = host.beginPhoneClaim(raw)
+                                        val inviteOrigin = host.parseVaultInviteLink(raw)
+                                        if (inviteOrigin == null) candidate = host.beginPhoneClaim(raw)
                                         withContext(Dispatchers.Main) {
                                             if (scannerActive && generation == scanGeneration && phone == null && scanGate.acceptResult()) {
-                                                if (candidate == null) {
+                                                if (inviteOrigin != null) {
+                                                    inviteLink = raw
+                                                    origin = inviteOrigin
+                                                    stage = EnrollmentStage.INVITE_REQUEST
+                                                    scanGate.finish()
+                                                    accepted = true
+                                                }
+                                                if (candidate == null && !accepted) {
                                                     error = invalidQr
                                                     scanGate.finish()
-                                                } else {
+                                                } else if (!accepted) {
                                                     phone = candidate
                                                     accepted = true
                                                     error = null
@@ -399,6 +531,7 @@ internal fun EnrollmentScreen(
         }
         error?.let { Text(it, Modifier.testTag("enrollment-error").semantics { liveRegion = LiveRegionMode.Assertive }) }
         OutlinedButton(onClick = {
+            inviteGeneration += 1
             scannerActive = false
             scanGate.cancel()
             scanGeneration += 1

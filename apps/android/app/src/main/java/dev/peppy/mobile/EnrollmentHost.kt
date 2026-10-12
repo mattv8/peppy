@@ -6,14 +6,17 @@ import uniffi.peppy_mobile_bindings.NativeEnrollmentClient
 import uniffi.peppy_mobile_bindings.NativeEnrollmentClientKind
 import uniffi.peppy_mobile_bindings.NativeEnrollmentIdentity
 import uniffi.peppy_mobile_bindings.newNativeEnrollmentClient
+import uniffi.peppy_mobile_bindings.parseVaultInviteLink as parseNativeVaultInviteLink
 import uniffi.peppy_mobile_bindings.restoreNativeEnrollmentClient
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Base64
 import java.security.MessageDigest
 
+internal data class EnrollmentHttpResponse(val status: Int, val body: String?)
+
 internal fun interface EnrollmentTransport {
-    fun request(origin: String, method: String, path: String, body: String?, headers: JSONObject?): String?
+    fun request(origin: String, method: String, path: String, body: String?, headers: JSONObject?): EnrollmentHttpResponse?
 }
 
 internal data class InstanceDiscovery(val claimed: Boolean, val setupCodeRequired: Boolean)
@@ -50,11 +53,15 @@ internal class EnrollmentHost(
 ) : AutoCloseable {
     enum class PhoneState { PENDING, CLAIMED, APPROVED, DENIED, EXPIRED }
 
-    private enum class Operation { OWNER, MANUAL }
+    enum class VaultRequestState { PENDING, APPROVED, DENIED, EXPIRED }
+
+    private enum class Operation { OWNER, MANUAL, VAULT_REQUEST }
     private data class ActiveClient(val origin: String, val operation: Operation, val client: NativeEnrollmentClient)
 
     private val hostedAccount by lazy { HostedAccountClient(AndroidHostedSecureStore(context)) }
+    private val clientLock = Any()
     private var activeClient: ActiveClient? = null
+    @Volatile private var lastErrorCode: String? = null
 
     fun discover(origin: String): String? = request(origin, "GET", "/v1/instance", null)
 
@@ -66,36 +73,183 @@ internal class EnrollmentHost(
         true
     }
 
-    fun claimOwner(origin: String, setupToken: String, adminPassword: String, secret: String): ImportResult = try {
+    fun claimOwner(origin: String, username: String, setupToken: String, adminPassword: String, secret: String): ImportResult {
+        return try {
         val client = clientFor(origin, Operation.OWNER)
-        val body = client.createOwnerRequest(setupToken, adminPassword, secret)
+        val body = client.createOwnerRequest(setupToken, username, adminPassword, secret)
         persistOwnerCheckpoint(origin, client.checkpoint())
         val response = claimRequest(origin, body)
             ?: return ImportResult.NETWORK_ERROR
         claimErrorResult(response)?.let { return it }
+        if (recordError(response)) return ImportResult.SERVER_REJECTED
         val result = install(client.finishOwnerAdmission(response, secret))
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
             clearOwnerCheckpoint(origin)
             closeActiveClient()
         }
         result
-    } catch (_: Exception) {
-        ImportResult.SERVER_REJECTED
+        } catch (_: Exception) {
+            ImportResult.SERVER_REJECTED
+        }
     }
 
-    fun joinWithSecret(origin: String, secret: String): ImportResult = try {
+    fun joinWithSecret(origin: String, vaultOwner: String?, secret: String): ImportResult {
+        return try {
+        lastErrorCode = null
         val client = clientFor(origin, Operation.MANUAL)
-        val challenge = request(origin, "POST", "/v1/enrollment/challenges", client.manualChallengeRequest(null))
+        val challengeResponse = enrollmentRequest(origin, "POST", "/v1/enrollment/challenges", client.manualChallengeRequest(null, vaultOwner))
             ?: return ImportResult.NETWORK_ERROR
+        val challenge = challengeResponse.body ?: return ImportResult.NETWORK_ERROR
+        if (!challengeResponse.isSuccess) {
+            recordError(challenge)
+            return if (challengeResponse.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
+        }
         val enrollmentId = JSONObject(challenge).getString("enrollment_id")
         val completeBody = client.completeManualChallengeRequest(challenge, secret)
-        val complete = request(origin, "POST", "/v1/enrollment/challenges/$enrollmentId/complete", completeBody)
+        val completeResponse = enrollmentRequest(origin, "POST", "/v1/enrollment/challenges/$enrollmentId/complete", completeBody)
             ?: return ImportResult.NETWORK_ERROR
+        val complete = completeResponse.body ?: return ImportResult.NETWORK_ERROR
+        if (!completeResponse.isSuccess) {
+            recordError(complete)
+            return if (completeResponse.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
+        }
         val result = install(client.finishManualAdmission(complete, secret))
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) closeActiveClient()
         result
+        } catch (_: Exception) {
+            ImportResult.SERVER_REJECTED
+        }
+    }
+
+    fun signIn(origin: String, username: String, password: String): Boolean {
+        lastErrorCode = null
+        return try {
+            val body = JSONObject().put("username", username).put("admin_password", password).put("client", "android").toString()
+            val response = enrollmentRequest(origin, "POST", "/v1/instance/session", body) ?: return false
+            if (response.isSuccess) return true
+            response.body?.let(::recordError)
+            false
+        } catch (_: Exception) { false }
+    }
+
+    fun parseVaultInviteLink(link: String): String? = try { parseNativeVaultInviteLink(link).origin } catch (_: Exception) { null }
+
+    fun beginVaultRequest(expectedOrigin: String, link: String, displayName: String): VaultRequestState? {
+        lastErrorCode = null
+        return try {
+        val invite = parseNativeVaultInviteLink(link)
+        if (invite.origin != expectedOrigin) {
+            lastErrorCode = "invite_invalid"
+            return null
+        }
+        val client = clientFor(invite.origin, Operation.VAULT_REQUEST)
+        val body = client.beginVaultRequest(invite.origin, invite.inviteToken, displayName)
+        persistVaultRequestCheckpoint(invite.origin, client.checkpoint())
+        val response = enrollmentRequest(invite.origin, "POST", "/v1/instance/vault-requests", body) ?: return null
+        val responseBody = response.body ?: return null
+        if (!response.isSuccess) {
+            if (recordError(responseBody) && response.status !in TRANSIENT_STATUSES) clearRejectedVaultRequest(invite.origin)
+            return null
+        }
+        client.acceptVaultRequestCreated(responseBody)
+        persistVaultRequestCheckpoint(invite.origin, client.checkpoint())
+        VaultRequestState.PENDING
+        } catch (_: Exception) { null }
+    }
+
+    fun pendingVaultRequest(origin: String): Boolean = try {
+        checkpointStore.read(vaultRequestCheckpointKey(origin)) != null
     } catch (_: Exception) {
-        ImportResult.SERVER_REJECTED
+        lastErrorCode = "storage_error"
+        false
+    }
+
+    fun vaultRequestStatus(origin: String, knownState: VaultRequestState = VaultRequestState.PENDING): VaultRequestState? {
+        lastErrorCode = null
+        return try {
+        val client = clientFor(origin, Operation.VAULT_REQUEST)
+        val pending = client.pendingVaultRequest() ?: return null
+        if (!client.vaultRequestAccepted()) {
+            val submission = client.beginVaultRequest(origin, "", "")
+            val submitted = enrollmentRequest(origin, "POST", "/v1/instance/vault-requests", submission) ?: return null
+            val submittedBody = submitted.body ?: return null
+            if (!submitted.isSuccess) {
+                if (recordError(submittedBody) && submitted.status !in TRANSIENT_STATUSES) clearRejectedVaultRequest(origin)
+                return null
+            }
+            client.acceptVaultRequestCreated(submittedBody)
+            persistVaultRequestCheckpoint(origin, client.checkpoint())
+        }
+        val headers = JSONObject()
+            .put("Peppy-Vault-Request", client.vaultRequestHeader())
+            .put("Peppy-Known-State", knownState.name.lowercase())
+        val response = enrollmentRequest(origin, "GET", "/v1/instance/vault-requests/${pending.requestId}?wait=15", null, headers) ?: return null
+        val responseBody = response.body ?: return null
+        if (!response.isSuccess) {
+            if (response.status == 404 && recordError(responseBody)) {
+                if (lastErrorCode == "request_not_found") clearRejectedVaultRequest(origin)
+                return VaultRequestState.EXPIRED
+            }
+            recordError(responseBody)
+            return null
+        }
+        val state = when (client.parseVaultRequestStatus(responseBody)) {
+            "pending" -> VaultRequestState.PENDING
+            "approved" -> VaultRequestState.APPROVED
+            "denied" -> VaultRequestState.DENIED
+            "expired" -> VaultRequestState.EXPIRED
+            "completed" -> if (client.hasPreparedOwnerMaterial()) VaultRequestState.APPROVED else {
+                lastErrorCode = "request_not_approved"
+                VaultRequestState.EXPIRED
+            }
+            else -> null
+        }
+        if (state == VaultRequestState.DENIED || state == VaultRequestState.EXPIRED) clearRejectedVaultRequest(origin)
+        state
+        } catch (_: Exception) { null }
+    }
+
+    fun createVault(origin: String, username: String, adminPassword: String, secret: String): ImportResult {
+        lastErrorCode = null
+        return try {
+        val client = clientFor(origin, Operation.VAULT_REQUEST)
+        val body = client.createVaultRequest(username, adminPassword, secret)
+        persistVaultRequestCheckpoint(origin, client.checkpoint())
+        val response = enrollmentRequest(origin, "POST", "/v1/instance/vaults", body) ?: return ImportResult.NETWORK_ERROR
+        val responseBody = response.body ?: return ImportResult.NETWORK_ERROR
+        if (!response.isSuccess) {
+            recordError(responseBody)
+            return if (response.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
+        }
+        val result = install(client.finishOwnerAdmission(responseBody, secret))
+        if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
+            client.clearVaultRequest()
+            clearVaultRequestCheckpoint(origin)
+            closeActiveClient()
+        }
+        result
+        } catch (_: Exception) { ImportResult.SERVER_REJECTED }
+    }
+
+    fun cancelVaultRequest(origin: String) {
+        try {
+            if (clientFor(origin, Operation.VAULT_REQUEST).hasPreparedOwnerMaterial()) return
+        } catch (_: Exception) { return }
+        try { clientFor(origin, Operation.VAULT_REQUEST).clearVaultRequest() } catch (_: Exception) { }
+        clearVaultRequestCheckpoint(origin)
+        closeActiveClient()
+    }
+
+    fun takeErrorCode(): String? = lastErrorCode.also { lastErrorCode = null }
+
+    fun hasPreparedVaultCreation(origin: String): Boolean = try {
+        clientFor(origin, Operation.VAULT_REQUEST).hasPreparedOwnerMaterial()
+    } catch (_: Exception) { false }
+
+    private fun clearRejectedVaultRequest(origin: String) {
+        try { clientFor(origin, Operation.VAULT_REQUEST).clearVaultRequest() } catch (_: Exception) { }
+        clearVaultRequestCheckpoint(origin)
+        closeActiveClient()
     }
 
     fun beginPhoneClaim(qr: String): PhoneEnrollment? {
@@ -183,20 +337,28 @@ internal class EnrollmentHost(
         closeActiveClient()
     }
 
-    private fun clientFor(origin: String, operation: Operation): NativeEnrollmentClient {
+    private fun clientFor(origin: String, operation: Operation): NativeEnrollmentClient = synchronized(clientLock) {
         activeClient?.let { active ->
-            if (active.origin == origin && active.operation == operation) return active.client
-            closeActiveClient()
+            if (active.origin == origin && active.operation == operation) return@synchronized active.client
+            closeActiveClientLocked()
         }
-        val client = if (operation == Operation.OWNER) restoreOwnerClient(origin)
-            ?: newNativeEnrollmentClient(origin, NativeEnrollmentClientKind.ANDROID, "Android phone")
-        else newNativeEnrollmentClient(origin, NativeEnrollmentClientKind.ANDROID, "Android phone")
+        val restored = when (operation) {
+            Operation.OWNER -> restoreOwnerClient(origin)
+            Operation.VAULT_REQUEST -> restoreVaultRequestClient(origin)
+            Operation.MANUAL -> null
+        }
+        val client = restored ?: newNativeEnrollmentClient(origin, NativeEnrollmentClientKind.ANDROID, "Android phone")
         activeClient = ActiveClient(origin, operation, client)
-        return client
+        client
     }
 
     private fun restoreOwnerClient(origin: String): NativeEnrollmentClient? {
         val checkpoint = readOwnerCheckpoint(origin) ?: return null
+        return restoreNativeEnrollmentClient(checkpoint)
+    }
+
+    private fun restoreVaultRequestClient(origin: String): NativeEnrollmentClient? {
+        val checkpoint = readVaultRequestCheckpoint(origin) ?: return null
         return restoreNativeEnrollmentClient(checkpoint)
     }
 
@@ -221,12 +383,49 @@ internal class EnrollmentHost(
         try { checkpointStore.remove(ownerCheckpointKey(origin)) } catch (_: Exception) { }
     }
 
-    private fun ownerCheckpointKey(origin: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(origin.toByteArray(Charsets.UTF_8))
-        return OWNER_CHECKPOINT_PREFIX + digest.joinToString("") { byte -> "%02x".format(byte) }
+    private fun persistVaultRequestCheckpoint(origin: String, checkpoint: ByteArray) =
+        persistCheckpoint(vaultRequestCheckpointKey(origin), origin, checkpoint)
+
+    private fun readVaultRequestCheckpoint(origin: String): ByteArray? =
+        readCheckpoint(vaultRequestCheckpointKey(origin), origin)
+
+    private fun clearVaultRequestCheckpoint(origin: String) {
+        try { checkpointStore.remove(vaultRequestCheckpointKey(origin)) } catch (_: Exception) { }
     }
 
-    private fun closeActiveClient() {
+    private fun ownerCheckpointKey(origin: String): String {
+        return checkpointKey(OWNER_CHECKPOINT_PREFIX, origin)
+    }
+
+    private fun vaultRequestCheckpointKey(origin: String): String = checkpointKey(VAULT_REQUEST_CHECKPOINT_PREFIX, origin)
+
+    private fun checkpointKey(prefix: String, origin: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(origin.toByteArray(Charsets.UTF_8))
+        return prefix + digest.joinToString("") { byte -> "%02x".format(byte) }
+    }
+
+    private fun persistCheckpoint(key: String, origin: String, checkpoint: ByteArray) = synchronized(clientLock) {
+        val envelope = JSONObject().put("version", 1).put("origin", origin)
+            .put("checkpoint", Base64.getEncoder().encodeToString(checkpoint)).toString().toByteArray(Charsets.UTF_8)
+        checkpointStore.write(key, envelope)
+    }
+
+    private fun readCheckpoint(key: String, origin: String): ByteArray? = synchronized(clientLock) {
+        val value = checkpointStore.read(key) ?: return null
+        val envelope = JSONObject(value.toString(Charsets.UTF_8))
+        check(envelope.getInt("version") == 1 && envelope.getString("origin") == origin)
+        return Base64.getDecoder().decode(envelope.getString("checkpoint"))
+    }
+
+    private fun recordError(response: String): Boolean {
+        val code = try { JSONObject(response).optString("code").takeIf(String::isNotBlank) } catch (_: Exception) { null }
+        lastErrorCode = code
+        return code != null
+    }
+
+    private fun closeActiveClient() = synchronized(clientLock) { closeActiveClientLocked() }
+
+    private fun closeActiveClientLocked() {
         activeClient?.client?.close()
         activeClient = null
     }
@@ -237,15 +436,19 @@ internal class EnrollmentHost(
         identity.close()
     }
 
-    private fun request(origin: String, method: String, path: String, body: String?, headers: JSONObject? = null): String? {
-        if (CredentialParser.canonicalOrigin(origin) != origin || !path.startsWith("/v1/") || path.contains('?') || path.contains('#')) return null
+    /** Legacy phone/claim callers deliberately see only 2xx bodies. */
+    private fun request(origin: String, method: String, path: String, body: String?, headers: JSONObject? = null): String? =
+        enrollmentRequest(origin, method, path, body, headers)?.takeIf { it.isSuccess }?.body
+
+    private fun enrollmentRequest(origin: String, method: String, path: String, body: String?, headers: JSONObject? = null): EnrollmentHttpResponse? {
+        if (CredentialParser.canonicalOrigin(origin) != origin || !path.startsWith("/v1/") || path.contains('#') || (path.contains('?') && !path.endsWith("?wait=15"))) return null
         transport?.let { return it.request(origin, method, path, body, headers) }
         val connection = try { URL(origin + path).openConnection() as HttpURLConnection } catch (_: Exception) { return null }
         return try {
             connection.instanceFollowRedirects = false
             connection.requestMethod = method
-            connection.connectTimeout = GatewayHttp.TIMEOUT_MS
-            connection.readTimeout = GatewayHttp.TIMEOUT_MS
+            connection.connectTimeout = ENROLLMENT_TIMEOUT_MS
+            connection.readTimeout = ENROLLMENT_TIMEOUT_MS
             connection.setRequestProperty("Accept", "application/json")
             hostedAccountHeader(origin)?.let { connection.setRequestProperty("Peppy-Account-Session", it) }
             headers?.keys()?.forEach { name -> connection.setRequestProperty(name, headers.getString(name)) }
@@ -256,7 +459,9 @@ internal class EnrollmentHost(
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.outputStream.use { it.write(bytes) }
             }
-            if (connection.responseCode in 200..299) connection.inputStream.use { GatewayHttp.readBounded(it, 64 * 1024) } else null
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            EnrollmentHttpResponse(status, stream?.use { GatewayHttp.readBounded(it, 64 * 1024) })
         } catch (_: Exception) {
             null
         } finally {
@@ -266,7 +471,7 @@ internal class EnrollmentHost(
 
     private fun claimRequest(origin: String, body: String): String? {
         if (CredentialParser.canonicalOrigin(origin) != origin) return null
-        transport?.let { return it.request(origin, "POST", "/v1/instance/claim", body, null) }
+        transport?.let { return it.request(origin, "POST", "/v1/instance/claim", body, null)?.takeIf(EnrollmentHttpResponse::isSuccess)?.body }
         val connection = try { URL(origin + "/v1/instance/claim").openConnection() as HttpURLConnection } catch (_: Exception) { return null }
         return try {
             connection.instanceFollowRedirects = false
@@ -295,5 +500,10 @@ internal class EnrollmentHost(
 
     private companion object {
         const val OWNER_CHECKPOINT_PREFIX = "self-hosted-owner-enrollment-checkpoint-v1-"
+        const val VAULT_REQUEST_CHECKPOINT_PREFIX = "vault-request:v1:"
+        const val ENROLLMENT_TIMEOUT_MS = 20_000
+        val TRANSIENT_STATUSES = setOf(408, 429, 500, 502, 503, 504)
     }
 }
+
+private val EnrollmentHttpResponse.isSuccess: Boolean get() = status in 200..299

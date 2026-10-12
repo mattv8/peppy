@@ -7,11 +7,15 @@ struct PhoneEnrollmentView: View {
     @State private var status: PhoneEnrollmentStatus?
     @State private var sharedSecret = ""
     @State private var codesMatch = false
+    @State private var inviteLink: String?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                QRScannerView { qr in Task { status = await model.beginPhoneEnrollment(qr: qr) } }
+            if let inviteLink {
+                SelfHostedEnrollmentView(model: model, isPresented: $isPresented, inviteLink: inviteLink)
+            } else {
+                VStack(spacing: 16) {
+                QRScannerView { qr in Task { await scan(qr) } }
                     .frame(height: 300).clipShape(RoundedRectangle(cornerRadius: 16))
                     .accessibilityIdentifier("phone-enrollment-scanner")
                 if let status {
@@ -46,9 +50,10 @@ struct PhoneEnrollmentView: View {
                     Button("Scan again") { status = nil; codesMatch = false }
                         .accessibilityIdentifier("phone-enrollment-retry")
                 }
-            }
+                }
             .padding().navigationTitle("Connect phone")
             .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { model.cancelPhoneEnrollment(); isPresented = false } } }
+            }
         }
         .accessibilityIdentifier("phone-enrollment-screen")
         .task(id: status?.awaitingOwner) {
@@ -58,5 +63,13 @@ struct PhoneEnrollmentView: View {
                 if let next = await model.phoneEnrollmentStatus() { status = next } else { return }
             }
         }
+    }
+
+    private func scan(_ qr: String) async {
+        if await model.isVaultInviteLink(qr) {
+            inviteLink = qr
+            return
+        }
+        status = await model.beginPhoneEnrollment(qr: qr)
     }
 }

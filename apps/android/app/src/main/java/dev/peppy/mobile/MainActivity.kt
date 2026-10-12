@@ -98,6 +98,24 @@ internal fun importMessage(result: ImportResult): String = when (result) {
     ImportResult.STORAGE_ERROR -> "Secure storage on this phone is unavailable. Nothing was saved."
 }
 
+internal fun enrollmentErrorMessage(code: String?): Int? = when (code) {
+    "admin_required" -> R.string.peppy_enrollment_error_admin_required
+    "foreign_vault" -> R.string.peppy_enrollment_error_foreign_vault
+    "vault_owner_required" -> R.string.peppy_enrollment_error_vault_owner_required
+    "request_not_approved" -> R.string.peppy_enrollment_error_request_not_approved
+    "username_taken" -> R.string.peppy_enrollment_error_username_taken
+    "operation_conflict" -> R.string.peppy_enrollment_error_operation_conflict
+    "invite_invalid" -> R.string.peppy_enrollment_error_invite_invalid
+    "request_not_found" -> R.string.peppy_enrollment_error_request_not_found
+    "vault_not_found" -> R.string.peppy_enrollment_error_vault_not_found
+    "invalid_username" -> R.string.peppy_enrollment_error_invalid_username
+    "invalid_display_name" -> R.string.peppy_enrollment_error_invalid_display_name
+    "vault_request_limited" -> R.string.peppy_enrollment_error_vault_request_limited
+    "create_vault_limited" -> R.string.peppy_enrollment_error_create_vault_limited
+    "manual_owner_limited" -> R.string.peppy_enrollment_error_manual_owner_limited
+    else -> null
+}
+
 internal fun unlockMessage(result: UnlockResult): String = when (result) {
     UnlockResult.UNLOCKED -> "Vault keys unlocked. Background sync is enabled."
     UnlockResult.NOT_ENROLLED -> "Import a device credential first."

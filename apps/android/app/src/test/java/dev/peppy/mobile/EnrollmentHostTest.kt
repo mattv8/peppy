@@ -28,7 +28,7 @@ class EnrollmentHostTest {
         assertNull(host.claimedState("not-json"))
         assertEquals(
             ImportResult.SERVER_REJECTED,
-            host.claimOwner("http://127.0.0.1:1", "setup", "password long enough", "weak"),
+            host.claimOwner("http://127.0.0.1:1", "admin", "setup", "password long enough", "weak"),
         )
         assertEquals(0, installs)
         assertTrue(store.values.isEmpty())
@@ -62,12 +62,12 @@ class EnrollmentHostTest {
         val origin = "https://enroll.example"
         val secret = generateHostedPassphrase()
         EnrollmentHost(context, store, transport = transport).use { first ->
-            assertEquals(ImportResult.NETWORK_ERROR, first.claimOwner(origin, "setup", "password long enough", secret))
+            assertEquals(ImportResult.NETWORK_ERROR, first.claimOwner(origin, "admin", "setup", "password long enough", secret))
             assertTrue(first.hasPendingOwner(origin))
         }
         EnrollmentHost(context, store, transport = transport).use { restored ->
             assertTrue(restored.hasPendingOwner(origin))
-            assertEquals(ImportResult.NETWORK_ERROR, restored.claimOwner(origin, "setup", "password long enough", secret))
+            assertEquals(ImportResult.NETWORK_ERROR, restored.claimOwner(origin, "admin", "setup", "password long enough", secret))
         }
         assertEquals(2, requests.size)
         assertEquals(requests[0].getString("operation_id"), requests[1].getString("operation_id"))
@@ -88,7 +88,7 @@ class EnrollmentHostTest {
         EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
             assertEquals(
                 ImportResult.NETWORK_ERROR,
-                host.claimOwner("https://enroll.example", "", "password long enough", generateHostedPassphrase()),
+                host.claimOwner("https://enroll.example", "admin", "", "password long enough", generateHostedPassphrase()),
             )
         }
 
@@ -105,13 +105,76 @@ class EnrollmentHostTest {
         assertFalse(gate.acceptResult())
     }
 
+    @Test fun signInSendsAndroidClientAndPreservesTypedWrongPasswordError() {
+        var body: JSONObject? = null
+        val transport = EnrollmentTransport { _, _, path, request, _ ->
+            if (path == "/v1/instance/session") {
+                body = JSONObject(requireNotNull(request))
+                EnrollmentHttpResponse(401, "{\"code\":\"invalid_admin_password\"}")
+            } else null
+        }
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            assertFalse(host.signIn("https://enroll.example", "taylor", "wrong password"))
+            assertEquals("android", requireNotNull(body).getString("client"))
+            assertEquals("invalid_admin_password", host.takeErrorCode())
+        }
+    }
+
+    @Test fun signInTreatsNonJsonServerFailureAsUnsuccessful() {
+        val transport = EnrollmentTransport { _, _, path, _, _ ->
+            if (path == "/v1/instance/session") EnrollmentHttpResponse(502, "<html>bad gateway</html>") else null
+        }
+        EnrollmentHost(context, MemorySecureStore(), transport = transport).use { host ->
+            assertFalse(host.signIn("https://enroll.example", "taylor", "password"))
+            assertNull(host.takeErrorCode())
+        }
+    }
+
+    @Test fun restoredUnacceptedRequestResendsTheExactRustSubmissionBeforePolling() {
+        val store = MemorySecureStore()
+        val origin = "https://enroll.example"
+        val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 7 })
+        val bodies = mutableListOf<String>()
+        var submitAttempts = 0
+        val transport = EnrollmentTransport { _, method, path, body, _ ->
+            when {
+                method == "POST" && path == "/v1/instance/vault-requests" -> {
+                    bodies += requireNotNull(body)
+                    submitAttempts += 1
+                    if (submitAttempts == 1) null else EnrollmentHttpResponse(200, JSONObject().put("request_id", JSONObject(body).getString("request_id")).put("expires_in_seconds", 60).toString())
+                }
+                method == "GET" -> EnrollmentHttpResponse(200, JSONObject().put("request_id", JSONObject(bodies.last()).getString("request_id")).put("state", "pending").put("expires_in_seconds", 60).toString())
+                else -> null
+            }
+        }
+        EnrollmentHost(context, store, transport = transport).use { first ->
+            assertNull(first.beginVaultRequest(origin, "$origin/#invite=$token", "Taylor"))
+        }
+        EnrollmentHost(context, store, transport = transport).use { restored ->
+            assertEquals(EnrollmentHost.VaultRequestState.PENDING, restored.vaultRequestStatus(origin))
+        }
+        assertEquals(2, bodies.size)
+        assertEquals(bodies[0], bodies[1])
+    }
+
+    @Test fun phoneNonSuccessStatusRemainsATransientNullResponse() {
+        val fixture = EnrollmentNativeFixture("https://enroll.example")
+        val transport = EnrollmentTransport { _, method, path, body, _ ->
+            if (path.endsWith("/claim")) EnrollmentHttpResponse(200, fixture.claimResponse(requireNotNull(body)))
+            else if (method == "GET") EnrollmentHttpResponse(429, "<html>busy</html>")
+            else null
+        }
+        val flow = requireNotNull(EnrollmentHost(context, MemorySecureStore(), transport = transport).beginPhoneClaim(fixture.qr))
+        try { assertNull(flow.status()) } finally { flow.close() }
+    }
+
     @Test fun claimedPhoneStatusProducesSasBeforeApprovalAndRetainsSharedSecretMethod() {
         val origin = "https://enroll.example"
         val fixture = EnrollmentNativeFixture(origin)
         val transport = EnrollmentTransport { _, method, path, body, _ ->
             when {
-                path.endsWith("/claim") -> fixture.claimResponse(body!!)
-                method == "GET" -> fixture.claimedStatus()
+                path.endsWith("/claim") -> EnrollmentHttpResponse(200, fixture.claimResponse(body!!))
+                method == "GET" -> EnrollmentHttpResponse(200, fixture.claimedStatus())
                 else -> null
             }
         }

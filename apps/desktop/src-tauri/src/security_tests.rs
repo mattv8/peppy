@@ -157,6 +157,11 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let enrollment = include_str!("enrollment.rs");
     for command in &commands {
         assert!(
+            registered.contains(&format!("enrollment::{command},"))
+                || !command.starts_with("enrollment_"),
+            "{command} is declared but not registered in generate_handler"
+        );
+        assert!(
             registered.contains(&format!("fn {command}("))
                 || [hosted, enrollment].iter().any(|source| {
                     source.contains(&format!("pub async fn {command}("))
@@ -165,8 +170,18 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
             "{command} declared in the app manifest but not defined"
         );
     }
+
     let composer = permissions(include_str!("../capabilities/composer.json"));
     let main = permissions(include_str!("../capabilities/default.json"));
+    for command in [
+        "enrollment_begin_vault_request",
+        "enrollment_vault_request_status",
+        "enrollment_create_vault",
+    ] {
+        assert!(registered.contains(&format!("enrollment::{command},")));
+        assert!(commands.contains(&command.to_owned()));
+        assert!(main.contains(&allow(command)));
+    }
     let app_permissions = |set: &HashSet<String>| {
         set.iter()
             .filter(|p| !p.contains(':'))
