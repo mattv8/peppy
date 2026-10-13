@@ -41,12 +41,12 @@ struct OwnerPhoneApprovalView: View {
                         Text(errorMessage(errorCode))
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("owner-phone-error")
-                            .onChange(of: errorCode) { _, value in
-                                guard let value else { return }
-                                UIAccessibility.post(notification: .announcement, argument: errorMessage(value))
-                            }
                         Button(String(localized: "peppy.try_again", table: "Peppy")) { Task { await retry() } }
                     }
+                }
+                .onChange(of: errorCode) { _, value in
+                    guard let value else { return }
+                    UIAccessibility.post(notification: .announcement, argument: errorMessage(value))
                 }
                 .frame(maxWidth: 460)
                 .padding(24)
