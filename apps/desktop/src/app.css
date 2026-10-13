@@ -23,8 +23,7 @@ body {
   border-radius: var(--peppy-window-radius);
 }
 html[data-window-rounded="false"] #desktop-shell,
-html[data-window-rounded="false"] #composer-shell,
-#composer-shell.head-panel-shell { border-radius: 0; }
+html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .desktop-layout {
   display: flex;
   flex: 1;
