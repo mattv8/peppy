@@ -12,6 +12,7 @@ type Stage = EnrollmentView["stage"];
 
 const copy = (key: PeppyCopyKey) => peppyCopy[key];
 const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone"]);
+const reconciliationStages = new Set<Stage>(["server", "setup", "signin"]);
 const pollIntervalMs = 4_000;
 const invitePollBackoffMs = [1_000, 2_000, 5_000, 10_000];
 const qrOptions = { errorCorrectionLevel: "M" as const, margin: 4, width: 512 };
@@ -30,7 +31,42 @@ const nativeSetupPromptHint = (mode: "open" | "protected") => {
     : "Your setup code, admin password, and vault shared secret will be requested securely.";
 };
 
+// Native transport/host codes and the enrollment domain codes that have their own message.
+// Anything outside this list is reported as "unavailable" so arbitrary text never reaches the UI.
+const diagnosticErrorCodes = new Set<string>([
+  "offline", "network", "local-tls-config", "secure-store-unavailable", "enrollment", "server-rejected",
+  "response-too-large", "host-state", "invalid-origin",
+  "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
+  "host-config", "server-response", "revoked", "wrong-passphrase", "credential-changed", "enrollment-state", "database-key-conflict",
+  "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
+  "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable",
+  "vault_not_found", "request_not_found", "request_not_approved", "operation_conflict", "admin-password-length",
+]);
+const diagnosticErrorCode = (code: unknown): string => typeof code === "string" && diagnosticErrorCodes.has(code) ? code : "unavailable";
+const thrownErrorCode = (error: unknown): string => typeof error === "object" && error !== null && "code" in error ? diagnosticErrorCode(error.code) : "unavailable";
+
 const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
+  if (errorCode === "offline") return "Peppy could not connect to the server. Check the server address, that the server is running, and its HTTPS certificate, then try again.";
+  if (errorCode === "network") return "Peppy could not start a network connection to your server. Try again.";
+  if (errorCode === "local-tls-config") return "This Peppy build's local HTTPS certificate authority is invalid, so it cannot secure the connection. Rebuild the development app; the server does not need to change.";
+  if (errorCode === "secure-store-unavailable") return "Secure storage could not be used: a protected record is invalid or the operating system denied access. Setup stopped to protect your keys.";
+  if (errorCode === "server-rejected") return "The server refused this request. Check the server address, then try again.";
+  if (errorCode === "response-too-large") return "The server sent a response that is too large for Peppy to accept.";
+  if (errorCode === "host-state") return "Peppy's local state is unavailable. Restart Peppy, then try again.";
+  if (errorCode === "invalid-origin") return "That server address is not allowed. Check it, then try again.";
+  if (errorCode === "host-config") return "Peppy's native host configuration could not be read or saved. Try again.";
+  if (errorCode === "server-response") return "The server's response could not be read or verified by this device. Check the server and this Peppy build, then try again.";
+  if (errorCode === "revoked") return "The server no longer accepts this device's saved credential. It was revoked or is invalid.";
+  if (errorCode === "wrong-passphrase") return "That vault shared secret does not match the pending vault. Check it and try again.";
+  if (errorCode === "credential-changed") return "The saved credential changed while setup was running. Try again.";
+  if (errorCode === "enrollment-state") return "The phone has not finished its connection request yet. Wait for it to finish, then try again.";
+  if (errorCode === "database-key-conflict") return "A protected database key already exists on this device and was not replaced. Try again.";
+  if (errorCode === "credential-mismatch") return "The saved credential, the server, or this device's local database do not match each other. Check that this device is linked to the right server, then try again.";
+  if (errorCode === "credentials-required") return "No saved device credential was found for this server, so this device cannot open its saved data. No local data was changed.";
+  if (errorCode === "database-key-missing") return "The protected key for this device's local database is missing. Peppy did not create a new key or change the database.";
+  if (errorCode === "database-key-mismatch") return "The protected key does not open this device's local database. No local data was changed.";
+  if (errorCode === "origin-binding") return "The saved credential is bound to a different server address than this one. No local data was changed.";
+  if (errorCode === "enrollment") return "Enrollment could not be matched to this device's local state or to the server's response. Check this device and the server, then try again.";
   if (errorCode === "invalid_setup_token") return copy("enrollment_error_invalid_setup_token");
   if (errorCode === "instance_already_claimed") return copy("enrollment_error_already_claimed");
   if (errorCode === "invite_invalid") return copy("enrollment_error_invite_invalid");
@@ -39,6 +75,8 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "invalid_username") return "Choose a valid username.";
   if (errorCode === "vault_request_completed") return "This vault request was already completed. Contact an owner if you need access.";
   if (errorCode === "request_completed_without_material") return "This vault request was already completed. Start a new request to try again.";
+  if (errorCode === "admin-password-length") return copy("admin_password_length");
+  if (errorCode === "vault-secret-unavailable") return "This device doesn't have the vault shared secret stored.";
   return "Peppy could not complete this step. Your server address was kept.";
 };
 
@@ -76,12 +114,13 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, onExit, onJoined, fixedOrigin, accountUrl }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, onExit, onDeferPhone, onJoined, fixedOrigin, accountUrl }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
   addingPhone?: boolean;
   onExit?(): void;
+  onDeferPhone?(): void;
   onJoined(): void;
   fixedOrigin?: string;
   accountUrl?: string;
@@ -96,6 +135,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const [method, setMethod] = useState<Method>("transfer");
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [sharedSecretError, setSharedSecretError] = useState<string | null>(null);
+  const [startOverConfirming, setStartOverConfirming] = useState(false);
+  const [startOverAttempted, setStartOverAttempted] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const [provisionError, setProvisionError] = useState(false);
   const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
@@ -113,12 +155,19 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const choice = useRef<HTMLButtonElement>(null);
   const modeSelect = useRef<HTMLSelectElement>(null);
   const verifyCheckbox = useRef<HTMLInputElement>(null);
+  const createOwnerButton = useRef<HTMLButtonElement>(null);
+  const startOverButton = useRef<HTMLButtonElement>(null);
+  const startOverConfirmButton = useRef<HTMLButtonElement>(null);
   const inviteLinkInput = useRef<HTMLInputElement>(null);
   const joined = useRef(false);
   const provisioning = useRef(false);
   const discoverStarted = useRef(false);
   const fixedStarted = useRef(false);
   const enrollEpoch = useRef(0);
+  const mutationInFlight = useRef(false);
+  const phoneInviteStarted = useRef(false);
+  const rotatedInvitation = useRef<string | null>(null);
+  const lastRotationOutcome = useRef<Stage | null>(null);
   const invitePollEpoch = useRef(0);
   const accountFetchEpoch = useRef(0);
   const signInEpoch = useRef(0);
@@ -138,17 +187,27 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     setView(next);
   };
   const failedView = (): EnrollmentView => ({ mode: mode === "hosted" ? "hosted" : "community", stage: "error", origin: connectedOrigin ?? undefined, errorCode: "unavailable" });
-  const runEnrollment = async (action: () => Promise<EnrollmentView>, retry: () => void) => {
+  const runEnrollment = async (action: () => Promise<EnrollmentView>, retry: () => void, isStartOver = false, background = false): Promise<EnrollmentView | null> => {
     const epoch = ++enrollEpoch.current;
+    let result: EnrollmentView | null = null;
     retryRef.current = retry;
-    setBusy(true);
+    setStartOverAttempted(isStartOver);
+    if (!background) setBusy(true);
+    mutationInFlight.current = true;
     try {
       const next = await action();
+      result = next;
       if (epoch === enrollEpoch.current) apply(next);
-    } catch {
-      if (epoch === enrollEpoch.current) apply(failedView());
+      return next;
+    } catch (error) {
+      if (epoch === enrollEpoch.current) apply({ ...failedView(), errorCode: thrownErrorCode(error) });
+      return null;
     } finally {
-      if (epoch === enrollEpoch.current) setBusy(false);
+      if (epoch === enrollEpoch.current) {
+        mutationInFlight.current = false;
+        if (!background) setBusy(false);
+        if ((enrolledWithoutPhone || addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus();
+      }
     }
   };
   const cancelActive = () => {
@@ -158,6 +217,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const resetEnrollment = () => {
     enrollEpoch.current += 1;
+    mutationInFlight.current = false;
     invitePollEpoch.current += 1;
     cancelActive();
     enrollmentActive.current = false;
@@ -188,6 +248,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
 
   const discover = (origin?: string) => runEnrollment(() => bridge.enrollment_discover(origin), () => discover(origin));
   const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner({ username }), createOwner);
+  const startOver = () => runEnrollment(
+    async () => {
+      const next = await bridge.enrollment_start_over();
+      setStartOverConfirming(false);
+      return next;
+    },
+    () => discover(view?.origin ?? connectedOrigin ?? undefined),
+    true,
+  );
   const signInEnrollment = () => runEnrollment(() => bridge.enrollment_sign_in({ username }), signInEnrollment);
   const connectSharedSecret = () => runEnrollment(() => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), connectSharedSecret);
   const beginVaultRequest = () => runEnrollment(async () => {
@@ -206,15 +275,53 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     setMethod(next);
     void runEnrollment(() => bridge.enrollment_add_phone(next), () => addPhone(next));
   };
+  const rotatePhone = (next: Method, automatic = false) => {
+    setMethod(next);
+    return runEnrollment(async () => {
+      const outcome = await bridge.enrollment_rotate_phone(next);
+      if (automatic) lastRotationOutcome.current = outcome.stage;
+      return outcome;
+    }, () => { void rotatePhone(next, automatic); }, false, automatic);
+  };
+  const deferPhone = async () => {
+    const result = await runEnrollment(() => bridge.enrollment_cancel_phone(), () => { void deferPhone(); });
+    // A phone that already claimed the code keeps the verification step open.
+    if (result && result.stage !== "verify_phone") onDeferPhone?.();
+  };
+  const useSharedSecretPhone = () => {
+    setSharedSecretError(null);
+    void rotatePhone("shared_secret").then(async result => {
+      if (!result || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+      try {
+        await bridge.reveal_vault_secret();
+      } catch (error) {
+        setSharedSecretError(enrollmentErrorMessage(thrownErrorCode(error)));
+      }
+    });
+  };
   const approve = () => {
     if (!verified) return;
     void runEnrollment(() => bridge.enrollment_approve(), approve);
   };
-  const refreshStatus = () => runEnrollment(() => bridge.enrollment_status(), refreshStatus);
+  const refreshStatus = async () => {
+    if (mutationInFlight.current) return;
+    try {
+      const next = await bridge.enrollment_status();
+      if (mutationInFlight.current) return;
+      if ((enrolledWithoutPhone || addingPhone) && next.stage === "server") {
+        void discover();
+        return;
+      }
+      apply(next);
+    } catch (error) {
+      if (!mutationInFlight.current) apply({ ...failedView(), errorCode: thrownErrorCode(error) });
+    }
+  };
   const cancelPairing = () => {
     invitePollEpoch.current += 1;
     if (addingPhone) {
       enrollEpoch.current += 1;
+      mutationInFlight.current = false;
       enrollmentActive.current = false;
       void bridge.enrollment_cancel().catch(() => undefined).finally(onExit);
       return;
@@ -227,6 +334,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const changeServer = () => {
     enrollEpoch.current += 1;
+    mutationInFlight.current = false;
     cancelActive();
     setBusy(false);
     apply({ mode: "community", stage: "server", origin: connectedOrigin ?? undefined });
@@ -264,6 +372,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   useEffect(() => () => {
     invalidateAccountFlows();
     enrollEpoch.current += 1;
+    mutationInFlight.current = false;
     cancelActive();
   }, []);
   useEffect(() => {
@@ -292,7 +401,6 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   }, [fixedOrigin]);
   useEffect(() => {
     if (!enrolledWithoutPhone && !addingPhone) return;
-    cancelActive();
     void refreshStatus();
   }, [addingPhone, enrolledWithoutPhone]);
 
@@ -333,9 +441,29 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
 
   const stage = view?.stage ?? null;
   useEffect(() => {
+    if (stage !== "ready" || !view?.owner || (view.hasGateway && !addingPhone) || phoneInviteStarted.current || mutationInFlight.current) return;
+    phoneInviteStarted.current = true;
+    addPhone("transfer");
+  }, [stage, view?.owner, view?.hasGateway]);
+  useEffect(() => {
     if (stage !== "locked") setVaultOwner("");
     if (stage !== "signin") setSigninPath("chooser");
   }, [stage]);
+  useEffect(() => {
+    if (!startOverConfirming) return;
+    startOverConfirmButton.current?.focus();
+  }, [startOverConfirming]);
+  useEffect(() => {
+    if (stage !== "setup" || !view?.ownerResumePending) setStartOverConfirming(false);
+    if (stage === "setup" && !view?.ownerResumePending && startOverAttempted) {
+      requestAnimationFrame(() => createOwnerButton.current?.focus());
+      setStartOverAttempted(false);
+    }
+  }, [stage, startOverAttempted, view?.ownerResumePending]);
+  const cancelStartOver = () => {
+    setStartOverConfirming(false);
+    requestAnimationFrame(() => startOverButton.current?.focus());
+  };
   useEffect(() => {
     if (stage !== "signin" || signinPath !== "chooser" || !bridge.enrollment_pending_invite) return;
     let live = true;
@@ -376,6 +504,12 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   }, [pageVisible, stage]);
   const payload = stage === "waiting_phone" ? view?.qrPayload : undefined;
   useEffect(() => {
+    if (payload && payload !== rotatedInvitation.current) {
+      rotatedInvitation.current = null;
+      lastRotationOutcome.current = null;
+    }
+  }, [payload]);
+  useEffect(() => {
     if (!payload) {
       setQr("");
       return;
@@ -391,15 +525,23 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     const timer = window.setInterval(() => {
       const epoch = enrollEpoch.current;
       void bridge.enrollment_status().then(next => {
-        if (epoch === enrollEpoch.current) apply(next);
-      }).catch(() => {
-        if (epoch !== enrollEpoch.current) return;
+        if (epoch === enrollEpoch.current && !mutationInFlight.current) apply(next);
+      }).catch(error => {
+        if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
         retryRef.current = refreshStatus;
-        apply(failedView());
+        apply({ ...failedView(), errorCode: thrownErrorCode(error) });
       });
     }, pollIntervalMs);
     return () => window.clearInterval(timer);
   }, [stage]);
+  useEffect(() => {
+    const invitation = stage === "waiting_phone" ? view?.qrPayload : stage === "expired" ? `expired:${view?.qrPayload ?? ""}` : null;
+    const nearExpiry = stage === "waiting_phone" && (view?.expiresInSeconds ?? Infinity) <= 15;
+    if (!invitation || (!nearExpiry && stage !== "expired") || mutationInFlight.current || rotatedInvitation.current === invitation) return;
+    if (stage === "expired" && lastRotationOutcome.current === "expired") return;
+    rotatedInvitation.current = invitation;
+    void rotatePhone(method, true);
+  }, [stage, view?.expiresInSeconds, view?.qrPayload, method]);
   const joinedNow = stage === "phone_connected" || (!addingPhone && stage === "ready" && Boolean(view?.hasGateway));
   useEffect(() => {
     if (!joinedNow || joined.current) return;
@@ -514,7 +656,6 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             <Heading>Set up your server</Heading>
             {view.setupCodeRequired === false ? (
               <>
-                <p>{copy("enrollment_setup_open")}</p>
                 <p className="setup-hint">{nativeSetupPromptHint("open")}</p>
               </>
             ) : (
@@ -523,9 +664,21 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
                 <p className="setup-hint">{nativeSetupPromptHint("protected")}</p>
               </>
             )}
+            {view.ownerResumePending && <>
+              <p id="enrollment-resume-notice" className="setup-hint">{copy("setup_owner_resume_body")}</p>
+              {startOverConfirming ? (
+                <div id="enrollment-start-over-confirm" role="group" aria-label={copy("setup_owner_resume_confirm_label")}>
+                  <p id="enrollment-start-over-confirm-body" className="setup-hint">{copy("setup_owner_resume_confirm_body")}</p>
+                  <div className="enrollment-actions">
+                    <button ref={startOverConfirmButton} id="enrollment-start-over-confirm-button" className="primary-button" disabled={busy} aria-describedby="enrollment-start-over-confirm-body" onClick={() => void startOver()}>{copy("setup_owner_resume_confirm_yes")}</button>
+                    <button id="enrollment-start-over-cancel-button" className="secondary-button" disabled={busy} onClick={cancelStartOver}>{copy("setup_owner_resume_confirm_no")}</button>
+                  </div>
+                </div>
+              ) : <button ref={startOverButton} id="enrollment-start-over-button" className="secondary-button" disabled={busy} onClick={() => setStartOverConfirming(true)}>{copy("setup_owner_resume_start_over")}</button>}
+            </>}
             <div id="enrollment-setup-username-field" className="setup-url-field"><label>{copy("enrollment_username_label")}<input id="enrollment-setup-username" type="text" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} aria-describedby="enrollment-setup-username-hint" /></label><span id="enrollment-setup-username-hint" className="setup-hint">{copy("enrollment_setup_username_hint")}</span></div>
             <div className="enrollment-actions">
-              <button id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create server</button>
+              <button ref={createOwnerButton} id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create server</button>
               <button id="enrollment-cancel-setup-button" className="secondary-button" disabled={busy} onClick={changeServer}>Cancel</button>
             </div>
           </Stage>
@@ -538,6 +691,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             <Heading>{hosted ? copy("hosted_sign_in_headline") : "Sign in to your server"}</Heading>
             <p>{hosted ? "Sign in to your Peppy account to continue. Signing in does not unlock your vault." : copy("enrollment_signin_body")}</p>
             <div className={hosted ? "enrollment-actions" : "chooser-buttons"}>
+              {!hosted && view.ownerResumePending && <button id="enrollment-signin-resume-button" className="chooser-button" disabled={busy} onClick={() => void createOwner()}><span className="chooser-button-label">{copy("setup_owner_resume_signin_label")}</span><span className="chooser-button-hint">{copy("setup_owner_resume_signin_hint")}</span></button>}
               <button id="enrollment-signin-password-button" className={hosted ? "primary-button" : "chooser-button"} disabled={busy} onClick={() => hosted ? void signInEnrollment() : setSigninPath("password")}>{hosted ? "Sign in" : <><span className="chooser-button-label">{copy("enrollment_signin_password_label")}</span><span className="chooser-button-hint">{copy("enrollment_signin_password_hint")}</span></>}</button>
               {!hosted && <button id="enrollment-signin-connect-button" className="chooser-button" disabled={busy} onClick={() => void connectSharedSecret()}><span className="chooser-button-label">{copy("enrollment_signin_connect_label")}</span><span className="chooser-button-hint">{copy("enrollment_signin_connect_hint")}</span></button>}
               {!hosted && <button id="enrollment-signin-invite-button" className="chooser-button" disabled={busy} onClick={() => setSigninPath("invite")}><span className="chooser-button-label">{copy("enrollment_signin_invite_label")}</span><span className="chooser-button-hint">{copy("enrollment_signin_invite_hint")}</span></button>}
@@ -580,14 +734,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           <Stage stage="ready">
             <Heading>Connect your phone</Heading>
             <p>Connect a phone to start sending messages. Permissions are granted on the phone, not here.</p>
-            <fieldset className="enrollment-methods">
-              <legend>How should the phone connect?</legend>
-              <label><input type="radio" name="enrollment-method" value="transfer" checked={method === "transfer"} onChange={() => setMethod("transfer")} /> Transfer keys securely</label>
-              <label><input type="radio" name="enrollment-method" value="shared_secret" checked={method === "shared_secret"} onChange={() => setMethod("shared_secret")} /> Enter shared secret on phone</label>
-            </fieldset>
-            <div className="enrollment-actions">
-              <button id="enrollment-add-phone-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Add phone</button>
-            </div>
+            <p id="enrollment-preparing-status" role="status">Preparing a connection code…</p>
+            {phoneInviteStarted.current && !mutationInFlight.current && <div className="enrollment-actions">
+              <button id="enrollment-show-connection-code-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Show connection code</button>
+              <button id="enrollment-ready-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
+            </div>}
           </Stage>
         );
       case "waiting_phone":
@@ -603,9 +754,12 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
               </div>
             )}
             <p className="setup-hint">{methodHints[method]}</p>
+            {sharedSecretError && <p id="enrollment-shared-secret-error" className="setup-field-error" role="alert">{sharedSecretError}</p>}
             <p className="setup-hint">This QR connects your phone to this server. It does not grant any permissions by itself.</p>
             <div className="enrollment-actions">
               <button id="enrollment-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>Cancel</button>
+              <button id="enrollment-shared-secret-phone-button" className="secondary-button" disabled={busy} onClick={useSharedSecretPhone}>Enter shared secret on phone</button>
+              <button id="enrollment-defer-phone-button" className="secondary-button" disabled={busy} onClick={deferPhone}>Set up phone later</button>
             </div>
           </Stage>
         );
@@ -644,7 +798,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
         return (
           <Stage stage="error">
             <Heading>Something went wrong</Heading>
-            <p id="enrollment-error" role="alert">{enrollmentErrorMessage(view.errorCode)}</p>
+            <p id="enrollment-error" role="alert">{startOverAttempted && view.errorCode === "instance_already_claimed" ? copy("setup_owner_resume_claimed") : startOverAttempted && view.errorCode === "operation_conflict" ? copy("setup_owner_resume_conflict") : enrollmentErrorMessage(view.errorCode)}</p>
+            <p id="enrollment-error-code" className="setup-hint" data-error-code={diagnosticErrorCode(view.errorCode)}>Error code: {diagnosticErrorCode(view.errorCode)}</p>
             <div className="enrollment-actions">
               <button id="enrollment-retry-button" className="primary-button" disabled={busy} onClick={() => retryRef.current()}>Retry</button>
             </div>
@@ -655,7 +810,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     }
   };
 
-  const statusMessage = stage === "waiting_phone" ? "Scan this code with your phone."
+  const statusMessage = stage === "setup" && view?.ownerResumePending ? copy("setup_owner_resume_status")
+    : stage === "waiting_phone" ? "Scan this code with your phone."
     : stage === "verify_phone" ? "Compare the verification code before approving."
       : stage === "phone_connected" ? "Phone connected. Finish setup on your phone."
         : stage === "expired" ? "This code expired."

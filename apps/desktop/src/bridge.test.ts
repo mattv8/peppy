@@ -6,6 +6,9 @@ const eventMock = vi.hoisted(() => ({
   stop: vi.fn(),
   windowStop: vi.fn(),
 }));
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (_event: string, handler: (event: { payload: unknown }) => void) => {
@@ -68,5 +71,19 @@ describe("bridge subscriptions", () => {
     const dispose = tauriBridge.subscribe_lifecycle(() => undefined);
     dispose();
     await vi.waitFor(() => expect(eventMock.windowStop).toHaveBeenCalledOnce());
+  });
+
+  it("passes declared arguments to native commands", async () => {
+    await tauriBridge.restore_contact("book", "contact");
+    await tauriBridge.enrollment_start_over();
+    await tauriBridge.enrollment_rotate_phone("shared_secret");
+    await tauriBridge.enrollment_cancel_phone();
+    await tauriBridge.reveal_vault_secret();
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "restore_contact", { bookId: "book", contactId: "contact" });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "enrollment_start_over", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "enrollment_rotate_phone", { method: "shared_secret" });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "enrollment_cancel_phone", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(5, "reveal_vault_secret", undefined);
   });
 });

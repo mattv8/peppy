@@ -1596,7 +1596,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This server is unclaimed. The first device to finish setup becomes its owner."
+            "value": "No setup code is required."
           }
         }
       }
