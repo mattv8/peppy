@@ -23,7 +23,9 @@ use zeroize::Zeroizing;
 const DEVICE_NAME: &str = "Peppy Desktop";
 const HOSTED_ORIGIN: &str = "https://peppy.pro";
 const OWNER_CHECKPOINT_PREFIX: &str = "enrollment-owner:v1:";
+const OWNER_SECRET_PREFIX: &str = "enrollment-owner-secret:v1:";
 const VAULT_REQUEST_CHECKPOINT_PREFIX: &str = "enrollment-vault-request:v1:";
+const VAULT_SECRET_PREFIX: &str = "enrollment-vault-secret:v1:";
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 #[derive(Default)]
@@ -38,7 +40,9 @@ pub struct Controller {
     has_gateway: Option<bool>,
     invitation_id: Option<uuid::Uuid>,
     invitation: Option<InvitationStatus>,
+    invitation_method: Option<EnrollmentMethod>,
     owner_resume: bool,
+    owner_claim_in_flight: usize,
     owner_passphrase: Option<Zeroizing<String>>,
     vault_request_state: Option<String>,
     vault_creation_in_flight: bool,
@@ -63,6 +67,8 @@ pub struct EnrollmentView {
     vault_owner_required: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    owner_resume_pending: bool,
 }
 
 impl Controller {
@@ -94,6 +100,14 @@ impl Controller {
                 }) =>
             {
                 "waiting_phone"
+            }
+            Some(_)
+                if self
+                    .invitation
+                    .as_ref()
+                    .is_some_and(|status| status.state == EnrollmentState::Expired) =>
+            {
+                "expired"
             }
             Some(_) if self.ready => "ready",
             Some(_)
@@ -147,6 +161,14 @@ impl Controller {
             setup_code_required,
             vault_owner_required: None,
             display_name: pending_request.map(|(_, _, display_name)| display_name),
+            // On a claimed server the earlier attempt is offered from sign-in, so a claim won by
+            // someone else never traps the device in setup.
+            owner_resume_pending: matches!(stage, "setup" | "signin")
+                && self
+                    .info
+                    .as_ref()
+                    .is_some_and(|info| info.mode == DeploymentMode::Community)
+                && self.owner_resume,
         }
     }
 
@@ -158,14 +180,38 @@ impl Controller {
 }
 
 /// Only an explicitly discovered, unclaimed community server without a setup requirement is open.
-/// Missing, claimed, and non-community state all fail closed to a native setup-token prompt.
+/// Missing, claimed, and non-community state all fail closed to a native setup-token prompt,
+/// except resuming this device's own attempt on a claimed server: the server replays a matching
+/// operation without checking the setup code.
 fn setup_code_required(controller: &std::sync::Mutex<Controller>) -> BridgeResult<bool> {
     let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
     Ok(!matches!(
         controller.info.as_ref(),
         Some(info)
-            if info.mode == DeploymentMode::Community && !info.claimed && !info.setup_required
+            if info.mode == DeploymentMode::Community
+                && ((!info.claimed && !info.setup_required)
+                    || (info.claimed && controller.owner_resume))
     ))
+}
+
+/// Returns a client usable for joining an existing vault. A restored pending first-owner client
+/// cannot join, so it is replaced in memory; its protected checkpoint stays in secure storage and
+/// is offered again by the next discovery.
+fn admission_client(controller: &mut Controller) -> BridgeResult<&mut EnrollmentClient> {
+    let origin = controller.origin()?.to_owned();
+    let pending_owner = controller
+        .client
+        .as_ref()
+        .is_some_and(|client| client.is_pending_owner_creation_for_origin(&origin));
+    if pending_owner || controller.client.is_none() {
+        controller.client = Some(
+            EnrollmentClient::new(origin, ClientKind::Desktop, DEVICE_NAME.into())
+                .map_err(|_| enrollment_error())?,
+        );
+        controller.owner_resume = false;
+        controller.owner_passphrase = None;
+    }
+    controller.client.as_mut().ok_or_else(enrollment_error)
 }
 
 /// A device identity already unlocked in this app for the selected origin.
@@ -191,6 +237,35 @@ fn set_identity_ready(controller: &mut Controller, role: Option<EnrollmentRole>)
     controller.owner = role == Some(EnrollmentRole::Owner);
 }
 
+/// Reconcile controller state with the active unlocked identity after an activation-side refresh
+/// has advanced the operation epoch. Only an owner identity may repair an owner setup view.
+fn reconcile_status_core(controller: &mut Controller, identity: Option<EnrollmentRole>) {
+    if !controller.ready && identity == Some(EnrollmentRole::Owner) {
+        set_identity_ready(controller, identity);
+    }
+}
+
+/// Chooses which restored client discovery resumes for a device without an identity. A pending
+/// vault request wins: it is the newer intent (joining is only offered once a server is claimed),
+/// and the owner checkpoint stays in secure storage. Returns whether an owner attempt is resumed.
+fn choose_pending_client(
+    pending_owner: Option<EnrollmentClient>,
+    pending_vault_request: Option<EnrollmentClient>,
+) -> (Option<EnrollmentClient>, bool) {
+    match (pending_vault_request, pending_owner) {
+        (Some(request), _) => (Some(request), false),
+        (None, Some(owner)) => (Some(owner), true),
+        (None, None) => (None, false),
+    }
+}
+
+/// A pending owner checkpoint stays resumable even after the server reports a claim: the claim may
+/// be this device's own lost-response attempt, which the server replays for the same operation and
+/// admin password.
+fn can_restore_owner_checkpoint(mode: DeploymentMode, has_identity: bool) -> bool {
+    mode == DeploymentMode::Community && !has_identity
+}
+
 /// Known registry only: an unknown registry yields `None`, never a fabricated `false`.
 fn known_gateway_presence((gateways, known): (Vec<crate::dto::GatewayView>, bool)) -> Option<bool> {
     known.then_some(!gateways.is_empty())
@@ -198,6 +273,13 @@ fn known_gateway_presence((gateways, known): (Vec<crate::dto::GatewayView>, bool
 
 /// Reads gateway presence from the active session for `origin`. No network request is made.
 async fn gateway_presence(state: &AppState, origin: &str) -> BridgeResult<Option<bool>> {
+    if state
+        .config()?
+        .active_binding()
+        .is_none_or(|binding| binding.origin != origin)
+    {
+        return Ok(None);
+    }
     let Some(session) = state.session().await? else {
         return Ok(None);
     };
@@ -223,6 +305,44 @@ async fn refresh_gateway_presence(state: &AppState) -> BridgeResult<Option<bool>
 
 fn owner_checkpoint_key(origin: &str) -> String {
     format!("{OWNER_CHECKPOINT_PREFIX}{origin}")
+}
+
+fn pending_secret_key(prefix: &str, origin: &str) -> String {
+    let digest = Sha256::digest(origin.as_bytes());
+    format!("{prefix}{digest:x}")
+}
+
+fn owner_secret_key(origin: &str) -> String {
+    pending_secret_key(OWNER_SECRET_PREFIX, origin)
+}
+
+fn vault_secret_key(origin: &str) -> String {
+    pending_secret_key(VAULT_SECRET_PREFIX, origin)
+}
+
+fn read_text_secret(
+    store: &dyn SecretStore,
+    account: &str,
+) -> BridgeResult<Option<Zeroizing<String>>> {
+    let Some(value) = store.get(account)?.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    String::from_utf8(value.to_vec())
+        .map(Zeroizing::new)
+        .map(Some)
+        .map_err(|_| enrollment_error())
+}
+
+fn tombstone_pending_secrets(store: &dyn SecretStore, origin: &str) -> BridgeResult<()> {
+    store.set(&owner_secret_key(origin), b"")?;
+    store.set(&vault_secret_key(origin), b"")
+}
+
+fn tombstone_if_present(store: &dyn SecretStore, account: &str) -> BridgeResult<()> {
+    if store.get(account)?.is_some_and(|value| !value.is_empty()) {
+        store.set(account, b"")?;
+    }
+    Ok(())
 }
 
 fn vault_request_checkpoint_key(origin: &str) -> String {
@@ -255,7 +375,8 @@ fn clear_vault_request_locked(
         .map(EnrollmentClient::clear_vault_request);
     controller.vault_request_state = None;
     controller.vault_creation_in_flight = false;
-    tombstone_vault_request_checkpoint(store, origin)
+    tombstone_vault_request_checkpoint(store, origin)?;
+    store.set(&vault_secret_key(origin), b"")
 }
 
 /// Resubmits an unaccepted vault request. Definitive rejections finish the request as expired;
@@ -398,18 +519,27 @@ fn owner_operation_current(
 fn wrong_owner_passphrase() -> BridgeError {
     BridgeError::new(
         "wrong-passphrase",
-        "That recovery secret does not match the pending vault.",
+        "That vault shared secret does not match the pending vault.",
     )
 }
 
+struct OwnerClaimGuard<'a>(&'a std::sync::Mutex<Controller>);
+
+impl Drop for OwnerClaimGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut controller) = self.0.lock() {
+            controller.owner_claim_in_flight = controller.owner_claim_in_flight.saturating_sub(1);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn create_owner_core<P, PF, C, CF, G, H, HF, A, AF>(
+async fn create_owner_core<P, PF, G, H, HF, A, AF>(
     controller: &std::sync::Mutex<Controller>,
     store: &dyn SecretStore,
     expected_binding: Option<crate::credentials::Binding>,
     username: String,
     mut prompt: P,
-    confirm_generated: C,
     generate: G,
     post_claim: H,
     activate: A,
@@ -417,8 +547,6 @@ async fn create_owner_core<P, PF, C, CF, G, H, HF, A, AF>(
 where
     P: FnMut(PassphrasePurpose) -> PF,
     PF: std::future::Future<Output = BridgeResult<Option<Zeroizing<String>>>>,
-    C: FnOnce(String) -> CF,
-    CF: std::future::Future<Output = BridgeResult<bool>>,
     G: FnOnce() -> Zeroizing<String>,
     H: FnOnce(String, String) -> HF,
     HF: std::future::Future<Output = BridgeResult<String>>,
@@ -447,28 +575,35 @@ where
     if !owner_operation_current(controller, epoch)? {
         return Ok(false);
     }
+    if !(12..=1024).contains(&admin_password.len()) {
+        return Err(BridgeError::new(
+            "admin-password-length",
+            "Administrator password must be between 12 and 1024 bytes.",
+        ));
+    }
 
-    let (retained, resume) = {
+    let (retained, resume, origin_for_secret) = {
         let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
-        (controller.owner_passphrase.clone(), controller.owner_resume)
+        (
+            controller.owner_passphrase.clone(),
+            controller.owner_resume,
+            controller.origin()?.to_owned(),
+        )
     };
+    let mut generated_secret = false;
     let passphrase = if let Some(passphrase) = retained {
         passphrase
+    } else if let Some(passphrase) = read_text_secret(store, &owner_secret_key(&origin_for_secret))?
+    {
+        passphrase
     } else if resume {
-        let Some(passphrase) = prompt(PassphrasePurpose::Unlock).await? else {
+        let Some(passphrase) = prompt(PassphrasePurpose::ResumeOwnerSecret).await? else {
             return Ok(false);
         };
         passphrase
     } else {
-        let passphrase = generate();
-        let message = format!(
-            "Save this recovery secret before continuing. It is required to add devices:\n\n{}",
-            passphrase.as_str()
-        );
-        if !confirm_generated(message).await? {
-            return Ok(false);
-        }
-        passphrase
+        generated_secret = true;
+        generate()
     };
     if !owner_operation_current(controller, epoch)? {
         return Ok(false);
@@ -501,12 +636,24 @@ where
         controller.owner_resume = false;
         (origin, request, checkpoint)
     };
+    if generated_secret {
+        store.set(&owner_secret_key(&origin), passphrase.as_bytes())?;
+    }
     store.set(&owner_checkpoint_key(&origin), &checkpoint)?;
     if !owner_operation_current(controller, epoch)? {
         return Ok(false);
     }
 
+    let claim_guard = {
+        let mut state = controller.lock().map_err(|_| BridgeError::host_state())?;
+        if state.operation_epoch != epoch {
+            return Ok(false);
+        }
+        state.owner_claim_in_flight += 1;
+        OwnerClaimGuard(controller)
+    };
     let response = post_claim(origin.clone(), request).await?;
+    drop(claim_guard);
     let identity = {
         let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
         if controller.operation_epoch != epoch {
@@ -520,10 +667,13 @@ where
             .map_err(|_| enrollment_error())?
     };
     activate(identity, passphrase, expected_binding).await?;
+    // Activation is the durable commit point. Clear recovery material before checking the UI
+    // epoch so a concurrent refresh cannot leave a completed owner claim resumable.
+    // The pending secret is cleared by `activate` only after the binding copy is stored.
+    tombstone_owner_checkpoint(store, &origin)?;
     if !owner_operation_current(controller, epoch)? {
         return Ok(false);
     }
-    tombstone_owner_checkpoint(store, &origin)?;
     let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
     if controller.operation_epoch != epoch {
         return Ok(false);
@@ -540,6 +690,75 @@ fn enrollment_error() -> BridgeError {
         "enrollment",
         "The enrollment response was invalid or no longer matches this device.",
     )
+}
+
+async fn start_over_core<F, FF>(
+    controller: &std::sync::Mutex<Controller>,
+    store: &dyn SecretStore,
+    fetch_instance: F,
+) -> BridgeResult<EnrollmentView>
+where
+    F: FnOnce(String) -> FF,
+    FF: std::future::Future<Output = BridgeResult<InstanceInfo>>,
+{
+    let (epoch, origin) = {
+        let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+        let origin = controller.origin()?.to_owned();
+        if controller.owner_claim_in_flight > 0 {
+            return Err(BridgeError::new(
+                "operation_conflict",
+                "The owner claim is still in progress.",
+            ));
+        }
+        if !controller.owner_resume
+            || !controller
+                .client
+                .as_ref()
+                .is_some_and(|client| client.is_pending_owner_creation_for_origin(&origin))
+        {
+            return Ok(controller.view());
+        }
+        controller.operation_epoch = controller.operation_epoch.wrapping_add(1);
+        (controller.operation_epoch, origin)
+    };
+    let info = fetch_instance(origin.clone()).await?;
+    if info.claimed {
+        return Err(BridgeError::new(
+            "instance_already_claimed",
+            "The server was already claimed.",
+        ));
+    }
+    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.operation_epoch != epoch {
+        return Ok(controller.view());
+    }
+    if info.mode != DeploymentMode::Community {
+        return Ok(controller.view());
+    }
+    let fresh_client =
+        EnrollmentClient::new(origin.clone(), ClientKind::Desktop, DEVICE_NAME.into())
+            .map_err(|_| enrollment_error())?;
+    tombstone_owner_checkpoint(store, &origin)?;
+    tombstone_pending_secrets(store, &origin)?;
+    controller.owner_passphrase = None;
+    controller.owner_resume = false;
+    controller.info = Some(info);
+    controller.client = Some(fresh_client);
+    Ok(controller.view())
+}
+
+async fn fetch_instance(origin: String) -> BridgeResult<InstanceInfo> {
+    serde_json::from_str(
+        &body(
+            http(&origin)?
+                .get(format!("{origin}{}", enrollment::routes::INSTANCE))
+                .send()
+                .await
+                .map_err(|_| NetError::Offline)?,
+        )
+        .await?,
+    )
+    .map_err(|_| enrollment_error())
 }
 
 fn http(origin: &str) -> BridgeResult<reqwest::Client> {
@@ -583,6 +802,7 @@ fn known_claim_error_code(body: &[u8]) -> Option<&'static str> {
         "request_not_found" => Some("request_not_found"),
         "request_not_approved" => Some("request_not_approved"),
         "operation_conflict" => Some("operation_conflict"),
+        "active_invitation_limit" => Some("active_invitation_limit"),
         _ => None,
     }
 }
@@ -660,6 +880,8 @@ async fn install_identity(
     expected_binding: Option<crate::credentials::Binding>,
 ) -> BridgeResult<()> {
     let metadata = identity.metadata().clone();
+    let origin = identity.origin().to_owned();
+    let vault_secret = passphrase.clone();
     let credential = identity.device_credential_for_native_secure_store();
     let portable = Zeroizing::new(
         serde_json::to_vec(&ImportedCredential {
@@ -703,9 +925,10 @@ async fn install_identity(
     (state.notifier)();
     let session = state.require_session().await?;
     if let Some(activation) = identity.into_activation() {
+        let activation_session = session.clone();
         crate::sync::blocking(move || {
             activation
-                .activate(&session.client)
+                .activate(&activation_session.client)
                 .map_err(|_| enrollment_error())
         })
         .await?;
@@ -724,7 +947,79 @@ async fn install_identity(
         )
         .await?;
     }
+    persist_binding_secret(
+        &*state.store,
+        &session.binding.vault_secret_account(),
+        &vault_secret,
+        &origin,
+    );
     Ok(())
+}
+
+/// Stores the verified vault secret for its device binding, then clears the origin's pending
+/// copies. Activation has already committed, so failures are tolerated: a retained pending copy
+/// is moved by the next discovery sweep instead of turning a completed enrollment into an error.
+fn persist_binding_secret(
+    store: &dyn SecretStore,
+    binding_account: &str,
+    secret: &str,
+    origin: &str,
+) {
+    if store.set(binding_account, secret.as_bytes()).is_ok() {
+        for pending_account in [owner_secret_key(origin), vault_secret_key(origin)] {
+            if read_text_secret(store, &pending_account)
+                .ok()
+                .flatten()
+                .is_some_and(|pending| pending.as_str() == secret)
+            {
+                let _ = tombstone_if_present(store, &pending_account);
+            }
+        }
+    }
+}
+
+/// Moves a pending secret left by an interrupted post-activation write into the empty binding
+/// account. A non-empty binding account is authoritative and is never overwritten here.
+fn sweep_pending_secret(
+    store: &dyn SecretStore,
+    origin: &str,
+    binding_account: &str,
+    verify: impl Fn(&str) -> bool,
+) -> BridgeResult<()> {
+    if let Some(binding) = read_text_secret(store, binding_account)? {
+        for pending_account in [owner_secret_key(origin), vault_secret_key(origin)] {
+            if read_text_secret(store, &pending_account)?
+                .is_some_and(|pending| pending.as_str() == binding.as_str())
+            {
+                let _ = tombstone_if_present(store, &pending_account);
+            }
+        }
+        return Ok(());
+    }
+    for pending_account in [owner_secret_key(origin), vault_secret_key(origin)] {
+        if let Some(secret) = read_text_secret(store, &pending_account)? {
+            if verify(secret.as_str()) && store.set(binding_account, secret.as_bytes()).is_ok() {
+                let _ = tombstone_if_present(store, &pending_account);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn vault_secret_unavailable() -> BridgeError {
+    BridgeError::new(
+        "vault-secret-unavailable",
+        "The vault shared secret is not stored on this device.",
+    )
+}
+
+/// Reads the binding's stored vault secret. An absent or tombstoned value is unavailable.
+fn stored_vault_secret(
+    store: &dyn SecretStore,
+    binding_account: &str,
+) -> BridgeResult<Zeroizing<String>> {
+    read_text_secret(store, binding_account)?.ok_or_else(vault_secret_unavailable)
 }
 
 #[tauri::command]
@@ -747,17 +1042,21 @@ pub async fn enrollment_discover(
     } else {
         enrollment::routes::INSTANCE
     };
-    let response: InstanceInfo = serde_json::from_str(
-        &body(
-            http(&selected)?
-                .get(format!("{selected}{discovery_path}"))
-                .send()
-                .await
-                .map_err(|_| NetError::Offline)?,
+    let response = if discovery_path == enrollment::routes::INSTANCE {
+        fetch_instance(selected.clone()).await?
+    } else {
+        serde_json::from_str(
+            &body(
+                http(&selected)?
+                    .get(format!("{selected}{discovery_path}"))
+                    .send()
+                    .await
+                    .map_err(|_| NetError::Offline)?,
+            )
+            .await?,
         )
-        .await?,
-    )
-    .map_err(|_| enrollment_error())?;
+        .map_err(|_| enrollment_error())?
+    };
     if response.mode == DeploymentMode::Hosted && selected != HOSTED_ORIGIN {
         return Err(BridgeError::new(
             "invalid-origin",
@@ -766,23 +1065,56 @@ pub async fn enrollment_discover(
     }
     let existing = existing_identity(&state, &selected).await?;
     let existing_role = existing.as_ref().map(ExistingIdentity::role);
+    if existing_role == Some(EnrollmentRole::Owner) {
+        let _ = tombstone_if_present(&*state.store, &owner_checkpoint_key(&selected));
+        if let Some(session) = state.session().await? {
+            if session.binding.origin == selected {
+                let verify = |secret: &str| {
+                    matches!(
+                        existing.as_ref(),
+                        Some(ExistingIdentity::Owner(profile, header))
+                            if EnrollmentClient::for_existing_owner(
+                                selected.clone(),
+                                ClientKind::Desktop,
+                                DEVICE_NAME.into(),
+                                profile.clone(),
+                                header.clone(),
+                            )
+                            .and_then(|client| client.owner_passphrase_matches(secret))
+                            .unwrap_or(false)
+                    )
+                };
+                let _ = sweep_pending_secret(
+                    &*state.store,
+                    &selected,
+                    &session.binding.vault_secret_account(),
+                    verify,
+                );
+            }
+        }
+    }
     let has_gateway = gateway_presence(&state, &selected).await?;
-    let can_resume_pending =
-        response.mode == DeploymentMode::Community && !response.claimed && existing.is_none();
+    let can_resume_pending = can_restore_owner_checkpoint(response.mode, existing.is_some());
     let pending_owner = if can_resume_pending {
         restore_pending_owner(&*state.store, &selected)?
     } else {
         None
     };
+    if can_resume_pending && pending_owner.is_none() {
+        // A secret without its resume checkpoint cannot authorize a replay. Treat it as an
+        // interrupted pre-checkpoint write and remove it on the next discovery.
+        let _ = tombstone_if_present(&*state.store, &owner_secret_key(&selected));
+    }
     let pending_vault_request = if response.mode == DeploymentMode::Community && existing.is_none()
     {
         restore_pending_vault_request(&*state.store, &selected)?
     } else {
         None
     };
-    let resumed_pending = pending_owner.is_some();
+    let (pending_client, resumed_pending) =
+        choose_pending_client(pending_owner, pending_vault_request);
     // An existing device stays ready with its own credential; only an owner gets an invitation client.
-    let client = match (existing, pending_owner) {
+    let client = match (existing, pending_client) {
         (Some(ExistingIdentity::Owner(profile, header)), _) => Some(
             EnrollmentClient::for_existing_owner(
                 selected.clone(),
@@ -795,7 +1127,6 @@ pub async fn enrollment_discover(
         ),
         (Some(ExistingIdentity::Device), _) => None,
         (None, Some(client)) => Some(client),
-        (None, None) if pending_vault_request.is_some() => pending_vault_request,
         (None, None) => Some(
             EnrollmentClient::new(selected.clone(), ClientKind::Desktop, DEVICE_NAME.into())
                 .map_err(|_| enrollment_error())?,
@@ -819,6 +1150,15 @@ pub async fn enrollment_discover(
         has_gateway,
     );
     Ok(controller.view())
+}
+
+#[tauri::command]
+pub async fn enrollment_start_over(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    start_over_core(&state.enrollment, &*state.store, fetch_instance).await
 }
 
 /// Applies a discovery result. An existing device keeps its client when the origin is unchanged.
@@ -859,7 +1199,11 @@ async fn existing_identity(
     state: &AppState,
     selected: &str,
 ) -> BridgeResult<Option<ExistingIdentity>> {
-    if state.config()?.active_binding().is_none() {
+    if state
+        .config()?
+        .active_binding()
+        .is_none_or(|binding| binding.origin != selected)
+    {
         return Ok(None);
     }
     let Some(session) = state.session().await? else {
@@ -939,15 +1283,6 @@ pub async fn enrollment_create_owner(
         expected_binding,
         input.and_then(|value| value.username).unwrap_or_default(),
         |purpose| dialogs::passphrase(app_ref, purpose),
-        |message| async move {
-            dialogs::confirm(
-                app_ref,
-                "Save vault recovery secret",
-                &message,
-                "I saved it",
-            )
-            .await
-        },
         || Zeroizing::new(peppy_crypto::passphrase::generate_passphrase()),
         |origin, request| async move {
             post(
@@ -1092,19 +1427,15 @@ pub async fn enrollment_connect_shared_secret(
             .view());
     };
     let (origin, challenge_request) = {
-        let controller = state
+        let mut controller = state
             .enrollment
             .lock()
             .map_err(|_| BridgeError::host_state())?;
-        (
-            controller.origin()?.to_owned(),
-            controller
-                .client
-                .as_ref()
-                .ok_or_else(enrollment_error)?
-                .manual_challenge_request(None, input.and_then(|value| value.vault_owner))
-                .map_err(|_| enrollment_error())?,
-        )
+        let origin = controller.origin()?.to_owned();
+        let request = admission_client(&mut controller)?
+            .manual_challenge_request(None, input.and_then(|value| value.vault_owner))
+            .map_err(|_| enrollment_error())?;
+        (origin, request)
     };
     let client = http(&origin)?;
     let account_session = hosted_account_header(&state, &hosted).await?;
@@ -1203,17 +1534,7 @@ pub async fn enrollment_begin_vault_request(
                 "This invite belongs to a different server.",
             ));
         }
-        if controller.client.is_none() {
-            controller.client = Some(
-                EnrollmentClient::new(
-                    invite.origin.clone(),
-                    ClientKind::Desktop,
-                    DEVICE_NAME.into(),
-                )
-                .map_err(|_| enrollment_error())?,
-            );
-        }
-        let client = controller.client.as_mut().ok_or_else(enrollment_error)?;
+        let client = admission_client(&mut controller)?;
         let request = client
             .begin_vault_request(
                 invite.origin.clone(),
@@ -1456,7 +1777,18 @@ pub async fn enrollment_create_vault(
         .map_err(|_| BridgeError::host_state())?
         .owner_passphrase
         .clone();
+    let secret_origin = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .origin()?
+        .to_owned();
+    let mut generated_secret = false;
     let passphrase = if let Some(passphrase) = retained {
+        passphrase
+    } else if let Some(passphrase) =
+        read_text_secret(&*state.store, &vault_secret_key(&secret_origin))?
+    {
         passphrase
     } else {
         let has_saved_material = state
@@ -1467,7 +1799,8 @@ pub async fn enrollment_create_vault(
             .as_ref()
             .is_some_and(EnrollmentClient::has_prepared_owner_material);
         if has_saved_material {
-            let Some(passphrase) = dialogs::passphrase(&app, PassphrasePurpose::Unlock).await?
+            let Some(passphrase) =
+                dialogs::passphrase(&app, PassphrasePurpose::RecoverVaultSecret).await?
             else {
                 return Ok(state
                     .enrollment
@@ -1477,11 +1810,8 @@ pub async fn enrollment_create_vault(
             };
             passphrase
         } else {
-            let passphrase = Zeroizing::new(peppy_crypto::passphrase::generate_passphrase());
-            if !dialogs::confirm(&app, "Save vault recovery secret", &format!("Save this recovery secret before continuing. It is required to add devices:\n\n{}", passphrase.as_str()), "I saved it").await? {
-                return Ok(state.enrollment.lock().map_err(|_| BridgeError::host_state())?.view());
-            }
-            passphrase
+            generated_secret = true;
+            Zeroizing::new(peppy_crypto::passphrase::generate_passphrase())
         }
     };
     let expected_binding = state.config()?.active_binding().cloned();
@@ -1513,6 +1843,11 @@ pub async fn enrollment_create_vault(
         controller.vault_creation_in_flight = true;
         (origin, request, checkpoint)
     };
+    if generated_secret {
+        state
+            .store
+            .set(&vault_secret_key(&origin), passphrase.as_bytes())?;
+    }
     state
         .store
         .set(&vault_request_checkpoint_key(&origin), &checkpoint)?;
@@ -1603,14 +1938,12 @@ pub async fn enrollment_create_vault(
     Ok(controller.view())
 }
 
-#[tauri::command]
-pub async fn enrollment_add_phone(
-    window: WebviewWindow,
-    state: State<'_, AppState>,
+async fn enrollment_add_phone_core(
+    state: &AppState,
     method: EnrollmentMethod,
-    hosted: State<'_, crate::hosted::HostedState>,
+    hosted: &crate::hosted::HostedState,
 ) -> BridgeResult<EnrollmentView> {
-    crate::require_main(window.label())?;
+    ensure_owner_client(state).await?;
     let request = state
         .enrollment
         .lock()
@@ -1622,7 +1955,7 @@ pub async fn enrollment_add_phone(
         .map_err(|_| enrollment_error())?;
     let session = state.require_session().await?;
     let origin = session.api.origin().to_owned();
-    let account = hosted_account_header(&state, &hosted).await?;
+    let account = hosted_account_header(state, hosted).await?;
     let created: InvitationCreated = serde_json::from_str(
         &body(
             device_request(
@@ -1657,8 +1990,71 @@ pub async fn enrollment_add_phone(
         )
         .map_err(|_| enrollment_error())?;
     controller.invitation_id = Some(created.invitation_id);
-    controller.invitation = None;
+    controller.invitation = Some(InvitationStatus {
+        state: EnrollmentState::Waiting,
+        expires_in_seconds: created.expires_in_seconds,
+        claim: None,
+        transcript: None,
+        encrypted_key_package: None,
+        transfer_nonce: None,
+        profile: None,
+    });
+    controller.invitation_method = Some(method);
     Ok(controller.view())
+}
+
+#[tauri::command]
+pub async fn enrollment_add_phone(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    method: EnrollmentMethod,
+    hosted: State<'_, crate::hosted::HostedState>,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    enrollment_add_phone_core(&state, method, &hosted).await
+}
+
+/// Rebuild the in-memory invitation client after a process restart. This is deliberately guarded
+/// by the selected origin and the unlocked owner identity; a credential for another server must
+/// never become an invitation authority here.
+async fn ensure_owner_client(state: &AppState) -> BridgeResult<()> {
+    let origin = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .origin
+        .clone()
+        .ok_or_else(enrollment_error)?;
+    if state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .client
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(ExistingIdentity::Owner(profile, header)) = existing_identity(state, &origin).await?
+    else {
+        return Err(enrollment_error());
+    };
+    let client = EnrollmentClient::for_existing_owner(
+        origin.clone(),
+        ClientKind::Desktop,
+        DEVICE_NAME.into(),
+        profile,
+        header,
+    )
+    .map_err(|_| enrollment_error())?;
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    if controller.origin.as_deref() != Some(origin.as_str()) {
+        return Err(enrollment_error());
+    }
+    controller.client.get_or_insert(client);
+    Ok(())
 }
 
 async fn refresh_invitation(
@@ -1698,6 +2094,180 @@ async fn refresh_invitation(
         .map_err(|_| BridgeError::host_state())?
         .invitation = Some(status);
     Ok(())
+}
+
+async fn cancel_phone_invitation(
+    state: &AppState,
+    hosted: &crate::hosted::HostedState,
+) -> BridgeResult<()> {
+    let id = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .invitation_id;
+    if let Some(id) = id {
+        let session = state.require_session().await?;
+        let origin = session.api.origin().to_owned();
+        let account = hosted_account_header(state, hosted).await?;
+        body(
+            device_request(
+                &session,
+                &origin,
+                http(&origin)?.delete(format!(
+                    "{origin}{}/{id}",
+                    enrollment::routes::ENROLLMENT_INVITATIONS
+                )),
+                account.as_ref().map(|value| value.as_str()),
+            )?
+            .send()
+            .await
+            .map_err(|_| NetError::Offline)?,
+        )
+        .await?;
+    }
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    controller.invitation_id = None;
+    controller.invitation = None;
+    controller.invitation_method = None;
+    Ok(())
+}
+
+/// Replaces a phone invitation only when it is expired or about to expire. The server cancels any
+/// unconsumed invitation unconditionally, so a claimed or approved invitation is never touched.
+/// Hitting the active-invitation limit (older invitations from earlier runs) yields the expired
+/// stage so the person can restart once those lapse, instead of an error.
+async fn rotate_phone_core<R, RF, C, CF, A, AF>(
+    controller: &std::sync::Mutex<Controller>,
+    method: EnrollmentMethod,
+    refresh: R,
+    cancel: C,
+    add: A,
+) -> BridgeResult<EnrollmentView>
+where
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = BridgeResult<()>>,
+    C: FnOnce() -> CF,
+    CF: std::future::Future<Output = BridgeResult<()>>,
+    A: FnOnce() -> AF,
+    AF: std::future::Future<Output = BridgeResult<EnrollmentView>>,
+{
+    if controller
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .invitation_id
+        .is_none()
+    {
+        return add().await;
+    }
+    refresh().await?;
+    let rotate = {
+        let guard = controller.lock().map_err(|_| BridgeError::host_state())?;
+        guard.invitation.as_ref().is_some_and(|status| {
+            status.state == EnrollmentState::Expired
+                || (status.state == EnrollmentState::Waiting && status.expires_in_seconds <= 15)
+                || (status.state == EnrollmentState::Waiting
+                    && guard.invitation_method != Some(method))
+        })
+    };
+    if !rotate {
+        return Ok(controller
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    cancel().await?;
+    match add().await {
+        Ok(view) => Ok(view),
+        Err(error) if error.code == "active_invitation_limit" => {
+            let mut view = controller
+                .lock()
+                .map_err(|_| BridgeError::host_state())?
+                .view();
+            view.stage = "expired";
+            Ok(view)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn cancel_phone_core<R, RF, C, CF>(
+    controller: &std::sync::Mutex<Controller>,
+    refresh: R,
+    cancel: C,
+) -> BridgeResult<EnrollmentView>
+where
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = BridgeResult<()>>,
+    C: FnOnce() -> CF,
+    CF: std::future::Future<Output = BridgeResult<()>>,
+{
+    if controller
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .invitation_id
+        .is_none()
+    {
+        cancel().await?;
+        return Ok(controller
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    refresh().await?;
+    let cancelable = controller
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .invitation
+        .as_ref()
+        .is_some_and(|status| {
+            matches!(
+                status.state,
+                EnrollmentState::Waiting | EnrollmentState::Expired
+            )
+        });
+    if cancelable {
+        cancel().await?;
+    }
+    Ok(controller
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .view())
+}
+
+#[tauri::command]
+pub async fn enrollment_cancel_phone(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    hosted: State<'_, crate::hosted::HostedState>,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    cancel_phone_core(
+        &state.enrollment,
+        || refresh_invitation(&state, &hosted),
+        || cancel_phone_invitation(&state, &hosted),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn enrollment_rotate_phone(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    method: EnrollmentMethod,
+    hosted: State<'_, crate::hosted::HostedState>,
+) -> BridgeResult<EnrollmentView> {
+    crate::require_main(window.label())?;
+    rotate_phone_core(
+        &state.enrollment,
+        method,
+        || refresh_invitation(&state, &hosted),
+        || cancel_phone_invitation(&state, &hosted),
+        || enrollment_add_phone_core(&state, method, &hosted),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1780,22 +2350,63 @@ pub async fn enrollment_status(
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
-    if state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .invitation_id
-        .is_some()
-    {
+    let (invitation_active, reconcile_origin) = {
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        (
+            controller.invitation_id.is_some(),
+            (!controller.ready)
+                .then(|| controller.origin.clone())
+                .flatten(),
+        )
+    };
+    if invitation_active {
         refresh_invitation(&state, &hosted).await?;
     }
+    let identity = match reconcile_origin.as_deref() {
+        Some(origin) => existing_identity(&state, origin)
+            .await?
+            .map(|identity| identity.role()),
+        None => None,
+    };
     let has_gateway = refresh_gateway_presence(&state).await?;
     let mut controller = state
         .enrollment
         .lock()
         .map_err(|_| BridgeError::host_state())?;
     controller.has_gateway = has_gateway;
+    if reconcile_origin.as_deref() == controller.origin.as_deref() {
+        reconcile_status_core(&mut controller, identity);
+    }
     Ok(controller.view())
+}
+
+#[tauri::command]
+pub async fn reveal_vault_secret(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> BridgeResult<()> {
+    crate::require_main(window.label())?;
+    let session = state.require_session().await?;
+    let unlocked = crate::sync::blocking({
+        let session = session.clone();
+        move || {
+            session
+                .client
+                .key_status()
+                .map(|status| status.active_epoch.is_some())
+                .map_err(crate::core_error)
+        }
+    })
+    .await?;
+    if !unlocked {
+        return Err(vault_secret_unavailable());
+    }
+    let secret = stored_vault_secret(&*state.store, &session.binding.vault_secret_account())?;
+    dialogs::show_vault_secret(&app, secret).await
 }
 
 #[tauri::command]
@@ -1859,6 +2470,7 @@ pub async fn enrollment_cancel(
     controller.vault_creation_in_flight = false;
     controller.invitation_id = None;
     controller.invitation = None;
+    controller.invitation_method = None;
     Ok(())
 }
 
@@ -1884,10 +2496,92 @@ mod owner_retry_tests {
     use peppy_hosted_api::enrollment::{
         ClaimInstanceRequest, ClaimInstanceResponse, InstanceSession,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
 
     const ORIGIN: &str = "https://community.example";
+    const OTHER_ORIGIN: &str = "https://other.example";
     const RECOVERY_SECRET: &str = "alpha bravo charlie delta echo foxtrot";
+
+    struct CountingStore {
+        reads: AtomicUsize,
+    }
+
+    impl SecretStore for CountingStore {
+        fn get(&self, _account: &str) -> BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn set(&self, _account: &str, _secret: &[u8]) -> BridgeResult<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingStore;
+
+    impl SecretStore for FailingStore {
+        fn get(&self, _account: &str) -> BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+            Err(BridgeError::new("secure-store-unavailable", "unavailable"))
+        }
+
+        fn set(&self, _account: &str, _secret: &[u8]) -> BridgeResult<()> {
+            Err(BridgeError::new("secure-store-unavailable", "unavailable"))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStore {
+        values: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        writes: Mutex<Vec<String>>,
+    }
+
+    impl SecretStore for RecordingStore {
+        fn get(&self, account: &str) -> BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .get(account)
+                .cloned()
+                .map(Zeroizing::new))
+        }
+
+        fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()> {
+            self.writes.lock().unwrap().push(account.into());
+            self.values
+                .lock()
+                .unwrap()
+                .insert(account.into(), secret.into());
+            Ok(())
+        }
+    }
+
+    fn active_binding() -> crate::credentials::Binding {
+        crate::credentials::Binding {
+            origin: ORIGIN.into(),
+            vault_id: uuid::Uuid::new_v4().to_string(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn state_with_active_binding(
+        root: &tempfile::TempDir,
+        store: Arc<dyn SecretStore>,
+        binding: &crate::credentials::Binding,
+    ) -> AppState {
+        let state = AppState::new(root.path().to_path_buf(), store, crate::tests::noop());
+        state
+            .update_config(|config| {
+                config.origin = Some(binding.origin.clone());
+                config.remember(binding);
+                config.active = Some(binding.clone());
+            })
+            .unwrap();
+        state
+    }
 
     fn unclaimed_controller() -> Mutex<Controller> {
         Mutex::new(Controller {
@@ -1906,6 +2600,29 @@ mod owner_retry_tests {
             ),
             ..Controller::default()
         })
+    }
+
+    fn pending_owner_controller(store: &MemoryStore) -> Mutex<Controller> {
+        let controller = unclaimed_controller();
+        let checkpoint = {
+            let mut guard = controller.lock().unwrap();
+            let client = guard.client.as_mut().unwrap();
+            client
+                .create_owner_request(
+                    "setup-token".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    RECOVERY_SECRET.into(),
+                )
+                .unwrap();
+            let checkpoint = client.checkpoint().unwrap();
+            guard.owner_resume = true;
+            checkpoint
+        };
+        store
+            .set(&owner_checkpoint_key(ORIGIN), &checkpoint)
+            .unwrap();
+        controller
     }
 
     fn claim_response(request: &str, replayed: bool) -> String {
@@ -1960,7 +2677,6 @@ mod owner_retry_tests {
                 prompted_by_test.lock().unwrap().push(purpose);
                 std::future::ready(prompt(purpose))
             },
-            |_| std::future::ready(Ok(true)),
             || Zeroizing::new(RECOVERY_SECRET.into()),
             move |_, serialized| {
                 *request_by_test.lock().unwrap() = Some(serialized.clone());
@@ -1981,6 +2697,122 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
+    async fn invalid_admin_password_lengths_stop_before_generating_or_persisting_owner_material() {
+        for password in ["a".repeat(11), "é".repeat(5) + "a", "a".repeat(1025)] {
+            let controller = unclaimed_controller();
+            let store = MemoryStore::default();
+
+            let error = create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                |purpose| {
+                    let value = match purpose {
+                        PassphrasePurpose::SetupToken => "setup-token",
+                        PassphrasePurpose::AdminPassword => &password,
+                        _ => panic!("invalid password must stop before another prompt"),
+                    };
+                    std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
+                },
+                || panic!("invalid password must not generate a secret"),
+                |_, _| async move {
+                    panic!("invalid password must not post a claim");
+                    #[allow(unreachable_code)]
+                    Ok(String::new())
+                },
+                |_, _, _| async move {
+                    panic!("invalid password must not activate an identity");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.code, "admin-password-length");
+            assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+            assert!(!controller
+                .lock()
+                .unwrap()
+                .client
+                .as_ref()
+                .unwrap()
+                .has_prepared_owner_material());
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_owner_creation_accepts_byte_length_boundaries_without_reprompting_for_a_secret()
+    {
+        for password in ["a".repeat(12), "é".repeat(6), "a".repeat(1024)] {
+            let controller = unclaimed_controller();
+            let store = MemoryStore::default();
+            let prompted = Arc::new(Mutex::new(Vec::new()));
+            let seen = prompted.clone();
+
+            assert!(create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                move |purpose| {
+                    seen.lock().unwrap().push(purpose);
+                    let value = match purpose {
+                        PassphrasePurpose::SetupToken => "setup-token",
+                        PassphrasePurpose::AdminPassword => &password,
+                        _ => panic!("fresh owner creation must not re-prompt for a secret"),
+                    };
+                    std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
+                },
+                || Zeroizing::new(RECOVERY_SECRET.into()),
+                |_, request| std::future::ready(Ok(claim_response(&request, false))),
+                |_, _, _| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap());
+
+            assert_eq!(
+                *prompted.lock().unwrap(),
+                vec![
+                    PassphrasePurpose::SetupToken,
+                    PassphrasePurpose::AdminPassword
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_owner_writes_its_pending_secret_before_the_resume_checkpoint() {
+        let controller = unclaimed_controller();
+        let store = RecordingStore::default();
+
+        create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            |purpose| std::future::ready(prompt(purpose)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, request| std::future::ready(Ok(claim_response(&request, false))),
+            |_, _, _| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap();
+
+        let writes = store.writes.lock().unwrap();
+        let secret = writes
+            .iter()
+            .position(|key| key == &owner_secret_key(ORIGIN))
+            .unwrap();
+        let checkpoint = writes
+            .iter()
+            .position(|key| key == &owner_checkpoint_key(ORIGIN))
+            .unwrap();
+        assert!(secret < checkpoint);
+    }
+
+    #[tokio::test]
     async fn lost_response_retry_reuses_operation_device_and_credential_metadata() {
         let controller = unclaimed_controller();
         let store = MemoryStore::default();
@@ -1995,7 +2827,6 @@ mod owner_retry_tests {
             None,
             String::new(),
             |purpose| std::future::ready(prompt(purpose)),
-            |_| std::future::ready(Ok(true)),
             || Zeroizing::new(RECOVERY_SECRET.into()),
             move |_, request| {
                 first_requests.lock().unwrap().push(request.clone());
@@ -2029,7 +2860,6 @@ mod owner_retry_tests {
             None,
             String::new(),
             |purpose| std::future::ready(prompt(purpose)),
-            |_| std::future::ready(Ok(true)),
             || panic!("an immediate retry must retain the generated secret"),
             move |_, request| {
                 second_requests.lock().unwrap().push(request.clone());
@@ -2131,13 +2961,12 @@ mod owner_retry_tests {
             String::new(),
             |purpose| {
                 std::future::ready(match purpose {
-                    PassphrasePurpose::Unlock => Ok(Some(Zeroizing::new(
+                    PassphrasePurpose::ResumeOwnerSecret => Ok(Some(Zeroizing::new(
                         "wrong secret with enough separate words".into(),
                     ))),
                     _ => prompt(purpose),
                 })
             },
-            |_| std::future::ready(Ok(true)),
             || panic!("resume must prompt instead of generating"),
             move |_, _| {
                 *posts_seen.lock().unwrap() += 1;
@@ -2168,6 +2997,286 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
+    async fn resumed_owner_creation_requests_the_earlier_owner_secret() {
+        let store = MemoryStore::default();
+        let controller = unclaimed_controller();
+        controller.lock().unwrap().owner_resume = true;
+        let prompted = Arc::new(Mutex::new(Vec::new()));
+        let seen = prompted.clone();
+
+        let _ = create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            move |purpose| {
+                seen.lock().unwrap().push(purpose);
+                std::future::ready(match purpose {
+                    PassphrasePurpose::ResumeOwnerSecret => Ok(None),
+                    _ => prompt(purpose),
+                })
+            },
+            || panic!("resuming must not generate a secret"),
+            |_, _| std::future::ready(Ok(String::new())),
+            |_, _, _| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *prompted.lock().unwrap(),
+            vec![
+                PassphrasePurpose::SetupToken,
+                PassphrasePurpose::AdminPassword,
+                PassphrasePurpose::ResumeOwnerSecret,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn start_over_replaces_an_unclaimed_pending_owner_and_tombstones_its_checkpoint() {
+        let store = MemoryStore::default();
+        let controller = pending_owner_controller(&store);
+        store
+            .set(&owner_secret_key(ORIGIN), RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        let view = start_over_core(&controller, &store, |_| async {
+            Ok(InstanceInfo {
+                mode: DeploymentMode::Community,
+                claimed: false,
+                setup_required: true,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(view.stage, "setup");
+        assert!(!view.owner_resume_pending);
+        assert_eq!(
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b""
+        );
+        assert_eq!(
+            store
+                .get(&owner_secret_key(ORIGIN))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b""
+        );
+        let guard = controller.lock().unwrap();
+        assert!(!guard.owner_resume);
+        assert!(!guard
+            .client
+            .as_ref()
+            .unwrap()
+            .is_pending_owner_creation_for_origin(ORIGIN));
+    }
+
+    #[tokio::test]
+    async fn start_over_keeps_checkpoint_when_server_is_claimed_or_fetch_fails() {
+        for result in [
+            Err(BridgeError::new("offline", "offline")),
+            Ok(InstanceInfo {
+                mode: DeploymentMode::Community,
+                claimed: true,
+                setup_required: true,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            }),
+        ] {
+            let store = MemoryStore::default();
+            let controller = pending_owner_controller(&store);
+            let error =
+                match start_over_core(&controller, &store, |_| std::future::ready(result)).await {
+                    Err(error) => error,
+                    Ok(_) => panic!("start over should reject this response"),
+                };
+            assert!(matches!(error.code, "offline" | "instance_already_claimed"));
+            assert!(store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .is_some_and(|value| !value.is_empty()));
+        }
+    }
+
+    #[tokio::test]
+    async fn start_over_leaves_non_pending_or_stale_operations_unchanged() {
+        let store = MemoryStore::default();
+        let controller = unclaimed_controller();
+        let before = controller.lock().unwrap().view();
+        let view = start_over_core(&controller, &store, |_| async {
+            Ok(InstanceInfo {
+                mode: DeploymentMode::Community,
+                claimed: false,
+                setup_required: true,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(view.stage, before.stage);
+        assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+
+        let controller = pending_owner_controller(&store);
+        let checkpoint = store
+            .get(&owner_checkpoint_key(ORIGIN))
+            .unwrap()
+            .unwrap()
+            .to_vec();
+        let view = start_over_core(&controller, &store, |_: String| {
+            begin_owner_operation(&controller).unwrap();
+            std::future::ready(Ok(InstanceInfo {
+                mode: DeploymentMode::Community,
+                claimed: false,
+                setup_required: true,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            }))
+        })
+        .await
+        .unwrap();
+        assert!(view.owner_resume_pending);
+        assert_eq!(
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .unwrap()
+                .to_vec(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
+    async fn start_over_refuses_an_in_flight_claim_without_changing_its_epoch_or_checkpoint() {
+        let store = MemoryStore::default();
+        let controller = pending_owner_controller(&store);
+        let (epoch, checkpoint) = {
+            let mut guard = controller.lock().unwrap();
+            guard.owner_claim_in_flight = 1;
+            (
+                guard.operation_epoch,
+                store
+                    .get(&owner_checkpoint_key(ORIGIN))
+                    .unwrap()
+                    .unwrap()
+                    .to_vec(),
+            )
+        };
+
+        let result = start_over_core(&controller, &store, |_| async {
+            panic!("in-flight precondition must refuse before discovery")
+        })
+        .await;
+        let Err(error) = result else {
+            panic!("in-flight claim must conflict");
+        };
+
+        assert_eq!(error.code, "operation_conflict");
+        assert_eq!(controller.lock().unwrap().operation_epoch, epoch);
+        assert_eq!(
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .unwrap()
+                .to_vec(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_claim_post_releases_its_in_flight_claim() {
+        let controller = unclaimed_controller();
+        let store = MemoryStore::default();
+
+        let result = create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            |purpose| std::future::ready(prompt(purpose)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, _| std::future::ready(Err(BridgeError::new("offline", "claim failed"))),
+            |_, _, _| std::future::ready(Ok(())),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().code, "offline");
+        assert_eq!(controller.lock().unwrap().owner_claim_in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn start_over_keeps_refusing_while_any_claim_guard_is_held() {
+        let store = MemoryStore::default();
+        let controller = pending_owner_controller(&store);
+        let (first, second) = {
+            let mut guard = controller.lock().unwrap();
+            guard.owner_claim_in_flight += 2;
+            drop(guard);
+            (OwnerClaimGuard(&controller), OwnerClaimGuard(&controller))
+        };
+
+        drop(first);
+        let refused = start_over_core(&controller, &store, |_| async {
+            panic!("an in-flight claim must refuse before discovery")
+        })
+        .await;
+        let Err(error) = refused else {
+            panic!("a held claim guard must refuse start over");
+        };
+        assert_eq!(error.code, "operation_conflict");
+        assert_eq!(controller.lock().unwrap().owner_claim_in_flight, 1);
+
+        drop(second);
+        assert_eq!(controller.lock().unwrap().owner_claim_in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn start_over_refuses_a_non_community_instance_without_tombstoning() {
+        let store = MemoryStore::default();
+        let controller = pending_owner_controller(&store);
+        let checkpoint = store
+            .get(&owner_checkpoint_key(ORIGIN))
+            .unwrap()
+            .unwrap()
+            .to_vec();
+
+        let view = start_over_core(&controller, &store, |_| async {
+            Ok(InstanceInfo {
+                mode: DeploymentMode::Hosted,
+                claimed: false,
+                setup_required: false,
+                password_auth: true,
+                qr_pairing: true,
+                shared_secret_pairing: true,
+            })
+        })
+        .await
+        .unwrap();
+
+        assert!(view.owner_resume_pending);
+        assert_eq!(
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .unwrap()
+                .to_vec(),
+            checkpoint
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_during_native_prompt_never_activates_a_different_profile() {
         let controller = Arc::new(unclaimed_controller());
         let store = MemoryStore::default();
@@ -2186,7 +3295,6 @@ mod owner_retry_tests {
                 }
                 std::future::ready(prompt(purpose))
             },
-            |_| std::future::ready(Ok(true)),
             || Zeroizing::new(RECOVERY_SECRET.into()),
             |_, _| std::future::ready(Ok(String::new())),
             move |_, _, _| {
@@ -2217,6 +3325,118 @@ mod owner_retry_tests {
         }
     }
 
+    fn invitation_status(state: EnrollmentState, expires_in_seconds: u32) -> InvitationStatus {
+        InvitationStatus {
+            state,
+            expires_in_seconds,
+            claim: None,
+            transcript: None,
+            encrypted_key_package: None,
+            transfer_nonce: None,
+            profile: None,
+        }
+    }
+
+    #[test]
+    fn invitation_views_cover_waiting_and_expired_stages() {
+        let mut controller = ready_controller();
+        controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 300));
+        assert_eq!(controller.view().stage, "waiting_phone");
+
+        controller.invitation = Some(invitation_status(EnrollmentState::Expired, 0));
+        assert_eq!(controller.view().stage, "expired");
+    }
+
+    #[test]
+    fn claimed_community_checkpoint_is_resumable_without_an_identity() {
+        assert!(can_restore_owner_checkpoint(
+            DeploymentMode::Community,
+            false
+        ));
+        assert!(!can_restore_owner_checkpoint(
+            DeploymentMode::Community,
+            true
+        ));
+        assert!(!can_restore_owner_checkpoint(DeploymentMode::Hosted, false));
+
+        let mut controller = ready_controller();
+        controller.owner_resume = true;
+        assert_eq!(controller.view().stage, "signin");
+        assert!(controller.view().owner_resume_pending);
+    }
+
+    #[test]
+    fn a_pending_vault_request_wins_over_an_old_owner_checkpoint() {
+        let store = MemoryStore::default();
+        let owner = pending_owner_controller(&store)
+            .into_inner()
+            .unwrap()
+            .client
+            .unwrap();
+        let mut request =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        request
+            .begin_vault_request(ORIGIN.into(), "A".repeat(43), "Taylor".into())
+            .unwrap();
+
+        let (client, resumed) = choose_pending_client(Some(owner), Some(request));
+        assert!(!resumed);
+        assert!(client.unwrap().pending_vault_request().is_some());
+
+        let owner = pending_owner_controller(&store)
+            .into_inner()
+            .unwrap()
+            .client
+            .unwrap();
+        let (client, resumed) = choose_pending_client(Some(owner), None);
+        assert!(resumed);
+        assert!(client.unwrap().is_pending_owner_creation_for_origin(ORIGIN));
+    }
+
+    #[test]
+    fn joining_keeps_a_pending_vault_request_client() {
+        let mut request =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        request
+            .begin_vault_request(ORIGIN.into(), "A".repeat(43), "Taylor".into())
+            .unwrap();
+        let mut controller = Controller {
+            client: Some(request),
+            ..ready_controller()
+        };
+        assert!(admission_client(&mut controller)
+            .unwrap()
+            .pending_vault_request()
+            .is_some());
+    }
+
+    #[test]
+    fn resuming_on_a_claimed_server_skips_only_the_replayed_setup_code() {
+        let controller = Mutex::new(ready_controller());
+        assert!(setup_code_required(&controller).unwrap());
+        controller.lock().unwrap().owner_resume = true;
+        assert!(!setup_code_required(&controller).unwrap());
+    }
+
+    #[test]
+    fn joining_replaces_only_a_pending_owner_client_and_keeps_its_checkpoint() {
+        let store = MemoryStore::default();
+        let controller = pending_owner_controller(&store);
+        let mut guard = controller.lock().unwrap();
+        let client = admission_client(&mut guard).unwrap();
+        assert!(!client.is_pending_owner_creation_for_origin(ORIGIN));
+        assert!(!guard.owner_resume);
+        assert!(store
+            .get(&owner_checkpoint_key(ORIGIN))
+            .unwrap()
+            .is_some_and(|checkpoint| !checkpoint.is_empty()));
+
+        let mut fresh = unclaimed_controller().into_inner().unwrap();
+        let before = fresh.client.as_ref().unwrap().checkpoint().unwrap();
+        let kept = admission_client(&mut fresh).unwrap().checkpoint().unwrap();
+        assert_eq!(before, kept);
+    }
+
     #[test]
     fn manual_admission_flags_follow_the_verified_role() {
         let mut owner = ready_controller();
@@ -2236,6 +3456,377 @@ mod owner_retry_tests {
         set_identity_ready(&mut gateway, Some(EnrollmentRole::Gateway));
         assert_eq!(gateway.view().owner, Some(false));
         assert!(gateway.view().has_gateway.is_none());
+    }
+
+    #[test]
+    fn status_reconciliation_repairs_only_an_unready_owner_controller() {
+        let mut owner = ready_controller();
+        reconcile_status_core(&mut owner, Some(EnrollmentRole::Owner));
+        assert_eq!(owner.view().stage, "ready");
+        assert_eq!(owner.view().owner, Some(true));
+
+        let mut device = ready_controller();
+        reconcile_status_core(&mut device, Some(EnrollmentRole::Device));
+        assert_eq!(device.view().stage, "signin");
+        assert_eq!(device.view().owner, None);
+    }
+
+    #[tokio::test]
+    async fn phone_rotation_only_replaces_expiring_or_expired_invitations() {
+        for (status, expected_events) in [
+            (invitation_status(EnrollmentState::Claimed, 10), vec![]),
+            (invitation_status(EnrollmentState::Approved, 0), vec![]),
+            (invitation_status(EnrollmentState::Waiting, 290), vec![]),
+            (
+                invitation_status(EnrollmentState::Expired, 0),
+                vec!["cancel", "create"],
+            ),
+            (
+                invitation_status(EnrollmentState::Waiting, 15),
+                vec!["cancel", "create"],
+            ),
+        ] {
+            let controller = Mutex::new(Controller {
+                invitation_id: Some(uuid::Uuid::nil()),
+                invitation: Some(status),
+                invitation_method: Some(EnrollmentMethod::Transfer),
+                ..ready_controller()
+            });
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let cancelled = events.clone();
+            let created = events.clone();
+
+            rotate_phone_core(
+                &controller,
+                EnrollmentMethod::Transfer,
+                || std::future::ready(Ok(())),
+                move || {
+                    cancelled.lock().unwrap().push("cancel");
+                    std::future::ready(Ok(()))
+                },
+                move || {
+                    created.lock().unwrap().push("create");
+                    std::future::ready(Ok(ready_controller().view()))
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(*events.lock().unwrap(), expected_events);
+        }
+    }
+
+    #[tokio::test]
+    async fn invitation_limit_cancels_the_old_invitation_then_returns_expired() {
+        let controller = Mutex::new(Controller {
+            invitation_id: Some(uuid::Uuid::nil()),
+            invitation: Some(invitation_status(EnrollmentState::Expired, 0)),
+            ..ready_controller()
+        });
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let cancelled = cancellations.clone();
+
+        let view = rotate_phone_core(
+            &controller,
+            EnrollmentMethod::Transfer,
+            || std::future::ready(Ok(())),
+            move || {
+                cancelled.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+            || std::future::ready(Err(BridgeError::new("active_invitation_limit", "limit"))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cancellations.load(Ordering::SeqCst), 1);
+        assert_eq!(view.stage, "expired");
+    }
+
+    #[tokio::test]
+    async fn phone_rotation_replaces_a_waiting_invitation_for_a_new_method() {
+        let controller = Mutex::new(Controller {
+            invitation_id: Some(uuid::Uuid::nil()),
+            invitation: Some(invitation_status(EnrollmentState::Waiting, 290)),
+            invitation_method: Some(EnrollmentMethod::Transfer),
+            ..ready_controller()
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cancelled = events.clone();
+        let created = events.clone();
+
+        rotate_phone_core(
+            &controller,
+            EnrollmentMethod::SharedSecret,
+            || std::future::ready(Ok(())),
+            move || {
+                cancelled.lock().unwrap().push("cancel");
+                std::future::ready(Ok(()))
+            },
+            move || {
+                created.lock().unwrap().push("create");
+                std::future::ready(Ok(ready_controller().view()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*events.lock().unwrap(), ["cancel", "create"]);
+    }
+
+    #[tokio::test]
+    async fn phone_rotation_creates_directly_without_an_active_invitation() {
+        let controller = Mutex::new(ready_controller());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let refreshed = events.clone();
+        let cancelled = events.clone();
+        let created = events.clone();
+
+        rotate_phone_core(
+            &controller,
+            EnrollmentMethod::Transfer,
+            move || {
+                refreshed.lock().unwrap().push("refresh");
+                std::future::ready(Ok(()))
+            },
+            move || {
+                cancelled.lock().unwrap().push("cancel");
+                std::future::ready(Ok(()))
+            },
+            move || {
+                created.lock().unwrap().push("create");
+                std::future::ready(Ok(ready_controller().view()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*events.lock().unwrap(), ["create"]);
+    }
+
+    #[tokio::test]
+    async fn cancel_phone_leaves_a_claimed_invitation_untouched() {
+        let controller = Mutex::new(Controller {
+            invitation_id: Some(uuid::Uuid::nil()),
+            invitation: Some(invitation_status(EnrollmentState::Claimed, 10)),
+            ..ready_controller()
+        });
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let cancelled = cancellations.clone();
+
+        let view = cancel_phone_core(
+            &controller,
+            || std::future::ready(Ok(())),
+            move || {
+                cancelled.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(view.stage, "verify_phone");
+        assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+    }
+
+    struct BindingWriteFails {
+        inner: MemoryStore,
+        binding_account: String,
+    }
+
+    impl SecretStore for BindingWriteFails {
+        fn get(&self, account: &str) -> BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+            self.inner.get(account)
+        }
+
+        fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()> {
+            if account == self.binding_account {
+                return Err(BridgeError::new("secure-store-unavailable", "unavailable"));
+            }
+            self.inner.set(account, secret)
+        }
+    }
+
+    fn stored(store: &dyn SecretStore, account: &str) -> Option<Vec<u8>> {
+        store.get(account).unwrap().map(|value| value.to_vec())
+    }
+
+    #[tokio::test]
+    async fn owner_creation_leaves_the_pending_secret_for_the_binding_write() {
+        let controller = unclaimed_controller();
+        let store = MemoryStore::default();
+
+        assert!(create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            |purpose| std::future::ready(prompt(purpose)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, request| std::future::ready(Ok(claim_response(&request, false))),
+            |_, _, _| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(
+            stored(&store, &owner_secret_key(ORIGIN)).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+        assert_eq!(
+            stored(&store, &owner_checkpoint_key(ORIGIN)).as_deref(),
+            Some(&b""[..])
+        );
+    }
+
+    #[test]
+    fn binding_secret_write_clears_pending_secrets_only_after_it_succeeds() {
+        let binding_account = active_binding().vault_secret_account();
+        let stored_ok = MemoryStore::default();
+        stored_ok
+            .set(&owner_secret_key(ORIGIN), RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        persist_binding_secret(&stored_ok, &binding_account, RECOVERY_SECRET, ORIGIN);
+        assert_eq!(
+            stored(&stored_ok, &binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+        assert_eq!(
+            stored(&stored_ok, &owner_secret_key(ORIGIN)).as_deref(),
+            Some(&b""[..])
+        );
+
+        let failing = BindingWriteFails {
+            inner: MemoryStore::default(),
+            binding_account: binding_account.clone(),
+        };
+        failing
+            .set(&owner_secret_key(ORIGIN), RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        persist_binding_secret(&failing, &binding_account, RECOVERY_SECRET, ORIGIN);
+        assert_eq!(
+            stored(&failing, &owner_secret_key(ORIGIN)).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+    }
+
+    #[test]
+    fn discovery_sweep_moves_a_pending_secret_only_into_an_empty_binding() {
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        store
+            .set(&vault_secret_key(ORIGIN), RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        sweep_pending_secret(&store, ORIGIN, &binding_account, |_| true).unwrap();
+        assert_eq!(
+            stored(&store, &binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+        assert_eq!(
+            stored(&store, &vault_secret_key(ORIGIN)).as_deref(),
+            Some(&b""[..])
+        );
+
+        store
+            .set(&owner_secret_key(ORIGIN), b"newer pending value")
+            .unwrap();
+        sweep_pending_secret(&store, ORIGIN, &binding_account, |_| true).unwrap();
+        assert_eq!(
+            stored(&store, &binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+    }
+
+    #[test]
+    fn discovery_sweep_keeps_wrong_and_unrelated_pending_secrets() {
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        store
+            .set(&owner_secret_key(ORIGIN), b"wrong secret")
+            .unwrap();
+        store
+            .set(&vault_secret_key(ORIGIN), b"unrelated secret")
+            .unwrap();
+
+        sweep_pending_secret(&store, ORIGIN, &binding_account, |_| false).unwrap();
+
+        assert!(stored(&store, &binding_account).is_none());
+        assert_eq!(
+            stored(&store, &owner_secret_key(ORIGIN)).as_deref(),
+            Some(&b"wrong secret"[..])
+        );
+        assert_eq!(
+            stored(&store, &vault_secret_key(ORIGIN)).as_deref(),
+            Some(&b"unrelated secret"[..])
+        );
+    }
+
+    #[test]
+    fn discovery_sweep_clears_duplicate_pending_secret() {
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        store
+            .set(&binding_account, RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        store
+            .set(&owner_secret_key(ORIGIN), RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        store
+            .set(&vault_secret_key(ORIGIN), b"unrelated secret")
+            .unwrap();
+
+        sweep_pending_secret(&store, ORIGIN, &binding_account, |_| true).unwrap();
+
+        assert_eq!(
+            stored(&store, &owner_secret_key(ORIGIN)).as_deref(),
+            Some(&b""[..])
+        );
+        assert_eq!(
+            stored(&store, &vault_secret_key(ORIGIN)).as_deref(),
+            Some(&b"unrelated secret"[..])
+        );
+    }
+
+    #[test]
+    fn stored_vault_secret_is_unavailable_when_absent_or_tombstoned() {
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        assert_eq!(
+            stored_vault_secret(&store, &binding_account)
+                .unwrap_err()
+                .code,
+            "vault-secret-unavailable"
+        );
+        store.set(&binding_account, b"").unwrap();
+        assert_eq!(
+            stored_vault_secret(&store, &binding_account)
+                .unwrap_err()
+                .code,
+            "vault-secret-unavailable"
+        );
+        store
+            .set(&binding_account, RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        assert_eq!(
+            stored_vault_secret(&store, &binding_account)
+                .unwrap()
+                .as_str(),
+            RECOVERY_SECRET
+        );
+    }
+
+    #[test]
+    fn clearing_a_vault_request_tombstones_its_pending_secret() {
+        let store = MemoryStore::default();
+        store
+            .set(&vault_secret_key(ORIGIN), RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        let mut controller = ready_controller();
+        clear_vault_request_locked(&mut controller, &store, ORIGIN).unwrap();
+        assert_eq!(
+            stored(&store, &vault_secret_key(ORIGIN)).as_deref(),
+            Some(&b""[..])
+        );
     }
 
     #[test]
@@ -2535,6 +4126,59 @@ mod owner_retry_tests {
             known_gateway_presence((vec![gateway("gw-1", true, false)], false)),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn existing_identity_skips_an_active_binding_for_another_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountingStore {
+            reads: AtomicUsize::new(0),
+        });
+        let binding = active_binding();
+        let state = state_with_active_binding(&root, store.clone(), &binding);
+
+        assert!(existing_identity(&state, OTHER_ORIGIN)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+        assert!(!binding.data_dir(root.path()).exists());
+        assert!(state.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn gateway_presence_skips_an_active_binding_for_another_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountingStore {
+            reads: AtomicUsize::new(0),
+        });
+        let binding = active_binding();
+        let state = state_with_active_binding(&root, store.clone(), &binding);
+
+        assert_eq!(gateway_presence(&state, OTHER_ORIGIN).await.unwrap(), None);
+        assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+        assert!(!binding.data_dir(root.path()).exists());
+        assert!(state.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn existing_identity_propagates_same_origin_secure_store_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let binding = active_binding();
+        let state = state_with_active_binding(&root, Arc::new(FailingStore), &binding);
+
+        let error = existing_identity(&state, ORIGIN).await.err().unwrap();
+        assert_eq!(error.code, "secure-store-unavailable");
+    }
+
+    #[tokio::test]
+    async fn gateway_presence_propagates_same_origin_secure_store_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let binding = active_binding();
+        let state = state_with_active_binding(&root, Arc::new(FailingStore), &binding);
+
+        let error = gateway_presence(&state, ORIGIN).await.err().unwrap();
+        assert_eq!(error.code, "secure-store-unavailable");
     }
 
     #[test]

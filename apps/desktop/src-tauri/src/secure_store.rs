@@ -81,13 +81,15 @@ mod bundled {
     pub(crate) fn parse_account(account: &str) -> Option<Account> {
         let mut parts = account.split(':');
         let kind = parts.next()?;
-        if !matches!(kind, "credential" | "db-key" | "key-cache") || parts.next()? != "v2" {
+        if !matches!(kind, "credential" | "db-key" | "key-cache" | "vault-secret")
+            || parts.next()? != "v2"
+        {
             return None;
         }
         let vault = parse_uuid(parts.next()?)?;
         let device = parse_uuid(parts.next()?)?;
         let field = match kind {
-            "credential" | "db-key" if parts.next().is_none() => kind.to_owned(),
+            "credential" | "db-key" | "vault-secret" if parts.next().is_none() => kind.to_owned(),
             "key-cache" => {
                 let epoch = parts.next()?;
                 if epoch.parse::<u32>().ok()?.to_string() != epoch || parts.next().is_some() {
@@ -287,6 +289,13 @@ mod bundled {
             };
             if found.is_some() {
                 return Ok(found);
+            }
+            if parsed.field == "vault-secret" {
+                return if poisoned {
+                    Err(invalid_record())
+                } else {
+                    Ok(None)
+                };
             }
             let legacy = self.inner.get(account)?;
             if let Some(value) = &legacy {
@@ -542,6 +551,57 @@ mod bundled_tests {
                 .as_slice(),
             b"old"
         );
+    }
+
+    #[test]
+    fn vault_secret_is_replaceable_and_stored_in_the_bundled_record() {
+        let inner = SharedStore::default();
+        let dir = tempfile::tempdir().unwrap();
+        let store = bundled(inner.clone(), dir.path().join("lock"));
+
+        store.set(&account("vault-secret"), b"first").unwrap();
+        store.set(&account("vault-secret"), b"second").unwrap();
+
+        assert_eq!(
+            store
+                .get(&account("vault-secret"))
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            b"second"
+        );
+        assert!(inner
+            .values
+            .get(&account("vault-secret"))
+            .unwrap()
+            .is_none());
+        let record: serde_json::Value = serde_json::from_slice(
+            &inner
+                .values
+                .get(&format!("secrets:v3:{VAULT}:{DEVICE}"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(record["entries"]["vault-secret"].is_string());
+    }
+
+    #[test]
+    fn vault_secret_does_not_migrate_a_legacy_item() {
+        let inner = SharedStore::default();
+        inner
+            .values
+            .set(&account("vault-secret"), b"unexpected legacy secret")
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = bundled(inner.clone(), dir.path().join("lock"));
+
+        assert!(store.get(&account("vault-secret")).unwrap().is_none());
+        assert!(inner
+            .values
+            .get(&format!("secrets:v3:{VAULT}:{DEVICE}"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -126,6 +126,9 @@ impl Binding {
     pub fn db_key_account(&self) -> String {
         format!("db-key:v2:{}", self.scope())
     }
+    pub fn vault_secret_account(&self) -> String {
+        format!("vault-secret:v2:{}", self.scope())
+    }
     pub fn key_cache_account(&self, epoch: u32) -> String {
         format!("key-cache:v2:{}:{epoch}", self.scope())
     }
@@ -597,6 +600,7 @@ pub mod tests {
             b.database_path(Path::new("/r"))
         );
         assert_ne!(a.key_cache_account(1), b.key_cache_account(1));
+        assert_eq!(a.vault_secret_account(), "vault-secret:v2:v:d1");
 
         let store = MemoryStore::default();
         let vault = uuid::Uuid::new_v4().to_string();

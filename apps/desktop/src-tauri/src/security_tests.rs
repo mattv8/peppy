@@ -177,6 +177,10 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "enrollment_begin_vault_request",
         "enrollment_vault_request_status",
         "enrollment_create_vault",
+        "enrollment_rotate_phone",
+        "enrollment_cancel_phone",
+        "reveal_vault_secret",
+        "enrollment_start_over",
     ] {
         assert!(registered.contains(&format!("enrollment::{command},")));
         assert!(commands.contains(&command.to_owned()));
