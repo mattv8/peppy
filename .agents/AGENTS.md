@@ -97,13 +97,28 @@ This reference records non-obvious Peppy domain constraints. Related references:
   [mobile provisioning](../crates/mobile-bindings/src/hosted.rs); the account
   selection query is in `peppy-platform/src/service.rs`.
 - Generated vault shared secrets require either an explicit save
-  acknowledgement (browser, mobile) or protected native secure storage bound to
-  the vault and device with a native-only reveal path (desktop). Copying a
-  secret never counts as acknowledgement. Desktop writes the pending secret to
-  secure storage before the owner or vault-request checkpoint, reads it back to
-  resume, and prompts only when it is missing. After verified activation it
-  stores the secret under the device binding, including a user-entered secret
-  from shared-secret admission; a failed write there does not undo enrollment.
+  acknowledgement (browser) or protected native secure storage bound to the
+  vault and device with a native-only reveal path (desktop, Android, iOS).
+  Copying a secret never counts as acknowledgement. Native hosts write the
+  pending secret to secure storage before the owner or vault-request
+  checkpoint; a failed pending write aborts creation, and an existing non-empty
+  pending secret is reused rather than replaced. Desktop and Android resume an
+  interrupted owner claim or vault creation from their protected checkpoint,
+  read the pending secret first, and prompt only when it is missing. iOS resumes
+  vault creation the same way but has no owner-claim checkpoint: an interrupted
+  iOS claim can only be retried through shared-secret admission, which uses the
+  stored pending secret for that origin when none is entered. After verified
+  activation hosts store the secret actually used under the device binding,
+  including a user-entered secret from shared-secret admission or a
+  phone-approval fallback prompt that passed the vault-header check; a failed
+  write there does not undo enrollment, and a non-empty stored value is never
+  overwritten. After a successful binding write, remove the matching pending
+  secret so a later vault on the same origin cannot reuse it. A storage read
+  error fails closed rather than prompting. Mobile reveal is gated by device authentication
+  in the UI; the stored item is not bound to user authentication because
+  approval reads it silently. iOS uses the shared Keychain store
+  (`AfterFirstUnlockThisDeviceOnly`, not synchronized); Android uses the
+  Keystore-wrapped store excluded from backup and device transfer.
   Stored binding secrets are not yet removed on revocation or vault teardown.
   Preserve an in-progress secret in transient private state across same-page
   retries; do not put it in logs, process arguments, Tauri IPC, Android saved
@@ -163,7 +178,19 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - First setup uses `/v1/instance/*`; device admission uses `/v1/enrollment/*`.
   The old `/v1/pairing` routes, reversed computer-join protocol, and
   `create-owner` CLI are removed. Keep the single QR in onboarding or the main
-  Add phone flow, never Settings; do not add a Save QR action.
+  Add phone flow, never Settings; do not add a Save QR action. Owner phones
+  (desktop, Android, iOS) share the Rust owner view in
+  [hosted-client enrollment](../crates/hosted-client/src/newenrollment.rs)
+  (`owner_phone_view`): it validates status against the active invitation,
+  derives the SAS locally, and returns a transcript-pinned claim digest. Hosts
+  compare invitation id and that digest before and after any awaited secret
+  prompt and require the owner's explicit codes-match confirmation. Rotate a
+  waiting invitation only near expiry or when the requested method changes;
+  **Enter shared secret on phone** switches a waiting invitation to the
+  shared-secret method before revealing the secret. Once the invitation is
+  approved, stop treating it as rotatable: the server can report an approved
+  invitation as expired before the phone confirms, and that must not offer
+  **Start again** or create a replacement.
 - Device credentials may be serialized only for protected native secure storage.
   Do not add credential-file onboarding or export UI.
 - Server-advertised providers and platform configuration both gate native

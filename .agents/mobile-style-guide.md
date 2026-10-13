@@ -32,12 +32,30 @@ reviews use `pnpm --dir packages/mobile-design check` for drift.
   descriptors only. The private claim header is not UI data or a general HTTP
   capability. Use the canonical enrollment origin for identity and the
   same-origin status descriptor for transport. See [iOS host](../apps/ios/PeppyNative/EnrollmentHost.swift).
-- The phone UI scans one `connect_phone` code, presents the SAS before the
-  confirmation action, and prompts for the shared secret only for that method.
+- The phone UI scans one `connect_phone` code and shows the SAS for the owner to
+  compare. A transfer pairing confirms automatically after owner approval and
+  advances only after verified native installation; a shared-secret pairing
+  still requires the secret and an explicit submit.
   Camera permission is requested only when the user starts scanning. Do not add
   automatic OS-permission requests, default-SMS role requests, or RCS claims.
   See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentScreen.kt)
   and [iOS enrollment UI](../apps/ios/PeppyMobile/PhoneEnrollmentView.swift).
+- Owner phones offer **Add phone** on the main screen, never in Settings, and
+  only when the `owner` role's vault keys are unlocked; hide or disable the
+  entry otherwise rather than failing after it is opened. The owner flow shows
+  the QR, then the locally derived SAS with an owner-specific codes-match control
+  (`owner_phone_*` copy, not recipient pairing copy) before **Confirm and
+  approve**; after approval it shows the approved-waiting state until the phone
+  connects, and a denied claim shows its own message with **Start again**.
+  Approval uses the stored vault secret; when it is missing, prompt once with the
+  "not your admin password" copy and save only after verification. Run network
+  and secret checks off the main thread. Phone vault creation stores the
+  generated secret silently and says so only after the write succeeds. **Enter
+  shared secret on phone** switches the invitation to the shared-secret method,
+  then reveals the secret only after device authentication, transiently, never
+  in saved UI state, and clears it when the app leaves the foreground. See
+  [Android owner flow](../apps/android/app/src/main/java/dev/peppy/mobile/OwnerPhoneApprovalScreen.kt)
+  and [iOS owner flow](../apps/ios/PeppyMobile/OwnerPhoneApprovalView.swift).
 - First setup visibly identifies the server-advertised mode. Open first claim
   says that the first device to complete setup becomes owner and omits setup-code
   entry. Token-protected first claim states that the operator requires a code
