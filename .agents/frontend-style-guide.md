@@ -230,7 +230,11 @@ Rules for disclosure:
   secure prompt. It generates the vault shared secret silently, keeps it in
   protected secure storage, and shows it only in a native dialog with **Copy
   secret** (from Settings or the shared-secret phone option). The secret never
-  enters the webview. Setup copy says where the secret is kept. The browser
+  enters the webview. Setup copy says where the secret is kept. **Confirm and
+  approve** uses the stored secret without prompting; when none is stored (for
+  example a vault created before secure storage), it asks once in a native
+  **Approve phone** prompt that says this is not the admin password, verifies
+  the entry against the vault header, and saves it for later approvals. The browser
   still shows its generated secret once and requires a save acknowledgement.
   App-lock credentials remain a
   separate native gate. Browser-hosted secret prompts are DOM controls by design:
