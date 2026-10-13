@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CoreRejectedError } from "./core.js";
 import { BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 
@@ -86,14 +87,16 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
-  it("maps load_state to snapshot and mutations to checkpointed session calls", async () => {
+  it("maps load_state to snapshot and draft mutations to checkpointed session calls", async () => {
     const session = new FakeSession();
     await dispatchBrowserRpc(session, { id: 1, command: "load_state", args: { conversationId: "c" } });
     await dispatchBrowserRpc(session, { id: 2, command: "save_draft", args: { input: { text: "hello" } } });
+    await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
     expect(session.calls).toEqual([
       { command: "snapshot", args: { conversationId: "c" }, mutation: false },
       { command: "contact_snapshot", args: { addresses: [] }, mutation: false },
       { command: "save_draft", args: { text: "hello" }, mutation: true },
+      { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
     ]);
   });
 
@@ -114,6 +117,26 @@ describe("browser host RPC", () => {
         { address: "Morgan", sourceDeviceId: "phone-1" },
       ] }, mutation: false },
     ]);
+  });
+
+  it("preserves sanctioned draft error details through the browser RPC", async () => {
+    const session = new FakeSession();
+    session.mutate = async () => { throw new CoreRejectedError("draft-moved", { conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" }); };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: {} } })).resolves.toEqual({
+      id: 1,
+      ok: false,
+      error: { code: "draft-moved", message: "Browser operation failed.", conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" },
+    });
+  });
+
+  it("does not expose malformed draft error details through the browser RPC", async () => {
+    const session = new FakeSession();
+    session.mutate = async () => { throw new CoreRejectedError("draft-moved", { conversationId: "conversation\n2", currentRevision: "01", draftId: "x".repeat(129) }); };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: {} } })).resolves.toEqual({
+      id: 1,
+      ok: false,
+      error: { code: "draft-moved", message: "Browser operation failed." },
+    });
   });
 
   it("preserves every message and attachment while bounding optional image preview work", async () => {
@@ -142,6 +165,32 @@ describe("browser host RPC", () => {
     await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "changed"));
     expect(boots).toBe(1);
     expect(second.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("broadcasts draft deletion after its checkpointed mutation succeeds", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const first = port();
+    const second = port();
+    await Promise.all([host.attach(first), host.attach(second)]);
+    first.emit({ id: 1, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
+    await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "changed"));
+    expect(session.calls).toContainEqual({ command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true });
+  });
+
+  it("notifies other windows after a persisted draft move rejection", async () => {
+    const session = new FakeSession();
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      throw new CoreRejectedError("draft-moved", { conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" });
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const first = port();
+    const second = port();
+    await Promise.all([host.attach(first), host.attach(second)]);
+    first.emit({ id: 1, command: "send_draft", args: { input: {} } });
+    await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "changed"));
+    expect(first.messages).toContainEqual(expect.objectContaining({ id: 1, ok: false, error: expect.objectContaining({ code: "draft-moved" }) }));
   });
 
   it("locks all ports and terminates the worker without restoring a live filesystem", async () => {
@@ -370,13 +419,15 @@ describe("browser host RPC", () => {
     expect(attached.messages).toContainEqual({ event: "stopped", reason: "unavailable" });
   });
 
-  it("unwraps DesktopBridge argument objects into Rust's flat command shapes", async () => {
+  it("unwraps DesktopBridge draft argument objects into Rust's flat command shapes", async () => {
     const session = new FakeSession();
     await dispatchBrowserRpc(session, { id: 1, command: "save_draft", args: { input: { text: "draft" } } });
     await dispatchBrowserRpc(session, { id: 2, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } });
+    await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
     expect(session.calls).toEqual([
       { command: "save_draft", args: { text: "draft" }, mutation: true },
       { command: "set_notification_preferences", args: { preview: "hidden" }, mutation: true },
+      { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
     ]);
   });
 

@@ -8,12 +8,14 @@ export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; body: string; timestamp: string; status?: MessageStatus; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; participants?: string[]; replyBlockedReason?: string };
+/** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
+export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
+export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
 export type SendDraftInput = DraftInput & { gatewayId: string; simId: string };
 /** A separate, server-readable re-encoded copy created only after native confirmation. */
 export type PublicCopy = { url: string; expiresInSeconds: number };
@@ -44,7 +46,7 @@ export type RestorableContact = { id: string; bookId: string; displayName: strin
 export type ResolvedContact = { contactId: string; bookId: string; displayName: string; photoDataUrl?: string };
 export type ContactResolutionMap = Record<string, ResolvedContact>;
 /** `currentRevision` is set when the stored draft revision is known (stale saves/sends, refused sends). */
-export type BridgeError = { code: string; message: string; currentRevision?: string };
+export type BridgeError = { code: string; message: string; conversationId?: string; draftId?: string; currentRevision?: string };
 export type HostedAccountView = { available: boolean; signedIn: boolean; accountLabel: string | null; classification: "new" | "pending" | "incomplete" | "provisioning" | "existing" | "lapsed" | null; entitlement: string | null; access: "read_write" | "read_only" | null; hasVault: boolean; resumable: boolean };
 /** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
 export type EnrollmentView = {
@@ -83,6 +85,7 @@ export interface DesktopBridge {
   /** Browser-only capability for locking a shared encrypted session. */
   lock_sync?(): Promise<void>;
   save_draft(input: DraftInput): Promise<Draft>;
+  discard_draft(input: DiscardDraftInput): Promise<void>;
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
   send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: MessageStatus; reason?: string; revision?: string }>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;

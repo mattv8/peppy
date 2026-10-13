@@ -1,6 +1,7 @@
 //! Peppy desktop native host. The webview only receives sanitized view models (`dto`) and
 //! state-change hints; credentials, keys, passphrases, tokens and file paths stay in Rust.
 use std::{
+    collections::HashMap,
     path::PathBuf,
     str::FromStr,
     sync::{
@@ -13,6 +14,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_notification::NotificationExt;
 
 mod app_lock;
+mod composer_scope;
 mod contacts;
 mod credentials;
 mod dialogs;
@@ -24,6 +26,8 @@ mod gateways;
 mod heads;
 mod heads_runtime;
 
+#[cfg(test)]
+mod draft_command_tests;
 mod hosted;
 mod lifecycle;
 mod material_state;
@@ -52,6 +56,7 @@ use dto::{DraftView, Head, PublicCopyView, SendResultView, Snapshot};
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{AttachmentId, ConversationId, NotificationTarget};
+use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
@@ -67,6 +72,7 @@ pub struct AppState {
     store: Arc<dyn SecretStore>,
     config_lock: Mutex<()>,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
+    composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
     enrollment: Mutex<enrollment::Controller>,
     /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
@@ -114,18 +120,73 @@ pub fn require_main(label: &str) -> BridgeResult<()> {
     }
 }
 
-/// A composer window is scoped to the conversation in its label; the main window is unscoped.
-pub fn check_conversation_scope(label: &str, conversation: Option<&str>) -> BridgeResult<()> {
-    if label == tray::MAIN {
-        return Ok(());
+/// A composer may follow only a move that was returned to this same window in its active session.
+fn effective_composer_conversation(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    conversation: Option<&str>,
+) -> BridgeResult<Option<ConversationId>> {
+    let source = tray::composer_conversation(label).ok_or_else(window_error)?;
+    let requested = conversation
+        .and_then(|id| ConversationId::from_str(id).ok())
+        .ok_or_else(window_error)?;
+    let scopes = state
+        .composer_scopes
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    composer_scope::effective_conversation(source, scopes.get(label), &session.binding, requested)
+        .map(Some)
+        .ok_or_else(window_error)
+}
+
+fn remember_composer_move(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    error: &BridgeError,
+) {
+    if error.code != "draft-moved" || tray::composer_conversation(label).is_none() {
+        return;
     }
-    let scope = tray::composer_conversation(label).ok_or_else(window_error)?;
-    match conversation.map(ConversationId::from_str) {
-        Some(Ok(id)) if id == scope => Ok(()),
-        _ => Err(BridgeError::new(
-            "window-context",
-            "A composer window can only access its own conversation.",
-        )),
+    let Some(conversation) = error
+        .conversation_id
+        .as_deref()
+        .and_then(|id| ConversationId::from_str(id).ok())
+    else {
+        return;
+    };
+    if let Ok(mut scopes) = state.composer_scopes.lock() {
+        scopes.insert(
+            label.to_owned(),
+            composer_scope::MovedScope {
+                binding: session.binding.clone(),
+                conversation,
+            },
+        );
+    }
+}
+
+fn remember_composer_target(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    conversation: &str,
+) {
+    if tray::composer_conversation(label).is_none() {
+        return;
+    }
+    let Some(conversation) = ConversationId::from_str(conversation).ok() else {
+        return;
+    };
+    if let Ok(mut scopes) = state.composer_scopes.lock() {
+        scopes.insert(
+            label.to_owned(),
+            composer_scope::MovedScope {
+                binding: session.binding.clone(),
+                conversation,
+            },
+        );
     }
 }
 
@@ -138,6 +199,7 @@ impl AppState {
             store,
             config_lock: Mutex::new(()),
             session: tokio::sync::Mutex::new(None),
+            composer_scopes: Mutex::new(HashMap::new()),
             enrollment: Mutex::new(enrollment::Controller::default()),
             import_lock: tokio::sync::Mutex::new(()),
             notifier,
@@ -169,6 +231,9 @@ impl AppState {
     }
 
     async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+        if let Ok(mut scopes) = self.composer_scopes.lock() {
+            scopes.clear();
+        }
         if !preserve_heads {
             if let Ok(mut generation) = self.head_generation.lock() {
                 generation.invalidate();
@@ -200,6 +265,9 @@ impl AppState {
             }
             existing.cancel.cancel();
             *guard = None;
+        }
+        if let Ok(mut scopes) = self.composer_scopes.lock() {
+            composer_scope::clear_for_binding(&mut scopes, &binding);
         }
         let epochs = config
             .known(&binding)
@@ -290,6 +358,30 @@ async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>
     state.session().await
 }
 
+/// Loads a snapshot using the same window scope policy as the Tauri command.
+async fn load_state_for_window(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    conversation_id: Option<String>,
+    origin: Option<String>,
+    preferences: NotificationPreferences,
+) -> BridgeResult<(Snapshot, bool)> {
+    if label == tray::MAIN {
+        return blocking(move || {
+            session.snapshot(conversation_id.as_deref(), head(), origin, preferences)
+        })
+        .await;
+    }
+    let conversation_id =
+        effective_composer_conversation(state, label, &session, conversation_id.as_deref())?
+            .expect("composer conversation");
+    blocking(move || {
+        session.snapshot_scoped(&conversation_id.to_string(), head(), origin, preferences)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn load_state(
     window: tauri::WebviewWindow,
@@ -297,7 +389,6 @@ async fn load_state(
     state: State<'_, AppState>,
     conversation_id: Option<String>,
 ) -> BridgeResult<Snapshot> {
-    check_conversation_scope(window.label(), conversation_id.as_deref())?;
     if state.app_locked.load(Ordering::Acquire) {
         return Ok(locked_snapshot(
             state.app_lock_storage_available.load(Ordering::Acquire),
@@ -307,11 +398,16 @@ async fn load_state(
     let Some(session) = snapshot_session(&state).await? else {
         return Ok(empty_snapshot(origin));
     };
-    let s = session.clone();
     let preferences = state.notifications.preferences();
-    let (mut snapshot, deferred) =
-        blocking(move || s.snapshot(conversation_id.as_deref(), head(), origin, preferences))
-            .await?;
+    let (mut snapshot, deferred) = load_state_for_window(
+        &state,
+        window.label(),
+        session.clone(),
+        conversation_id,
+        origin,
+        preferences,
+    )
+    .await?;
     let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
     snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
     snapshot.head.panel = Some(panel);
@@ -663,15 +759,115 @@ async fn unlock_with(
     Ok(())
 }
 
+/// Saves a draft and records a returned move only for the originating composer window.
+async fn save_draft_for_window(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    input: DraftInput,
+) -> BridgeResult<DraftView> {
+    if label != tray::MAIN {
+        effective_composer_conversation(
+            state,
+            label,
+            &session,
+            Some(input.conversation_id.as_str()),
+        )?;
+    }
+    let requested_conversation = input.conversation_id.clone();
+    let result = blocking({
+        let session = session.clone();
+        move || session.save_draft(&input)
+    })
+    .await;
+    if let Ok(draft) = &result {
+        if draft.conversation_id != requested_conversation {
+            remember_composer_target(state, label, &session, &draft.conversation_id);
+        }
+    } else if let Err(error) = &result {
+        remember_composer_move(state, label, &session, error);
+        if error.code == "draft-moved" {
+            session.notify();
+        }
+    }
+    result
+}
+
 #[tauri::command]
 async fn save_draft(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<DraftView> {
-    check_conversation_scope(window.label(), Some(input.conversation_id.as_str()))?;
     let session = state.require_session().await?;
-    blocking(move || session.save_draft(&input)).await
+    save_draft_for_window(&state, window.label(), session, input).await
+}
+
+#[tauri::command]
+async fn discard_draft(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: DiscardDraftInput,
+) -> BridgeResult<()> {
+    require_main(window.label())?;
+    let session = state.require_session().await?;
+    let conversation_id = input.conversation_id.clone();
+    blocking(move || session.discard_draft(&input)).await?;
+    if let Err(error) = heads_runtime::forget_deleted_conversation(&app, &conversation_id) {
+        eprintln!(
+            "could not clear deleted conversation pin: {}",
+            error.message
+        );
+    }
+    close_deleted_composers(&app, &state, &conversation_id);
+    Ok(())
+}
+
+fn close_deleted_composers(app: &tauri::AppHandle, state: &AppState, conversation_id: &str) {
+    let Ok(deleted) = ConversationId::from_str(conversation_id) else {
+        return;
+    };
+    let moved = state.composer_scopes.lock().ok();
+    for label in app.webview_windows().keys() {
+        let matches_source =
+            tray::composer_conversation(label).is_some_and(|source| source == deleted);
+        let matches_moved = moved
+            .as_ref()
+            .and_then(|scopes| scopes.get(label))
+            .is_some_and(|scope| scope.conversation == deleted);
+        if matches_source || matches_moved {
+            let _ = lifecycle::request_window(app, label, lifecycle::Action::Close);
+        }
+    }
+}
+
+/// Sends a draft through the same scoped path as the Tauri command.
+async fn send_draft_for_window(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    input: DraftInput,
+) -> BridgeResult<SendResultView> {
+    if label != tray::MAIN {
+        effective_composer_conversation(
+            state,
+            label,
+            &session,
+            Some(input.conversation_id.as_str()),
+        )?;
+    }
+    let s = session.clone();
+    let result = blocking(move || s.send_draft(&input)).await;
+    if let Err(error) = &result {
+        remember_composer_move(state, label, &session, error);
+        if error.code == "draft-moved" {
+            session.notify();
+        }
+    } else {
+        session.notify();
+    }
+    result
 }
 
 #[tauri::command]
@@ -680,12 +876,8 @@ async fn send_draft(
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<SendResultView> {
-    check_conversation_scope(window.label(), Some(input.conversation_id.as_str()))?;
     let session = state.require_session().await?;
-    let s = session.clone();
-    let result = blocking(move || s.send_draft(&input)).await;
-    session.notify();
-    result
+    send_draft_for_window(&state, window.label(), session, input).await
 }
 
 #[tauri::command]
@@ -710,7 +902,13 @@ async fn mark_seen(
     let conversation = if window.label() == tray::MAIN {
         None
     } else {
-        Some(tray::composer_conversation(window.label()).ok_or_else(window_error)?)
+        let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+        effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&source.to_string()),
+        )?
     };
     blocking(move || session.mark_seen_scoped(&visible_message_ids, conversation)).await
 }
@@ -904,14 +1102,18 @@ mod mms_filename_tests {
 }
 
 async fn check_attachment_window_scope(
+    state: &AppState,
     session: &Arc<Session>,
-    label: &str,
+    window: &tauri::WebviewWindow,
     id: &str,
 ) -> BridgeResult<()> {
-    if label == tray::MAIN {
+    if window.label() == tray::MAIN {
         return Ok(());
     }
-    let conversation = tray::composer_conversation(label).ok_or_else(window_error)?;
+    let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+    let conversation =
+        effective_composer_conversation(state, window.label(), session, Some(&source.to_string()))?
+            .ok_or_else(window_error)?;
     let (session, id) = (session.clone(), id.to_owned());
     let belongs = blocking(move || session.attachment_in_conversation(&id, conversation)).await?;
     belongs.then_some(()).ok_or_else(window_error)
@@ -924,7 +1126,7 @@ async fn retry_attachment(
     id: String,
 ) -> BridgeResult<()> {
     let session = state.require_session().await?;
-    check_attachment_window_scope(&session, window.label(), &id).await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
     let s = session.clone();
     blocking(move || s.retry_attachment(&id)).await?;
     session.notify();
@@ -939,7 +1141,7 @@ async fn save_attachment(
     id: String,
 ) -> BridgeResult<bool> {
     let session = state.require_session().await?;
-    check_attachment_window_scope(&session, window.label(), &id).await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     let s = session.clone();
@@ -1136,7 +1338,7 @@ async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> Br
             blocking(move || {
                 session
                     .client
-                    .create_compose_draft(None)
+                    .recipientless_compose_draft()
                     .map_err(core_error)
             })
             .await?
@@ -1510,6 +1712,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::Destroyed) {
                 window_chrome::forget_material(window.label());
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    if let Ok(mut scopes) = state.composer_scopes.lock() {
+                        scopes.remove(window.label());
+                    }
+                }
             }
             heads_runtime::panel_window_event(window, event);
             if matches!(
@@ -1576,6 +1783,7 @@ pub fn run() {
         unlock_app,
         set_app_lock,
         save_draft,
+        discard_draft,
         send_draft,
         mark_seen,
         pick_attachments,

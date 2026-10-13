@@ -12,6 +12,10 @@ pub struct BridgeError {
     /// continue without a stale-revision conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
 }
 
 impl BridgeError {
@@ -20,9 +24,22 @@ impl BridgeError {
             code,
             message: message.into(),
             current_revision: None,
+            conversation_id: None,
+            draft_id: None,
         }
     }
     pub fn with_revision(mut self, revision: u64) -> Self {
+        self.current_revision = Some(revision.to_string());
+        self
+    }
+    pub fn with_draft_identity(
+        mut self,
+        draft_id: peppy_client_core::DraftId,
+        conversation_id: peppy_client_core::ConversationId,
+        revision: u64,
+    ) -> Self {
+        self.draft_id = Some(draft_id.to_string());
+        self.conversation_id = Some(conversation_id.to_string());
         self.current_revision = Some(revision.to_string());
         self
     }
@@ -51,6 +68,23 @@ pub fn core_error(error: CoreError) -> BridgeError {
             format!("The draft changed elsewhere (current revision {current_revision}); both versions were kept."),
         )
         .with_revision(current_revision),
+        CoreError::DraftMoved { draft_id, conversation_id, current_revision } => BridgeError::new(
+            "draft-moved",
+            "The draft moved to another conversation.",
+        )
+        .with_draft_identity(draft_id, conversation_id, current_revision),
+        CoreError::DraftNotDiscardable => BridgeError::new(
+            "draft-not-discardable",
+            "Only an empty recipientless draft can be deleted.",
+        ),
+        CoreError::RecipientlessDraftExists => BridgeError::new(
+            "recipientless-draft-exists",
+            "A recipientless draft already exists.",
+        ),
+        CoreError::DraftMergeOverflow => BridgeError::new(
+            "draft-merge-overflow",
+            "Combining these drafts would exceed a compose limit.",
+        ),
         CoreError::NotFound => BridgeError::new("not-found", "The requested stored item was not found."),
         CoreError::WrongDatabaseKey => BridgeError::new(
             "database-key-mismatch",
@@ -97,5 +131,13 @@ mod tests {
             "database-key-mismatch"
         );
         assert_eq!(core_error(CoreError::KeysUnavailable).code, "locked");
+        let moved = core_error(CoreError::DraftMoved {
+            draft_id: peppy_client_core::DraftId::new(),
+            conversation_id: peppy_client_core::ConversationId::new(),
+            current_revision: 7,
+        });
+        assert_eq!(moved.code, "draft-moved");
+        assert_eq!(moved.current_revision.as_deref(), Some("7"));
+        assert!(moved.draft_id.is_some() && moved.conversation_id.is_some());
     }
 }

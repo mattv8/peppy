@@ -48,7 +48,7 @@ export const catalog = Object.freeze({
   production_pairing_qr_accessibility: "Pairing QR code",
   production_pairing_role_label: "Requested access",
   production_pairing_role_device: "Linked device",
-  production_pairing_role_gateway: "Gateway device",
+  production_pairing_role_gateway: "Phone",
   production_pairing_retry: "Create a new pairing code",
   production_pairing_paused: "Pairing paused. Create a new code to continue.",
   production_pairing_error: "Could not complete pairing. Try a new code.",

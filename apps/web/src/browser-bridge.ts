@@ -50,7 +50,13 @@ function isClient(value: unknown): value is VaultRequestView["client"] { return 
 function isRequestState(value: unknown): value is VaultRequestView["state"] { return value === "pending" || value === "approved" || value === "denied" || value === "completed" || value === "expired"; }
 
 class BrowserBridgeError extends Error implements BridgeError {
-  public constructor(public readonly code: string, message: string, public readonly currentRevision?: string) { super(message); }
+  public constructor(
+    public readonly code: string,
+    message: string,
+    public readonly currentRevision?: string,
+    public readonly conversationId?: string,
+    public readonly draftId?: string,
+  ) { super(message); }
 }
 
 function unsupported(method: string): Promise<never> {
@@ -312,7 +318,7 @@ export class BrowserBridge implements DesktopBridge {
     this.pending.delete(message.id);
     window.clearTimeout(request.timer);
     if (message.ok) request.resolve(message.value);
-    else request.reject(new BrowserBridgeError(message.error.code, message.error.message, message.error.currentRevision));
+    else request.reject(new BrowserBridgeError(message.error.code, message.error.message, message.error.currentRevision, message.error.conversationId, message.error.draftId));
   }
 
   private stop(reason: string): void {
@@ -375,6 +381,7 @@ export class BrowserBridge implements DesktopBridge {
   public load_state(conversationId?: string): Promise<DesktopSnapshot> { return this.call("load_state", { conversationId }); }
   public save_draft(input: DraftInput): Promise<Draft> { return this.call("save_draft", { input }); }
   public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }
+  public discard_draft(input: { id: string; conversationId: string; expectedRevision: string }): Promise<void> { return this.call("discard_draft", { input }); }
   public mark_seen(visibleMessageIds: string[]): Promise<void> { return this.call("mark_seen", { visibleMessageIds }); }
   public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
   public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }

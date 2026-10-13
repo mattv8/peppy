@@ -145,6 +145,12 @@ pub struct ConversationView {
     pub participants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_blocked_reason: Option<String>,
+    /// This row is the reusable recipientless composition, not an empty history.
+    #[serde(default)]
+    pub recipientless_draft: bool,
+    /// This row exists only for local compose state and has no established history.
+    #[serde(default)]
+    pub draft_only: bool,
 }
 
 #[derive(Serialize)]

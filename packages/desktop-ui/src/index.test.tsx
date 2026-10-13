@@ -14,6 +14,7 @@ import {
   ResizeHandle,
   StatusPopover,
   ConnectionDot,
+  ConversationList,
 } from "./index";
 
 const people = [{ id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 }];
@@ -169,6 +170,30 @@ function firePointer(target: Element, type: string, pointerId: number, clientX: 
 }
 
 describe("desktop UI controls", () => {
+  it("offers a cancellable inline delete confirmation only for blank draft rows", () => {
+    const onDelete = vi.fn();
+    const onCancelDelete = vi.fn();
+    const draft = { id: "draft", name: "New message", preview: "Draft", unread: 0, recipientlessDraft: true, draftOnly: true };
+    const { rerender } = render(<ConversationList conversations={[draft, people[0]]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} />);
+
+    expect(screen.getByRole("button", { name: "Delete draft for New message" })).toHaveAttribute("data-delete-conversation-id", "draft");
+    expect(screen.queryByRole("button", { name: /Delete draft for Aurora/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft for New message" }));
+    expect(onDelete).toHaveBeenCalledWith("draft");
+    expect(screen.getByRole("button", { name: "Delete draft for New message" })).toHaveFocus();
+
+    rerender(<ConversationList conversations={[draft]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} deleteConfirmationId="draft" />);
+    const confirmation = screen.getByRole("button", { name: "Confirm delete draft for New message" });
+    fireEvent.keyDown(confirmation, { key: "Escape" });
+    expect(onCancelDelete).toHaveBeenCalledOnce();
+    fireEvent.blur(confirmation);
+    expect(onCancelDelete).toHaveBeenCalledTimes(2);
+
+    rerender(<ConversationList conversations={[draft]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Delete draft for New message" }), { key: "Escape" });
+    expect(onCancelDelete).toHaveBeenCalledTimes(2);
+  });
+
   it("selects recipients with an ARIA combobox keyboard flow", () => {
     const changed = vi.fn();
     render(<RecipientPicker recipients={people} onChange={changed} />);

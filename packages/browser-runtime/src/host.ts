@@ -13,7 +13,7 @@ const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
 const OWNER_NAME = "peppy-browser-v1";
 
-export type RpcError = { code: string; message: string; currentRevision?: string };
+export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
 export type RpcRequest = { id: number; command: string; args: Record<string, unknown> };
 export type WorkerMessage = RpcRequest | { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason: string } | { event: "banner"; candidate: Record<string, unknown> };
@@ -94,6 +94,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   load_state: { coreCommand: "snapshot", mutation: false },
   save_draft: { coreCommand: "save_draft", mutation: true },
   send_draft: { coreCommand: "send_draft", mutation: true },
+  discard_draft: { coreCommand: "discard_draft", mutation: true },
   mark_seen: { coreCommand: "mark_seen", mutation: true },
   dismiss_notification: { coreCommand: "dismiss_notification", mutation: true },
   dismiss_all_notifications: { coreCommand: "dismiss_all_notifications", mutation: true },
@@ -159,13 +160,31 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
 function errorFor(error: unknown): RpcError {
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
-    const revision = "details" in error && typeof error.details === "object" && error.details !== null &&
-      "currentRevision" in error.details && typeof error.details.currentRevision === "string" ? error.details.currentRevision : undefined;
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed"]);
+    const details = errorDetails(error);
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed"]);
     const code = codes.has(error.code) ? error.code : "unavailable";
-    return { code, message: "Browser operation failed.", currentRevision: revision };
+    return { code, message: "Browser operation failed.", ...details };
   }
   return { code: "unavailable", message: "Browser operation failed." };
+}
+
+function errorDetails(error: object): Pick<RpcError, "conversationId" | "currentRevision" | "draftId"> {
+  const details = "details" in error && typeof error.details === "object" && error.details !== null ? error.details : undefined;
+  if (!details) return {};
+  const values = details as Record<string, unknown>;
+  return {
+    ...(safeErrorId(values.conversationId) ? { conversationId: values.conversationId } : {}),
+    ...(safeRevision(values.currentRevision) ? { currentRevision: values.currentRevision } : {}),
+    ...(safeErrorId(values.draftId) ? { draftId: values.draftId } : {}),
+  };
+}
+
+function safeErrorId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
+function safeRevision(value: unknown): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n;
 }
 
 function requestId(value: unknown): number {
@@ -187,7 +206,7 @@ function secretString(args: Record<string, unknown>, key: string): string | unde
 }
 
 function coreArgs(command: string, args: Record<string, unknown>): Record<string, unknown> {
-  const wrapper = command === "save_draft" || command === "send_draft" || command === "submit_contact_edit" ? "input"
+  const wrapper = command === "save_draft" || command === "send_draft" || command === "discard_draft" || command === "submit_contact_edit" ? "input"
     : command === "set_notification_preferences" ? "preferences" : undefined;
   if (!wrapper) return args;
   const value = args[wrapper];
@@ -473,7 +492,9 @@ export class BrowserWorkerHost {
       await this.stop("closed");
       return;
     }
-    if ((response.ok && command !== undefined && (INVOCATIONS[command]?.mutation || command === "unlock" || command === "publish_attachment" || command === "retry_attachment")) || generation !== this.owner.owner.generation) {
+    const mutationChanged = command !== undefined && INVOCATIONS[command]?.mutation && (response.ok || (!response.ok && response.error.code === "draft-moved"));
+    const successfulSideEffect = response.ok && (command === "unlock" || command === "publish_attachment" || command === "retry_attachment");
+    if (mutationChanged || successfulSideEffect || generation !== this.owner.owner.generation) {
       this.changed();
       if (command === "unlock") await this.dependencies.network?.start();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));

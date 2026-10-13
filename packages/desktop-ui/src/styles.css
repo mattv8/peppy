@@ -393,13 +393,16 @@ select:focus-visible {
   text-align: left;
 }
 .conversation-select { display: flex; min-width: 0; flex: 1; height: 100%; align-items: center; gap: 8px; padding: 8px; border: 0; background: transparent; color: inherit; text-align: left; }
-.conversation-popout { width: 32px; height: 32px; flex: 0 0 32px; margin-right: 6px; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); opacity: 0; }
-.conversation-row.selected .conversation-popout, .conversation-row:hover .conversation-popout, .conversation-row:focus-within .conversation-popout { opacity: 1; }
-.conversation-popout { pointer-events: none; }
-.conversation-row.selected .conversation-popout, .conversation-row:hover .conversation-popout, .conversation-row:focus-within .conversation-popout { pointer-events: auto; }
+.conversation-popout, .conversation-delete { width: 32px; height: 32px; flex: 0 0 32px; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); opacity: 0; pointer-events: none; }
+.conversation-popout { margin-right: 6px; }
+.conversation-row.selected :is(.conversation-popout, .conversation-delete), .conversation-row:hover :is(.conversation-popout, .conversation-delete), .conversation-row:focus-within :is(.conversation-popout, .conversation-delete) { opacity: 1; }
+.conversation-row.selected :is(.conversation-popout, .conversation-delete), .conversation-row:hover :is(.conversation-popout, .conversation-delete), .conversation-row:focus-within :is(.conversation-popout, .conversation-delete) { pointer-events: auto; }
 .conversation-popout:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.conversation-delete { color: var(--peppy-text-secondary); }
+.conversation-delete.confirming { opacity: 1; pointer-events: auto; background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
+.conversation-delete:hover { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
 @media (hover: none), (pointer: coarse) {
-  .conversation-popout { opacity: 1; pointer-events: auto; }
+  .conversation-popout, .conversation-delete { opacity: 1; pointer-events: auto; }
 }
 .conversation-row:hover,
 .conversation-row.selected {

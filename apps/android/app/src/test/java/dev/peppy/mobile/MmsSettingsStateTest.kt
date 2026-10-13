@@ -13,6 +13,10 @@ class MmsSettingsStateTest {
             "This number could not be saved for the selected SIM.",
             ownAddressError(MobileBindingsException.InvalidRequest()),
         )
+        assertEquals(
+            "The encrypted database is unavailable. Import or unlock this phone first.",
+            ownAddressError(MobileBindingsException.Closed()),
+        )
         val generic = ownAddressError(IllegalStateException("/private/secret database path"))
         assertEquals("Could not save the number securely. Try again.", generic)
         assertFalse(generic.contains("secret"))

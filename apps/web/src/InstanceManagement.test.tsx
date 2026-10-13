@@ -76,6 +76,14 @@ describe("InstanceManagement", () => {
     expect(document.querySelector("#instance-management-status input, #instance-management-status select, #instance-management-status button")).toBeNull();
   });
 
+  it("uses phone wording for the gateway role and health column", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], role: "gateway" as const, gateway_online: true }] })) })} />);
+    expect(await screen.findByRole("columnheader", { name: "Phone health" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Phone" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Online" })).toBeTruthy();
+    expect(screen.queryByText(/gateway/i)).toBeNull();
+  });
+
   it("shows only the signed-in identity to a non-admin owner", async () => {
     render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, isAdmin: false, username: "sasha" })) })} />);
     expect(await screen.findByText("sasha")).toBeTruthy();

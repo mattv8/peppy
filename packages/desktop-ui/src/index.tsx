@@ -18,6 +18,7 @@ import {
   Smartphone,
   Square,
   SquarePen,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -57,6 +58,7 @@ export {
   ShieldAlert,
   Smartphone,
   SquarePen,
+  Trash2,
   TriangleAlert,
   UserPlus,
   X,
@@ -82,6 +84,8 @@ export type Conversation = {
   preview: string;
   unread: number;
   status?: string;
+  recipientlessDraft?: boolean;
+  draftOnly?: boolean;
 };
 export type Attachment = {
   id: string;
@@ -795,12 +799,20 @@ export function ConversationList({
   selectedId,
   onSelect,
   onPopout,
+  onDelete,
+  onCancelDelete,
+  deleteConfirmationId,
+  deletingId,
   loading = false,
 }: {
   conversations: Conversation[];
   selectedId: string;
   onSelect(id: string): void;
   onPopout?(id: string): void;
+  onDelete?(id: string): void;
+  onCancelDelete?(): void;
+  deleteConfirmationId?: string;
+  deletingId?: string;
   loading?: boolean;
 }) {
   return (
@@ -809,30 +821,49 @@ export function ConversationList({
         {loading ? (
           <li className="sidebar-empty">Loading conversations…</li>
         ) : conversations.length ? (
-          conversations.map((c) => (
-            <li key={c.id}>
+          conversations.map((c) => {
+            const isDeleteConfirmation = deleteConfirmationId === c.id;
+            return <li key={c.id}>
               <div className={`conversation-row ${selectedId === c.id ? "selected" : ""}`} data-conversation-row={c.id}>
-              <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
-                <span className="avatar" aria-hidden>
-                  {c.avatarUrl ? <img src={c.avatarUrl} alt="" /> : c.name.slice(0, 1).toUpperCase()}
-                </span>
-                <span className="conversation-copy">
-                  <b>{c.name}</b>
-                  <small>{c.preview}</small>
-                </span>
-                {c.unread > 0 && (
-                  <span
-                    aria-label={`${c.unread} unread messages`}
-                    className="unread"
-                  >
-                    <span aria-hidden>{c.unread}</span>
+                <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
+                  <span className="avatar" aria-hidden>
+                    {c.avatarUrl ? <img src={c.avatarUrl} alt="" /> : c.name.slice(0, 1).toUpperCase()}
                   </span>
-                )}
-              </button>
-              {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
+                  <span className="conversation-copy">
+                    <b>{c.name}</b>
+                    <small>{c.preview}</small>
+                  </span>
+                  {c.unread > 0 && (
+                    <span aria-label={`${c.unread} unread messages`} className="unread">
+                      <span aria-hidden>{c.unread}</span>
+                    </span>
+                  )}
+                </button>
+                {c.recipientlessDraft && c.draftOnly && onDelete && <button
+                  type="button"
+                  className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}
+                  data-delete-conversation-id={c.id}
+                  aria-label={`${isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"} for ${c.name}`}
+                  title={isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"}
+                  disabled={deletingId === c.id}
+                  onBlur={() => isDeleteConfirmation && onCancelDelete?.()}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape" || !isDeleteConfirmation) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onCancelDelete?.();
+                  }}
+                  onClick={(event) => {
+                    event.currentTarget.focus();
+                    onDelete(c.id);
+                  }}
+                >
+                  {deletingId === c.id ? <Loader size={15} aria-hidden /> : <Trash2 size={16} aria-hidden />}
+                </button>}
+                {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
               </div>
-            </li>
-          ))
+            </li>;
+          })
         ) : (
           <li className="sidebar-empty">No conversations yet</li>
         )}
@@ -1181,7 +1212,7 @@ export function Composer({
               {status}
             </p>
           )}
-          {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "gateway is offline"}</span>}
+           {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "phone is offline"}</span>}
         </div>
         <div id="composer-toolbar">
         <button

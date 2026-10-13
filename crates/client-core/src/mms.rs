@@ -320,8 +320,15 @@ impl Client {
                 return Err(Error::MmsAcquisitionLimit);
             }
         }
-        let conversation_id =
-            acquisition_conversation(&tx, &ctx.device_id.to_string(), &input.source)?;
+        let mapped = mapped_thread_conversation(&tx, &ctx.device_id.to_string(), &input.source)?;
+        let conversation_id = if let Some(mapped) = mapped {
+            mapped
+        } else {
+            let chosen = conversation_for_mms_participants(&tx, ctx.device_id, &input)?
+                .unwrap_or_else(ConversationId::new);
+            link_thread_conversation(&tx, &ctx.device_id.to_string(), &input.source, chosen)?;
+            chosen
+        };
         let source_sequence = next_acquisition_sequence(&tx, conversation_id, ctx.device_id)?;
         let acquisition = MmsAcquisition {
             acquisition_id: uuid::Uuid::new_v4().to_string(),
@@ -817,27 +824,94 @@ fn acquisition_part_mappings(
         .collect()
 }
 
-fn acquisition_conversation(
+fn mapped_thread_conversation(
     conn: &rusqlite::Connection,
     device_id: &str,
     source: &MmsSource,
-) -> Result<ConversationId, Error> {
+) -> Result<Option<ConversationId>, Error> {
     let Some(thread) = source.provider_thread_id.as_deref() else {
-        return Ok(ConversationId::new());
+        return Ok(None);
     };
-    let existing: Option<String> = conn.query_row(
+    conn.query_row(
         "SELECT conversation_id FROM mms_thread_conversations WHERE source_device_id=? AND source_generation=? AND subscription_id=? AND provider_thread_id=?",
-        params![device_id, source.source_generation, source.subscription_id, thread], |row| row.get(0),
-    ).optional()?;
-    if let Some(id) = existing {
-        return super::parse(&id);
-    }
-    let conversation = ConversationId::new();
+        params![device_id, source.source_generation, source.subscription_id, thread], |row| row.get::<_, String>(0),
+    ).optional()?.map(|id| super::parse(&id)).transpose()
+}
+
+fn link_thread_conversation(
+    conn: &rusqlite::Connection,
+    device_id: &str,
+    source: &MmsSource,
+    conversation: ConversationId,
+) -> Result<(), Error> {
+    let Some(thread) = source.provider_thread_id.as_deref() else {
+        return Ok(());
+    };
     conn.execute(
         "INSERT INTO mms_thread_conversations(source_device_id,source_generation,subscription_id,provider_thread_id,conversation_id) VALUES(?,?,?,?,?)",
         params![device_id, source.source_generation, source.subscription_id, thread, conversation.to_string()],
     )?;
-    Ok(conversation)
+    Ok(())
+}
+
+/// Reuse only an exact, fully-known participant set. An incoming group without a confirmed local
+/// SIM number stays separate rather than guessing which participant is self.
+fn conversation_for_mms_participants(
+    conn: &rusqlite::Connection,
+    device_id: crate::DeviceId,
+    input: &MmsAcquisitionInput,
+) -> Result<Option<ConversationId>, Error> {
+    let region = crate::conversation_match::identity_region(conn)?;
+    let mut own_addresses = crate::conversation_match::OwnAddressCache::new();
+    let Some(expected) = crate::conversation_match::mms_participant_set(
+        conn,
+        input.direction,
+        input.sender_address.as_deref(),
+        &input.recipients,
+        Some((&device_id, &input.source.subscription_id)),
+        Some(&region),
+        &mut own_addresses,
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut statement = conn.prepare(
+        "SELECT conversation_id,payload FROM messages
+         WHERE json_extract(payload,'$.transport')='mms'
+           AND local_order IN (
+             SELECT MAX(local_order) FROM messages
+             WHERE json_extract(payload,'$.transport')='mms'
+             GROUP BY conversation_id
+           )
+         ORDER BY local_order DESC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (conversation_id, encoded) = row?;
+        let payload: MessagePayload = crate::decode(encoded.as_bytes())?;
+        let identity = payload
+            .mms_context
+            .as_ref()
+            .map(|context| (&payload.source_device_id, context.subscription_id.as_str()));
+        let Some(candidates) = crate::conversation_match::mms_participant_set(
+            conn,
+            payload.direction,
+            payload.sender_address.as_deref(),
+            &payload.recipients,
+            identity,
+            Some(&region),
+            &mut own_addresses,
+        )?
+        else {
+            continue;
+        };
+        if candidates == expected {
+            return crate::parse(&conversation_id).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 fn next_acquisition_sequence(

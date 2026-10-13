@@ -491,7 +491,10 @@ impl From<CoreError> for MobileBindingsError {
             | CoreError::IllegalTransition { .. } => Self::InvalidRequest,
             CoreError::Conflict => Self::Conflict,
             CoreError::NotFound => Self::NotFound,
-            CoreError::StaleDraft { .. } => Self::StaleDraft,
+            CoreError::StaleDraft { .. } | CoreError::DraftMoved { .. } => Self::StaleDraft,
+            CoreError::DraftNotDiscardable
+            | CoreError::RecipientlessDraftExists
+            | CoreError::DraftMergeOverflow => Self::Conflict,
             CoreError::InvalidKeyCache => Self::InvalidKeyCache,
             CoreError::KeysUnavailable => Self::KeysUnavailable,
             CoreError::InvalidMedia => Self::InvalidMedia,

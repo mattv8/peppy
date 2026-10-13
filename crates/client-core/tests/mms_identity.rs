@@ -191,7 +191,7 @@ fn incoming_group_does_not_suffix_match_short_or_two_e164_numbers() {
         assert_eq!(
             context.blocked_reason.as_deref(),
             Some(
-                "This SIM's saved number isn't among this group's participants. Check the number on the gateway phone."
+                "This SIM's saved number isn't among this group's participants. Check the number on this phone."
             )
         );
     }
@@ -215,7 +215,7 @@ fn incoming_group_does_not_match_trunk_prefixed_longer_participant() {
     assert_eq!(
         context.blocked_reason.as_deref(),
         Some(
-            "This SIM's saved number isn't among this group's participants. Check the number on the gateway phone."
+            "This SIM's saved number isn't among this group's participants. Check the number on this phone."
         )
     );
 }
