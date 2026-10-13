@@ -303,18 +303,28 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     if (!verified) return;
     void runEnrollment(() => bridge.enrollment_approve(), approve);
   };
-  const refreshStatus = async () => {
+  const retryStatus = () => {
+    void refreshStatus(true);
+  };
+  const refreshStatus = async (foreground = false) => {
     if (mutationInFlight.current) return;
+    const epoch = enrollEpoch.current;
+    if (foreground) setBusy(true);
     try {
       const next = await bridge.enrollment_status();
-      if (mutationInFlight.current) return;
+      if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
       if ((enrolledWithoutPhone || addingPhone) && next.stage === "server") {
         void discover();
         return;
       }
+      if (next.stage === "error") retryRef.current = retryStatus;
       apply(next);
     } catch (error) {
-      if (!mutationInFlight.current) apply({ ...failedView(), errorCode: thrownErrorCode(error) });
+      if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
+      retryRef.current = retryStatus;
+      apply({ ...failedView(), errorCode: thrownErrorCode(error) });
+    } finally {
+      if (foreground && epoch === enrollEpoch.current) setBusy(false);
     }
   };
   const cancelPairing = () => {
@@ -525,10 +535,12 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     const timer = window.setInterval(() => {
       const epoch = enrollEpoch.current;
       void bridge.enrollment_status().then(next => {
-        if (epoch === enrollEpoch.current && !mutationInFlight.current) apply(next);
+        if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
+        if (next.stage === "error") retryRef.current = retryStatus;
+        apply(next);
       }).catch(error => {
         if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
-        retryRef.current = refreshStatus;
+        retryRef.current = retryStatus;
         apply({ ...failedView(), errorCode: thrownErrorCode(error) });
       });
     }, pollIntervalMs);
