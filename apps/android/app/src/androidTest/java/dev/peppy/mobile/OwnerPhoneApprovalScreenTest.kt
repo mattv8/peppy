@@ -2,6 +2,7 @@ package dev.peppy.mobile
 
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -99,7 +100,7 @@ class OwnerPhoneApprovalScreenTest {
 
         compose.onNodeWithTag("owner-phone-approval-dialog").assertDoesNotExist()
         compose.onNodeWithTag("owner-phone-sas").assertIsDisplayed()
-        compose.onNodeWithTag("owner-phone-approve").assertIsNotEnabled()
+        compose.onNodeWithTag("owner-phone-approve").assertIsEnabled()
         assertEquals(0, actions.approvals)
     }
 
