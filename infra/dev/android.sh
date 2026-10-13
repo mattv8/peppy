@@ -13,7 +13,7 @@ fi
 AVD_NAME=${PEPPY_ANDROID_AVD:-}
 BOOT_TIMEOUT=${PEPPY_ANDROID_BOOT_TIMEOUT:-180}
 
-usage() { echo "Usage: bash infra/dev/android.sh {build|test|emulator|deploy|open|smoke|sms} [args...]" >&2; }
+usage() { echo "Usage: bash infra/dev/android.sh {build|test|emulator|forward|deploy|open|smoke|sms} [args...]" >&2; }
 die() { echo "android: $*" >&2; exit 1; }
 is_wsl() { [[ -n ${WSL_INTEROP:-} ]] || grep -qi microsoft /proc/sys/kernel/osrelease /proc/version 2>/dev/null; }
 absolute_path() {
@@ -367,6 +367,18 @@ emulator() {
     done
     trap - EXIT INT TERM HUP
     echo "Android emulator ready: $serial"
+    # Best effort: the server may not be running yet when the emulator is started on its own.
+    if ( ensure_debug_loopback "$serial" ); then
+        echo "Android emulator forwards the development server port: $serial"
+    else
+        echo "android: development server port not forwarded; start the server, then run 'just android-forward'" >&2
+    fi
+}
+forward() {
+    local serial
+    serial=$(adb_serial)
+    ensure_debug_loopback "$serial"
+    echo "Android emulator forwards the development server port: $serial"
 }
 ensure_supported_abi() {
     local abi
@@ -410,5 +422,5 @@ sms() { local serial; serial=$(adb_serial); [[ $# == 2 && -n $1 && -n $2 ]] || d
 
 case ${1:-} in
     build) build ;; test) test_android ;;
-    emulator) emulator ;; deploy) deploy ;; open) open ;; smoke) smoke ;; sms) shift; sms "$@" ;; *) usage; exit 64 ;;
+    emulator) emulator ;; forward) forward ;; deploy) deploy ;; open) open ;; smoke) smoke ;; sms) shift; sms "$@" ;; *) usage; exit 64 ;;
 esac
