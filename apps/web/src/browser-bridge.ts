@@ -156,6 +156,15 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
     secret.value = passphrase;
     secret.setAttribute("autocomplete", "off");
     label.append(secret);
+    const copy = document.createElement("button");
+    copy.id = `${id}-copy`;
+    copy.type = "button";
+    copy.textContent = "Copy secret";
+    const copyStatus = document.createElement("span");
+    copyStatus.id = `${id}-copy-status`;
+    copyStatus.className = "visually-hidden";
+    copyStatus.setAttribute("role", "status");
+    copyStatus.setAttribute("aria-live", "polite");
     const acknowledgement = document.createElement("label");
     const checkbox = document.createElement("input");
     checkbox.id = `${id}-acknowledged`;
@@ -172,8 +181,10 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
     submit.className = "primary-button";
     submit.disabled = true;
     submit.textContent = "Continue";
-    form.append(heading, description, label, acknowledgement, cancel, submit);
+    form.append(heading, description, label, copy, copyStatus, acknowledgement, cancel, submit);
+    let open = true;
     const finish = (acknowledged: boolean) => {
+      open = false;
       secret.value = "";
       checkbox.checked = false;
       if (activeSecretDialog === close) activeSecretDialog = undefined;
@@ -183,6 +194,19 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
     };
     const close = () => finish(false);
     activeSecretDialog = close;
+    copy.onclick = async () => {
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard is unavailable.");
+        await navigator.clipboard.writeText(passphrase);
+        if (!open) return;
+        copy.textContent = "Copied";
+        copyStatus.textContent = "Copied";
+      } catch {
+        if (!open) return;
+        copy.textContent = "Could not copy. Try again.";
+        copyStatus.textContent = "Could not copy. Try again.";
+      }
+    };
     checkbox.onchange = () => { submit.disabled = !checkbox.checked; };
     cancel.onclick = close;
     form.onsubmit = (event) => {
@@ -397,6 +421,7 @@ export class BrowserBridge implements DesktopBridge {
     return this.finishOwnerClaim(view);
   }
   public async enrollment_status(): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_status")); }
+  public enrollment_start_over(): Promise<EnrollmentView> { return this.enrollment_status(); }
   public enrollment_cancel(): Promise<void> { this.ownerClaimDraft = undefined; this.vaultClaimDraft = undefined; return this.call("enrollment_cancel"); }
   public enrollment_begin_vault_request(input: { inviteLink: string; displayName: string }): Promise<EnrollmentView> { return this.call("enrollment_begin_vault_request", input); }
   public enrollment_vault_request_status(): Promise<EnrollmentView> { return this.call("enrollment_vault_request_status"); }
@@ -441,6 +466,19 @@ export class BrowserBridge implements DesktopBridge {
   public enrollment_approve_vault_request(requestId: string): Promise<void> { return this.call("enrollment_approve_vault_request", { requestId }); }
   public enrollment_deny_vault_request(requestId: string): Promise<void> { return this.call("enrollment_deny_vault_request", { requestId }); }
   public async enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method })); }
+  public async enrollment_rotate_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
+    const view = await this.enrollment_status();
+    if (view.stage !== "waiting_phone" && view.stage !== "expired") return view;
+    await this.call("enrollment_cancel");
+    return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method }));
+  }
+  public async enrollment_cancel_phone(): Promise<EnrollmentView> {
+    const view = await this.enrollment_status();
+    if (view.stage !== "waiting_phone" && view.stage !== "expired") return view;
+    await this.call("enrollment_cancel");
+    return this.enrollment_status();
+  }
+  public reveal_vault_secret(): Promise<void> { return Promise.reject(new BrowserBridgeError("unavailable", "Vault shared secret reveal is unavailable in the browser.")); }
   public async enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView> {
     let draft = this.ownerClaimDraft;
     if (draft && this.enrollmentMode === "community" && this.setupCodeRequired && !draft.setupToken) {
@@ -507,7 +545,7 @@ export class BrowserBridge implements DesktopBridge {
         title: "Set up your Peppy server",
         description: protectedSetup
           ? peppyCopy.enrollment_setup_protected
-          : peppyCopy.enrollment_setup_open,
+          : "",
         confirm: "Continue",
         fields: [
           ...(protectedSetup ? [{ name: "setupToken", label: "Setup code", autocomplete: "off" }] : []),

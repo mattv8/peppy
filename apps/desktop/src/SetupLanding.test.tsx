@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy } from "./generated/peppyCopy";
@@ -57,12 +57,16 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account());
     vi.spyOn(bridge, "hosted_sign_out").mockResolvedValue();
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+    vi.spyOn(bridge, "enrollment_start_over").mockResolvedValue(view({ stage: "setup" }));
     vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
     vi.spyOn(bridge, "enrollment_cancel").mockResolvedValue();
     vi.spyOn(bridge, "enrollment_create_owner").mockResolvedValue(view({ stage: "ready", owner: true }));
     vi.spyOn(bridge, "enrollment_sign_in").mockResolvedValue(view({ stage: "locked" }));
     vi.spyOn(bridge, "enrollment_connect_shared_secret").mockResolvedValue(view({ stage: "ready", owner: true }));
     vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(waitingView());
+    vi.spyOn(bridge, "enrollment_rotate_phone").mockResolvedValue(waitingView());
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "reveal_vault_secret").mockResolvedValue();
     vi.spyOn(bridge, "enrollment_approve").mockResolvedValue(view({ stage: "phone_connected", owner: true }));
   });
   afterEach(() => {
@@ -87,6 +91,74 @@ describe("SetupLanding", () => {
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /manage account/i })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /connect to your own server/i })).toBeInTheDocument();
+  });
+
+  it("offers start over only for a resumed owner setup and invokes it after confirmation", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", ownerResumePending: true }));
+    renderLanding({ fixedOrigin: "https://community.example" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start over" }));
+    const confirm = screen.getByRole("button", { name: "Discard and start over" });
+    expect(confirm).toHaveFocus();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(bridge.enrollment_start_over).toHaveBeenCalledOnce());
+    expect(document.getElementById("enrollment-resume-notice")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create server" })).toHaveFocus());
+  });
+
+  it("cancels a resumed owner start-over confirmation without calling the bridge", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", ownerResumePending: true }));
+    renderLanding({ fixedOrigin: "https://community.example" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start over" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep my earlier attempt" }));
+    expect(bridge.enrollment_start_over).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start over" })).toHaveFocus());
+  });
+
+  it("shows the typed start-over failure", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", ownerResumePending: true }));
+    vi.spyOn(bridge, "enrollment_start_over").mockRejectedValue({ code: "instance_already_claimed" });
+    renderLanding({ fixedOrigin: "https://community.example" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start over" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard and start over" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "instance_already_claimed");
+  });
+
+  it("retries start-over verification with discovery instead of repeating the discard", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", ownerResumePending: true, origin: "https://community.example" }));
+    vi.spyOn(bridge, "enrollment_start_over").mockRejectedValue({ code: "offline" });
+    renderLanding({ fixedOrigin: "https://community.example" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start over" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard and start over" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledTimes(2));
+    expect(bridge.enrollment_start_over).toHaveBeenCalledOnce();
+  });
+
+  it("does not reuse start-over wording for a later create-owner claim conflict", async () => {
+    const resumed = view({ stage: "setup", ownerResumePending: true, origin: "https://community.example" });
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValueOnce(resumed).mockResolvedValueOnce(resumed);
+    vi.spyOn(bridge, "enrollment_start_over").mockRejectedValue({ code: "offline" });
+    vi.spyOn(bridge, "enrollment_create_owner").mockRejectedValue({ code: "instance_already_claimed" });
+    renderLanding({ fixedOrigin: "https://community.example" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Start over" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard and start over" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+    await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledOnce());
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(peppyCopy.enrollment_error_already_claimed);
+    expect(alert).not.toHaveTextContent(peppyCopy.setup_owner_resume_claimed);
+    expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "instance_already_claimed");
   });
 
   it("shows hosted-neutral copy and a safe billing link only with account metadata", async () => {
@@ -229,14 +301,54 @@ describe("SetupLanding", () => {
     expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
   });
 
-  it("offers the enrolled-without-phone owner the connect-phone choice from the enrollment stages", async () => {
+  it("automatically creates a transfer invitation for an enrolled owner without a phone", async () => {
     renderLanding({ enrolledWithoutPhone: true });
     expect(await screen.findByRole("heading", { name: /connect your phone/i })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /transfer keys securely/i })).toBeChecked();
-    expect(screen.getByRole("button", { name: /add phone/i })).toBeInTheDocument();
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
     expect(screen.queryByLabelText("Server mode")).not.toBeInTheDocument();
     expect(bridge.enrollment_status).toHaveBeenCalled();
     expect(bridge.hosted_account).not.toHaveBeenCalled();
+  });
+
+  it("discovers before adding a phone when status starts at server", async () => {
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "server" }));
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+  });
+
+  it("keeps a create-owner result when owner-without-phone status refreshes stale setup", async () => {
+    const creation = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "setup" }));
+    const rendered = renderLanding({ mode: "self-hosted" });
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone onJoined={vi.fn()} />);
+    await act(async () => creation.resolve(view({ stage: "ready", owner: true })));
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+  });
+
+  it("reconciles a remounted owner setup through status before adding a phone", async () => {
+    const creation = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    const rendered = renderLanding({ mode: "self-hosted" });
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    rendered.unmount();
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    await act(async () => creation.resolve(view({ stage: "ready", owner: true })));
   });
 
   it("keeps billing, provisioning, and passphrase errors on their established routes", async () => {
@@ -465,7 +577,7 @@ describe("SetupLanding", () => {
       expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
     });
 
-    it("explains open setup without claiming that a setup-code prompt will appear", async () => {
+    it("keeps explicitly open setup in open mode", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", setupCodeRequired: false }));
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
@@ -474,8 +586,6 @@ describe("SetupLanding", () => {
       await screen.findByRole("heading", { name: "Set up your server" });
       const setup = document.getElementById("enrollment-setup")!;
       expect(setup).toHaveAttribute("data-setup-mode", "open");
-      expect(setup).toHaveTextContent(peppyCopy.enrollment_setup_open);
-      expect(setup).not.toHaveTextContent("setup code");
     });
 
     it("uses protected setup copy when discovery omits the policy", async () => {
@@ -503,6 +613,15 @@ describe("SetupLanding", () => {
       expect(await screen.findByRole("alert")).toHaveTextContent(peppyCopy.enrollment_error_invalid_setup_token);
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
       await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledTimes(2));
+    });
+
+    it("shows the admin password length message and code without rendering a native password input", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "error", errorCode: "admin-password-length" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Admin password must be 12–1024 bytes long (usually one byte per character).");
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "admin-password-length");
+      expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
     });
 
     it("cancels the setup stage back to the server address without a bridge call", async () => {
@@ -611,14 +730,31 @@ describe("SetupLanding", () => {
       expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
     });
 
-    it("lets an owner choose a phone method and forwards it to add-phone", async () => {
+    it("rotates to the shared-secret phone method", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("radio", { name: /enter shared secret on phone/i }));
-      fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
-      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("shared_secret"));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
+      expect(bridge.reveal_vault_secret).not.toHaveBeenCalled();
+      Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+      fireEvent.click(screen.getByRole("button", { name: "Enter shared secret on phone" }));
+      await waitFor(() => expect(bridge.reveal_vault_secret).toHaveBeenCalledOnce());
+      delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
+
+    it("shows an inline secret-reveal failure after rotating the phone method", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "reveal_vault_secret").mockRejectedValue({ code: "vault-secret-unavailable" });
+      Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+
+      expect(await screen.findByRole("alert")).toHaveAttribute("id", "enrollment-shared-secret-error");
+      delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     });
 
     it("shows a waiting message instead of an owner action to a non-owner device", async () => {
@@ -626,6 +762,17 @@ describe("SetupLanding", () => {
       renderLanding({ enrolledWithoutPhone: true });
       expect(await screen.findByRole("heading", { name: /waiting for an owner/i })).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Add phone" })).not.toBeInTheDocument();
+    });
+
+    it("keeps owner actions available when automatic invitation creation returns ready", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
+      vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(view({ stage: "ready", owner: true }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+      expect(await screen.findByRole("button", { name: "Show connection code" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Set up phone later" })).toBeEnabled();
     });
 
     it("renders exactly one QR from the enrollment payload and offers no save action", async () => {
@@ -647,6 +794,73 @@ describe("SetupLanding", () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       await waitFor(() => expect(bridge.enrollment_cancel).toHaveBeenCalledOnce());
       await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalled());
+    });
+
+    it("defers phone setup only after cancelling the active phone invitation", async () => {
+      const onDeferPhone = vi.fn();
+      renderLanding({ mode: "self-hosted", onDeferPhone });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+      await waitFor(() => expect(bridge.enrollment_cancel_phone).toHaveBeenCalledOnce());
+      await waitFor(() => expect(onDeferPhone).toHaveBeenCalledOnce());
+    });
+
+    it("keeps the verification step when a phone claimed the code before Set up phone later", async () => {
+      const onDeferPhone = vi.fn();
+      vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(view({ stage: "verify_phone", owner: true, verificationCode: "123456" }));
+      renderLanding({ mode: "self-hosted", onDeferPhone });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+      await waitFor(() => expect(bridge.enrollment_cancel_phone).toHaveBeenCalledOnce());
+      expect(await screen.findByRole("heading", { name: /verify the code/i })).toBeInTheDocument();
+      expect(onDeferPhone).not.toHaveBeenCalled();
+    });
+
+    it("starts a connection code when Add phone is used by an owner who already has a phone", async () => {
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: true }));
+      renderLanding({ mode: "self-hosted", addingPhone: true, onExit: vi.fn() });
+      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+    });
+
+    it("offers to finish an earlier setup from sign-in on a claimed server", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin", ownerResumePending: true }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: new RegExp(peppyCopy.setup_owner_resume_signin_label) }));
+      await waitFor(() => expect(bridge.enrollment_create_owner).toHaveBeenCalledOnce());
+    });
+
+    it("hides the earlier-setup option on sign-in when no attempt is pending", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "signin" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("heading", { name: "Sign in to your server" });
+      expect(screen.queryByRole("button", { name: new RegExp(peppyCopy.setup_owner_resume_signin_label) })).not.toBeInTheDocument();
+    });
+
+    it("rotates once near expiry but never rotates during verification", async () => {
+      const advance = capturePoll();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView({ expiresInSeconds: 15 }));
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(waitingView({ expiresInSeconds: 10 }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("transfer"));
+      await advance();
+      expect(bridge.enrollment_rotate_phone).toHaveBeenCalledOnce();
+      cleanup();
+      vi.clearAllMocks();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "verify_phone", verificationCode: "123" }));
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByLabelText("Verification code: 123");
+      expect(bridge.enrollment_rotate_phone).not.toHaveBeenCalled();
     });
 
     it("moves from a polled waiting view to the verification stage without showing the QR", async () => {
@@ -684,18 +898,15 @@ describe("SetupLanding", () => {
       expect(document.getElementById("enrollment-phone_connected")).toHaveTextContent(/finish setup on your phone/i);
     });
 
-    it("restarts an expired pairing with the previously chosen method", async () => {
-      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
-      vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValueOnce(view({ stage: "expired" })).mockResolvedValueOnce(waitingView());
+    it("keeps manual restart after a rotation returns expired", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "expired", owner: true }));
+      vi.spyOn(bridge, "enrollment_rotate_phone").mockResolvedValue(view({ stage: "expired", owner: true }));
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("radio", { name: /enter shared secret on phone/i }));
-      fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Start again" }));
-      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledTimes(2));
-      expect(bridge.enrollment_add_phone).toHaveBeenLastCalledWith("shared_secret");
-      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("transfer"));
+      expect(await screen.findByRole("button", { name: "Start again" })).toBeEnabled();
+      expect(bridge.enrollment_rotate_phone).toHaveBeenCalledOnce();
     });
 
     it("shows a generic error, keeps the server address, and retries the failed step", async () => {
@@ -711,7 +922,7 @@ describe("SetupLanding", () => {
       expect(bridge.enrollment_discover).toHaveBeenCalledTimes(2);
     });
 
-    it("ignores a poll that was in flight when the user cancelled", async () => {
+    it("ignores a poll that was in flight when the user cancels", async () => {
       const advance = capturePoll();
       const stalePoll = deferred<EnrollmentView>();
       vi.spyOn(bridge, "enrollment_status").mockReturnValueOnce(stalePoll.promise).mockResolvedValueOnce(view({ stage: "ready", owner: true }));
@@ -721,10 +932,161 @@ describe("SetupLanding", () => {
       await screen.findByRole("img", { name: /pairing qr/i });
       await advance();
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      await waitFor(() => expect(screen.getByRole("button", { name: "Add phone" })).toBeInTheDocument());
+      await waitFor(() => expect(bridge.enrollment_cancel).toHaveBeenCalledOnce());
+      await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledTimes(2));
       await act(async () => stalePoll.resolve(waitingView()));
       expect(document.getElementById("enrollment-qr-image")).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Add phone" })).toBeInTheDocument();
+    });
+  });
+
+  describe("native connection failure codes", () => {
+    async function failedDiscoveryAlert(rejection: unknown) {
+      vi.spyOn(bridge, "enrollment_discover").mockRejectedValueOnce(rejection);
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      return screen.findByRole("alert");
+    }
+
+    it.each([
+      ["offline", "offline"],
+      ["network", "network"],
+      ["local TLS", "local-tls-config"],
+      ["secure store", "secure-store-unavailable"],
+      ["server rejected", "server-rejected"],
+      ["response too large", "response-too-large"],
+      ["host state", "host-state"],
+      ["invalid origin", "invalid-origin"],
+      ["enrollment", "enrollment"],
+      ["saved credential missing", "credentials-required"],
+      ["local database key missing", "database-key-missing"],
+      ["local database key mismatch", "database-key-mismatch"],
+      ["local identity mismatch", "credential-mismatch"],
+      ["saved credential origin mismatch", "origin-binding"],
+      ["native host configuration", "host-config"],
+      ["server response", "server-response"],
+      ["revoked device credential", "revoked"],
+      ["recovery secret mismatch", "wrong-passphrase"],
+      ["credential changed during setup", "credential-changed"],
+      ["phone not finished", "enrollment-state"],
+      ["database key conflict", "database-key-conflict"],
+    ])("reports the typed %s failure as its own code", async (_label, code) => {
+      const generic = await failedDiscoveryAlert({ code: "not-a-native-code", message: "ignored" });
+      const genericText = generic.textContent;
+      cleanup();
+
+      const alert = await failedDiscoveryAlert({ code, message: "native detail that must stay hidden" });
+
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", code);
+      expect(alert.textContent).not.toBe(genericText);
+      expect(document.body).not.toHaveTextContent("native detail that must stay hidden");
+    });
+
+    it("keeps a known setup-token domain error on its domain message", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup", setupCodeRequired: true }));
+      vi.spyOn(bridge, "enrollment_create_owner").mockRejectedValueOnce({ code: "invalid_setup_token", message: "raw" });
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(peppyCopy.enrollment_error_invalid_setup_token);
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "invalid_setup_token");
+    });
+
+    it.each([
+      "credentials-required",
+      "database-key-missing",
+      "database-key-mismatch",
+      "credential-mismatch",
+      "origin-binding",
+      "secure-store-unavailable",
+      "database-key-conflict",
+      "host-config",
+    ])("offers only a retry for the local storage failure %s and never a reset or removal action", async code => {
+      await failedDiscoveryAlert({ code, message: "raw storage detail" });
+
+      const panel = document.getElementById("enrollment-panel")!;
+      expect(within(panel).getAllByRole("button").map(button => button.textContent)).toEqual(["Retry"]);
+      expect(panel.textContent).not.toMatch(/delete|remove|erase|wipe|clear|reset/i);
+      expect(document.body).not.toHaveTextContent("raw storage detail");
+    });
+
+    it.each(["vault_not_found", "request_not_found", "request_not_approved", "operation_conflict"])("keeps the recognized claim code %s visible", async code => {
+      await failedDiscoveryAlert({ code, message: "raw claim detail" });
+
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", code);
+      expect(document.body).not.toHaveTextContent("raw claim detail");
+    });
+
+    it("reads the code from an Error instance and hides its secret-bearing message", async () => {
+      await failedDiscoveryAlert(Object.assign(new Error("token=abc at https://leak.example /Users/someone"), { code: "host-config" }));
+
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "host-config");
+      expect(document.body).not.toHaveTextContent("token=abc");
+      expect(document.body).not.toHaveTextContent("leak.example");
+      expect(document.body).not.toHaveTextContent("/Users/someone");
+    });
+
+    it("treats a thrown string as unavailable and never renders it", async () => {
+      await failedDiscoveryAlert("token=abc at https://leak.example");
+
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "unavailable");
+      expect(document.body).not.toHaveTextContent("token=abc");
+      expect(document.body).not.toHaveTextContent("leak.example");
+    });
+
+    it("keeps the code on a failed phone status poll without changing the polling stage", async () => {
+      const advance = capturePoll();
+      vi.spyOn(bridge, "enrollment_status").mockRejectedValueOnce({ code: "revoked", message: "token=abc" });
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("img", { name: /pairing qr/i });
+
+      await advance();
+
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "revoked");
+      expect(document.body).not.toHaveTextContent("token=abc");
+    });
+
+    it("hides unknown codes, URLs, and raw messages behind the unavailable code", async () => {
+      await failedDiscoveryAlert({ code: "https://leak.example/token=abc", message: "token=abc at /Users/someone/secret" });
+
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "unavailable");
+      expect(document.body).not.toHaveTextContent("leak.example");
+      expect(document.body).not.toHaveTextContent("token=abc");
+      expect(document.body).not.toHaveTextContent("/Users/someone/secret");
+    });
+
+    it("retries the same typed server origin after a typed failure", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockRejectedValueOnce({ code: "offline", message: "x" }).mockResolvedValueOnce(waitingView());
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("alert");
+      expect(screen.getByLabelText("Server URL")).toHaveValue("https://server.example");
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+      expect(bridge.enrollment_discover).toHaveBeenNthCalledWith(1, "https://server.example");
+      expect(bridge.enrollment_discover).toHaveBeenNthCalledWith(2, "https://server.example");
+    });
+
+    it("ignores a typed failure from an attempt that was already superseded", async () => {
+      const discovery = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_discover").mockReturnValue(discovery.promise);
+      renderLanding();
+      await chooseExisting();
+      fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+
+      await act(async () => discovery.reject({ code: "secure-store-unavailable", message: "stale" }));
+
+      expect(document.getElementById("enrollment-error")).not.toBeInTheDocument();
+      expect(document.getElementById("enrollment-error-code")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
     });
   });
 

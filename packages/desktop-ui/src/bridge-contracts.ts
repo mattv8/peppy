@@ -58,6 +58,7 @@ export type EnrollmentView = {
   expiresInSeconds?: number;
   errorCode?: string;
   setupCodeRequired?: boolean;
+  ownerResumePending?: boolean;
   vaultOwnerRequired?: boolean;
   displayName?: string;
   username?: string;
@@ -126,6 +127,7 @@ export interface DesktopBridge {
   hosted_open_billing(): Promise<void>;
   hosted_provision(): Promise<void>;
   enrollment_discover(origin?: string): Promise<EnrollmentView>;
+  enrollment_start_over(): Promise<EnrollmentView>;
   enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView>;
   enrollment_sign_in(input?: { username?: string }): Promise<EnrollmentView>;
   enrollment_connect_shared_secret(input?: { vaultOwner?: string }): Promise<EnrollmentView>;
@@ -134,6 +136,9 @@ export interface DesktopBridge {
   enrollment_create_vault(input: { username: string }): Promise<EnrollmentView>;
   enrollment_pending_invite?(): Promise<string | null>;
   enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
+  enrollment_rotate_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
+  enrollment_cancel_phone(): Promise<EnrollmentView>;
+  reveal_vault_secret(): Promise<void>;
   enrollment_status(): Promise<EnrollmentView>;
   enrollment_approve(): Promise<EnrollmentView>;
   enrollment_cancel(): Promise<void>;

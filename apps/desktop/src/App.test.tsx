@@ -105,6 +105,18 @@ describe("setup landing routing", () => {
     expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
   });
 
+  it("defers automatic phone setup per origin while header Add phone remains available", async () => {
+    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true }));
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(enrollment("ready", { owner: true }));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    await waitFor(() => expect(localStorage.getItem("peppy.setup.phoneDeferred:https://example.test")).toBe("1"));
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
+    expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
+  });
+
   it("returns to the selected conversation when add phone is cancelled", async () => {
     const cancellation = deferred<void>();
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
@@ -112,8 +124,7 @@ describe("setup landing routing", () => {
     vi.mocked(bridge.enrollment_cancel).mockReturnValue(cancellation.promise);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
-    fireEvent.click(await screen.findByText("Connect your phone"));
-    fireEvent.click(document.getElementById("enrollment-add-phone-button")!);
+    await screen.findByRole("img", { name: /pairing qr/i });
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(bridge.enrollment_cancel).toHaveBeenCalledOnce();
     expect(document.getElementById("conversation-stage")).not.toBeInTheDocument();

@@ -110,6 +110,127 @@ describe("BrowserBridge", () => {
     }
   });
 
+  it("copies only the generated secret without acknowledging or continuing", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: false } });
+      await discover;
+      const createOwner = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      port.reply({ id: 2, ok: true, value: { passphrase: "synthetic generated secret" } });
+      const copy = await vi.waitFor(() => {
+        const button = document.getElementById("browser-enrollment-owner-secret-copy");
+        expect(button).toBeInstanceOf(HTMLButtonElement);
+        return button as HTMLButtonElement;
+      });
+
+      copy.click();
+
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("synthetic generated secret"));
+      expect(copy.textContent).toBe("Copied");
+      expect((document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement).checked).toBe(false);
+      expect((document.getElementById("browser-enrollment-owner-secret-submit") as HTMLButtonElement).disabled).toBe(true);
+      expect(port.sent).toHaveLength(2);
+      (document.getElementById("browser-enrollment-owner-secret-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      port.reply({ id: 3, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: false } });
+      await createOwner;
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("reports missing and rejected clipboard writes and allows a retry", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const writeText = vi.fn().mockRejectedValueOnce(new Error("denied")).mockResolvedValueOnce(undefined);
+    const originalClipboard = navigator.clipboard;
+    const clipboard: { writeText?: typeof writeText } = {};
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "hosted", stage: "setup" } });
+      await discover;
+      const createOwner = bridge.enrollment_create_owner();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      port.reply({ id: 2, ok: true, value: { passphrase: "synthetic generated secret" } });
+      const copy = await vi.waitFor(() => {
+        const button = document.getElementById("browser-enrollment-owner-secret-copy");
+        expect(button).toBeInstanceOf(HTMLButtonElement);
+        return button as HTMLButtonElement;
+      });
+
+      copy.click();
+      await vi.waitFor(() => expect(copy.textContent).toBe("Could not copy. Try again."));
+      clipboard.writeText = writeText;
+      copy.click();
+      await vi.waitFor(() => expect(copy.textContent).toBe("Could not copy. Try again."));
+      copy.click();
+      await vi.waitFor(() => expect(copy.textContent).toBe("Copied"));
+      expect(writeText).toHaveBeenCalledTimes(2);
+      expect(port.sent).toHaveLength(2);
+      (document.getElementById("browser-enrollment-owner-secret-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      port.reply({ id: 3, ok: true, value: { mode: "hosted", stage: "setup" } });
+      await createOwner;
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it.each(["resolve", "reject"])("does not restore copy feedback after close when the write settles with %s", async (outcome) => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    let settleCopy: (() => void) | undefined;
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn(() => new Promise<void>((resolve, reject) => {
+      settleCopy = () => outcome === "resolve" ? resolve() : reject(new Error("Clipboard denied"));
+    })) } });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "hosted", stage: "setup" } });
+      await discover;
+      const createOwner = bridge.enrollment_create_owner();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      port.reply({ id: 2, ok: true, value: { passphrase: "synthetic generated secret" } });
+      const copy = await vi.waitFor(() => {
+        const button = document.getElementById("browser-enrollment-owner-secret-copy");
+        expect(button).toBeInstanceOf(HTMLButtonElement);
+        return button as HTMLButtonElement;
+      });
+      const status = document.getElementById("browser-enrollment-owner-secret-copy-status")!;
+      copy.click();
+      (document.getElementById("browser-enrollment-owner-secret-cancel") as HTMLButtonElement).click();
+
+      settleCopy?.();
+      await Promise.resolve();
+      expect(copy.textContent).toBe("Copy secret");
+      expect(status.textContent).toBe("");
+      expect(document.getElementById("browser-enrollment-owner-secret")).toBeNull();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      port.reply({ id: 3, ok: true, value: { mode: "hosted", stage: "setup" } });
+      await createOwner;
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
   it("omits the browser setup-code field for an explicitly open server", async () => {
     const port = new TestPort();
     const restoreShowModal = stubShowModal();

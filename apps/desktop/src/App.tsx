@@ -35,6 +35,7 @@ import {
   RecipientPanel,
   ResizeHandle,
   ShieldAlert,
+  Smartphone,
   SquarePen,
   StatusPopover,
   TriangleAlert,
@@ -781,6 +782,11 @@ function MessageList({
 function ownerWithoutPhone(snapshot: DesktopSnapshot) {
   return snapshot.connection.state === "connected" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
 }
+const phoneDeferredKey = (origin: string | undefined) => origin ? `peppy.setup.phoneDeferred:${origin}` : "";
+const phoneSetupDeferred = (origin: string | undefined) => {
+  const key = phoneDeferredKey(origin);
+  return Boolean(key && localStorage.getItem(key));
+};
 
 type SettingsAction = "origin" | "unlock" | "account";
 
@@ -811,6 +817,7 @@ function SettingsView({
   onAppLock,
   browserHost = false,
   accountUrl,
+  canRevealVaultSecret = false,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -838,11 +845,13 @@ function SettingsView({
   onAppLock(enabled: boolean): Promise<boolean>;
   browserHost?: boolean;
   accountUrl?: string;
+  canRevealVaultSecret?: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
   const settingsContentRef = useRef<HTMLDivElement>(null);
   const pendingSectionRef = useRef<string | null>(null);
   const scrollEndTimer = useRef<number | undefined>(undefined);
@@ -989,6 +998,14 @@ function SettingsView({
           </button>
         )}
         {actionAlert("unlock")}
+        {canRevealVaultSecret && <>
+          <button id="settings-reveal-vault-secret" className="secondary-button" disabled={Boolean(pendingAction)} onClick={async () => {
+            setRevealError(null);
+            try { await bridge.reveal_vault_secret(); }
+            catch (error) { setRevealError(errorCode(error) === "vault-secret-unavailable" ? "This device doesn't have the vault shared secret stored." : FALLBACK_ERROR); }
+          }}>Show vault shared secret</button>
+          {revealError && <p id="settings-reveal-vault-secret-error" className="settings-error" role="alert">{revealError}</p>}
+        </>}
         {encryption === "unlocked" && onLock && (
           <button id="browser-lock-all-tabs" className="secondary-button" onClick={() => void onLock()}>
             Lock now
@@ -1156,6 +1173,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationSettingsRequested = useRef(false);
   const [notice, setNotice] = useState("");
   const [addingPhone, setAddingPhone] = useState(false);
+  const [phoneDeferredOrigin, setPhoneDeferredOrigin] = useState<string | null>(null);
   // Names of contacts picked from search, shown on chips until the next native snapshot
   // resolves the same addresses. Display only; recipient IDs stay phone addresses.
   const [chosenContacts, setChosenContacts] = useState<ContactResolutionMap>({});
@@ -2275,7 +2293,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <SquarePen size={16} aria-hidden />
               </button>}
               {snapshot?.deviceRole === "owner" && (
-                <button id="add-phone-action" onClick={() => setAddingPhone(true)}>Add phone</button>
+                <button id="add-phone-action" aria-label="Add phone" title="Add phone" onClick={() => setAddingPhone(true)}>
+                  <Smartphone size={16} aria-hidden />
+                </button>
               )}
               {!browserHost && conversationLoaded && (
                 <button id="header-popout-conversation"
@@ -2318,7 +2338,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                appLock={appLock}
                onAppLock={changeAppLock}
                browserHost={browserHost}
-               accountUrl={accountUrl}
+              accountUrl={accountUrl}
+              canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
              />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2337,13 +2358,20 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot && (addingPhone || (!selected && (snapshot.connection.errorCode === "server-required" || ownerWithoutPhone(snapshot) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview") || (snapshot.connection.state !== "connected" && !canUnlock)))) ? (
+              {snapshot && (addingPhone || (!selected && (snapshot.connection.errorCode === "server-required" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview") || (snapshot.connection.state !== "connected" && !canUnlock)))) ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
                   enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
                   addingPhone={addingPhone}
                   onExit={() => setAddingPhone(false)}
+                  onDeferPhone={() => {
+                    const key = phoneDeferredKey(snapshot.connection.origin);
+                    if (key) localStorage.setItem(key, "1");
+                    setPhoneDeferredOrigin(snapshot.connection.origin ?? null);
+                    setAddingPhone(false);
+                    void refresh();
+                  }}
                   onJoined={() => { setAddingPhone(false); void refresh(); }}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
