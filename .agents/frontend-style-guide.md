@@ -215,14 +215,24 @@ Rules for disclosure:
 
 ### Enrollment UI
 
-- The main **Add phone** flow is a single sequence: choose transfer or shared
-  secret, show one `connect_phone` QR, show the SAS after the phone claims, then
-  require the owner's explicit SAS checkbox before approval. The QR is not a
-  credential or approval and has no Save action. Keep the stable stage and QR
-  hooks in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
+- The phone step shows a transfer `connect_phone` QR as soon as an owner has no
+  phone, after first setup or from **Add phone**. It replaces the QR only near
+  or after expiry, and never once a phone has claimed it; the server cancels
+  claimed invitations unconditionally, so frequent rotation can break a phone
+  mid-claim. Secondary actions are **Enter shared secret on phone**, which on
+  desktop opens the native secret reveal, and **Set up phone later**, which
+  cancels only the invitation and is remembered per origin. After the phone
+  claims, show the SAS and require the owner's explicit SAS checkbox before
+  approval. The QR is not a credential or approval and has no Save action. Keep
+  the stable stage and QR hooks in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
 - Native desktop requests the setup code only when discovery reports
-  token-protected first claim, then requests the admin password and vault shared
-  secret in separate native secure prompts. App-lock credentials remain a
+  token-protected first claim, then requests the admin password in a native
+  secure prompt. It generates the vault shared secret silently, keeps it in
+  protected secure storage, and shows it only in a native dialog with **Copy
+  secret** (from Settings or the shared-secret phone option). The secret never
+  enters the webview. Setup copy says where the secret is kept. The browser
+  still shows its generated secret once and requires a save acknowledgement.
+  App-lock credentials remain a
   separate native gate. Browser-hosted secret prompts are DOM controls by design:
   they remain accessible to same-origin JavaScript and must not be described as
   native secure controls. Keep their values outside shared React snapshots and
@@ -231,8 +241,8 @@ Rules for disclosure:
   [native app lock](../apps/desktop/src-tauri/src/app_lock.rs), and
   [browser bridge](../apps/web/src/browser-bridge.ts).
 - Community first setup visibly identifies the server-advertised mode. Open
-  first claim says that the first device to complete setup becomes owner and
-  does not show a setup-code input. Token-protected first claim says that the
+  first claim shows no setup-code input and no extra explanation of claim
+  ownership. Token-protected first claim says that the
   operator requires a code configured with `PEPPY_SETUP_TOKEN` and shows that
   input. Preserve the distinct setup-code, administrator-password, and vault
   shared-secret authorities. Missing policy remains conservative for older
