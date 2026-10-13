@@ -3,14 +3,21 @@
 //! field (AppKit `NSAlert` + `NSSecureTextField` on macOS); it is never requested in the webview,
 //! never passed through IPC, and never placed on a process argv.
 use crate::error::{BridgeError, BridgeResult};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PassphrasePurpose {
     Unlock,
+    ResumeOwnerSecret,
+    RecoverVaultSecret,
     Create,
     SetupToken,
     AdminPassword,
@@ -22,6 +29,176 @@ pub enum PassphrasePurpose {
 
 fn dialog_error() -> BridgeError {
     BridgeError::new("native-dialog", "The native dialog could not be shown.")
+}
+
+const VAULT_SECRET_TITLE: &str = "Vault shared secret";
+const VAULT_SECRET_INSTRUCTIONS: &str =
+    "Use this secret to connect a phone or another device to your vault. Keep it private.";
+const VAULT_SECRET_DONE: &str = "Done";
+const VAULT_SECRET_COPY: &str = "Copy secret";
+// Escape and the window close box reach this slot on Windows and Linux (see
+// `vault_secret_buttons`), so its label must not be the copy action.
+const VAULT_SECRET_CLOSE: &str = "Close";
+const COPY_SUCCEEDED: &str = "Copied";
+const COPY_FAILED: &str = "Could not copy. Try again.";
+
+static SECRET_CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+
+trait SecretClipboard {
+    fn copy_secret(&mut self, secret: &str) -> bool;
+}
+
+struct NativeSecretClipboard;
+
+impl SecretClipboard for NativeSecretClipboard {
+    fn copy_secret(&mut self, secret: &str) -> bool {
+        let Ok(mut clipboard) = SECRET_CLIPBOARD.get_or_init(|| Mutex::new(None)).lock() else {
+            return false;
+        };
+        if clipboard.is_none() {
+            let Ok(new_clipboard) = arboard::Clipboard::new() else {
+                return false;
+            };
+            *clipboard = Some(new_clipboard);
+        }
+        clipboard
+            .as_mut()
+            .is_some_and(|clipboard| set_sensitive_clipboard_text(clipboard, secret))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_sensitive_clipboard_text(clipboard: &mut arboard::Clipboard, secret: &str) -> bool {
+    use arboard::SetExtApple;
+
+    clipboard.set().exclude_from_history().text(secret).is_ok()
+}
+
+#[cfg(target_os = "windows")]
+fn set_sensitive_clipboard_text(clipboard: &mut arboard::Clipboard, secret: &str) -> bool {
+    use arboard::SetExtWindows;
+
+    clipboard
+        .set()
+        .exclude_from_history()
+        .exclude_from_cloud()
+        .text(secret)
+        .is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn set_sensitive_clipboard_text(clipboard: &mut arboard::Clipboard, secret: &str) -> bool {
+    use arboard::SetExtLinux;
+
+    clipboard.set().exclude_from_history().text(secret).is_ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn set_sensitive_clipboard_text(_: &mut arboard::Clipboard, _: &str) -> bool {
+    false
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecretDialogAction {
+    Done,
+    Copy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecretDialogStep {
+    Finish,
+    ShowFeedback(&'static str),
+}
+
+/// Maps the plugin result of the vault secret dialog. Only the copy label copies; every other
+/// result (Done, Close, Escape, or the window close box) means Done.
+fn vault_secret_action(result: MessageDialogResult) -> SecretDialogAction {
+    match result {
+        MessageDialogResult::Custom(label) if label == VAULT_SECRET_COPY => {
+            SecretDialogAction::Copy
+        }
+        _ => SecretDialogAction::Done,
+    }
+}
+
+fn vault_secret_buttons() -> MessageDialogButtons {
+    MessageDialogButtons::YesNoCancelCustom(
+        VAULT_SECRET_DONE.into(),
+        VAULT_SECRET_COPY.into(),
+        VAULT_SECRET_CLOSE.into(),
+    )
+}
+
+fn handle_secret_dialog_action(
+    clipboard: &mut impl SecretClipboard,
+    secret: &str,
+    action: SecretDialogAction,
+) -> SecretDialogStep {
+    match action {
+        SecretDialogAction::Done => SecretDialogStep::Finish,
+        SecretDialogAction::Copy => {
+            let feedback = if clipboard.copy_secret(secret) {
+                COPY_SUCCEEDED
+            } else {
+                COPY_FAILED
+            };
+            SecretDialogStep::ShowFeedback(feedback)
+        }
+    }
+}
+
+fn secret_message(instructions: &str, secret: &str, feedback: Option<&str>) -> Zeroizing<String> {
+    let mut message = Zeroizing::new(format!("{instructions}\n\nVault shared secret:\n{secret}"));
+    if let Some(feedback) = feedback {
+        message.push_str("\n\n");
+        message.push_str(feedback);
+    }
+    message
+}
+
+async fn show_secret_dialog(
+    app: &AppHandle,
+    secret: &str,
+    feedback: Option<&str>,
+    title: &str,
+    instructions: &str,
+    buttons: MessageDialogButtons,
+    action: fn(MessageDialogResult) -> SecretDialogAction,
+) -> BridgeResult<SecretDialogAction> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let message = secret_message(instructions, secret, feedback);
+    app.dialog()
+        .message(message.as_str())
+        .title(title)
+        .kind(MessageDialogKind::Info)
+        .buttons(buttons)
+        .show_with_result(move |result| {
+            let _ = sender.send(action(result));
+        });
+    receiver.await.map_err(|_| dialog_error())
+}
+
+/// Displays a native-only vault secret. Done, Close, Escape, and the close box all mean Done;
+/// only the copy button writes the clipboard.
+pub async fn show_vault_secret(app: &AppHandle, secret: Zeroizing<String>) -> BridgeResult<()> {
+    let mut clipboard = NativeSecretClipboard;
+    let mut feedback = None;
+    loop {
+        let action = show_secret_dialog(
+            app,
+            secret.as_str(),
+            feedback,
+            VAULT_SECRET_TITLE,
+            VAULT_SECRET_INSTRUCTIONS,
+            vault_secret_buttons(),
+            vault_secret_action,
+        )
+        .await?;
+        match handle_secret_dialog_action(&mut clipboard, secret.as_str(), action) {
+            SecretDialogStep::Finish => return Ok(()),
+            SecretDialogStep::ShowFeedback(next_feedback) => feedback = Some(next_feedback),
+        }
+    }
 }
 
 pub async fn pick_file(app: &AppHandle, title: &str) -> BridgeResult<Option<PathBuf>> {
@@ -246,12 +423,15 @@ mod windows_dialog {
         let mut password = Zeroizing::new([0u16; PASSWORD_BUFFER]);
         let (message, caption) = match purpose {
             PassphrasePurpose::Unlock => (w!("Enter the vault passphrase. It is verified only on this device and is never stored."), w!("Unlock Peppy sync")),
+            PassphrasePurpose::ResumeOwnerSecret => (w!("Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server."), w!("Resume Peppy server setup")),
+            PassphrasePurpose::RecoverVaultSecret => (w!("Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server."), w!("Complete vault setup")),
             PassphrasePurpose::Create => (w!("Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered."), w!("Create encryption passphrase")),
             PassphrasePurpose::AppLockCreate => (w!("Choose a password required when Peppy opens on this computer."), w!("Require a password to open Peppy")),
             PassphrasePurpose::AppLockConfirm => (w!("Enter the same password again."), w!("Confirm Peppy password")),
             PassphrasePurpose::AppLockUnlock => (w!("Enter the password required to open Peppy on this computer."), w!("Unlock Peppy")),
             PassphrasePurpose::AppLockDisable => (w!("Enter your current Peppy password to turn off the app lock."), w!("Turn off Peppy app lock")),
-            _ => return Err(BridgeError::new("platform-gate", "This passphrase prompt is unavailable on Windows.")),
+            PassphrasePurpose::SetupToken => (w!("Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window."), w!("Claim Peppy server")),
+            PassphrasePurpose::AdminPassword => (w!("Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window."), w!("Peppy server administrator")),
         };
         let info = CREDUI_INFOW {
             cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
@@ -266,17 +446,16 @@ mod windows_dialog {
             CredUIPromptForCredentialsW(
                 Some(&info),
                 match purpose {
-                    PassphrasePurpose::Unlock => w!("Peppy sync vault"),
+                    PassphrasePurpose::Unlock
+                    | PassphrasePurpose::ResumeOwnerSecret
+                    | PassphrasePurpose::RecoverVaultSecret => w!("Peppy sync vault"),
                     PassphrasePurpose::Create => w!("Peppy encryption passphrase"),
                     PassphrasePurpose::AppLockCreate
                     | PassphrasePurpose::AppLockConfirm
                     | PassphrasePurpose::AppLockUnlock
                     | PassphrasePurpose::AppLockDisable => w!("Peppy app lock"),
-                    _ => {
-                        return Err(BridgeError::new(
-                            "platform-gate",
-                            "This passphrase prompt is unavailable on Windows.",
-                        ))
+                    PassphrasePurpose::SetupToken | PassphrasePurpose::AdminPassword => {
+                        w!("Peppy server")
                     }
                 },
                 None,
@@ -335,6 +514,10 @@ mod linux {
     const UNLOCK_TITLE: &str = "Unlock Peppy sync";
     const UNLOCK_MESSAGE: &str =
         "Enter the vault passphrase. It is verified only on this device and is never stored.";
+    const RESUME_OWNER_SECRET_TITLE: &str = "Resume Peppy server setup";
+    const RESUME_OWNER_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.";
+    const RECOVER_VAULT_SECRET_TITLE: &str = "Complete vault setup";
+    const RECOVER_VAULT_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.";
     const CREATE_TITLE: &str = "Create encryption passphrase";
     const CREATE_MESSAGE: &str = "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.";
     const APP_LOCK_MESSAGE: &str = "Enter the password required to open Peppy on this computer.";
@@ -344,6 +527,12 @@ mod linux {
     ) -> BridgeResult<Option<Zeroizing<String>>> {
         let (title, message) = match purpose {
             PassphrasePurpose::Unlock => (UNLOCK_TITLE, UNLOCK_MESSAGE),
+            PassphrasePurpose::ResumeOwnerSecret => {
+                (RESUME_OWNER_SECRET_TITLE, RESUME_OWNER_SECRET_MESSAGE)
+            }
+            PassphrasePurpose::RecoverVaultSecret => {
+                (RECOVER_VAULT_SECRET_TITLE, RECOVER_VAULT_SECRET_MESSAGE)
+            }
             PassphrasePurpose::Create => (CREATE_TITLE, CREATE_MESSAGE),
             PassphrasePurpose::AppLockCreate => (
                 "Require a password to open Peppy",
@@ -357,12 +546,14 @@ mod linux {
                 "Turn off Peppy app lock",
                 "Enter your current Peppy password to turn off the app lock.",
             ),
-            _ => {
-                return Err(BridgeError::new(
-                    "platform-gate",
-                    "This passphrase prompt is unavailable on Linux.",
-                ))
-            }
+            PassphrasePurpose::SetupToken => (
+                "Claim Peppy server",
+                "Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window.",
+            ),
+            PassphrasePurpose::AdminPassword => (
+                "Peppy server administrator",
+                "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.",
+            ),
         };
         for (program, arguments) in [
             (
@@ -433,18 +624,137 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
-    use super::{passphrase_from_utf8, trim_helper_terminator};
+    use super::{
+        handle_secret_dialog_action, passphrase_from_utf8, secret_message, trim_helper_terminator,
+        vault_secret_action, vault_secret_buttons, SecretClipboard, SecretDialogAction,
+        SecretDialogStep, COPY_FAILED, COPY_SUCCEEDED, VAULT_SECRET_CLOSE, VAULT_SECRET_COPY,
+        VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
+    };
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
+
+    struct FakeClipboard {
+        copied: Vec<String>,
+        results: Vec<bool>,
+    }
+
+    impl SecretClipboard for FakeClipboard {
+        fn copy_secret(&mut self, secret: &str) -> bool {
+            self.copied.push(secret.to_owned());
+            self.results.remove(0)
+        }
+    }
+
+    #[test]
+    fn vault_secret_copy_then_done_copies_only_the_phrase() {
+        let secret = "synthetic secret phrase";
+        let mut clipboard = FakeClipboard {
+            copied: Vec::new(),
+            results: vec![true],
+        };
+
+        assert_eq!(
+            handle_secret_dialog_action(&mut clipboard, secret, SecretDialogAction::Copy),
+            SecretDialogStep::ShowFeedback(COPY_SUCCEEDED)
+        );
+        assert_eq!(
+            handle_secret_dialog_action(&mut clipboard, secret, SecretDialogAction::Done),
+            SecretDialogStep::Finish
+        );
+        assert_eq!(clipboard.copied, [secret]);
+        assert!(
+            secret_message(VAULT_SECRET_INSTRUCTIONS, secret, Some(COPY_SUCCEEDED))
+                .contains(secret)
+        );
+    }
+
+    #[test]
+    fn vault_secret_retries_after_a_failed_copy() {
+        let mut clipboard = FakeClipboard {
+            copied: Vec::new(),
+            results: vec![false, true],
+        };
+
+        assert_eq!(
+            handle_secret_dialog_action(&mut clipboard, "synthetic", SecretDialogAction::Copy),
+            SecretDialogStep::ShowFeedback(COPY_FAILED)
+        );
+        assert_eq!(
+            handle_secret_dialog_action(&mut clipboard, "synthetic", SecretDialogAction::Copy),
+            SecretDialogStep::ShowFeedback(COPY_SUCCEEDED)
+        );
+        assert_eq!(clipboard.copied, ["synthetic", "synthetic"]);
+    }
+
+    #[test]
+    fn vault_secret_done_without_copy_never_touches_the_clipboard() {
+        let mut clipboard = FakeClipboard {
+            copied: Vec::new(),
+            results: Vec::new(),
+        };
+
+        assert_eq!(
+            handle_secret_dialog_action(&mut clipboard, "synthetic", SecretDialogAction::Done),
+            SecretDialogStep::Finish
+        );
+        assert!(clipboard.copied.is_empty());
+    }
+
+    #[test]
+    fn vault_secret_maps_only_the_copy_label_to_copy() {
+        assert_eq!(
+            vault_secret_action(MessageDialogResult::Custom(VAULT_SECRET_COPY.into())),
+            SecretDialogAction::Copy
+        );
+        assert_eq!(
+            vault_secret_action(MessageDialogResult::Custom(VAULT_SECRET_DONE.into())),
+            SecretDialogAction::Done
+        );
+        assert_eq!(
+            vault_secret_action(MessageDialogResult::Custom(VAULT_SECRET_CLOSE.into())),
+            SecretDialogAction::Done
+        );
+        // Escape and the close box surface as a raw Cancel on some platforms.
+        assert_eq!(
+            vault_secret_action(MessageDialogResult::Cancel),
+            SecretDialogAction::Done
+        );
+    }
+
+    #[test]
+    fn vault_secret_escape_and_close_never_reach_the_copy_label() {
+        let MessageDialogButtons::YesNoCancelCustom(done, copy, close) = vault_secret_buttons()
+        else {
+            panic!("vault secret must use three custom buttons");
+        };
+        assert_eq!(done, VAULT_SECRET_DONE);
+        assert_eq!(copy, VAULT_SECRET_COPY);
+        // The plugin reports Escape/close as Custom(cancel label) on Windows and Linux.
+        assert_eq!(close, VAULT_SECRET_CLOSE);
+        assert_ne!(close, VAULT_SECRET_COPY);
+        assert_eq!(
+            vault_secret_action(MessageDialogResult::Custom(close)),
+            SecretDialogAction::Done
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn passphrase_purpose_preserves_unlock_copy() {
         let unlock = super::macos::copy(super::PassphrasePurpose::Unlock);
         let create = super::macos::copy(super::PassphrasePurpose::Create);
+        let admin_password = super::macos::copy(super::PassphrasePurpose::AdminPassword);
+        let resume = super::macos::copy(super::PassphrasePurpose::ResumeOwnerSecret);
+        let recover = super::macos::copy(super::PassphrasePurpose::RecoverVaultSecret);
         assert_eq!(unlock.0, "Unlock Peppy sync");
         assert_eq!(unlock.1, "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.");
         assert_eq!(unlock.2, "Unlock");
         assert_ne!(unlock, create);
         assert_eq!(create.2, "Create");
+        assert!(admin_password.1.contains("12–1024 UTF-8 bytes"));
+        assert_eq!(resume.0, "Resume Peppy server setup");
+        assert!(resume.1.contains("earlier setup attempt"));
+        assert_eq!(recover.0, "Complete vault setup");
+        assert!(recover.1.contains("when this vault was created"));
     }
 
     #[test]
@@ -494,9 +804,11 @@ mod macos {
     ) -> (&'static str, &'static str, &'static str) {
         match purpose {
             super::PassphrasePurpose::Unlock => ("Unlock Peppy sync", "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.", "Unlock"),
+            super::PassphrasePurpose::ResumeOwnerSecret => ("Resume Peppy server setup", "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.", "Continue"),
+            super::PassphrasePurpose::RecoverVaultSecret => ("Complete vault setup", "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.", "Continue"),
             super::PassphrasePurpose::Create => ("Create encryption passphrase", "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.", "Create"),
             super::PassphrasePurpose::SetupToken => ("Claim Peppy server", "Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
-            super::PassphrasePurpose::AdminPassword => ("Peppy server administrator", "Enter the server administrator password. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
+            super::PassphrasePurpose::AdminPassword => ("Peppy server administrator", "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
             super::PassphrasePurpose::AppLockCreate => ("Require a password to open Peppy", "Choose a password required when Peppy opens on this computer.", "Continue"),
             super::PassphrasePurpose::AppLockConfirm => ("Confirm Peppy password", "Enter the same password again.", "Continue"),
             super::PassphrasePurpose::AppLockUnlock => ("Unlock Peppy", "Enter the password required to open Peppy on this computer.", "Unlock"),
