@@ -311,6 +311,93 @@ describe("SetupLanding", () => {
     expect(bridge.hosted_account).not.toHaveBeenCalled();
   });
 
+  it("retries an initial rejected status request with foreground busy feedback", async () => {
+    const retryStatus = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockRejectedValueOnce({ code: "offline" })
+      .mockReturnValueOnce(retryStatus.promise)
+      .mockRejectedValueOnce({ code: "offline" })
+      .mockResolvedValueOnce(view({ stage: "ready", owner: false }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(2);
+
+    await act(async () => retryStatus.reject({ code: "offline" }));
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledTimes(3));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Waiting for an owner" })).toBeInTheDocument();
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries an initial returned status error without starting discovery", async () => {
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(view({ stage: "error", errorCode: "offline" }))
+      .mockResolvedValueOnce(view({ stage: "ready", owner: false }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("heading", { name: "Waiting for an owner" })).toBeInTheDocument();
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
+  });
+
+  it("ignores a successful status retry after a mode reset without restarting polling", async () => {
+    const retryStatus = deferred<EnrollmentView>();
+    const setInterval = vi.spyOn(window, "setInterval");
+    vi.spyOn(bridge, "enrollment_status")
+      .mockRejectedValueOnce({ code: "offline" })
+      .mockReturnValueOnce(retryStatus.promise);
+    const rendered = renderLanding({ mode: "self-hosted", enrolledWithoutPhone: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone onJoined={vi.fn()} />);
+    await act(async () => retryStatus.resolve(waitingView()));
+
+    expect(document.getElementById("enrollment-waiting_phone")).not.toBeInTheDocument();
+    expect(setInterval.mock.calls.some(([, timeout]) => timeout === 4_000)).toBe(false);
+  });
+
+  it("ignores a rejected status retry after a mode reset", async () => {
+    const retryStatus = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockRejectedValueOnce({ code: "offline" })
+      .mockReturnValueOnce(retryStatus.promise);
+    const rendered = renderLanding({ mode: "self-hosted", enrolledWithoutPhone: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone onJoined={vi.fn()} />);
+    await act(async () => retryStatus.reject({ code: "offline" }));
+
+    expect(document.getElementById("enrollment-error")).not.toBeInTheDocument();
+  });
+
+  it("keeps a newer enrollment mutation busy when an earlier status retry resolves", async () => {
+    const retryStatus = deferred<EnrollmentView>();
+    const discovery = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockRejectedValueOnce({ code: "offline" })
+      .mockReturnValueOnce(retryStatus.promise);
+    vi.spyOn(bridge, "enrollment_discover").mockReturnValue(discovery.promise);
+    const rendered = renderLanding({ enrolledWithoutPhone: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
+    fireEvent.change(await screen.findByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+
+    await act(async () => retryStatus.resolve(view({ stage: "ready", owner: false })));
+
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+  });
+
   it("discovers before adding a phone when status starts at server", async () => {
     vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "server" }));
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
@@ -875,6 +962,24 @@ describe("SetupLanding", () => {
       expect(document.getElementById("enrollment-qr-image")).not.toBeInTheDocument();
     });
 
+    it("retries a returned polling error with status instead of discovery", async () => {
+      const advance = capturePoll();
+      vi.spyOn(bridge, "enrollment_status")
+        .mockResolvedValueOnce(view({ stage: "error", errorCode: "offline" }))
+        .mockResolvedValueOnce(waitingView());
+      renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await screen.findByRole("img", { name: /pairing qr/i });
+
+      await advance();
+      fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+      await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledTimes(2));
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+      expect(bridge.enrollment_discover).toHaveBeenCalledOnce();
+    });
+
     it("keeps approval disabled until the codes-match checkbox is checked", async () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "verify_phone", verificationCode: "382941" }));
       renderLanding({ mode: "self-hosted" });
@@ -1049,6 +1154,10 @@ describe("SetupLanding", () => {
       expect(await screen.findByRole("alert")).toBeInTheDocument();
       expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "revoked");
       expect(document.body).not.toHaveTextContent("token=abc");
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledTimes(2));
+      expect(bridge.enrollment_discover).toHaveBeenCalledOnce();
     });
 
     it("hides unknown codes, URLs, and raw messages behind the unavailable code", async () => {
