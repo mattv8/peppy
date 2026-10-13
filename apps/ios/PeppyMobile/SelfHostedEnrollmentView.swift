@@ -53,11 +53,6 @@ struct SelfHostedEnrollmentView: View {
             }
         }
         .accessibilityIdentifier("self-hosted-enrollment-screen")
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active {
-                enrollment.revealsGeneratedSecret = false
-            }
-        }
         .onDisappear { enrollment.clearSecrets() }
     }
 
@@ -139,30 +134,6 @@ struct SelfHostedEnrollmentView: View {
 
     private var ownerSecretSection: some View {
         Group {
-            Section("Save your vault shared secret") {
-                Text("This separate six-word secret unlocks your encrypted vault. Save it somewhere safe before creating the owner account.")
-                    .font(.footnote)
-                generatedSecretDisplay
-
-                Button(enrollment.revealsGeneratedSecret ? "Hide shared secret" : "Reveal shared secret") {
-                    enrollment.revealsGeneratedSecret.toggle()
-                }
-                .disabled(isUnavailable)
-                .accessibilityIdentifier("self-hosted-secret-reveal")
-
-                Button("Copy shared secret") {
-                    UIPasteboard.general.setItems(
-                        [["public.utf8-plain-text": enrollment.generatedSecret]],
-                        options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(60)]
-                    )
-                }
-                .disabled(isUnavailable)
-                .accessibilityIdentifier("self-hosted-secret-copy")
-
-                Toggle("I saved this shared secret.", isOn: $enrollment.acknowledgedSecretSave)
-                    .disabled(isUnavailable)
-                    .accessibilityIdentifier("self-hosted-secret-ack")
-            }
             Section {
                 Button("Create owner account") { submitOwnerClaim() }
                     .disabled(!enrollment.ownerClaimEnabled(
@@ -172,7 +143,6 @@ struct SelfHostedEnrollmentView: View {
                     .accessibilityIdentifier("self-hosted-owner-submit")
                 Button("Back") {
                     enrollment.ownerStep = .credentials
-                    enrollment.revealsGeneratedSecret = false
                 }
                 .disabled(model.activity != .idle)
                 modeButton
@@ -268,19 +238,16 @@ struct SelfHostedEnrollmentView: View {
                 SecureField("Password", text: $enrollment.vaultPassword).textContentType(.newPassword).accessibilityIdentifier("vault-password-input")
                 SecureField("Confirm password", text: $enrollment.vaultPasswordConfirmation).textContentType(.newPassword).accessibilityIdentifier("vault-password-confirmation")
                 Text(String(localized: "peppy.enrollment_invite_approved_secure_hint", table: "Peppy")).font(.footnote)
-                if enrollment.requiresSavedSecret {
-                    SecureField("Saved vault shared secret", text: $enrollment.savedSecret)
-                        .textContentType(.password).accessibilityIdentifier("invite-saved-secret-input")
-                } else {
-                    if enrollment.vaultSecretPrepared { generatedSecretDisplay }
-                    Button("Generate vault shared secret") { enrollment.prepareVaultSecret(using: generateHostedPassphrase) }
-                        .disabled(isUnavailable).accessibilityIdentifier("invite-secret-generate")
+                if enrollment.requiresEnteredSecret {
+                    SecureField("Vault shared secret", text: $enrollment.savedSecret)
+                        .textContentType(.password)
+                        .accessibilityIdentifier("vault-shared-secret-input")
                 }
-                if enrollment.vaultSecretPrepared || enrollment.requiresSavedSecret {
-                    Toggle("I saved this shared secret.", isOn: $enrollment.acknowledgedSecretSave)
-                        .accessibilityIdentifier("invite-secret-ack")
+                if enrollment.savedSecretHintVisible {
+                    Text("peppy.owner_phone_secret_saved_hint", tableName: "Peppy").font(.footnote)
                 }
             }
+            .onAppear { prepareFreshVaultSecret() }
             Section {
                 Button(String(localized: "peppy.enrollment_create_vault_cta", table: "Peppy")) { submitCreateVault() }
                     .disabled(!enrollment.canSubmitVaultCreation || isUnavailable).accessibilityIdentifier("create-vault-submit")
@@ -299,21 +266,6 @@ struct SelfHostedEnrollmentView: View {
         }
     }
 
-    private var generatedSecretDisplay: some View {
-        Group {
-            if enrollment.revealsGeneratedSecret {
-                Text(enrollment.generatedSecret)
-                    .textSelection(.enabled)
-                    .accessibilityLabel("Generated vault shared secret")
-            } else {
-                Text(concealedSecret)
-                    .accessibilityLabel("Generated vault shared secret hidden")
-            }
-        }
-        .font(.body.monospaced())
-        .privacySensitive()
-        .accessibilityIdentifier("self-hosted-generated-secret")
-    }
 
     private var serverURLField: some View {
         TextField("Server URL", text: $enrollment.origin)
@@ -337,9 +289,6 @@ struct SelfHostedEnrollmentView: View {
         model.activity != .idle || scenePhase != .active
     }
 
-    private var concealedSecret: String {
-        String(repeating: "•••• ", count: 5) + "••••"
-    }
 
     private func submitJoin() {
         let origin = enrollment.origin
@@ -392,7 +341,7 @@ struct SelfHostedEnrollmentView: View {
                 if let pending = await model.pendingVaultRequest(origin: discovery.origin) {
                     enrollment.displayName = pending.displayName
                     if pending.hasPreparedOwnerMaterial {
-                        enrollment.requiresSavedSecret = true
+                        enrollment.applyPreparedOwnerMaterial(storedSecret: pending.hasStoredVaultSecret)
                         enrollment.inviteStage = .approved
                     } else {
                         enrollment.inviteStage = .waiting
@@ -442,7 +391,7 @@ struct SelfHostedEnrollmentView: View {
             case "approved":
                 enrollment.inviteStage = .approved
             case "completed" where progress.hasPreparedOwnerMaterial:
-                enrollment.requiresSavedSecret = true
+                enrollment.applyPreparedOwnerMaterial(storedSecret: progress.hasStoredVaultSecret)
                 enrollment.inviteStage = .approved
             case "completed":
                 model.vaultRequestRecoveryRequired()
@@ -458,11 +407,26 @@ struct SelfHostedEnrollmentView: View {
         let origin = enrollment.origin
         let username = enrollment.vaultUsername
         let password = enrollment.vaultPassword
-        let secret = enrollment.requiresSavedSecret ? enrollment.savedSecret : enrollment.generatedSecret
+        let secret = vaultSecretForSubmission()
         Task {
             await model.createVault(origin: origin, username: username, adminPassword: password, passphrase: secret)
             finishIfReady()
         }
+    }
+
+    /// Stored secrets are resolved natively (empty value). A prepared request without a stored copy uses the re-entered secret.
+    private func vaultSecretForSubmission() -> String {
+        if enrollment.requiresEnteredSecret { return enrollment.savedSecret }
+        if enrollment.requiresSavedSecret { return "" }
+        prepareFreshVaultSecret()
+        return enrollment.generatedSecret
+    }
+
+    /// A fresh approved invite generates its vault secret up front so the create button can enable.
+    /// Resumed requests keep their stored or re-entered material.
+    private func prepareFreshVaultSecret() {
+        guard !enrollment.vaultSecretPrepared, !enrollment.requiresSavedSecret, !enrollment.requiresEnteredSecret else { return }
+        enrollment.prepareVaultSecret(using: generateHostedPassphrase)
     }
 
     private func cancelInvite() {

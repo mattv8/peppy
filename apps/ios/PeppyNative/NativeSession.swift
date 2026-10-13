@@ -43,6 +43,8 @@ public struct VaultRequestProgress: Equatable, Sendable {
     public let state: String
     public let accepted: Bool
     public let hasPreparedOwnerMaterial: Bool
+    /// True only when the protected pending copy of the prepared vault secret is present (a read error throws instead).
+    public var hasStoredVaultSecret = false
 }
 
 private struct InstanceDiscoveryResponse: Decodable {
@@ -150,10 +152,14 @@ public actor NativeSession {
         try await changeEnrollment {
             let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
             let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
-            let request = try producer.createOwnerRequest(setupToken: setupToken, username: username, adminPassword: adminPassword, passphrase: passphrase)
+            let secrets = VaultSecretStore(secure: self.store.secure)
+            // A stored pending secret wins, so a retry after a rejected claim never switches to a new secret.
+            let secret = try secrets.candidatePendingSecret(origin: serverOrigin.serialized, entered: passphrase)
+            try secrets.savePending(secret, origin: serverOrigin.serialized)
+            let request = try producer.createOwnerRequest(setupToken: setupToken, username: username, adminPassword: adminPassword, passphrase: secret)
             let response = try await EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin)).submitOwnerClaim(request)
-            let enrollment = try producer.finishOwnerAdmission(response, passphrase: passphrase)
-            return try self.activateVerifiedEnrollment(enrollment)
+            let enrollment = try producer.finishOwnerAdmission(response, passphrase: secret)
+            return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
         }
     }
 
@@ -180,15 +186,16 @@ public actor NativeSession {
             let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
             let session = self.instanceSession?.origin == serverOrigin.serialized ? self.instanceSession?.token : nil
             let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), instanceSession: session)
+            let secret = try VaultSecretStore(secure: self.store.secure).sharedSecretForJoin(origin: serverOrigin.serialized, entered: passphrase)
             let request = try producer.manualChallengeRequest(vaultID: vaultID, vaultOwner: vaultOwner)
             let challenge = try await host.requestManualChallenge(request)
             guard let id = (try JSONSerialization.jsonObject(with: Data(challenge.utf8)) as? [String: Any])?["enrollment_id"] as? String else {
                 throw ClientError.invalidResponse("manual challenge")
             }
-            let complete = try producer.completeManualChallengeRequest(challenge: challenge, passphrase: passphrase)
+            let complete = try producer.completeManualChallengeRequest(challenge: challenge, passphrase: secret)
             let response = try await host.completeManualChallenge(id: id, request: complete)
-            let enrollment = try producer.finishManualAdmission(response, passphrase: passphrase)
-            return try self.activateVerifiedEnrollment(enrollment)
+            let enrollment = try producer.finishManualAdmission(response, passphrase: secret)
+            return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
         }
     }
 
@@ -284,12 +291,16 @@ public actor NativeSession {
         try await changeEnrollment {
             let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
             guard let producer = try self.restoredVaultRequestProducer(for: serverOrigin.serialized) else { throw ClientError.notEnrolled }
-            let request = try producer.createVaultRequest(username: username, adminPassword: adminPassword, passphrase: passphrase)
+            let secrets = VaultSecretStore(secure: self.store.secure)
+            let vaultSecret = try secrets.candidatePendingSecret(origin: serverOrigin.serialized, entered: passphrase)
+            // The prepared owner material verifies the secret inside createVaultRequest, before any write or request.
+            let request = try producer.createVaultRequest(username: username, adminPassword: adminPassword, passphrase: vaultSecret)
+            try secrets.savePending(vaultSecret, origin: serverOrigin.serialized)
             try self.saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
             let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin))
             let response = try await host.createVault(request)
-            let enrollment = try producer.finishOwnerAdmission(response, passphrase: passphrase)
-            let status = try self.activateVerifiedEnrollment(enrollment)
+            let enrollment = try producer.finishOwnerAdmission(response, passphrase: vaultSecret)
+            let status = try self.activateVerifiedEnrollment(enrollment, bindingSecret: vaultSecret)
             try self.clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
             return status
         }
@@ -334,7 +345,8 @@ public actor NativeSession {
             displayName: pending.displayName,
             state: state,
             accepted: try producer.vaultRequestAccepted(),
-            hasPreparedOwnerMaterial: try producer.hasPreparedOwnerMaterial()
+            hasPreparedOwnerMaterial: try producer.hasPreparedOwnerMaterial(),
+            hasStoredVaultSecret: try VaultSecretStore(secure: store.secure).pendingSecret(origin: pending.origin) != nil
         )
     }
 
@@ -358,18 +370,22 @@ public actor NativeSession {
         }
         let origin = try ServerOrigin(canonical: rawOrigin, allowLoopbackHTTP: allowLoopbackHTTP)
         let producer = try NativeEnrollmentRequestProducer(origin: origin.serialized, deviceName: deviceName)
-        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+        phoneProducer = producer
         do {
+            let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+            try Task.checkCancellation()
+            guard phoneProducer === producer else { throw ClientError.canceled }
             let request = try producer.claimPhoneInvitationRequest(qr: qrPayload)
             let claim = try await host.claimPhoneInvitation(request)
+            try Task.checkCancellation()
+            guard phoneProducer === producer else { throw ClientError.canceled }
             try producer.consumePhoneClaim(claim)
             let context = try phoneContext(from: claim, expectedOrigin: origin.serialized, host: host)
-            phoneProducer = producer
             phoneClaimContext = context
             return try await phoneEnrollmentStatus()
         } catch {
             producer.cancelPhoneFlow()
-            clearPhoneEnrollment(cancelProducer: false)
+            clearPhoneEnrollment(cancelProducer: false, matching: producer)
             throw error
         }
     }
@@ -380,6 +396,11 @@ public actor NativeSession {
         }
         let descriptor = try validatedPhoneStatusDescriptor(producer: producer, context: context)
         let status = try await context.host.executePhoneStatusDescriptor(descriptor)
+        try Task.checkCancellation()
+        guard phoneProducer === producer,
+              phoneClaimContext?.invitationID == context.invitationID else {
+            throw ClientError.canceled
+        }
         let state: String
         do {
             guard let object = try JSONSerialization.jsonObject(with: Data(status.utf8)) as? [String: Any],
@@ -392,14 +413,14 @@ public actor NativeSession {
             }
             state = parsedState
         } catch {
-            if phoneProducer != nil { clearPhoneEnrollment() }
+            clearPhoneEnrollment(matching: producer)
             throw error
         }
         let code: String
         do {
             code = try producer.phoneSAS(status: status)
         } catch {
-            clearPhoneEnrollment()
+            clearPhoneEnrollment(matching: producer)
             throw error
         }
         return PhoneEnrollmentStatus(
@@ -421,16 +442,26 @@ public actor NativeSession {
             } else {
                 let descriptor = try self.validatedPhoneStatusDescriptor(producer: producer, context: context)
                 let status = try await context.host.executePhoneStatusDescriptor(descriptor)
+                try Task.checkCancellation()
+                guard self.phoneProducer === producer,
+                      self.phoneClaimContext?.invitationID == context.invitationID else {
+                    throw ClientError.canceled
+                }
                 do {
                     request = try producer.confirmPhoneInvitationRequest(status: status, sharedSecret: sharedSecret)
                     self.phoneConfirmationRequest = request
                 } catch {
-                    self.clearPhoneEnrollment()
+                    self.clearPhoneEnrollment(matching: producer)
                     throw error
                 }
             }
             let response = try await context.host.confirmPhoneInvitation(id: context.invitationID, request: request)
-            defer { self.clearPhoneEnrollment(cancelProducer: false) }
+            defer { self.clearPhoneEnrollment(cancelProducer: false, matching: producer) }
+            try Task.checkCancellation()
+            guard self.phoneProducer === producer,
+                  self.phoneClaimContext?.invitationID == context.invitationID else {
+                throw ClientError.canceled
+            }
             let enrollment = try producer.finishedPhoneAdmission(response)
             return try self.activateVerifiedEnrollment(enrollment)
         }
@@ -438,6 +469,59 @@ public actor NativeSession {
 
     public func cancelPhoneEnrollment() {
         clearPhoneEnrollment()
+    }
+
+    public func ownerPhoneApprovalHost(deviceName: String) async throws -> OwnerPhoneApprovalHost {
+        guard let record, record.role == "owner", status.keysUnlocked else { throw ClientError.notEnrolled }
+        let origin = try ServerOrigin(canonical: record.identity.origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let client = try newNativeExistingOwnerEnrollmentClient(
+            origin: origin.serialized,
+            kind: .ios,
+            deviceName: deviceName,
+            profileJson: record.profileJson,
+            headerJson: record.headerJson
+        )
+        let accountSession = try await hostedSession(for: origin)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession)
+        return OwnerPhoneApprovalHost(
+            producer: NativeOwnerPhoneProducer(client: client),
+            transport: EnrollmentOwnerPhoneTransport(host: host),
+            secrets: VaultSecretStore(secure: store.secure),
+            identity: record.identity,
+            credential: try store.token(record.identity),
+            isHosted: origin.serialized == "https://peppy.pro",
+            accountSession: accountSession,
+            shouldRotate: { stage, seconds, active, requested in
+                let nativeStage: NativeOwnerPhoneStage
+                switch stage {
+                case .waiting: nativeStage = .waiting
+                case .verify: nativeStage = .verify
+                case .approved: nativeStage = .approved
+                case .connected: nativeStage = .connected
+                case .expired: nativeStage = .expired
+                case .denied: nativeStage = .denied
+                }
+                return ownerPhoneShouldRotate(
+                    stage: nativeStage,
+                    expiresInSeconds: UInt32(clamping: seconds),
+                    active: active == .transfer ? .transfer : .sharedSecret,
+                    requested: requested == .transfer ? .transfer : .sharedSecret
+                )
+            }
+        )
+    }
+
+    public func ownerVaultSecret() throws -> String {
+        guard let record else { throw ClientError.notEnrolled }
+        guard let secret = try VaultSecretStore(secure: store.secure).read(record.identity) else {
+            throw ClientError.missingSecret("vault shared secret")
+        }
+        return secret
+    }
+
+    /// A network confirmation failure may retain Rust's prepared request for one deliberate retry.
+    public func phoneEnrollmentCanRetryConfirmation() -> Bool {
+        phoneProducer != nil && phoneClaimContext != nil && phoneConfirmationRequest != nil
     }
 
     private func phoneContext(
@@ -476,7 +560,8 @@ public actor NativeSession {
         return descriptor
     }
 
-    private func clearPhoneEnrollment(cancelProducer: Bool = true) {
+    private func clearPhoneEnrollment(cancelProducer: Bool = true, matching producer: NativeEnrollmentRequestProducer? = nil) {
+        guard producer == nil || phoneProducer === producer else { return }
         if cancelProducer { phoneProducer?.cancelPhoneFlow() }
         phoneProducer = nil
         phoneClaimContext = nil
@@ -597,7 +682,8 @@ public actor NativeSession {
         if try store.databaseWasCreated(identity), !databaseExists(identity) { throw ClientError.localDatabaseMissing }
     }
 
-    private func activateVerifiedEnrollment(_ enrollment: NativeEnrollmentIdentity) throws -> SessionStatus {
+    /// `bindingSecret` is set only by owner claim, vault creation, and manual admission, where the secret was just verified.
+    private func activateVerifiedEnrollment(_ enrollment: NativeEnrollmentIdentity, bindingSecret: String? = nil) throws -> SessionStatus {
         let metadata = enrollment.metadata()
         let identity = EnrollmentIdentity(origin: metadata.origin, vaultId: metadata.vaultId, deviceId: metadata.deviceId)
         guard UUID(uuidString: identity.vaultId)?.uuidString.lowercased() == identity.vaultId,
@@ -618,6 +704,9 @@ public actor NativeSession {
             self.record = record
             status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
             refreshCount()
+            if let bindingSecret {
+                VaultSecretStore(secure: store.secure).storeBinding(bindingSecret, for: identity, origin: identity.origin)
+            }
             return status
         } catch {
             try? nativeClient.dispose()

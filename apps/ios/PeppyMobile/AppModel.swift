@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if canImport(LocalAuthentication)
+import LocalAuthentication
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -236,6 +239,7 @@ final class AppModel {
     }
 
     func beginPhoneEnrollment(qr: String) async -> PhoneEnrollmentStatus? {
+        lastError = nil
         activity = .enrolling
         defer { activity = .idle }
         do { return try await session.beginPhoneEnrollment(qrPayload: qr, deviceName: UIDevice.current.name) }
@@ -251,11 +255,63 @@ final class AppModel {
         catch { lastError = (error as? ClientError)?.userMessage ?? "Pairing expired or was denied."; return nil }
     }
 
-    func confirmPhoneEnrollment(sharedSecret: String?) async {
-        await run(.enrolling) { try await $0.confirmPhoneEnrollment(sharedSecret: sharedSecret) }
+    func confirmPhoneEnrollment(sharedSecret: String?) async -> PhoneEnrollmentAttemptCoordinator.ConfirmationOutcome {
+        lastError = nil
+        activity = .enrolling
+        defer { activity = .idle }
+        do {
+            status = try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret)
+            lastError = nil
+            enrollmentBlocked = false
+            return .succeeded
+        } catch is CancellationError {
+            return .canceled
+        } catch ClientError.canceled {
+            return .canceled
+        } catch {
+            let failure = error as? ClientError
+            lastError = failure?.userMessage ?? "Unexpected error."
+            switch failure {
+            case .localDatabaseMissing, .missingSecret, .identityMismatch: enrollmentBlocked = true
+            default: break
+            }
+            let retainedRequest = await session.phoneEnrollmentCanRetryConfirmation()
+            if retainedRequest, case .some(.network) = failure { return .retryableFailure }
+            if retainedRequest, case let .some(.server(status, _)) = failure, status >= 500 { return .retryableFailure }
+            return .terminalFailure
+        }
     }
 
     func cancelPhoneEnrollment() { Task { await session.cancelPhoneEnrollment() } }
+
+    func ownerPhoneApprovalHost() async -> OwnerPhoneApprovalHost? {
+        do {
+            return try await session.ownerPhoneApprovalHost(deviceName: UIDevice.current.name)
+        } catch {
+            lastError = (error as? ClientError)?.userMessage ?? "Could not prepare phone approval."
+            return nil
+        }
+    }
+
+    func revealOwnerVaultSecret() async -> String? {
+        #if canImport(LocalAuthentication)
+        let context = LAContext()
+        do {
+            guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
+                lastError = String(localized: "peppy.owner_phone_error_lock_required", table: "Peppy")
+                return nil
+            }
+            try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: String(localized: "peppy.owner_phone_secret_reveal_cta", table: "Peppy"))
+            return try await session.ownerVaultSecret()
+        } catch {
+            lastError = String(localized: "peppy.owner_phone_error_secret_unavailable", table: "Peppy")
+            return nil
+        }
+        #else
+        lastError = String(localized: "peppy.owner_phone_error_lock_required", table: "Peppy")
+        return nil
+        #endif
+    }
 
     func refreshDevices() async {
         defer { devicesLoaded = true }

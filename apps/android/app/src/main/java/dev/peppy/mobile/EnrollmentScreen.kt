@@ -10,9 +10,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -71,20 +73,84 @@ internal class EnrollmentScanGate {
     @Synchronized fun cancel() { active = false; inFlight = false }
 }
 
+/** Tracks the one automatic transfer confirmation allowed for a phone scan. */
+internal class PhoneEnrollmentAttempt {
+    private var active = true
+    private var automaticConfirmationStarted = false
+
+    enum class Completion { SUCCEEDED, FAILED, IGNORED }
+
+    @Synchronized
+    fun startAutomaticConfirmation(state: EnrollmentHost.PhoneState, requiresSharedSecret: Boolean): Boolean {
+        if (!active || automaticConfirmationStarted || state != EnrollmentHost.PhoneState.APPROVED || requiresSharedSecret) return false
+        automaticConfirmationStarted = true
+        return true
+    }
+
+    @Synchronized
+    fun complete(result: ImportResult, current: Boolean): Completion {
+        if (!active || !current) return Completion.IGNORED
+        active = false
+        return if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) Completion.SUCCEEDED else Completion.FAILED
+    }
+
+    fun deliverCompletion(
+        result: ImportResult,
+        current: Boolean,
+        onSuccess: () -> Unit,
+        onFailure: () -> Unit,
+    ): Completion = complete(result, current).also { completion ->
+        when (completion) {
+            Completion.SUCCEEDED -> onSuccess()
+            Completion.FAILED -> onFailure()
+            Completion.IGNORED -> Unit
+        }
+    }
+
+    @Synchronized fun cancel() {
+        active = false
+    }
+}
+
 internal fun canClaimOwner(
     ownerResume: Boolean,
+    ownerSecretStored: Boolean,
     setupToken: String,
     setupCodeRequired: Boolean,
     adminPassword: String,
     secret: String,
-    saved: Boolean,
     busy: Boolean,
 ): Boolean =
-        secret.isNotBlank() &&
-        (ownerResume || saved) &&
+    (secret.isNotBlank() || (ownerResume && ownerSecretStored)) &&
         (!setupCodeRequired || setupToken.isNotBlank()) &&
         adminPassword.length >= 12 &&
         !busy
+
+/** The entered secret is asked for only when a resumed checkpoint has no stored pending secret (legacy). */
+internal fun ownerSecretFieldVisible(ownerResume: Boolean, ownerSecretStored: Boolean): Boolean =
+    ownerResume && !ownerSecretStored
+
+/** Approved vault creation asks for the secret only when the pending slot is missing; unavailable storage never prompts. */
+internal fun recoverySecretFieldVisible(state: EnrollmentHost.ResumeSecret): Boolean = state == EnrollmentHost.ResumeSecret.PROMPT
+
+internal fun canCreateVault(
+    username: String,
+    adminPassword: String,
+    secret: String,
+    state: EnrollmentHost.ResumeSecret,
+    busy: Boolean,
+): Boolean =
+    username.isNotBlank() &&
+        adminPassword.length >= 12 &&
+        (secret.isNotBlank() || state == EnrollmentHost.ResumeSecret.STORED) &&
+        state != EnrollmentHost.ResumeSecret.UNAVAILABLE &&
+        !busy
+
+internal fun ownerSecretErrorMessage(code: String?): Int? = when (code) {
+    "wrong-passphrase" -> R.string.peppy_owner_phone_error_wrong_passphrase
+    "vault-secret-mismatch" -> R.string.peppy_owner_phone_error_secret_mismatch
+    else -> null
+}
 
 @Composable
 internal fun GeneratedSecretControls(
@@ -135,16 +201,15 @@ internal fun EnrollmentScreen(
     var inviteLink by remember { mutableStateOf("") }
     var displayName by remember { mutableStateOf("") }
     var vaultUsername by remember { mutableStateOf("") }
-    var recoverySecretRequired by remember { mutableStateOf(false) }
+    var recoveryState by remember { mutableStateOf(EnrollmentHost.ResumeSecret.NONE) }
     var enrollmentForeground by remember { mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
     var inviteState by remember { mutableStateOf(EnrollmentHost.VaultRequestState.PENDING) }
     var inviteGeneration by remember { mutableStateOf(0) }
     var adminPassword by remember { mutableStateOf("") }
     var secret by remember { mutableStateOf("") }
-    var revealSecret by remember { mutableStateOf(false) }
     var phoneSecret by remember { mutableStateOf("") }
-    var saved by remember { mutableStateOf(false) }
     var ownerResume by remember { mutableStateOf(false) }
+    var ownerSecretStored by remember { mutableStateOf(false) }
     var setupCodeRequired by remember { mutableStateOf(true) }
     var discoveryGeneration by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -154,7 +219,8 @@ internal fun EnrollmentScreen(
     var phoneState by remember { mutableStateOf<EnrollmentHost.PhoneState?>(null) }
     var phoneTerminal by remember { mutableStateOf<String?>(null) }
     var sas by remember { mutableStateOf<String?>(null) }
-    var confirmed by remember { mutableStateOf(false) }
+    var phoneAttempt by remember { mutableStateOf<PhoneEnrollmentAttempt?>(null) }
+    var phoneConfirming by remember { mutableStateOf(false) }
     var scannerActive by remember { mutableStateOf(true) }
     var scanGeneration by remember { mutableStateOf(0) }
     var cameraGranted by remember {
@@ -163,6 +229,7 @@ internal fun EnrollmentScreen(
     val cameraRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { cameraGranted = it }
     val networkFailed = stringResource(R.string.peppy_production_network_failed)
     val invalidQr = stringResource(R.string.peppy_production_pairing_invalid_qr)
+    val pairingExpired = stringResource(R.string.peppy_production_pairing_expired)
     val denied = stringResource(R.string.peppy_hosted_join_denied)
     val sasLabel = stringResource(R.string.peppy_production_pairing_sas_label)
     val invalidSetupToken = stringResource(R.string.peppy_enrollment_error_invalid_setup_token)
@@ -179,7 +246,7 @@ internal fun EnrollmentScreen(
                 else {
                     val errorCode = host.takeErrorCode()
                     if (errorCode == "vault_owner_required") vaultOwnerRequired = true
-                    error = enrollmentErrorMessage(errorCode)?.let(context::getString) ?: when (result) {
+                    error = (enrollmentErrorMessage(errorCode) ?: ownerSecretErrorMessage(errorCode))?.let(context::getString) ?: when (result) {
                     ImportResult.SETUP_TOKEN_REJECTED -> invalidSetupToken
                     ImportResult.INSTANCE_ALREADY_CLAIMED -> instanceAlreadyClaimed
                     ImportResult.SERVER_REJECTED, ImportResult.NETWORK_ERROR -> networkFailed
@@ -193,16 +260,25 @@ internal fun EnrollmentScreen(
     fun resetPhone() {
         scanGeneration += 1
         scanGate.restart()
+        phoneAttempt?.cancel()
+        phoneAttempt = null
         phone?.close()
         phone = null
         phoneStatus = null
         phoneState = null
         phoneTerminal = null
         sas = null
-        confirmed = false
         phoneSecret = ""
+        phoneConfirming = false
         busy = false
         error = null
+    }
+
+    fun phoneClaimTerminal(failure: EnrollmentHost.PhoneClaimFailure?): String = when (failure) {
+        EnrollmentHost.PhoneClaimFailure.INVALID_QR, null -> invalidQr
+        EnrollmentHost.PhoneClaimFailure.NETWORK -> networkFailed
+        EnrollmentHost.PhoneClaimFailure.EXPIRED -> pairingExpired
+        EnrollmentHost.PhoneClaimFailure.REJECTED -> denied
     }
 
     DisposableEffect(host) {
@@ -210,6 +286,7 @@ internal fun EnrollmentScreen(
             scannerActive = false
             scanGate.cancel()
             scanGeneration += 1
+            phoneAttempt?.cancel()
             phone?.close()
             host.close()
         }
@@ -223,7 +300,7 @@ internal fun EnrollmentScreen(
     }
 
     Column(
-        Modifier.fillMaxSize().padding(24.dp).testTag("native-enrollment-screen"),
+        Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp).testTag("native-enrollment-screen"),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         when (stage) {
@@ -252,10 +329,14 @@ internal fun EnrollmentScreen(
                                     origin = canonical
                                     setupToken = ""
                                     setupCodeRequired = discovery.setupCodeRequired
-                                    ownerResume = !discovery.claimed && host.hasPendingOwner(canonical)
+                                    val resume = if (discovery.claimed) EnrollmentHost.ResumeSecret.NONE else host.ownerResumeSecret(canonical)
                                     if (discovery.claimed && host.pendingVaultRequest(canonical)) {
                                         stage = EnrollmentStage.INVITE_WAITING
+                                    } else if (resume == EnrollmentHost.ResumeSecret.UNAVAILABLE) {
+                                        error = importMessage(ImportResult.STORAGE_ERROR)
                                     } else {
+                                        ownerResume = resume != EnrollmentHost.ResumeSecret.NONE
+                                        ownerSecretStored = resume == EnrollmentHost.ResumeSecret.STORED
                                         host.takeErrorCode()?.let { error = importMessage(ImportResult.STORAGE_ERROR) }
                                         stage = if (discovery.claimed) EnrollmentStage.CLAIMED_CHOOSER else EnrollmentStage.OWNER
                                     }
@@ -277,19 +358,12 @@ internal fun EnrollmentScreen(
                 }
                 OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("enrollment-username"))
                 OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("admin-password"))
-                if (ownerResume) {
+                if (ownerSecretFieldVisible(ownerResume, ownerSecretStored)) {
                     OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("owner-resume-secret"))
+                } else if (ownerResume) {
+                    Text(stringResource(R.string.peppy_owner_phone_secret_saved_hint), style = MaterialTheme.typography.bodySmall)
                 } else {
                     if (secret.isEmpty()) Button(onClick = { secret = generateHostedPassphrase() }, modifier = Modifier.testTag("generate-vault-secret")) { Text(stringResource(R.string.peppy_passphrase_generate_cta)) }
-                    if (secret.isNotEmpty()) {
-                        GeneratedSecretControls(
-                            secret = secret,
-                            revealSecret = revealSecret,
-                            saved = saved,
-                            onToggleReveal = { revealSecret = !revealSecret },
-                            onAcknowledge = { saved = it },
-                        )
-                    }
                 }
                 Text(
                     stringResource(if (setupCodeRequired) R.string.peppy_enrollment_setup_protected else R.string.peppy_enrollment_setup_open),
@@ -298,7 +372,7 @@ internal fun EnrollmentScreen(
                 )
                 Button(
                     onClick = { run { host.claimOwner(origin, username, if (setupCodeRequired) setupToken else "", adminPassword, secret) } },
-                    enabled = canClaimOwner(ownerResume, setupToken, setupCodeRequired, adminPassword, secret, saved, busy),
+                    enabled = canClaimOwner(ownerResume, ownerSecretStored, setupToken, setupCodeRequired, adminPassword, secret, busy),
                     modifier = Modifier.testTag("claim-owner"),
                 ) { Text(stringResource(R.string.peppy_continue)) }
             }
@@ -366,7 +440,8 @@ internal fun EnrollmentScreen(
                         val observedGeneration = inviteGeneration
                         when (withContext(Dispatchers.IO) { host.vaultRequestStatus(origin, inviteState) }) {
                             EnrollmentHost.VaultRequestState.APPROVED -> if (observedGeneration == inviteGeneration && stage == EnrollmentStage.INVITE_WAITING) {
-                                recoverySecretRequired = withContext(Dispatchers.IO) { host.hasPreparedVaultCreation(origin) }
+                                recoveryState = withContext(Dispatchers.IO) { host.vaultCreationSecret(origin) }
+                                if (recoveryState == EnrollmentHost.ResumeSecret.UNAVAILABLE) error = importMessage(ImportResult.STORAGE_ERROR)
                                 stage = EnrollmentStage.INVITE_APPROVED
                             }
                             EnrollmentHost.VaultRequestState.DENIED -> if (observedGeneration == inviteGeneration && stage == EnrollmentStage.INVITE_WAITING) stage = EnrollmentStage.INVITE_DENIED
@@ -384,13 +459,18 @@ internal fun EnrollmentScreen(
                 OutlinedTextField(vaultUsername, { vaultUsername = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("vault-username"))
                 Text(stringResource(R.string.peppy_enrollment_invite_approved_secure_hint), style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("vault-password"))
-                if (recoverySecretRequired) {
+                if (recoverySecretFieldVisible(recoveryState)) {
                     OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("recovery-vault-secret"))
+                } else if (recoveryState == EnrollmentHost.ResumeSecret.STORED) {
+                    Text(stringResource(R.string.peppy_owner_phone_secret_saved_hint), style = MaterialTheme.typography.bodySmall)
                 } else {
                     if (secret.isEmpty()) Button(onClick = { secret = generateHostedPassphrase() }, modifier = Modifier.testTag("generate-vault-secret")) { Text(stringResource(R.string.peppy_passphrase_generate_cta)) }
-                    if (secret.isNotEmpty()) GeneratedSecretControls(secret, revealSecret, saved, { revealSecret = !revealSecret }, { saved = it })
                 }
-                Button(onClick = { run { host.createVault(origin, vaultUsername, adminPassword, secret) } }, enabled = vaultUsername.isNotBlank() && adminPassword.length >= 12 && secret.isNotBlank() && (recoverySecretRequired || saved) && !busy, modifier = Modifier.testTag("create-vault-submit")) { Text(stringResource(R.string.peppy_enrollment_create_vault_cta)) }
+                Button(
+                    onClick = { run { host.createVault(origin, vaultUsername, adminPassword, secret) } },
+                    enabled = canCreateVault(vaultUsername, adminPassword, secret, recoveryState, busy),
+                    modifier = Modifier.testTag("create-vault-submit"),
+                ) { Text(stringResource(R.string.peppy_enrollment_create_vault_cta)) }
             }
             EnrollmentStage.INVITE_DENIED, EnrollmentStage.INVITE_EXPIRED -> {
                 val expired = stage == EnrollmentStage.INVITE_EXPIRED
@@ -407,7 +487,7 @@ internal fun EnrollmentScreen(
                     Button(onClick = { resetPhone() }, modifier = Modifier.testTag("phone-retry")) { Text(stringResource(R.string.peppy_try_again)) }
                 } else if (flow == null) {
                     if (cameraGranted) {
-                        scanner(Modifier.fillMaxWidth().testTag("enrollment-qr-scanner")) { raw ->
+                        scanner(Modifier.fillMaxWidth().weight(1f).testTag("enrollment-qr-scanner")) { raw ->
                             if (scannerActive && !busy && phone == null && phoneTerminal == null && scanGate.tryStart()) {
                                 busy = true
                                 val generation = scanGeneration
@@ -427,13 +507,19 @@ internal fun EnrollmentScreen(
                                                     accepted = true
                                                 }
                                                 if (candidate == null && !accepted) {
-                                                    error = invalidQr
-                                                    scanGate.finish()
+                                                    phoneTerminal = phoneClaimTerminal(host.takePhoneClaimFailure())
                                                 } else if (!accepted) {
                                                     phone = candidate
+                                                    phoneAttempt = PhoneEnrollmentAttempt()
                                                     accepted = true
                                                     error = null
                                                 }
+                                            }
+                                        }
+                                    } catch (_: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            if (scannerActive && generation == scanGeneration && phone == null && scanGate.acceptResult()) {
+                                                phoneTerminal = invalidQr
                                             }
                                         }
                                     } finally {
@@ -445,6 +531,7 @@ internal fun EnrollmentScreen(
                                 }
                             }
                         }
+                        if (busy) CircularProgressIndicator(Modifier.testTag("phone-scan-waiting"))
                     } else {
                         Button(onClick = { cameraRequest.launch(Manifest.permission.CAMERA) }, modifier = Modifier.testTag("enrollment-camera-request")) { Text(stringResource(R.string.peppy_enrollment_allow_camera)) }
                     }
@@ -477,6 +564,33 @@ internal fun EnrollmentScreen(
                                         phoneStatus = current
                                         phoneState = currentState
                                         if (sas == null) sas = withContext(Dispatchers.IO) { flow.sas(current) }
+                                        if (sas == null) {
+                                            phoneTerminal = invalidQr
+                                            flow.close()
+                                            return@LaunchedEffect
+                                        }
+                                        val attempt = phoneAttempt
+                                        if (attempt?.startAutomaticConfirmation(currentState, flow.requiresSharedSecret()) == true) {
+                                            val generation = scanGeneration
+                                            phoneConfirming = true
+                                            val result = withContext(Dispatchers.IO) { flow.confirm(current, null) }
+                                            attempt.deliverCompletion(
+                                                result = result,
+                                                current = scannerActive && generation == scanGeneration && phone === flow,
+                                                onSuccess = {
+                                                    phoneConfirming = false
+                                                    onEnrolled()
+                                                },
+                                                onFailure = {
+                                                    phoneConfirming = false
+                                                    phoneTerminal = when (result) {
+                                                        ImportResult.NETWORK_ERROR, ImportResult.SERVER_REJECTED -> networkFailed
+                                                        else -> importMessage(result)
+                                                    }
+                                                    flow.close()
+                                                },
+                                            )
+                                        }
                                         return@LaunchedEffect
                                     }
                                     EnrollmentHost.PhoneState.DENIED, EnrollmentHost.PhoneState.EXPIRED -> {
@@ -509,8 +623,6 @@ internal fun EnrollmentScreen(
                         if (phoneState != EnrollmentHost.PhoneState.APPROVED) {
                             Text(stringResource(R.string.peppy_hosted_join_waiting), Modifier.testTag("phone-approval-waiting"))
                         }
-                        Checkbox(confirmed, { confirmed = it }, Modifier.testTag("phone-sas-confirm"))
-                        Text(stringResource(R.string.peppy_production_pairing_verify))
                         if (flow.requiresSharedSecret()) {
                             OutlinedTextField(
                                 phoneSecret,
@@ -519,12 +631,24 @@ internal fun EnrollmentScreen(
                                 visualTransformation = PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth().testTag("phone-shared-secret"),
                             )
+                            Button(
+                                onClick = { phoneStatus?.let { status -> run { flow.confirm(status, phoneSecret.takeIf(String::isNotBlank)) } } },
+                                enabled = phoneState == EnrollmentHost.PhoneState.APPROVED && phoneSecret.isNotBlank() && !busy,
+                                modifier = Modifier.testTag("phone-confirm"),
+                            ) { Text(stringResource(R.string.peppy_continue)) }
+                        } else if (phoneConfirming && phoneState == EnrollmentHost.PhoneState.APPROVED) {
+                            Column(
+                                Modifier.testTag("phone-connecting"),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                CircularProgressIndicator()
+                                Text(
+                                    stringResource(R.string.peppy_production_pairing_connecting),
+                                    Modifier.semantics { liveRegion = LiveRegionMode.Assertive },
+                                )
+                            }
                         }
-                        Button(
-                            onClick = { phoneStatus?.let { status -> run { flow.confirm(status, phoneSecret.takeIf(String::isNotBlank)) } } },
-                            enabled = phoneState == EnrollmentHost.PhoneState.APPROVED && confirmed && (!flow.requiresSharedSecret() || phoneSecret.isNotBlank()) && !busy,
-                            modifier = Modifier.testTag("phone-confirm"),
-                        ) { Text(stringResource(R.string.peppy_continue)) }
                     }
                 }
             }
@@ -535,9 +659,10 @@ internal fun EnrollmentScreen(
             scannerActive = false
             scanGate.cancel()
             scanGeneration += 1
+            phoneAttempt?.cancel()
             phone?.close()
             host.close()
             onDismiss()
-        }, modifier = Modifier.testTag("enrollment-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
+        }, enabled = !phoneConfirming, modifier = Modifier.testTag("enrollment-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
     }
 }

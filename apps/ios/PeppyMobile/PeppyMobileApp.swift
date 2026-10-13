@@ -40,6 +40,8 @@ struct DeviceView: View {
     @State private var showingSelfHosted = false
     @State private var showingSelfHostedEnrollment = false
     @State private var showingPhoneEnrollment = false
+    @State private var showingOwnerPhoneApproval = false
+    @State private var ownerPhoneApprovalHost: OwnerPhoneApprovalHost?
     @State private var showingHostedEnrollment = false
     @State private var enrollmentLoaded = false
 
@@ -76,6 +78,15 @@ struct DeviceView: View {
         }
         .sheet(isPresented: $showingPhoneEnrollment) {
             PhoneEnrollmentView(model: model, isPresented: $showingPhoneEnrollment)
+        }
+        .sheet(isPresented: $showingOwnerPhoneApproval) {
+            if let ownerPhoneApprovalHost {
+                OwnerPhoneApprovalView(
+                    host: ownerPhoneApprovalHost,
+                    isPresented: $showingOwnerPhoneApproval,
+                    revealSecret: { await model.revealOwnerVaultSecret() }
+                )
+            }
         }
     }
 
@@ -287,6 +298,22 @@ struct DeviceView: View {
                         .disabled(model.activity != .idle).accessibilityIdentifier("disconnect-button")
                 }
                 devicesSection
+                if model.status.role == "owner", model.status.keysUnlocked {
+                    Section {
+                        Button {
+                            Task {
+                                ownerPhoneApprovalHost = await model.ownerPhoneApprovalHost()
+                                showingOwnerPhoneApproval = ownerPhoneApprovalHost != nil
+                            }
+                        } label: {
+                            Text("peppy.owner_phone_add_cta", tableName: "Peppy").bold().frame(minHeight: 44)
+                        }
+                        .accessibilityIdentifier("add-phone-button")
+                    } header: {
+                        Text("peppy.owner_phone_section_title", tableName: "Peppy")
+                    }
+                    .accessibilityIdentifier("owner-phone-section")
+                }
                 relaySection
                 if model.status.role == "owner" { vaultSection }
                 if let identity = model.status.identity, identity.origin == "https://peppy.pro" {

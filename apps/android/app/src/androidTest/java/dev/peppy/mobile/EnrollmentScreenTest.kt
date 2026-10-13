@@ -1,5 +1,7 @@
 package dev.peppy.mobile
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -15,9 +17,11 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 
@@ -50,6 +54,60 @@ class EnrollmentScreenTest {
         }
 
         compose.onNodeWithTag("fake-enrollment-scanner").assertIsDisplayed()
+    }
+
+    @Test fun failedScanReplacesScannerWithRetryAndCanScanAgain() {
+        var onCode: ((String) -> Unit)? = null
+        compose.setContent {
+            EnrollmentScreen(
+                initialOrigin = HostedAccountClient.ORIGIN,
+                onDismiss = {},
+                onEnrolled = {},
+                hasCameraPermission = { true },
+                scanner = { modifier, callback ->
+                    onCode = callback
+                    Box(modifier.fillMaxSize())
+                },
+            )
+        }
+
+        compose.onNodeWithTag("enrollment-qr-scanner").assertIsDisplayed()
+        compose.onNodeWithTag("enrollment-cancel").assertIsDisplayed()
+        compose.runOnIdle { onCode?.invoke("{") }
+        compose.runOnIdle { onCode?.invoke("{") }
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithTag("phone-terminal-error").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNodeWithTag("phone-terminal-error").assertIsDisplayed()
+        compose.onNodeWithTag("phone-retry").assertIsDisplayed()
+        compose.onNodeWithTag("enrollment-qr-scanner").assertDoesNotExist()
+        compose.runOnIdle { onCode?.invoke("{") }
+        compose.onNodeWithTag("phone-terminal-error").assertIsDisplayed()
+        compose.onNodeWithTag("phone-retry").performClick()
+        compose.onNodeWithTag("phone-terminal-error").assertDoesNotExist()
+        compose.onNodeWithTag("enrollment-qr-scanner").assertIsDisplayed()
+        compose.runOnIdle { onCode?.invoke("{") }
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithTag("phone-terminal-error").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag("phone-terminal-error").assertIsDisplayed()
+    }
+
+    @Test fun cancelFromPhoneScannerDispatchesDismiss() {
+        var dismisses = 0
+        compose.setContent {
+            EnrollmentScreen(
+                initialOrigin = HostedAccountClient.ORIGIN,
+                onDismiss = { dismisses += 1 },
+                onEnrolled = {},
+                hasCameraPermission = { true },
+                scanner = { modifier, _ -> Box(modifier.fillMaxSize()) },
+            )
+        }
+
+        compose.onNodeWithTag("enrollment-cancel").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(1, dismisses) }
     }
 
     @Test fun invalidServerOriginAnnouncesErrorAssertively() {
