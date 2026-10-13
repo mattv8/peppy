@@ -76,9 +76,9 @@ pub fn sync_webview(webview: &Webview, head_panel: bool) {
     let chrome_webview = webview.clone();
     let _ = webview.run_on_main_thread(move || {
         let window = chrome_webview.window();
-        let rounded = !head_panel
-            && !window.is_maximized().unwrap_or(false)
-            && !window.is_fullscreen().unwrap_or(false);
+        let rounded = head_panel
+            || (!window.is_maximized().unwrap_or(false)
+                && !window.is_fullscreen().unwrap_or(false));
         let masked_corners = apply_window(&window, rounded);
         let value = if masked_corners { "true" } else { "false" };
         let material = MATERIALS.with(|materials| materials.borrow().active(chrome_webview.label()));
