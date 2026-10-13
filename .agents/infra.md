@@ -146,7 +146,11 @@ path; it does not consume hosted env files or run private migrations.
   Missing new Rust symbols at iOS link time can mean stale libraries rather
   than an invalid Swift API. Rebuild the matching target libraries with the
   maintained [Android](../infra/compose/verify-android-native.sh) and
-  [iOS](../infra/build/build-ios-artifacts.sh) scripts.
+  [iOS](../infra/build/build-ios-artifacts.sh) scripts. A bare `./gradlew`
+  assemble packages whatever is already in `src/main/jniLibs`; after binding
+  changes, build installable APKs with `just android-build` or
+  `just android-test`, which rebuild JNI first. Otherwise the app fails at
+  runtime with `UnsatisfiedLinkError` for the new symbols.
 - Android's script defaults to `PEPPY_ANDROID_NATIVE_PROFILE=debug`; the
   [artifact workflow](../.github/workflows/build-artifacts.yml) explicitly uses
   `release`. The host library used for bindgen remains debug in either case.
