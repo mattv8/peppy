@@ -2002,10 +2002,10 @@ public func FfiConverterTypeNativeClient_lower(_ value: NativeClient) -> UInt64 
 
 public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
-    func acceptVaultRequestCreated(json: String) throws
-
+    func acceptVaultRequestCreated(json: String) throws 
+    
     func approvePhoneInvitationRequest(statusJson: String, passphrase: String) throws  -> String
-
+    
     func beginVaultRequest(origin: String, inviteToken: String, displayName: String) throws  -> String
     
     /**
@@ -2017,8 +2017,8 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
     func claimPhoneInvitationRequest(qrJson: String) throws  -> String
     
-    func clearVaultRequest() throws
-
+    func clearVaultRequest() throws 
+    
     func completeManualChallengeRequest(challengeJson: String, passphrase: String) throws  -> String
     
     func confirmPhoneInvitationRequest(statusJson: String, sharedSecret: String?) throws  -> String
@@ -2030,7 +2030,7 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     func createOwnerRequest(setupToken: String, username: String, adminPassword: String, passphrase: String) throws  -> String
     
     func createPhoneInvitationRequest(method: NativeEnrollmentMethod) throws  -> String
-
+    
     func createVaultRequest(username: String, adminPassword: String, passphrase: String) throws  -> String
     
     func finishManualAdmission(responseJson: String, passphrase: String) throws  -> NativeEnrollmentIdentity
@@ -2040,11 +2040,11 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     func finishPhoneAdmission(completeJson: String) throws  -> NativeEnrollmentIdentity
     
     func hasPreparedOwnerMaterial() throws  -> Bool
-
+    
     func manualChallengeRequest(vaultId: String?, vaultOwner: String?) throws  -> String
-
+    
     func parseVaultRequestStatus(json: String) throws  -> String
-
+    
     func pendingVaultRequest() throws  -> NativePendingVaultRequest?
     
     func phoneSas(statusJson: String) throws  -> String
@@ -2053,10 +2053,20 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
      * Opaque claimant-authenticated polling descriptor for native transport only.
      */
     func phoneStatusRequest() throws  -> String
-
+    
     func vaultRequestAccepted() throws  -> Bool
-
+    
     func vaultRequestHeader() throws  -> String
+    
+    func ownerPassphraseMatches(passphrase: String) throws  -> Bool
+    
+    func ownerPhoneInvitationId() throws  -> String?
+    
+    func ownerPhoneMethod() throws  -> NativeEnrollmentMethod?
+    
+    func ownerPhoneQrPayload() throws  -> String
+    
+    func ownerPhoneStatus(statusJson: String) throws  -> NativeOwnerPhoneStatus
     
 }
 open class NativeEnrollmentClient: NativeEnrollmentClientProtocol, @unchecked Sendable {
@@ -2120,7 +2130,7 @@ open func acceptVaultRequestCreated(json: String)throws   {try rustCallWithError
     )
 }
 }
-
+    
 open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2131,7 +2141,7 @@ open func approvePhoneInvitationRequest(statusJson: String, passphrase: String)t
     )
 })
 }
-
+    
 open func beginVaultRequest(origin: String, inviteToken: String, displayName: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2173,7 +2183,7 @@ open func claimPhoneInvitationRequest(qrJson: String)throws  -> String  {
     )
 })
 }
-
+    
 open func clearVaultRequest()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_clear_vault_request(
@@ -2244,7 +2254,7 @@ open func createPhoneInvitationRequest(method: NativeEnrollmentMethod)throws  ->
     )
 })
 }
-
+    
 open func createVaultRequest(username: String, adminPassword: String, passphrase: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2297,7 +2307,7 @@ open func hasPreparedOwnerMaterial()throws  -> Bool  {
     )
 })
 }
-
+    
 open func manualChallengeRequest(vaultId: String?, vaultOwner: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2308,7 +2318,7 @@ open func manualChallengeRequest(vaultId: String?, vaultOwner: String?)throws  -
     )
 })
 }
-
+    
 open func parseVaultRequestStatus(json: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2318,7 +2328,7 @@ open func parseVaultRequestStatus(json: String)throws  -> String  {
     )
 })
 }
-
+    
 open func pendingVaultRequest()throws  -> NativePendingVaultRequest?  {
     return try  FfiConverterOptionTypeNativePendingVaultRequest.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2349,7 +2359,7 @@ open func phoneStatusRequest()throws  -> String  {
     )
 })
 }
-
+    
 open func vaultRequestAccepted()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2358,12 +2368,59 @@ open func vaultRequestAccepted()throws  -> Bool  {
     )
 })
 }
-
+    
 open func vaultRequestHeader()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func ownerPassphraseMatches(passphrase: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_passphrase_matches(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(passphrase),uniffiCallStatus
+    )
+})
+}
+    
+open func ownerPhoneInvitationId()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_phone_invitation_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func ownerPhoneMethod()throws  -> NativeEnrollmentMethod?  {
+    return try  FfiConverterOptionTypeNativeEnrollmentMethod.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_phone_method(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func ownerPhoneQrPayload()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_phone_qr_payload(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func ownerPhoneStatus(statusJson: String)throws  -> NativeOwnerPhoneStatus  {
+    return try  FfiConverterTypeNativeOwnerPhoneStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_phone_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(statusJson),uniffiCallStatus
     )
 })
 }
@@ -5295,6 +5352,84 @@ public func FfiConverterTypeNativeOpenConfig_lower(_ value: NativeOpenConfig) ->
 }
 
 
+public struct NativeOwnerPhoneStatus: Equatable, Hashable {
+    public var invitationId: String
+    public var stage: NativeOwnerPhoneStage
+    public var expiresInSeconds: UInt32
+    /**
+     * Locally derived six-digit SAS; present only while verification is required.
+     */
+    public var sas: String?
+    /**
+     * SHA-256 base64url-no-pad digest of the validated transcript and typed claim.
+     */
+    public var claimDigest: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(invitationId: String, stage: NativeOwnerPhoneStage, expiresInSeconds: UInt32, 
+        /**
+         * Locally derived six-digit SAS; present only while verification is required.
+         */sas: String?, 
+        /**
+         * SHA-256 base64url-no-pad digest of the validated transcript and typed claim.
+         */claimDigest: String?) {
+        self.invitationId = invitationId
+        self.stage = stage
+        self.expiresInSeconds = expiresInSeconds
+        self.sas = sas
+        self.claimDigest = claimDigest
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeOwnerPhoneStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeOwnerPhoneStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerPhoneStatus {
+        return
+            try NativeOwnerPhoneStatus(
+                invitationId: FfiConverterString.read(from: &buf), 
+                stage: FfiConverterTypeNativeOwnerPhoneStage.read(from: &buf), 
+                expiresInSeconds: FfiConverterUInt32.read(from: &buf), 
+                sas: FfiConverterOptionString.read(from: &buf), 
+                claimDigest: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeOwnerPhoneStatus, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.invitationId, into: &buf)
+        FfiConverterTypeNativeOwnerPhoneStage.write(value.stage, into: &buf)
+        FfiConverterUInt32.write(value.expiresInSeconds, into: &buf)
+        FfiConverterOptionString.write(value.sas, into: &buf)
+        FfiConverterOptionString.write(value.claimDigest, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerPhoneStatus_lift(_ buf: RustBuffer) throws -> NativeOwnerPhoneStatus {
+    return try FfiConverterTypeNativeOwnerPhoneStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerPhoneStatus_lower(_ value: NativeOwnerPhoneStatus) -> RustBuffer {
+    return FfiConverterTypeNativeOwnerPhoneStatus.lower(value)
+}
+
+
 public struct NativePendingVaultRequest: Equatable, Hashable {
     public var origin: String
     public var requestId: String
@@ -5308,9 +5443,9 @@ public struct NativePendingVaultRequest: Equatable, Hashable {
         self.displayName = displayName
     }
 
+    
 
-
-
+    
 }
 
 #if compiler(>=6)
@@ -5324,8 +5459,8 @@ public struct FfiConverterTypeNativePendingVaultRequest: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePendingVaultRequest {
         return
             try NativePendingVaultRequest(
-                origin: FfiConverterString.read(from: &buf),
-                requestId: FfiConverterString.read(from: &buf),
+                origin: FfiConverterString.read(from: &buf), 
+                requestId: FfiConverterString.read(from: &buf), 
                 displayName: FfiConverterString.read(from: &buf)
         )
     }
@@ -5738,9 +5873,9 @@ public struct NativeVaultInvite: Equatable, Hashable {
         self.inviteToken = inviteToken
     }
 
+    
 
-
-
+    
 }
 
 #if compiler(>=6)
@@ -5754,7 +5889,7 @@ public struct FfiConverterTypeNativeVaultInvite: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeVaultInvite {
         return
             try NativeVaultInvite(
-                origin: FfiConverterString.read(from: &buf),
+                origin: FfiConverterString.read(from: &buf), 
                 inviteToken: FfiConverterString.read(from: &buf)
         )
     }
@@ -6764,6 +6899,100 @@ public func FfiConverterTypeNativeNotificationCaptureOutcome_lower(_ value: Nati
 
 
 
+public enum NativeOwnerPhoneStage: Equatable, Hashable {
+    
+    case waiting
+    case verify
+    case approved
+    case connected
+    case expired
+    case denied
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeOwnerPhoneStage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeOwnerPhoneStage: FfiConverterRustBuffer {
+    typealias SwiftType = NativeOwnerPhoneStage
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerPhoneStage {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .waiting
+        
+        case 2: return .verify
+        
+        case 3: return .approved
+        
+        case 4: return .connected
+        
+        case 5: return .expired
+        
+        case 6: return .denied
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeOwnerPhoneStage, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .waiting:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .verify:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .approved:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .connected:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .expired:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .denied:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerPhoneStage_lift(_ buf: RustBuffer) throws -> NativeOwnerPhoneStage {
+    return try FfiConverterTypeNativeOwnerPhoneStage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerPhoneStage_lower(_ value: NativeOwnerPhoneStage) -> RustBuffer {
+    return FfiConverterTypeNativeOwnerPhoneStage.lower(value)
+}
+
+
+
+
 public enum NativePermitState: Equatable, Hashable {
     
     case permit
@@ -7298,6 +7527,30 @@ fileprivate struct FfiConverterOptionTypeNativeSnapshotProjectionStatus: FfiConv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNativeEnrollmentMethod: FfiConverterRustBuffer {
+    typealias SwiftType = NativeEnrollmentMethod?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeEnrollmentMethod.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeEnrollmentMethod.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -7790,6 +8043,17 @@ public func restoreNativeEnrollmentClient(checkpoint: Data)throws  -> NativeEnro
     )
 })
 }
+public func ownerPhoneShouldRotate(stage: NativeOwnerPhoneStage, expiresInSeconds: UInt32, active: NativeEnrollmentMethod, requested: NativeEnrollmentMethod) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_owner_phone_should_rotate(
+        FfiConverterTypeNativeOwnerPhoneStage_lower(stage),
+        FfiConverterUInt32.lower(expiresInSeconds),
+        FfiConverterTypeNativeEnrollmentMethod_lower(active),
+        FfiConverterTypeNativeEnrollmentMethod_lower(requested),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -7852,6 +8116,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_restore_native_enrollment_client() != 36620) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_owner_phone_should_rotate() != 43566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
@@ -8257,6 +8524,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header() != 50961) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_passphrase_matches() != 22026) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_phone_invitation_id() != 63774) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_phone_method() != 9836) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_phone_qr_payload() != 2632) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_phone_status() != 46122) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentidentity_activate_into() != 62525) {

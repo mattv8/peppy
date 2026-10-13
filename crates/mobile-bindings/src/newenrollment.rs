@@ -4,6 +4,8 @@ use crate::{MobileBindingsError, NativeClient};
 use peppy_hosted_api::enrollment::{ClientKind, EnrollmentMethod, EnrollmentRole};
 use std::sync::{Arc, Mutex};
 
+mod owner_phone;
+
 #[derive(uniffi::Object)]
 pub struct NativeEnrollmentClient {
     inner: Mutex<peppy_hosted_client::newenrollment::EnrollmentClient>,
@@ -105,7 +107,7 @@ pub enum NativeEnrollmentClientKind {
     Ios,
 }
 
-#[derive(Clone, Copy, uniffi::Enum)]
+#[derive(Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeEnrollmentMethod {
     Transfer,
     SharedSecret,

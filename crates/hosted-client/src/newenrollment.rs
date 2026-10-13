@@ -49,6 +49,17 @@ pub struct EnrollmentClient {
     mode: EnrollmentMode,
 }
 
+/// Locally validated owner-facing invitation status. This is intentionally a
+/// presentation-neutral view: hosts never consume server-supplied SAS values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerPhoneView {
+    pub invitation_id: Uuid,
+    pub state: EnrollmentState,
+    pub expires_in_seconds: u32,
+    pub sas: Option<String>,
+    pub claim_digest: Option<String>,
+}
+
 struct OwnerMaterial {
     operation_id: Uuid,
     profile: KeyProfile,
@@ -301,6 +312,80 @@ impl EnrollmentClient {
             return Ok(false);
         };
         Ok(verify_vault_check_header(&root, &owner.profile, &owner.header).is_ok())
+    }
+
+    /// Returns the active owner invitation id after the server has created it.
+    pub fn owner_invitation_id(&self) -> Option<Uuid> {
+        match self.phone.as_ref()? {
+            PhoneFlow::OwnerInvitation { invitation_id, .. } => Some(*invitation_id),
+            _ => None,
+        }
+    }
+
+    /// Returns the active owner invitation method after the server has created it.
+    pub fn owner_phone_method(&self) -> Option<EnrollmentMethod> {
+        match self.phone.as_ref()? {
+            PhoneFlow::OwnerInvitation { method, .. } => Some(*method),
+            _ => None,
+        }
+    }
+
+    /// Parses an owner invitation status. Claim-less terminal status is trusted only because the
+    /// native host fetched it from the active invitation's id-addressed endpoint.
+    pub fn owner_phone_view(
+        &self,
+        status_json: String,
+    ) -> Result<OwnerPhoneView, HostedClientError> {
+        let status: InvitationStatus = parse(&status_json)?;
+        let invitation_id = self
+            .owner_invitation_id()
+            .ok_or(HostedClientError::InvalidRequest)?;
+        let transcript_matches = || match status.transcript.as_ref() {
+            Some(transcript) => transcript.enrollment_id == invitation_id,
+            None => true,
+        };
+
+        let (sas, claim_digest) = match status.state {
+            EnrollmentState::Waiting | EnrollmentState::Expired | EnrollmentState::Denied => {
+                if !transcript_matches() {
+                    return Err(HostedClientError::InvalidRequest);
+                }
+                (None, None)
+            }
+            EnrollmentState::Claimed => {
+                let context = self.phone_context(&status)?;
+                let digest = owner_phone_claim_digest(
+                    &context,
+                    status
+                        .claim
+                        .as_ref()
+                        .ok_or(HostedClientError::InvalidRequest)?,
+                )?;
+                (
+                    Some(context.sas().map_err(|_| HostedClientError::Crypto)?),
+                    Some(digest),
+                )
+            }
+            EnrollmentState::Approved => {
+                let context = self.phone_context(&status)?;
+                let claim = status
+                    .claim
+                    .as_ref()
+                    .ok_or(HostedClientError::InvalidRequest)?;
+                (None, Some(owner_phone_claim_digest(&context, claim)?))
+            }
+            EnrollmentState::Confirmed | EnrollmentState::Consumed => {
+                self.phone_context(&status)?;
+                (None, None)
+            }
+        };
+        Ok(OwnerPhoneView {
+            invitation_id,
+            state: status.state,
+            expires_in_seconds: status.expires_in_seconds,
+            sas,
+            claim_digest,
+        })
     }
 
     pub fn create_owner_request(
@@ -1507,6 +1592,21 @@ fn vault_material(
 fn credential_digest(credential: &str) -> String {
     lowercase_hex(&Sha256::digest(credential.as_bytes()))
 }
+fn owner_phone_claim_digest(
+    context: &EnrollmentContext,
+    claim: &peppy_hosted_api::enrollment::InvitationPublicClaim,
+) -> Result<String, HostedClientError> {
+    let context = context
+        .canonical_bytes()
+        .map_err(|_| HostedClientError::Crypto)?;
+    let claim = serde_json::to_vec(claim).map_err(|_| HostedClientError::InvalidRequest)?;
+    let mut input = b"peppy-owner-phone-digest-v1\0".to_vec();
+    for value in [&context, &claim] {
+        input.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        input.extend_from_slice(value);
+    }
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(input)))
+}
 fn decode_hex32(value: &str) -> Result<[u8; 32], HostedClientError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(HostedClientError::InvalidRequest);
@@ -1679,6 +1779,97 @@ mod tests {
             ..claimed
         };
         (recipient, approved, material)
+    }
+
+    #[test]
+    fn owner_phone_view_exposes_and_validates_the_active_invitation() {
+        let (owner, _recipient, claimed, _material) = phone_claimed_roundtrip();
+        assert_eq!(owner.owner_invitation_id(), Some(Uuid::from_u128(7)));
+        assert_eq!(owner.owner_phone_method(), Some(EnrollmentMethod::Transfer));
+
+        let view = owner
+            .owner_phone_view(serde_json::to_string(&claimed).unwrap())
+            .unwrap();
+        assert_eq!(view.invitation_id, Uuid::from_u128(7));
+        assert_eq!(view.state, EnrollmentState::Claimed);
+        assert_eq!(view.sas.unwrap().len(), 6);
+        assert!(view.claim_digest.is_some());
+
+        let mut foreign = claimed;
+        foreign.transcript.as_mut().unwrap().enrollment_id = Uuid::new_v4();
+        assert!(
+            owner
+                .owner_phone_view(serde_json::to_string(&foreign).unwrap())
+                .is_err()
+        );
+        let claimless_approved = InvitationStatus {
+            state: EnrollmentState::Approved,
+            expires_in_seconds: 300,
+            claim: None,
+            transcript: None,
+            encrypted_key_package: None,
+            transfer_nonce: None,
+            profile: None,
+        };
+        assert!(
+            owner
+                .owner_phone_view(serde_json::to_string(&claimless_approved).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owner_phone_view_claim_digest_is_canonical_and_changes_with_the_claim() {
+        let (owner, _recipient, claimed, _material) = phone_claimed_roundtrip();
+        let status_json = serde_json::to_string(&claimed).unwrap();
+        let first = owner.owner_phone_view(status_json.clone()).unwrap();
+        let second = owner.owner_phone_view(status_json).unwrap();
+        assert_eq!(first.claim_digest, second.claim_digest);
+
+        let mut changed_transcript = claimed;
+        changed_transcript.transcript.as_mut().unwrap().key_epoch += 1;
+        assert_ne!(
+            first.claim_digest.unwrap(),
+            owner
+                .owner_phone_view(serde_json::to_string(&changed_transcript).unwrap())
+                .unwrap()
+                .claim_digest
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn owner_phone_view_digest_changes_for_a_second_valid_recipient_claim() {
+        let (owner, _recipient, claimed, _material) = phone_claimed_roundtrip();
+        let first = owner
+            .owner_phone_view(serde_json::to_string(&claimed).unwrap())
+            .unwrap();
+        let qr: PhonePairingQr = parse(&owner.get_qr_payload().unwrap()).unwrap();
+        let mut second_recipient =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Android, "second phone".into())
+                .unwrap();
+        let second_claim: ClaimInvitationRequest = parse(
+            &second_recipient
+                .claim_phone_invitation(serde_json::to_string(&qr).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut second_status = claimed;
+        let transcript = second_status.transcript.as_mut().unwrap();
+        transcript.recipient_transfer_public_key = second_claim.transfer_public_key.clone();
+        transcript.signing_public_key = second_claim.device.signing_public_key.clone();
+        transcript.device_id = second_claim.device.device_id;
+        transcript.credential_digest = second_claim.credential_digest.clone();
+        second_status.claim = Some(peppy_hosted_api::enrollment::InvitationPublicClaim {
+            device: second_claim.device,
+            transfer_public_key: second_claim.transfer_public_key,
+            credential_digest: second_claim.credential_digest,
+            claim_authenticator: second_claim.claim_authenticator,
+        });
+        let second = owner
+            .owner_phone_view(serde_json::to_string(&second_status).unwrap())
+            .unwrap();
+        assert_ne!(first.claim_digest, second.claim_digest);
     }
 
     #[test]
