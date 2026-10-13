@@ -18,6 +18,7 @@
     "allow-unlock-app",
     "allow-set-app-lock",
     "allow-save-draft",
+    "allow-discard-draft",
     "allow-send-draft",
     "allow-mark-seen",
     "allow-pick-attachments",

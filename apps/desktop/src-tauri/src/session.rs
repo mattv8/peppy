@@ -11,8 +11,8 @@ use crate::{
     secure_store::SecretStore,
 };
 use peppy_client_core::{
-    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Message, MessageId,
-    NativeKeyCache, VaultId,
+    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, DraftId, Message,
+    MessageId, NativeKeyCache, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -206,7 +206,10 @@ fn compose_error(error: ComposeError) -> BridgeError {
         ComposeError::AfterRoute {
             source,
             current_revision,
-        } => core_error(source).with_revision(current_revision),
+        } => match source {
+            peppy_client_core::Error::DraftMoved { .. } => core_error(source),
+            source => core_error(source).with_revision(current_revision),
+        },
     }
 }
 
@@ -229,7 +232,26 @@ impl Session {
 
     /// CAS draft save. Text, recipients, attachments and route are persisted together.
     pub fn save_draft(&self, input: &DraftInput) -> BridgeResult<DraftView> {
-        compose::save_draft(&self.client, input).map_err(compose_error)
+        let previous = DraftId::from_str(&input.id)
+            .ok()
+            .and_then(|id| self.client.compose_draft(id).ok().flatten());
+        let draft = compose::save_draft(&self.client, input).map_err(compose_error)?;
+        if previous.as_ref().is_none_or(|old| {
+            old.draft_id.to_string() != draft.id
+                || old.conversation_id.to_string() != draft.conversation_id
+        }) {
+            self.notify();
+        }
+        Ok(draft)
+    }
+
+    pub fn discard_draft(
+        &self,
+        input: &peppy_desktop_api::compose::DiscardDraftInput,
+    ) -> BridgeResult<()> {
+        compose::discard_draft(&self.client, input).map_err(compose_error)?;
+        self.notify();
+        Ok(())
     }
 
     /// Queues locally only after shared composition policy accepts the stored draft.
@@ -246,6 +268,15 @@ impl Session {
 
     pub fn mark_seen(&self, ids: &[String]) -> BridgeResult<()> {
         self.mark_seen_scoped(ids, None)
+    }
+
+    pub fn redirected_conversation(
+        &self,
+        source: ConversationId,
+    ) -> BridgeResult<Option<ConversationId>> {
+        self.client
+            .conversation_redirect(source)
+            .map_err(core_error)
     }
 
     /// Validates a complete batch before applying any read marks. Composer
@@ -497,6 +528,11 @@ impl Session {
             let draft = drafts
                 .iter()
                 .find(|d| d.conversation_id == conversation.conversation_id);
+            let draft_only = draft
+                .map(|draft| self.client.compose_draft_is_new(draft.draft_id))
+                .transpose()
+                .map_err(core_error)?
+                .unwrap_or(false);
             let name = last
                 .map(dto::counterpart)
                 .or_else(|| draft.map(|d| d.recipients.join(", ")))
@@ -536,6 +572,8 @@ impl Session {
                     .as_ref()
                     .map(|context| context.recipients.clone()),
                 reply_blocked_reason: reply_context.and_then(|context| context.blocked_reason),
+                recipientless_draft: false,
+                draft_only,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -560,6 +598,8 @@ impl Session {
                 messages: Vec::new(),
                 participants: None,
                 reply_blocked_reason: None,
+                recipientless_draft: draft.recipients.is_empty(),
+                draft_only: true,
             });
         }
         let draft = active
@@ -672,6 +712,23 @@ impl Session {
         Ok((snapshot, deferred))
     }
 
+    pub fn snapshot_scoped(
+        &self,
+        requested: &str,
+        head: Head,
+        origin: Option<String>,
+        notification_preferences: NotificationPreferences,
+    ) -> BridgeResult<(Snapshot, bool)> {
+        let snapshot = self.snapshot(Some(requested), head, origin, notification_preferences)?;
+        if snapshot.0.active_conversation_id.as_deref() != Some(requested) {
+            return Err(BridgeError::new(
+                "not-found",
+                "The requested stored item was not found.",
+            ));
+        }
+        Ok(snapshot)
+    }
+
     /// Persists the last reported gateway views (non-secret display/routing data, mode 0600).
     pub fn persist_gateways(&self, views: &[GatewayView]) {
         if let Ok(bytes) = serde_json::to_vec(views) {
@@ -725,6 +782,7 @@ mod tests {
             )
             .unwrap();
         let conversation = ConversationId::from_str(&draft.conversation_id).unwrap();
+        count.store(0, Ordering::Relaxed);
         let captured = session
             .client
             .capture_incoming(IncomingSms {

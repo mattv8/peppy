@@ -214,7 +214,7 @@ struct DeviceView: View {
                     LabeledContent("Notification mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable")
                         .accessibilityIdentifier("mirroring-ios-unavailable-row")
-                    Text("iOS does not provide a system-wide notification listener API. Mirroring is available on an Android gateway.")
+                    Text("iOS does not provide a system-wide notification listener API. Mirroring is available on an Android phone.")
                         .foregroundStyle(.secondary)
                 }.accessibilityIdentifier("mirroring-ios-section")
             }.formStyle(.grouped).navigationTitle(Text("peppy.mirroring", tableName: "Peppy")).toolbar { settingsButton }
@@ -238,12 +238,12 @@ struct DeviceView: View {
                 } header: {
                     Text("Carrier messaging")
                 } footer: {
-                    Text("iOS cannot capture or send carrier SMS/MMS. Use an Android gateway for carrier messaging. RCS is unavailable.")
+                    Text("iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. RCS is unavailable.")
                 }.accessibilityIdentifier("carrier-section")
                 Section("SMS and MMS") {
                     LabeledContent("SMS mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("sms-mirroring-unavailable-row")
-                    Text("iOS does not provide an SMS inbox listener. An Android gateway receives and sends SMS.")
+                    Text("iOS does not provide an SMS inbox listener. An Android phone receives and sends SMS.")
                     LabeledContent("MMS capture", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("mms-unavailable-row")
                     Text("MMS capture requires a carrier listener not available in this iOS build.")
@@ -396,7 +396,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Gateway settings") {
+                Section("Phone settings") {
                     LabeledContent("SMS capture", value: "Unavailable on iOS").accessibilityValue("Unavailable")
                         .accessibilityIdentifier("settings-sms-capture-toggle")
                     LabeledContent("MMS capture", value: "Unavailable on iOS").accessibilityValue("Unavailable")

@@ -95,12 +95,12 @@ private fun loadMmsHealth(context: Context, databaseOpen: Boolean): MmsHealth {
 
 internal fun ownAddressError(error: Throwable?): String = when (error) {
     is MobileBindingsException.InvalidRequest -> "This number could not be saved for the selected SIM."
-    is MobileBindingsException.Closed -> "The encrypted database is unavailable. Import or unlock this gateway first."
+    is MobileBindingsException.Closed -> "The encrypted database is unavailable. Import or unlock this phone first."
     is MobileBindingsException.InvalidDatabaseKey,
     is MobileBindingsException.WrongDatabaseKey,
     is MobileBindingsException.Database,
     is MobileBindingsException.UnsupportedSchema,
-    is MobileBindingsException.Crypto -> "The encrypted database is unavailable. Try again after reopening the gateway."
+    is MobileBindingsException.Crypto -> "The encrypted database is unavailable. Try again after reopening the phone."
     else -> "Could not save the number securely. Try again."
 }
 

@@ -199,6 +199,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "configure_server",
         "unlock_sync",
         "publish_attachment",
+        "discard_draft",
         "open_composer",
         "set_start_at_login",
         "popout_conversation",
@@ -231,19 +232,11 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
 
 #[test]
 fn runtime_window_checks_back_the_acl() {
-    let conversation = peppy_client_core::ConversationId::new().to_string();
-    let label = format!("composer-{conversation}");
     assert!(crate::require_main("main").is_ok());
     assert_eq!(
-        crate::require_main(&label).unwrap_err().code,
+        crate::require_main("composer-any").unwrap_err().code,
         "window-context"
     );
-    assert!(crate::check_conversation_scope("main", None).is_ok());
-    assert!(crate::check_conversation_scope(&label, Some(&conversation)).is_ok());
-    let other = peppy_client_core::ConversationId::new().to_string();
-    assert!(crate::check_conversation_scope(&label, Some(&other)).is_err());
-    assert!(crate::check_conversation_scope(&label, None).is_err());
-    assert!(crate::check_conversation_scope("head-x", Some(&conversation)).is_err());
 }
 
 // ---- 2. Serialized import, token rotation and session cancellation -----------------------
@@ -814,7 +807,7 @@ fn refused_sends_keep_the_revision_and_results_report_it() {
     // A stale send reports the current revision so the UI can continue.
     let stale = session
         .send_draft(&routed(
-            input(&draft.id, "", "", &[], "0"),
+            input(&draft.id, "", "", &[], "1"),
             &gateway_id,
             "sim-1",
         ))
@@ -879,10 +872,7 @@ fn send_rejects_a_draft_from_another_conversation_without_mutation() {
         .save_draft(&input("draft-new", "", "mine", &["+15555550101"], "0"))
         .unwrap();
     assert_ne!(victim.conversation_id, own.conversation_id);
-    // A composer scoped to `own` passes the window scope check with its own conversation ID
-    // but names the other conversation's draft (whose stored route differs, forcing a save).
-    let label = format!("composer-{}", own.conversation_id);
-    assert!(crate::check_conversation_scope(&label, Some(&own.conversation_id)).is_ok());
+    // A request that names `own` but carries the other draft must not mutate it.
     let forged = routed(
         input(&victim.id, &own.conversation_id, "", &[], &victim.revision),
         &gateway_id,

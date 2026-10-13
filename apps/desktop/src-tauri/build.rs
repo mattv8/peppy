@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "unlock_app",
     "set_app_lock",
     "save_draft",
+    "discard_draft",
     "send_draft",
     "mark_seen",
     "pick_attachments",

@@ -49,7 +49,7 @@
     <string name="peppy_production_pairing_qr_accessibility">Pairing QR code</string>
     <string name="peppy_production_pairing_role_label">Requested access</string>
     <string name="peppy_production_pairing_role_device">Linked device</string>
-    <string name="peppy_production_pairing_role_gateway">Gateway device</string>
+    <string name="peppy_production_pairing_role_gateway">Phone</string>
     <string name="peppy_production_pairing_retry">Create a new pairing code</string>
     <string name="peppy_production_pairing_paused">Pairing paused. Create a new code to continue.</string>
     <string name="peppy_production_pairing_error">Could not complete pairing. Try a new code.</string>

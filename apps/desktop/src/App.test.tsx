@@ -9,7 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App, DraftStore } from "./App";
+import { App, DraftStore, shouldConfirmPostFlushDelete } from "./App";
 import {
   bridge,
   fixtureBridge,
@@ -37,6 +37,125 @@ const SMS_ONLY: GatewayView = {
   supportsMms: false,
 };
 describe("draft lifecycle flushing", () => {
+  it("retires a late moved save with recoverable text so close cannot retry it", async () => {
+    const unavailable = vi.fn();
+    const store = new DraftStore(async () => {
+      throw { code: "draft-moved", message: "moved", details: { conversationId: "destination", draftId: "draft-destination", currentRevision: "4" } };
+    }, { changed: () => {}, rekeyed: () => {}, unavailable });
+    await store.edit("source", { text: "local recovery" });
+    expect(unavailable).toHaveBeenCalledWith("source", "destination", expect.stringContaining("Review the retained text"));
+    expect(await store.flushAll()).toEqual({ ok: true });
+    expect(store.get("source")).toBeUndefined();
+    expect(store.recoveriesFor("destination")).toEqual([
+      expect.objectContaining({ content: expect.objectContaining({ text: "local recovery" }) }),
+    ]);
+  });
+
+  it("retains a late moved save reported with flat native details", async () => {
+    const store = new DraftStore(async () => {
+      throw { code: "draft-moved", message: "moved", conversationId: "destination" };
+    }, { changed: () => {}, rekeyed: () => {} });
+    await store.edit("source", { text: "flat detail recovery" });
+    expect(store.recoveriesFor("destination")[0]).toMatchObject({
+      content: { text: "flat detail recovery" },
+    });
+    expect(await store.flushAll()).toEqual({ ok: true });
+  });
+
+  it("keeps newer text as recovery when a delayed save rekeys to a destination", async () => {
+    const first = deferred<Draft>();
+    const inputs: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      inputs.push(input);
+      if (inputs.length === 1) return first.promise;
+      return { ...input, id: "draft-destination", revision: "5" };
+    }, { changed: () => {}, rekeyed: () => {} });
+    const initialSave = store.edit("source", { text: "first" });
+    await vi.waitFor(() => expect(inputs).toHaveLength(1));
+    const newerSave = store.edit("source", { text: "newer local text" });
+    first.resolve({
+      id: "draft-destination",
+      conversationId: "destination",
+      text: "destination text",
+      recipientIds: ["+15550001"],
+      attachmentIds: [],
+      revision: "4",
+    });
+    await expect(initialSave).resolves.toEqual({ ok: false, error: expect.stringContaining("retained separately") });
+    await expect(newerSave).resolves.toEqual({ ok: false, error: expect.stringContaining("deleted or moved") });
+    expect(inputs).toHaveLength(1);
+    expect(store.recoveriesFor("destination")[0]?.content.text).toBe("newer local text");
+    await expect(store.edit("destination", { text: "destination follow-up" })).resolves.toEqual({ ok: true });
+    expect(inputs.at(-1)?.conversationId).toBe("destination");
+  });
+
+  it("continues saving newer typing after a fresh draft receives its first host identity", async () => {
+    const first = deferred<Draft>();
+    const inputs: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      inputs.push(input);
+      if (inputs.length === 1) return first.promise;
+      return { ...input, id: "draft-created", revision: "2" };
+    }, { changed: () => {}, rekeyed: () => {} });
+    const initialSave = store.edit("new:1", { text: "first" });
+    await vi.waitFor(() => expect(inputs).toHaveLength(1));
+    const newerSave = store.edit("new:1", { text: "newer" });
+    first.resolve({ id: "draft-created", conversationId: "created", text: "first", recipientIds: [], attachmentIds: [], revision: "1" });
+    await expect(initialSave).resolves.toEqual({ ok: true });
+    await expect(newerSave).resolves.toEqual({ ok: true });
+    expect(inputs).toMatchObject([{ conversationId: "", text: "first" }, { conversationId: "created", text: "newer", expectedRevision: "1" }]);
+    expect(store.get("created")?.content.text).toBe("newer");
+    expect(store.recoveriesFor("created")).toEqual([]);
+  });
+
+  it("requires confirmation when a pending blank create resolves to a reused draft with text", async () => {
+    const first = deferred<Draft>();
+    const store = new DraftStore(async () => first.promise, { changed: () => {}, rekeyed: () => {} });
+    const pending = store.edit("new:blank", {});
+    first.resolve({ id: "draft-reused", conversationId: "reused", text: "existing text", recipientIds: [], attachmentIds: [], revision: "4" });
+    await expect(pending).resolves.toEqual({ ok: true });
+    const reused = store.get("reused")!;
+    expect(shouldConfirmPostFlushDelete("new:blank", reused.key, reused.content, false, null)).toBe(true);
+    expect(shouldConfirmPostFlushDelete("new:blank", "rekeyed-empty", { text: "", recipientIds: [], attachmentIds: [] }, false, null)).toBe(false);
+    expect(shouldConfirmPostFlushDelete("reused", reused.key, reused.content, true, "reused")).toBe(false);
+  });
+
+  it("keeps destinationless not-found content reachable and nonblocking", async () => {
+    const store = new DraftStore(async () => {
+      throw { code: "not-found", message: "deleted" };
+    }, { changed: () => {}, rekeyed: () => {} });
+    await store.edit("source", { text: "recover me" });
+    expect(store.recoveriesFor()).toEqual([
+      expect.objectContaining({ content: expect.objectContaining({ text: "recover me" }) }),
+    ]);
+    expect(await store.flushAll()).toEqual({ ok: true });
+  });
+
+  it("allows an established conversation to start a fresh reply after its old draft moves", async () => {
+    const inputs: DraftInput[] = [];
+    const store = new DraftStore(async input => {
+      inputs.push(input);
+      if (input.conversationId === "established") throw { code: "draft-moved", conversationId: "destination" };
+      return { ...input, id: "draft-established", revision: "1" };
+    }, { changed: () => {}, rekeyed: () => {} });
+    await store.edit("established", { text: "old reply" });
+    store.adopt("established", undefined);
+    await expect(store.edit("established", { text: "new reply" })).resolves.toEqual({ ok: true });
+    expect(inputs.at(-1)).toMatchObject({ conversationId: "established", text: "new reply" });
+  });
+
+  it("does not report a rekey collision as saved when its destination is dirty", async () => {
+    const store = new DraftStore(async input => {
+      if (input.conversationId === "destination") throw { message: "offline" };
+      return { ...input, id: "draft-destination", conversationId: "destination", revision: "1" };
+    }, { changed: () => {}, rekeyed: () => {} });
+    await store.edit("destination", { text: "destination edits" });
+    const outcome = await store.edit("source", { text: "source edits" });
+    expect(outcome).toEqual({ ok: false, error: expect.stringContaining("retained separately") });
+    expect(store.get("destination")?.content.text).toBe("destination edits");
+    expect(store.recoveriesFor("destination")[0]?.content.text).toBe("source edits");
+  });
+
   it("attempts every dirty slot and reports the first failed save", async () => {
     const persisted: string[] = [];
     const store = new DraftStore(async input => {
@@ -227,6 +346,8 @@ function createHost() {
           preview: "Draft",
           unread: 0,
           messages: [],
+          draftOnly: true,
+          recipientlessDraft: d.recipientIds.length === 0,
         }));
       return {
         version: "1",
@@ -317,6 +438,12 @@ function createHost() {
       });
       return { accepted: true, status: "queued-local" as const };
     },
+    discard(input: { id: string; conversationId: string; expectedRevision: string }) {
+      const draft = host.drafts.get(input.conversationId);
+      if (!draft || draft.id !== input.id || draft.revision !== input.expectedRevision) throw { code: "stale-draft", message: "The draft changed elsewhere." } satisfies HostError;
+      if (draft.recipientIds.length) throw { code: "draft-not-discardable", message: "Only recipientless drafts can be deleted." } satisfies HostError;
+      host.drafts.delete(input.conversationId);
+    },
   };
   return host;
 }
@@ -375,6 +502,7 @@ beforeEach(() => {
   vi.spyOn(bridge, "send_draft").mockImplementation(async (input) =>
     host.send(input),
   );
+  vi.spyOn(bridge, "discard_draft").mockImplementation(async (input) => host.discard(input));
   vi.spyOn(bridge, "pick_attachments").mockResolvedValue([
     {
       id: "file-1",
@@ -415,6 +543,21 @@ afterEach(() => {
 });
 
 describe("new-recipient drafts", () => {
+  it("deletes an empty recipientless draft directly and confirms before deleting content", async () => {
+    host.drafts.set("empty-draft", { id: "draft-empty", conversationId: "empty-draft", text: "keep until confirmed", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await waitFor(() => expect(document.querySelector('[data-conversation-id="empty-draft"]')).toBeInTheDocument());
+    fireEvent.click(document.querySelector('[data-conversation-id="empty-draft"]')!);
+    await waitFor(() => expect(document.getElementById("conversation-delete-draft")).toBeInTheDocument());
+    const remove = document.getElementById("conversation-delete-draft")!;
+    fireEvent.click(remove);
+    expect(document.getElementById("conversation-delete-draft")).toHaveAccessibleName("Confirm delete draft");
+    expect(host.drafts.has("empty-draft")).toBe(true);
+    fireEvent.click(document.getElementById("conversation-delete-draft")!);
+    await waitFor(() => expect(host.drafts.has("empty-draft")).toBe(false));
+  });
+
   it("creates the draft with empty IDs, then saves and sends with the host-assigned IDs", async () => {
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
@@ -447,7 +590,7 @@ describe("new-recipient drafts", () => {
       expectedRevision: "1",
     });
 
-    fireEvent.change(screen.getByLabelText("Gateway"), {
+    fireEvent.change(screen.getByLabelText("Phone"), {
       target: { value: routeValue(SMS_ONLY) },
     });
     await waitFor(() =>
@@ -546,7 +689,7 @@ describe("new-recipient drafts", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
   });
 
-  it("unblocks Send when an incoming message replaces a pending recipient panel", async () => {
+  it("keeps new-compose recipient editing after an incoming history match", async () => {
     host.gateways = [MMS_SIM];
     render(<App />);
     const picker = await screen.findByRole("combobox", {
@@ -577,10 +720,29 @@ describe("new-recipient drafts", () => {
     });
     await act(async () => hint?.());
 
-    await waitFor(() =>
-      expect(screen.queryByRole("region", { name: "Message recipients" })).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(await screen.findByRole("region", { name: "Message recipients" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+
+  it("keeps the second group recipient input focused while the first chip rekeys", async () => {
+    host.gateways = [MMS_SIM];
+    const firstSave = deferred<Draft>();
+    const save = vi.mocked(bridge.save_draft).mockImplementationOnce(() => firstSave.promise);
+    render(<App />);
+    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
+    fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const recipients = screen.getByLabelText("Recipients");
+    fireEvent.change(recipients, { target: { value: "+1 202 555 0101" } });
+    recipients.focus();
+    host.drafts.set("history", { id: "draft-history", conversationId: "history", text: "", recipientIds: ["+12025550100"], attachmentIds: [], revision: "1" });
+    firstSave.resolve({ id: "draft-history", conversationId: "history", text: "", recipientIds: ["+12025550100"], attachmentIds: [], revision: "1" });
+    await waitFor(() => expect(screen.getByLabelText("Recipients")).toBe(recipients));
+    expect(recipients).toHaveFocus();
+    expect(recipients).toHaveValue("+1 202 555 0101");
+    fireEvent.keyDown(recipients, { key: "Enter" });
+    await waitFor(() => expect(host.drafts.get("history")?.recipientIds).toEqual(["+12025550100", "+12025550101"]));
   });
 
   it("persists an empty recipient list after removing the last chip without restoring it on blur", async () => {
@@ -743,7 +905,7 @@ describe("draft durability", () => {
   it("blocks send after a rejected save, keeps the edits, and sends the latest text once a retry succeeds", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    fireEvent.change(screen.getByLabelText("Gateway"), {
+    fireEvent.change(screen.getByLabelText("Phone"), {
       target: { value: routeValue(SMS_ONLY) },
     });
     await waitFor(() => expect(host.drafts.get("aurora")?.simId).toBe("sim-1"));
@@ -771,6 +933,46 @@ describe("draft durability", () => {
     await waitFor(() => expect(host.sent).toHaveLength(1));
     expect(host.sent[0].text).toBe("latest text");
     await waitFor(() => expect(message()).toHaveValue(""));
+  });
+
+  it("does not resend when send reports a moved draft and retains the text for review", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.change(screen.getByLabelText("Phone"), {
+      target: { value: routeValue(SMS_ONLY) },
+    });
+    type("send only after review");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("send only after review"));
+    host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findAllByText(/Review the retained text/)).not.toHaveLength(0);
+    await waitFor(() => expect(document.querySelector("[data-header-title]")).toHaveTextContent("River"));
+    expect(bridge.send_draft).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("send only after review")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Replace draft with retained content" }));
+    await waitFor(() => expect(host.drafts.get("river")?.text).toBe("send only after review"));
+    expect(host.drafts.get("river")?.text).not.toContain("\n\n");
+  });
+
+  it("shows destinationless late-save recovery with copy and restore actions", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    host.failSaves = { code: "not-found", message: "deleted" };
+    type("late local text");
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    expect(recovery).toHaveTextContent("late local text");
+    expect(within(recovery).getByRole("button", { name: "Copy retained text" })).toBeInTheDocument();
+    expect(within(recovery).getByRole("button", { name: "Restore in new draft" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    const selectedRecovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    expect(selectedRecovery).toHaveTextContent("late local text");
+    await act(async () => hint?.());
+    expect(screen.getByRole("status", { name: "Recoverable unsaved draft" })).toHaveTextContent("late local text");
   });
 
   it("recovers from a stale-revision conflict by keeping this window's text over the stored revision", async () => {
@@ -1204,7 +1406,7 @@ describe("gateway routes", () => {
   it("distinguishes two SIMs on one gateway device and blocks MMS on the SMS-only SIM", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    const select = screen.getByLabelText("Gateway") as HTMLSelectElement;
+    const select = screen.getByLabelText("Phone") as HTMLSelectElement;
     const values = within(select)
       .getAllByRole("option")
       .map((option) => (option as HTMLOptionElement).value);
@@ -1263,7 +1465,7 @@ describe("gateway routes", () => {
     });
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("hello"));
-    expect(screen.getByLabelText("Gateway")).toHaveDisplayValue(
+    expect(screen.getByLabelText("Phone")).toHaveDisplayValue(
       "Unavailable route · SIM sim-9",
     );
     expect(
@@ -2127,6 +2329,7 @@ describe("desktop presentation controls", () => {
     vi.stubGlobal("PointerEvent", MouseEvent);
     openComposerWindow("aurora");
     host.conversations[0].messages = [];
+    host.conversations[0].draftOnly = true;
     render(<App />);
     const panel = await screen.findByRole("region", { name: "Message recipients" });
     const stage = document.getElementById("conversation-stage")!;

@@ -163,6 +163,9 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .header-actions button:hover {
   background: var(--peppy-surface-hover);
 }
+.header-actions #conversation-delete-draft { color: var(--peppy-text-secondary); }
+.header-actions #conversation-delete-draft.confirming,
+.header-actions #conversation-delete-draft:hover { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
 #conversation-list {
   flex: 1;
   min-height: 0;
@@ -432,6 +435,37 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #draft-recovery p {
   flex: 1;
   margin: 0;
+}
+[data-draft-recovery] {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--peppy-warning-text);
+  border-radius: var(--peppy-control-radius);
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+[data-draft-recovery] :is(p, pre) {
+  flex: 0 0 100%;
+  min-width: 0;
+  margin: 0;
+}
+[data-draft-recovery] pre {
+  max-height: 96px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+[data-draft-recovery] .secondary-button {
+  flex: 0 0 auto;
+}
+#composer-banner-row:has([data-draft-recovery]) {
+  max-block-size: min(32dvh, 176px);
+  overflow-y: auto;
 }
 #onboarding-view {
   flex: 1;

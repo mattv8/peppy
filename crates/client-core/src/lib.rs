@@ -19,6 +19,7 @@
 //!   merged monotonically; commands learned from a snapshot are historical and never permitted.
 //!   A durable restore guard blocks all new carrier permits on a restored gateway; there is no
 //!   clear. Rolling a database back behind the application is not detectable.
+mod compose_create;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -27,6 +28,7 @@ mod contact_search;
 mod contact_source;
 mod contact_state;
 mod contacts;
+mod conversation_match;
 mod gateway_settings;
 mod media;
 mod mms;
@@ -73,7 +75,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 21;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 2;
 /// Records per `append_snapshot_page` call.
@@ -168,6 +170,20 @@ pub enum Error {
     NotFound,
     #[error("stale draft; current revision is {current_revision}")]
     StaleDraft { current_revision: u64 },
+    #[error(
+        "draft moved to conversation {conversation_id}; current revision is {current_revision}"
+    )]
+    DraftMoved {
+        draft_id: DraftId,
+        conversation_id: ConversationId,
+        current_revision: u64,
+    },
+    #[error("draft is not discardable")]
+    DraftNotDiscardable,
+    #[error("a recipientless draft already exists")]
+    RecipientlessDraftExists,
+    #[error("moving this draft would exceed a compose limit")]
+    DraftMergeOverflow,
     #[error("no send attempt was recorded for this command")]
     NoAttempt,
     #[error("illegal send-state transition {from:?} -> {to:?}")]
@@ -1316,15 +1332,7 @@ impl Client {
         }
         let conversation_id = match sms.conversation_id {
             Some(id) => id,
-            None => tx
-                .query_row(
-                    "SELECT conversation_id FROM addresses WHERE address=?",
-                    params![sms.sender_address],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?
-                .map(|id| parse(&id))
-                .transpose()?
+            None => conversation_match::address_conversation(&tx, &sms.sender_address)?
                 .unwrap_or_else(ConversationId::new),
         };
         let payload = MessagePayload {
@@ -1420,6 +1428,19 @@ impl Client {
         {
             return Ok(existing);
         }
+        if let Some(conversation_id) = conversation_id {
+            let has_history: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+                params![conversation_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !has_history {
+                if redirect_target(&s.conn, conversation_id.to_string(), false)?.is_some() {
+                    return Err(Error::NotFound);
+                }
+                return Err(Error::NotFound);
+            }
+        }
         let draft = ComposeDraft {
             draft_id: DraftId::new(),
             conversation_id: conversation_id.unwrap_or_else(ConversationId::new),
@@ -1430,14 +1451,61 @@ impl Client {
             revision: 0,
         };
         s.conn.execute(
-            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision) VALUES(?,?,'','[]','[]',NULL,0)",
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,'','[]','[]',NULL,0,?)",
+            params![draft.draft_id.to_string(), draft.conversation_id.to_string(), conversation_id.is_none()],
+        )?;
+        Ok(draft)
+    }
+
+    /// Returns the single reusable recipientless compose draft, creating it atomically when none
+    /// exists. Established conversations are never eligible, even if their reply draft happens
+    /// to have an empty recipient list.
+    pub fn recipientless_compose_draft(&self) -> Result<ComposeDraft, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = recipientless_draft(&tx, None)? {
+            tx.execute(
+                "UPDATE compose_drafts SET draft_only=1 WHERE draft_id=?",
+                params![existing.draft_id.to_string()],
+            )?;
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let draft = ComposeDraft {
+            draft_id: DraftId::new(),
+            conversation_id: ConversationId::new(),
+            text: String::new(),
+            recipients: Vec::new(),
+            attachment_ids: Vec::new(),
+            route: None,
+            revision: 0,
+        };
+        tx.execute(
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,'','[]','[]',NULL,0,1)",
             params![draft.draft_id.to_string(), draft.conversation_id.to_string()],
         )?;
+        tx.commit()?;
         Ok(draft)
     }
 
     pub fn compose_draft(&self, draft_id: DraftId) -> Result<Option<ComposeDraft>, Error> {
         load_compose_draft(&self.lock()?.conn, "draft_id", &draft_id.to_string())
+    }
+
+    /// Returns the original conversation for a live draft or a redirected draft ID.
+    pub fn compose_draft_source_conversation(
+        &self,
+        draft_id: DraftId,
+    ) -> Result<Option<ConversationId>, Error> {
+        let guard = self.lock()?;
+        let conversation: Option<String> = guard.conn.query_row(
+            "SELECT conversation_id FROM compose_drafts WHERE draft_id=? UNION ALL SELECT conversation_id FROM compose_draft_redirects WHERE draft_id=? ORDER BY 1 LIMIT 1",
+            params![draft_id.to_string(), draft_id.to_string()],
+            |row| row.get(0),
+        ).optional()?;
+        conversation.map(|id| parse(&id)).transpose()
     }
 
     /// All compose drafts, including draft-only conversations, in creation order.
@@ -1450,6 +1518,73 @@ impl Client {
             .query_map([], compose_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(decode_compose_row).collect()
+    }
+
+    /// Whether this draft originated in new-compose flow. This intent remains true when it adopts
+    /// existing history, allowing a later recipient edit to resolve a different conversation.
+    pub fn compose_draft_is_new(&self, draft_id: DraftId) -> Result<bool, Error> {
+        let guard = self.lock()?;
+        load_compose_draft(&guard.conn, "draft_id", &draft_id.to_string())?
+            .map(|_| is_draft_only(&guard.conn, draft_id))
+            .transpose()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    pub fn compose_draft_redirect(&self, draft_id: DraftId) -> Result<Option<ComposeDraft>, Error> {
+        let guard = self.lock()?;
+        let target = redirect_target(&guard.conn, draft_id.to_string(), true)?;
+        target
+            .map(|target| load_compose_draft(&guard.conn, "draft_id", &target))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn conversation_redirect(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ConversationId>, Error> {
+        let guard = self.lock()?;
+        let target = redirect_target(&guard.conn, conversation_id.to_string(), false)?;
+        target.map(|target| parse(&target)).transpose()
+    }
+
+    /// Deletes only an empty, recipientless draft-only conversation. Missing non-forwarded drafts
+    /// are already gone and therefore succeed; a forwarded ID remains actionable as DraftMoved.
+    pub fn discard_compose_draft(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(draft) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
+            if let Some(moved) = moved_draft(&tx, draft_id)? {
+                return Err(moved);
+            }
+            tx.commit()?;
+            return Ok(());
+        };
+        if draft.revision != expected_revision {
+            return Err(Error::StaleDraft {
+                current_revision: draft.revision,
+            });
+        }
+        if !is_discardable(&tx, &draft)? {
+            return Err(Error::DraftNotDiscardable);
+        }
+        let attachments = draft.attachment_ids.clone();
+        tx.execute(
+            "DELETE FROM compose_drafts WHERE draft_id=?",
+            params![draft_id.to_string()],
+        )?;
+        tx.commit()?;
+        drop(guard);
+        for attachment in attachments {
+            let _ = self.discard_unreferenced_attachment(attachment);
+        }
+        Ok(())
     }
 
     /// Compare-and-swap save; a stale revision leaves stored content untouched.
@@ -1477,12 +1612,45 @@ impl Client {
         let tx = s
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current =
-            load_compose_draft(&tx, "draft_id", &draft_id.to_string())?.ok_or(Error::NotFound)?;
+        let Some(current) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
+            return Err(moved_draft(&tx, draft_id)?.unwrap_or(Error::NotFound));
+        };
         if current.revision != expected_revision {
             return Err(Error::StaleDraft {
                 current_revision: current.revision,
             });
+        }
+        let source_has_messages: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+            params![current.conversation_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let new_compose = is_draft_only(&tx, draft_id)? || !source_has_messages;
+        if new_compose
+            && update.recipients.is_empty()
+            && !current.recipients.is_empty()
+            && recipientless_draft(&tx, Some(draft_id))?.is_some()
+        {
+            return Err(Error::RecipientlessDraftExists);
+        }
+        let region = conversation_match::identity_region(&tx)?;
+        if new_compose
+            && !update.recipients.is_empty()
+            && conversation_match::recipient_set(&current.recipients, Some(&region))
+                != conversation_match::recipient_set(&update.recipients, Some(&region))
+        {
+            let target = conversation_for_compose_recipients(
+                &tx,
+                &update.recipients,
+                current.conversation_id,
+                &region,
+            )?;
+            if let Some(conversation_id) = target.or(source_has_messages.then(ConversationId::new))
+            {
+                let moved = move_compose_draft(&tx, current, update, conversation_id)?;
+                tx.commit()?;
+                return Ok(moved);
+            }
         }
         let next = current.revision.checked_add(1).ok_or(Error::Database)?;
         tx.execute(
@@ -1506,6 +1674,26 @@ impl Client {
             route: update.route,
             revision: next,
         })
+    }
+
+    /// Rechecks a draft immediately before a host send. A late request against an old ID is never
+    /// redirected silently because the user must review the authoritative destination first.
+    pub fn resolve_compose_draft_for_send(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+    ) -> Result<ComposeDraft, Error> {
+        let guard = self.lock()?;
+        let Some(draft) = load_compose_draft(&guard.conn, "draft_id", &draft_id.to_string())?
+        else {
+            return Err(moved_draft(&guard.conn, draft_id)?.unwrap_or(Error::NotFound));
+        };
+        if draft.revision != expected_revision {
+            return Err(Error::StaleDraft {
+                current_revision: draft.revision,
+            });
+        }
+        Ok(draft)
     }
 
     /// Sends the stored draft at `expected_revision`: queues exactly one command, then clears
@@ -1539,8 +1727,9 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let draft =
-            load_compose_draft(&tx, "draft_id", &draft_id.to_string())?.ok_or(Error::NotFound)?;
+        let Some(draft) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
+            return Err(moved_draft(&tx, draft_id)?.unwrap_or(Error::NotFound));
+        };
         if draft.revision != expected_revision {
             return Err(Error::StaleDraft {
                 current_revision: draft.revision,
@@ -1600,7 +1789,7 @@ impl Client {
         )?;
         let next = draft.revision.checked_add(1).ok_or(Error::Database)?;
         tx.execute(
-            "UPDATE compose_drafts SET text='',attachment_ids='[]',revision=? WHERE draft_id=?",
+            "UPDATE compose_drafts SET text='',attachment_ids='[]',revision=?,draft_only=0 WHERE draft_id=?",
             params![to_i64(next)?, draft_id.to_string()],
         )?;
         tx.commit()?;
@@ -3352,6 +3541,21 @@ const MIGRATION_19: &str = "
 CREATE TABLE IF NOT EXISTS outbox_attachments(envelope_id TEXT NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(envelope_id,attachment_id));
 CREATE INDEX IF NOT EXISTS outbox_attachments_attachment ON outbox_attachments(attachment_id);
 ";
+/// Version 19 -> 20: local-only draft forwarding and compose intent. Existing rows deliberately
+/// remain `draft_only=0`; no history or identifier is rewritten.
+const MIGRATION_20: &str = "
+ALTER TABLE compose_drafts ADD COLUMN draft_only INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE compose_draft_redirects(
+  draft_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  target_draft_id TEXT NOT NULL,
+  target_conversation_id TEXT NOT NULL
+);
+";
+const MIGRATION_21: &str = "
+ALTER TABLE compose_draft_redirects ADD COLUMN forward_conversation INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX compose_draft_redirects_conversation ON compose_draft_redirects(conversation_id, forward_conversation);
+";
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
 const DECODER_REVISION: &str = "3";
@@ -3413,6 +3617,8 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_17)?;
             tx.execute_batch(MIGRATION_18)?;
             tx.execute_batch(MIGRATION_19)?;
+            tx.execute_batch(MIGRATION_20)?;
+            tx.execute_batch(MIGRATION_21)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -3421,7 +3627,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=18)) => {
+        Some(version @ (4..=20)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -3465,6 +3671,12 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 18 {
                 tx.execute_batch(MIGRATION_19)?;
+            }
+            if version <= 19 {
+                tx.execute_batch(MIGRATION_20)?;
+            }
+            if version <= 20 {
+                tx.execute_batch(MIGRATION_21)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -4038,10 +4250,18 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
     if message.mms_context.is_none()
         && let Some(address) = address
     {
-        conn.execute(
-            "INSERT OR IGNORE INTO addresses(address,conversation_id) VALUES(?,?)",
-            params![address, message.record.conversation_id.to_string()],
-        )?;
+        for address in [
+            address.to_owned(),
+            conversation_match::canonical_address(
+                address,
+                Some(&conversation_match::identity_region(conn)?),
+            ),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO addresses(address,conversation_id) VALUES(?,?)",
+                params![address, message.record.conversation_id.to_string()],
+            )?;
+        }
     }
     Ok(Inserted::New)
 }
@@ -5398,6 +5618,224 @@ fn load_compose_draft(
     .map(decode_compose_row)
     .transpose()
 }
+
+fn is_draft_only(conn: &Connection, draft_id: DraftId) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT draft_only FROM compose_drafts WHERE draft_id=?",
+        params![draft_id.to_string()],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(Into::into)
+}
+
+fn is_discardable(conn: &Connection, draft: &ComposeDraft) -> Result<bool, Error> {
+    if !draft.recipients.is_empty() {
+        return Ok(false);
+    }
+    let has_messages: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+        params![draft.conversation_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(!has_messages)
+}
+
+fn recipientless_draft(
+    conn: &Connection,
+    excluding: Option<DraftId>,
+) -> Result<Option<ComposeDraft>, Error> {
+    let excluded = excluding.map(|id| id.to_string()).unwrap_or_default();
+    conn.query_row(
+        &format!("SELECT {COMPOSE_COLUMNS} FROM compose_drafts d WHERE d.recipients='[]' AND d.draft_id != ? AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=d.conversation_id) ORDER BY d.local_order LIMIT 1"),
+        params![excluded], compose_row,
+    ).optional()?.map(decode_compose_row).transpose()
+}
+
+fn moved_draft(conn: &Connection, draft_id: DraftId) -> Result<Option<Error>, Error> {
+    let Some(target_draft) = redirect_target(conn, draft_id.to_string(), true)? else {
+        return Ok(None);
+    };
+    let moved: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT conversation_id,revision FROM compose_drafts WHERE draft_id=?",
+            params![target_draft],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    moved
+        .map(|(conversation, revision)| {
+            Ok(Error::DraftMoved {
+                draft_id: parse(&target_draft)?,
+                conversation_id: parse(&conversation)?,
+                current_revision: u64::try_from(revision).map_err(|_| Error::Database)?,
+            })
+        })
+        .transpose()
+}
+
+fn redirect_target(
+    conn: &Connection,
+    start: String,
+    by_draft: bool,
+) -> Result<Option<String>, Error> {
+    let (source, target) = if by_draft {
+        ("draft_id", "target_draft_id")
+    } else {
+        ("conversation_id", "target_conversation_id")
+    };
+    let mut current = start;
+    let mut found = false;
+    for _ in 0..8 {
+        let scope = if by_draft {
+            ""
+        } else {
+            " AND forward_conversation=1"
+        };
+        let next: Option<String> = conn.query_row(
+            &format!("SELECT {target} FROM compose_draft_redirects WHERE {source}=?{scope} ORDER BY rowid DESC LIMIT 1"),
+            params![current], |row| row.get(0),
+        ).optional()?;
+        let Some(next) = next else {
+            return Ok(found.then_some(current));
+        };
+        if next == current {
+            return Err(Error::Database);
+        }
+        found = true;
+        current = next;
+    }
+    Err(Error::Database)
+}
+
+fn conversation_for_compose_recipients(
+    conn: &Connection,
+    recipients: &[String],
+    source_conversation: ConversationId,
+    region: &str,
+) -> Result<Option<ConversationId>, Error> {
+    if let Some(conversation) = conversation_match::conversation_for_recipients(conn, recipients)? {
+        if conversation != source_conversation {
+            return Ok(Some(conversation));
+        }
+    }
+    let expected = conversation_match::recipient_set(recipients, Some(region));
+    let mut statement = conn.prepare(&format!(
+        "SELECT {COMPOSE_COLUMNS} FROM compose_drafts WHERE conversation_id != ? ORDER BY local_order DESC"
+    ))?;
+    let drafts = statement.query_map(params![source_conversation.to_string()], compose_row)?;
+    for draft in drafts {
+        let draft = decode_compose_row(draft?)?;
+        if conversation_match::recipient_set(&draft.recipients, Some(region)) == expected {
+            return Ok(Some(draft.conversation_id));
+        }
+    }
+    Ok(None)
+}
+
+fn move_compose_draft(
+    conn: &Connection,
+    source: ComposeDraft,
+    update: ComposeDraftUpdate,
+    destination_conversation: ConversationId,
+) -> Result<ComposeDraft, Error> {
+    let destination = load_compose_draft(
+        conn,
+        "conversation_id",
+        &destination_conversation.to_string(),
+    )?;
+    let (destination_id, text, attachment_ids, route, revision) = if let Some(destination) =
+        destination
+    {
+        let text = merge_draft_text(&destination.text, &update.text)?;
+        let attachment_ids =
+            merge_attachment_ids(&destination.attachment_ids, &update.attachment_ids)?;
+        let route = update.route.clone().or(destination.route);
+        let revision = destination.revision.checked_add(1).ok_or(Error::Database)?;
+        conn.execute(
+            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,draft_only=1 WHERE draft_id=?",
+            params![text, json(&update.recipients)?, json(&attachment_ids)?, route.as_ref().map(json).transpose()?, to_i64(revision)?, destination.draft_id.to_string()],
+        )?;
+        (destination.draft_id, text, attachment_ids, route, revision)
+    } else {
+        let destination_id = DraftId::new();
+        let revision = source.revision.checked_add(1).ok_or(Error::Database)?;
+        conn.execute(
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,?,1)",
+            params![destination_id.to_string(), destination_conversation.to_string(), update.text, json(&update.recipients)?, json(&update.attachment_ids)?, update.route.as_ref().map(json).transpose()?, to_i64(revision)?],
+        )?;
+        (
+            destination_id,
+            update.text,
+            update.attachment_ids,
+            update.route,
+            revision,
+        )
+    };
+    let source_has_messages: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+        params![source.conversation_id.to_string()],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "DELETE FROM compose_drafts WHERE draft_id=?",
+        params![source.draft_id.to_string()],
+    )?;
+    conn.execute(
+        "INSERT INTO compose_draft_redirects(draft_id,conversation_id,target_draft_id,target_conversation_id,forward_conversation) VALUES(?,?,?,?,?)",
+        params![source.draft_id.to_string(), source.conversation_id.to_string(), destination_id.to_string(), destination_conversation.to_string(), !source_has_messages],
+    )?;
+    conn.execute(
+        "UPDATE compose_draft_redirects SET target_draft_id=?,target_conversation_id=? WHERE target_draft_id=?",
+        params![destination_id.to_string(), destination_conversation.to_string(), source.draft_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM compose_draft_redirects WHERE rowid IN (SELECT rowid FROM compose_draft_redirects ORDER BY rowid DESC LIMIT -1 OFFSET 256)",
+        [],
+    )?;
+    Ok(ComposeDraft {
+        draft_id: destination_id,
+        conversation_id: destination_conversation,
+        text,
+        recipients: update.recipients,
+        attachment_ids,
+        route,
+        revision,
+    })
+}
+
+fn merge_draft_text(destination: &str, source: &str) -> Result<String, Error> {
+    let text = if destination.is_empty() || source.is_empty() {
+        format!("{destination}{source}")
+    } else {
+        format!("{destination}\n\n{source}")
+    };
+    if text.len() > MAX_BODY_BYTES {
+        return Err(Error::DraftMergeOverflow);
+    }
+    Ok(text)
+}
+
+fn merge_attachment_ids(
+    destination: &[AttachmentId],
+    source: &[AttachmentId],
+) -> Result<Vec<AttachmentId>, Error> {
+    let mut merged = destination.to_vec();
+    for attachment in source {
+        if !merged.contains(attachment) {
+            merged.push(*attachment);
+        }
+    }
+    if merged.len() > MAX_DRAFT_ATTACHMENTS {
+        return Err(Error::DraftMergeOverflow);
+    }
+    Ok(merged)
+}
+
+/// Normalizes a phone identity for local conversation matching. Invalid and short-code values
+/// remain exact, while parseable numbers use E.164 and a caller-supplied region.
+pub fn canonical_address(address: &str, region: Option<&str>) -> String {
+    conversation_match::canonical_address(address, region)
+}
 fn canonical(path: &Path) -> Result<PathBuf, Error> {
     let parent = path.parent().ok_or(Error::Database)?;
     std::fs::create_dir_all(parent).map_err(|_| Error::Database)?;
@@ -5472,6 +5910,220 @@ mod tests {
             assert_eq!(decode_state(state_code(state)), Ok(state));
         }
         assert_eq!(decode_state("attempted"), Err(Error::Database));
+    }
+
+    #[test]
+    fn recipientless_draft_is_atomic_and_discard_is_cas_safe() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[42; 32]).unwrap(),
+        )
+        .unwrap();
+        let first = client.recipientless_compose_draft().unwrap();
+        assert_eq!(
+            client.recipientless_compose_draft().unwrap().draft_id,
+            first.draft_id
+        );
+        let recipient_edit = client
+            .save_compose_draft(
+                first.draft_id,
+                0,
+                ComposeDraftUpdate {
+                    recipients: vec!["(415) 555-2671".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(recipient_edit.draft_id, first.draft_id);
+        assert_eq!(recipient_edit.conversation_id, first.conversation_id);
+        let cleared = client
+            .save_compose_draft(
+                first.draft_id,
+                recipient_edit.revision,
+                ComposeDraftUpdate::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            client.discard_compose_draft(first.draft_id, 1),
+            Err(Error::StaleDraft { .. })
+        ));
+        client
+            .discard_compose_draft(first.draft_id, cleared.revision)
+            .unwrap();
+        client
+            .discard_compose_draft(first.draft_id, cleared.revision)
+            .unwrap();
+        assert!(client.compose_draft(first.draft_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn recipient_commit_moves_to_known_history_and_late_save_cannot_append() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[43; 32]).unwrap(),
+        )
+        .unwrap();
+        let captured = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+14155552671".into(),
+                body: "history".into(),
+                provider_message_id: Some("one".into()),
+                imported: false,
+            })
+            .unwrap();
+        let source = client.recipientless_compose_draft().unwrap();
+        // Rows created before the intent column was introduced have this default.
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "UPDATE compose_drafts SET draft_only=0 WHERE draft_id=?",
+                params![source.draft_id.to_string()],
+            )
+            .unwrap();
+        let moved = client
+            .save_compose_draft(
+                source.draft_id,
+                0,
+                ComposeDraftUpdate {
+                    text: "new text".into(),
+                    recipients: vec!["(415) 555-2671".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(moved.conversation_id, captured.conversation_id);
+        assert_eq!(moved.text, "new text");
+        assert!(client.compose_draft_is_new(moved.draft_id).unwrap());
+        let reply_conversation = ConversationId::new();
+        client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(reply_conversation),
+                sender_address: "+15555550101".into(),
+                body: "reply".into(),
+                provider_message_id: Some("two".into()),
+                imported: false,
+            })
+            .unwrap();
+        let reply = client
+            .create_compose_draft(Some(reply_conversation))
+            .unwrap();
+        assert!(!client.compose_draft_is_new(reply.draft_id).unwrap());
+        let forked = client
+            .save_compose_draft(
+                moved.draft_id,
+                moved.revision,
+                ComposeDraftUpdate {
+                    text: "group text".into(),
+                    recipients: vec!["(415) 555-2671".into(), "+14155552672".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_ne!(forked.conversation_id, captured.conversation_id);
+        assert_eq!(client.messages(captured.conversation_id).unwrap().len(), 1);
+        assert!(matches!(
+            client.save_compose_draft(source.draft_id, 0, ComposeDraftUpdate::default()),
+            Err(Error::DraftMoved { conversation_id, .. }) if conversation_id == forked.conversation_id
+        ));
+        assert_eq!(
+            client
+                .compose_draft_source_conversation(source.draft_id)
+                .unwrap(),
+            Some(source.conversation_id)
+        );
+        assert_eq!(
+            client
+                .compose_draft_redirect(source.draft_id)
+                .unwrap()
+                .unwrap()
+                .draft_id,
+            forked.draft_id
+        );
+    }
+
+    #[test]
+    fn canonical_address_keeps_short_codes_exact() {
+        assert_eq!(
+            canonical_address("(415) 555-2671", Some("US")),
+            "+14155552671"
+        );
+        assert_eq!(canonical_address("40404", Some("US")), "40404");
+    }
+
+    #[test]
+    fn repeated_history_moves_flatten_old_draft_redirects() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[44; 32]).unwrap(),
+        )
+        .unwrap();
+        let addresses = [
+            "+14155552671",
+            "+14155552672",
+            "+14155552673",
+            "+14155552674",
+            "+14155552675",
+            "+14155552676",
+            "+14155552677",
+            "+14155552678",
+            "+14155552679",
+            "+14155552680",
+        ];
+        let mut histories = Vec::new();
+        for (index, address) in addresses.iter().enumerate() {
+            let conversation = ConversationId::new();
+            client
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation),
+                    sender_address: (*address).into(),
+                    body: "history".into(),
+                    provider_message_id: Some(format!("history-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+            histories.push(conversation);
+        }
+        let original = client.recipientless_compose_draft().unwrap();
+        let mut current = original.clone();
+        for (address, conversation) in addresses.iter().zip(histories.iter()) {
+            current = client
+                .save_compose_draft(
+                    current.draft_id,
+                    current.revision,
+                    ComposeDraftUpdate {
+                        recipients: vec![(*address).into()],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(current.conversation_id, *conversation);
+        }
+        assert_eq!(
+            client
+                .compose_draft_redirect(original.draft_id)
+                .unwrap()
+                .unwrap()
+                .draft_id,
+            current.draft_id
+        );
     }
 
     #[test]

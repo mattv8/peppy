@@ -578,7 +578,7 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
         .prepare_attachment(&outbound_source, "image/png", "share.png")
         .unwrap();
     let draft = desktop.create_compose_draft(None).unwrap();
-    desktop
+    let draft = desktop
         .save_compose_draft(
             draft.draft_id,
             0,

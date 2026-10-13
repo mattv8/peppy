@@ -449,6 +449,15 @@ describe("BrowserBridge", () => {
     await expect(bridge.get_app_lock_status()).rejects.toMatchObject({ code: "unsupported" });
   });
 
+  it("round-trips discard requests and moved-draft details", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const discarded = bridge.discard_draft({ id: "draft", conversationId: "conversation", expectedRevision: "1" });
+    expect(port.sent).toEqual([{ id: 1, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } }]);
+    port.reply({ id: 1, ok: false, error: { code: "draft-moved", message: "Moved", conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" } });
+    await expect(discarded).rejects.toMatchObject({ code: "draft-moved", conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" });
+  });
+
   it("opens only a validated billing destination in a new tab", async () => {
     const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
     const open = vi.spyOn(window, "open").mockReturnValue(null);

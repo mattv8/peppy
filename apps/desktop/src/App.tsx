@@ -39,6 +39,7 @@ import {
   SquarePen,
   StatusPopover,
   TriangleAlert,
+  Trash2,
   X,
   type Attachment,
   type Conversation,
@@ -112,7 +113,7 @@ export async function searchRecipientSuggestions(query: string, sourceDeviceId?:
 const STATUS_LABEL: Record<MessageStatus, string> = {
   "queued-local": "Queued locally",
   "server-accepted": "Server accepted",
-  "gateway-persisted": "Gateway persisted",
+  "gateway-persisted": "Received by phone",
   preparing: "Preparing",
   submitted: "Submitted",
   sent: "Sent",
@@ -150,6 +151,13 @@ const errorCode = (error: unknown): string | undefined =>
   typeof error.code === "string"
     ? error.code
     : undefined;
+
+const errorDetail = (error: unknown, key: "conversationId" | "draftId" | "currentRevision"): string | undefined => {
+  if (typeof error !== "object" || error === null) return undefined;
+  const record = error as Record<string, unknown>;
+  const details = typeof record.details === "object" && record.details !== null ? record.details as Record<string, unknown> : record;
+  return typeof details[key] === "string" ? details[key] : undefined;
+};
 
 function expiryText(seconds: number): string {
   if (seconds <= 0)
@@ -233,17 +241,17 @@ function routeProblem(
 ): string | undefined {
   if (route.kind === "none")
     return gateways.length
-      ? "choose a gateway and SIM"
-      : "no gateway is configured";
+      ? "choose a phone and SIM"
+      : "no phone is configured";
   if (route.kind === "stale")
-    return "the selected gateway/SIM is no longer reported; choose another route";
+    return "the selected phone/SIM is no longer reported; choose another route";
   if (!requiresMms && !route.gateway.supportsSms)
-    return "this gateway/SIM does not support SMS";
+    return "this phone/SIM does not support SMS";
   if (requiresMms && !route.gateway.supportsMms)
-    return "this gateway/SIM does not support MMS attachments";
+    return "this phone/SIM does not support MMS attachments";
   const contentVersion = route.gateway.mmsContentVersion;
   if (requiresMms && (!Number.isSafeInteger(contentVersion) || (contentVersion ?? 0) < 2))
-    return "this gateway/SIM needs MMS content version 2";
+    return "this phone/SIM needs MMS content version 2";
   const recipientLimit = Math.min(route.gateway.mmsMaxRecipients ?? 20, 20);
   if (requiresMms && recipientCount > recipientLimit)
     return `this MMS route supports up to ${recipientLimit} recipients`;
@@ -301,10 +309,34 @@ const contentOf = (draft: Draft): DraftContent => ({
   simId: draft.simId,
 });
 const isDirty = (slot: DraftSlot) => slot.generation > slot.savedGeneration;
+const sameDraftContent = (left: DraftContent, right: DraftContent) =>
+  left.text === right.text &&
+  left.gatewayId === right.gatewayId &&
+  left.simId === right.simId &&
+  left.recipientIds.join("\u0000") === right.recipientIds.join("\u0000") &&
+  left.attachmentIds.join("\u0000") === right.attachmentIds.join("\u0000");
+export const shouldConfirmPostFlushDelete = (
+  requestedKey: string,
+  currentKey: string,
+  currentContent: DraftContent,
+  hadContent: boolean,
+  confirmedKey: string | null,
+) =>
+  Boolean(currentContent.text || currentContent.attachmentIds.length) &&
+  (!hadContent || currentKey !== requestedKey) &&
+  confirmedKey !== currentKey;
 
 type DraftStoreEvents = {
   changed(): void;
   rekeyed(from: string, to: string): void;
+  unavailable?(from: string, to?: string, message?: string): void;
+};
+
+export type DraftRecovery = {
+  id: string;
+  content: DraftContent;
+  destination?: string;
+  message: string;
 };
 
 /**
@@ -315,6 +347,8 @@ type DraftStoreEvents = {
 export class DraftStore {
   private slots = new Map<string, DraftSlot>();
   private aliases = new Map<string, string>();
+  private tombstones = new Set<string>();
+  private recoveries = new Map<string, DraftRecovery>();
   private newCount = 0;
 
   constructor(
@@ -342,13 +376,47 @@ export class DraftStore {
     return [...this.slots.values()].filter((slot) => isLocalDraftKey(slot.key));
   }
 
+  recoveriesFor(conversationId?: string): DraftRecovery[] {
+    return [...this.recoveries.values()].filter(
+      recovery => conversationId
+        ? !recovery.destination || recovery.destination === conversationId || recovery.id === conversationId
+        : !recovery.destination,
+    );
+  }
+
+  discardRecovery(id: string) {
+    this.recoveries.delete(id);
+    this.events.changed();
+  }
+
+  /** Retires content whose host identity moved outside this window's save queue. */
+  retireUnavailable(key: string, error: unknown): string | undefined {
+    const slot = this.get(key);
+    const destination = errorDetail(error, "conversationId");
+    if (!slot) return destination;
+    const moved = errorCode(error) === "draft-moved";
+    this.retire(
+      slot,
+      slot.content,
+      destination,
+      moved
+        ? "Draft moved elsewhere. Review the retained text before sending again."
+        : "Draft was deleted elsewhere. Retained text can be copied or restored to a new draft.",
+    );
+    return destination;
+  }
+
   /** Starts a draft; the host assigns both IDs on save. */
   createNew(recipient?: string): { key: string; saved: Promise<SaveOutcome> } {
     const key = `${NEW_DRAFT_PREFIX}${++this.newCount}`;
+    this.ensure(key);
     return { key, saved: this.edit(key, { recipientIds: recipient ? [recipient] : [] }) };
   }
 
   edit(key: string, patch: Partial<DraftContent>): Promise<SaveOutcome> {
+    const resolved = this.resolve(key);
+    if (this.tombstones.has(key) || this.tombstones.has(resolved))
+      return Promise.resolve({ ok: false, error: "This draft was deleted or moved elsewhere." });
     const slot = this.ensure(key);
     slot.content = { ...slot.content, ...patch };
     slot.generation += 1;
@@ -361,6 +429,7 @@ export class DraftStore {
     const slot = this.get(conversationId);
     if (slot && (isDirty(slot) || slot.held)) return;
     if (draft) {
+      this.tombstones.delete(conversationId);
       const target = slot ?? this.ensure(conversationId);
       Object.assign(target, {
         id: draft.id,
@@ -370,6 +439,7 @@ export class DraftStore {
         error: undefined,
       });
     } else if (slot) {
+      this.tombstones.delete(conversationId);
       Object.assign(slot, {
         id: "",
         revision: "0",
@@ -419,6 +489,14 @@ export class DraftStore {
     if (isDirty(slot)) void this.enqueue(slot);
   }
 
+  /** A discarded draft is removed only after its serialized saves have completed. */
+  remove(key: string) {
+    const resolved = this.resolve(key);
+    this.tombstones.add(resolved);
+    this.slots.delete(resolved);
+    this.events.changed();
+  }
+
   /** The host cleared the sent draft; edits typed during the send start a fresh draft. */
   markSent(key: string, sentGeneration: number) {
     const slot = this.get(key);
@@ -465,6 +543,8 @@ export class DraftStore {
   }
 
   private async save(slot: DraftSlot): Promise<SaveOutcome> {
+    if (this.tombstones.has(slot.key) || this.slots.get(slot.key) !== slot)
+      return { ok: false, error: "This draft was deleted or moved elsewhere." };
     if (slot.held)
       return {
         ok: false,
@@ -486,7 +566,12 @@ export class DraftStore {
     try {
       saved = await this.persist(input);
     } catch (error) {
-      slot.error = { message: errorText(error), code: errorCode(error) };
+      const code = errorCode(error);
+      if (code === "draft-moved" || code === "not-found") {
+        this.retireUnavailable(slot.key, error);
+        return { ok: true };
+      }
+      slot.error = { message: errorText(error), code };
       this.events.changed();
       return { ok: false, error: slot.error.message };
     }
@@ -497,21 +582,57 @@ export class DraftStore {
       error: undefined,
     });
     if (slot.generation === generation) slot.content = contentOf(saved);
-    if (saved.conversationId && saved.conversationId !== slot.conversationId)
-      this.rekey(slot, saved.conversationId);
+    if (saved.conversationId && saved.conversationId !== slot.conversationId) {
+      if (slot.generation > generation && !sameDraftContent(contentOf(saved), input)) {
+        this.retire(
+          slot,
+          slot.content,
+          saved.conversationId,
+          "Draft moved while you were editing. Your newer text is retained separately; review it before sending again.",
+        );
+        return { ok: false, error: "Draft moved while you were editing. Your newer text is retained separately." };
+      }
+      if (!this.rekey(slot, saved.conversationId)) return { ok: false, error: "Draft moved while another window has edits. Your text is retained separately." };
+    }
     this.events.changed();
     return { ok: true };
   }
 
-  private rekey(slot: DraftSlot, conversationId: string) {
+  private rekey(slot: DraftSlot, conversationId: string): boolean {
     const from = slot.key;
     slot.conversationId = conversationId;
-    if (from === conversationId) return;
+    if (from === conversationId) return true;
+    const destination = this.slots.get(conversationId);
+    if (destination && destination !== slot && isDirty(destination)) {
+      this.retire(
+        slot,
+        slot.content,
+        conversationId,
+        "This draft moved while the destination has newer edits. Your text is retained separately.",
+      );
+      return false;
+    }
     this.slots.delete(from);
-    this.aliases.set(from, conversationId);
+    if (isLocalDraftKey(from)) this.aliases.set(from, conversationId);
     slot.key = conversationId;
     this.slots.set(conversationId, slot);
     this.events.rekeyed(from, conversationId);
+    return true;
+  }
+
+  private retire(
+    slot: DraftSlot,
+    content: DraftContent,
+    destination: string | undefined,
+    message: string,
+  ) {
+    const from = slot.key;
+    if (content.text || content.attachmentIds.length || content.recipientIds.length)
+      this.recoveries.set(from, { id: from, content: { ...content }, destination, message });
+    this.slots.delete(from);
+    if (destination && isLocalDraftKey(from)) this.aliases.set(from, destination);
+    this.events.unavailable?.(from, destination, message);
+    this.events.changed();
   }
 }
 
@@ -548,16 +669,16 @@ function GatewaySelector({
     return index >= 0 ? `SIM ${index + 1}` : gateway.simId;
   };
   return (
-    <section id="gateway-selector" aria-label="Gateway and SIM" data-route-state={problem ? "blocked" : "ready"}>
+    <section id="gateway-selector" aria-label="Phone and SIM" data-route-state={problem ? "blocked" : "ready"}>
         <select
-          aria-label="Gateway"
+          aria-label="Phone"
           value={value}
           onChange={(event) => choose(event.target.value)}
           disabled={!gateways.length}
         >
           {route.kind === "none" && (
             <option value="" disabled>
-              {gateways.length ? "Choose gateway and SIM" : "No gateway"}
+              {gateways.length ? "Choose phone and SIM" : "No phone"}
             </option>
           )}
           {route.kind === "stale" && (
@@ -1195,6 +1316,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [composerHeight, setComposerHeight] = useState<number | null>(null);
   const [recipientPosition, setRecipientPosition] = useState<RecipientPosition | null>(null);
   const [pendingRecipient, setPendingRecipient] = useState(false);
+  const [newComposeKey, setNewComposeKey] = useState<string | null>(null);
+  const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [overlayHeight, setOverlayHeight] = useState<number | null>(
     typeof ResizeObserver === "undefined" ? 120 : null,
   );
@@ -1226,6 +1350,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const messageRows = useRef(new Map<string, HTMLElement>());
   const handlers = useRef({
     rekeyed: (_from: string, _to: string) => {},
+    unavailable: (_from: string, _to?: string, _message?: string) => {},
     close: () => {},
     collapse: () => {},
     closeHead: () => {},
@@ -1235,6 +1360,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     storeRef.current = new DraftStore((input) => bridge.save_draft(input), {
       changed: () => rerender(),
       rekeyed: (from, to) => handlers.current.rekeyed(from, to),
+      unavailable: (from, to, message) => handlers.current.unavailable(from, to, message),
     });
   const store = storeRef.current;
 
@@ -1463,6 +1589,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (key === previous) return;
     if (previous) void store.flush(previous);
     choose(key);
+    if (newComposeKey && key !== newComposeKey && !isLocalDraftKey(key)) setNewComposeKey(null);
     setNotice("");
     if (!isLocalDraftKey(key)) void refresh(key).catch(report(""));
   };
@@ -1471,6 +1598,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (selectedRef.current !== from) return;
     choose(to);
     void refresh(to).catch(report(""));
+  };
+  handlers.current.unavailable = (from, to, message) => {
+    if (selectedRef.current === from && to) choose(to);
+    else if (selectedRef.current === from) choose("");
+    setNotice(message ?? "Draft changed elsewhere.");
+    if (to) void refresh(to).catch(report(""));
   };
 
   useEffect(() => {
@@ -1604,6 +1737,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   const slot = store.get(slotKey);
+  const recoveries = store.recoveriesFor(slotKey || undefined);
   const content = slot?.content ?? blankContent();
   const gateways = snapshot?.gateways ?? [];
   const route = resolveRoute(content, gateways);
@@ -1617,13 +1751,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     routeRecipients,
     estimateBytes,
   );
-  const isNewConversation =
-    Boolean(slotKey) &&
-    (isLocalDraftKey(slotKey) ||
-      (conversationLoaded && active!.messages.length === 0));
+  const isNewConversation = Boolean(slotKey) && (
+    isLocalDraftKey(slotKey) ||
+    (newComposeKey !== null && store.resolve(newComposeKey) === slotKey) ||
+    active?.draftOnly === true
+  );
 
   const edit = (patch: Partial<DraftContent>) => {
-    if (slotKey) void store.edit(slotKey, patch);
+    if (slotKey && deletingId !== slotKey) void store.edit(slotKey, patch);
+  };
+  const commitRecipients = (recipientIds: string[]) => {
+    if (!slotKey) return;
+    const previous = content.recipientIds;
+    void store.edit(slotKey, { recipientIds }).then(outcome => {
+      const current = store.get(slotKey);
+      if (!outcome.ok && current?.error?.code === "recipientless-draft-exists") {
+        setNotice("Another blank draft already exists. Your previous recipients were restored.");
+        void store.edit(slotKey, { recipientIds: previous });
+      } else if (!outcome.ok && current?.error?.code === "draft-merge-overflow") {
+        setNotice("These drafts are too large to combine. Your draft is still available to edit.");
+      }
+    });
   };
   const changeRecipientPosition = (position: RecipientPosition) => {
     setRecipientPosition(position);
@@ -1643,11 +1791,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
 
-  const startNewMessage = (recipient?: string) => {
+  const startNewMessage = async (recipient?: string) => {
     const previous = selectedRef.current;
-    if (previous) void store.flush(previous);
+    const previousSlot = previous ? store.get(previous) : undefined;
+    if (previousSlot && isDirty(previousSlot)) await store.flush(previous);
     const { key } = store.createNew(recipient);
-    choose(store.resolve(key));
+    const draftKey = store.resolve(key);
+    setNewComposeKey(draftKey);
+    choose(draftKey);
     setNotice("");
   };
   const showConversationList = () => {
@@ -1664,7 +1815,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const startTitlebarMessage = () => {
     showConversationList();
-    startNewMessage();
+    void startNewMessage();
   };
 
   const retrySave = async () => {
@@ -1684,6 +1835,72 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }
     }
     await store.flush(slotKey);
+  };
+
+  const deleteDraft = async (conversationId: string) => {
+    if (!conversationId) return setDeleteConfirmationId(null);
+    const conversation = snapshotRef.current?.conversations.find(item => item.id === conversationId);
+    const localDraft = isLocalDraftKey(conversationId);
+    if (!localDraft && (!conversation?.draftOnly || !conversation.recipientlessDraft)) return;
+    let draftSlot = store.get(conversationId);
+    if (!draftSlot && !localDraft) {
+      try {
+        const state = await bridge.load_state(conversationId);
+        if (state.activeConversationId === conversationId) store.adopt(conversationId, state.draft);
+        draftSlot = store.get(conversationId);
+      } catch (error) {
+        setNotice(`Draft not deleted: ${errorText(error)}`);
+        return;
+      }
+    }
+    if (!draftSlot || draftSlot.content.recipientIds.length) return;
+    const hasContent = Boolean(draftSlot.content.text || draftSlot.content.attachmentIds.length);
+    if (hasContent && deleteConfirmationId !== conversationId) {
+      setDeleteConfirmationId(conversationId);
+      setNotice("Deleting this draft permanently removes its text and attachments. Select Confirm delete draft to continue.");
+      return;
+    }
+    setDeletingId(conversationId);
+    try {
+      const flushed = await store.flush(conversationId);
+      const current = store.get(conversationId);
+      if (!flushed.ok && current?.id) throw new Error(flushed.error);
+      if (!current || current.content.recipientIds.length) throw new Error("The draft changed elsewhere; reload before deleting it.");
+      if (shouldConfirmPostFlushDelete(
+        conversationId,
+        current.key,
+        current.content,
+        hasContent,
+        deleteConfirmationId,
+      )) {
+        setDeleteConfirmationId(current.key);
+        setNotice("Deleting this draft permanently removes its text and attachments. Select Confirm delete draft to continue.");
+        return;
+      }
+      if (current.id)
+        await bridge.discard_draft({ id: current.id, conversationId: current.conversationId, expectedRevision: current.revision });
+      store.remove(conversationId);
+      setDeleteConfirmationId(null);
+      if (selectedRef.current === conversationId) {
+        const next = snapshotRef.current?.conversations.find(item => item.id !== conversationId)?.id ?? "";
+        choose(next);
+      }
+      try {
+        await refresh();
+      } catch (error) {
+        setNotice(`Draft deleted, but refresh failed: ${errorText(error)}`);
+        return;
+      }
+      setNotice("Draft deleted.");
+    } catch (error) {
+      setNotice(`Draft not deleted: ${errorText(error)}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+  const cancelDeleteDraft = () => {
+    setDeleteConfirmationId(null);
+    setNotice("");
   };
 
   const addAttachment = async () => {
@@ -1736,7 +1953,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         draftEstimateBytes(current.content, attachmentViews),
       );
       if (blocked || chosen.kind !== "route")
-        return setNotice(`Not sent: ${blocked ?? "choose a gateway and SIM"}.`);
+        return setNotice(`Not sent: ${blocked ?? "choose a phone and SIM"}.`);
       const sentGeneration = current.generation;
       store.hold(current.key);
       try {
@@ -1755,8 +1972,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           );
         }
         store.markSent(current.key, sentGeneration);
+        setNewComposeKey(null);
       } catch (error) {
         store.release(current.key);
+        if (errorCode(error) === "draft-moved") {
+          const destination = store.retireUnavailable(current.key, error);
+          if (destination) {
+            choose(destination);
+            void refresh(destination).catch(report(""));
+          }
+          return setNotice("Draft moved elsewhere. Review the retained text, then send again.");
+        }
         return setNotice(`Send failed: ${errorText(error)}`);
       }
       await refresh(current.conversationId).catch(report(""));
@@ -1919,12 +2145,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       name: local.content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
       preview: "Not saved yet",
       unread: 0,
+      draftOnly: true,
+      recipientlessDraft: local.content.recipientIds.length === 0,
     })),
-    ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants }) => ({
+    ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly }) => ({
       id,
       ...displayConversation(name, participants, resolution),
       preview,
       unread,
+      recipientlessDraft,
+      draftOnly,
     })),
   ];
 
@@ -1993,7 +2223,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     />
   );
   const composer = (
-    <section
+            <section
       id="composer-area"
       aria-label="Composer"
       aria-busy={sending}
@@ -2012,11 +2242,42 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onRemoveAttachment={slotKey ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
         status={notice}
         statusActive={statusActive}
-        bannerSlot={slot?.error ? (
-          <DraftRecovery
-            error={slot.error.message}
-            onRetry={() => void retrySave()}
-          />
+        bannerSlot={slot?.error || recoveries.length ? (
+          <>
+            {slot?.error && <DraftRecovery
+              error={slot.error.message}
+              onRetry={() => void retrySave()}
+            />}
+            {recoveries.map(recovery => <section
+              key={recovery.id}
+              id={`draft-recovery-${recovery.id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+              data-draft-recovery={recovery.id}
+              aria-label="Recoverable unsaved draft"
+              role="status"
+            >
+              <p>{recovery.message}</p>
+              {recovery.content.text && <pre>{recovery.content.text}</pre>}
+              {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
+                void store.edit(recovery.destination!, recovery.content).then(outcome => {
+                  if (outcome.ok) store.discardRecovery(recovery.id);
+                  else setNotice(`Retained text was not applied: ${outcome.error}`);
+                });
+               }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
+                const { key } = store.createNew();
+                setNewComposeKey(key);
+                choose(key);
+                store.discardRecovery(recovery.id);
+                void store.edit(key, recovery.content);
+              }}>Restore in new draft</button>}
+              {recovery.content.text && <button className="secondary-button" type="button" onClick={() => {
+                void navigator.clipboard?.writeText(recovery.content.text).then(
+                  () => setNotice("Recoverable text copied."),
+                  () => setNotice("Could not copy recoverable text; select it above to copy."),
+                );
+              }}>Copy retained text</button>}
+              <button className="secondary-button" type="button" onClick={() => store.discardRecovery(recovery.id)}>Discard retained text</button>
+            </section>)}
+          </>
         ) : undefined}
         statusSlot={
           <>
@@ -2052,9 +2313,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   const recipientPanel = isNewConversation ? (
     <RecipientPanel
-      key={slotKey}
+      key={newComposeKey ?? slotKey}
       recipients={content.recipientIds.map((id) => ({ id, label: resolution[id]?.displayName ?? id, avatarUrl: resolution[id]?.photoDataUrl }))}
-      onCommit={(recipientIds) => edit({ recipientIds })}
+      onCommit={commitRecipients}
       searchContacts={snapshot ? (query) => searchRecipientSuggestions(query, content.gatewayId) : undefined}
       onSuggestionChosen={rememberContact}
       position={recipientPosition}
@@ -2228,11 +2489,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden />
             </button>}
           </div>
-          <ConversationList
+            <ConversationList
             conversations={conversations}
             selectedId={slotKey}
             onSelect={select}
-            onPopout={id => void popoutConversation(id)}
+              onPopout={id => void popoutConversation(id)}
+              onDelete={id => void deleteDraft(id)}
+              onCancelDelete={cancelDeleteDraft}
+              deleteConfirmationId={deleteConfirmationId ?? undefined}
+              deletingId={deletingId ?? undefined}
           />
         </aside>
         {!settingsOpen && !notificationsOpen && !contactsOpen && <ResizeHandle
@@ -2306,6 +2571,23 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   <ExternalLink size={16} aria-hidden />
                 </button>
               )}
+              {((active?.recipientlessDraft && active.draftOnly) || (Boolean(newComposeKey) && content.recipientIds.length === 0)) && <button
+                id="conversation-delete-draft"
+                className={deleteConfirmationId === slotKey ? "confirming" : undefined}
+                aria-label={deleteConfirmationId === slotKey ? "Confirm delete draft" : "Delete draft"}
+                title={deleteConfirmationId === slotKey ? "Confirm delete draft" : "Delete draft"}
+                disabled={deletingId === slotKey}
+                onBlur={() => deleteConfirmationId === slotKey && cancelDeleteDraft()}
+                onKeyDown={event => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelDeleteDraft();
+                }}
+                onClick={() => void deleteDraft(slotKey)}
+              >
+                <Trash2 size={16} aria-hidden />
+              </button>}
             </div>
           </header>
           {settingsOpen ? (

@@ -85,6 +85,50 @@ pub(crate) fn routed(mut draft: DraftInput, gateway: &str, sim: &str) -> DraftIn
     draft
 }
 
+#[test]
+fn history_row_with_new_compose_intent_is_not_recipientless() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let history = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+14155552671".into(),
+            body: "history".into(),
+            provider_message_id: Some("history-draft-flag".into()),
+            imported: false,
+        })
+        .unwrap();
+    let source = session.client.recipientless_compose_draft().unwrap();
+    let moved = session
+        .save_draft(&input(
+            &source.draft_id.to_string(),
+            &source.conversation_id.to_string(),
+            "draft",
+            &["+14155552671"],
+            &source.revision.to_string(),
+        ))
+        .unwrap();
+    assert_eq!(moved.conversation_id, history.conversation_id.to_string());
+
+    let (snapshot, _) = session
+        .snapshot(
+            Some(&moved.conversation_id),
+            crate::head(),
+            None,
+            crate::notifications::NotificationPreferences::default(),
+        )
+        .unwrap();
+    let row = snapshot
+        .conversations
+        .iter()
+        .find(|row| row.id == moved.conversation_id)
+        .unwrap();
+    assert!(!row.recipientless_draft);
+    assert!(row.draft_only);
+}
+
 pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
     GatewayView {
         id: id.into(),
@@ -661,7 +705,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
             "0",
         ))
         .unwrap();
-    assert_eq!(draft.revision, "1");
+    assert_eq!(draft.revision, "0");
     assert_eq!(draft.recipient_ids, vec!["+15555550100".to_string()]);
     assert!(session
         .save_draft(&input(
@@ -669,12 +713,12 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
             &draft.conversation_id,
             "x",
             &["not a phone"],
-            "1"
+            "0"
         ))
         .is_err());
     assert_eq!(
         session
-            .save_draft(&input(&draft.id, &draft.conversation_id, "stale", &[], "0"))
+            .save_draft(&input(&draft.id, &draft.conversation_id, "stale", &[], "1"))
             .unwrap_err()
             .code,
         "stale-draft"
@@ -682,7 +726,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
 
     // Gateway capabilities not loaded yet: refused, draft untouched.
     let send = routed(
-        input(&draft.id, &draft.conversation_id, "", &[], "1"),
+        input(&draft.id, &draft.conversation_id, "", &[], "0"),
         &gateway_id,
         "sim-1",
     );
@@ -698,7 +742,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     assert_eq!(
         session
             .send_draft(&routed(
-                input(&draft.id, "", "", &[], "1"),
+                input(&draft.id, "", "", &[], "0"),
                 &gateway_id,
                 "sim-9"
             ))
@@ -709,7 +753,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     assert_eq!(
         session
             .send_draft(&routed(
-                input(&draft.id, "", "", &[], "0"),
+                input(&draft.id, "", "", &[], "1"),
                 &gateway_id,
                 "sim-1"
             ))

@@ -85,13 +85,13 @@ private fun granted(context: Context, permission: String) =
     context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
 internal fun importMessage(result: ImportResult): String = when (result) {
-    ImportResult.IMPORTED -> "Credential verified for this gateway device. Unlock with the vault passphrase next."
+    ImportResult.IMPORTED -> "Credential verified for this phone. Unlock with the vault passphrase next."
     ImportResult.UPDATED -> "Credential refreshed for the same device. Local data and its protected key were kept."
     ImportResult.INVALID_CREDENTIAL -> "This file is not a valid Peppy v1 device credential (16 KiB maximum)."
     ImportResult.SERVER_REJECTED -> "The server did not accept this credential for its vault and device."
     ImportResult.SETUP_TOKEN_REJECTED -> "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again."
     ImportResult.INSTANCE_ALREADY_CLAIMED -> "This server has already been set up. Connect with your admin password or vault shared secret instead."
-    ImportResult.NOT_A_GATEWAY -> "This credential belongs to a viewing device. Pair this phone as an SMS gateway instead."
+    ImportResult.NOT_A_GATEWAY -> "This credential belongs to a viewing device. Pair this phone to send SMS instead."
     ImportResult.NETWORK_ERROR -> "Could not reach the Peppy server. Check the connection and try again."
     ImportResult.IDENTITY_MISMATCH -> "This phone is already bound to a different server, vault, or device. Import refused to protect existing data."
     ImportResult.EXISTING_DATA_WITHOUT_KEY -> "Local Peppy data exists without its protected key. Import refused so that data is not overwritten."
@@ -128,9 +128,9 @@ internal fun unlockMessage(result: UnlockResult): String = when (result) {
 @Composable
 internal fun syncMessage(status: GatewayStatus): String = when {
     status.syncPhase == SyncPhase.RECOVERY_REQUIRED -> when (status.recoveryReason) {
-        RecoveryReason.PRODUCER_CONFLICT -> "Stopped: the server reports this device's updates conflict with an earlier install. Pair this phone again as a new gateway device."
-        RecoveryReason.DATABASE_MISSING -> "Stopped: this phone's encrypted message database is missing, so it cannot safely continue. Nothing will be sent. Pair this phone again as a new gateway device."
-        else -> "Stopped: this credential was already used by an earlier install. Pair this phone again as a new gateway device."
+        RecoveryReason.PRODUCER_CONFLICT -> "Stopped: the server reports this device's updates conflict with an earlier install. Pair this phone again as a new device."
+        RecoveryReason.DATABASE_MISSING -> "Stopped: this phone's encrypted message database is missing, so it cannot safely continue. Nothing will be sent. Pair this phone again as a new device."
+        else -> "Stopped: this credential was already used by an earlier install. Pair this phone again as a new device."
     }
     status.outboxRejection != null -> "Stopped: the server permanently rejected a queued update (${status.outboxRejection}). Sending and uploads are paused; pair this phone again."
     !status.sharedKeysReady -> stringResource(R.string.peppy_not_unlocked)
@@ -291,7 +291,7 @@ private fun CompanionScreen() {
         }
 
         if (!settingsOpen && status?.enrolled == true && destination == "sms") Section("sms-tab-screen", stringResource(R.string.peppy_sms)) {
-        Section("status-section", "Gateway status") {
+        Section("status-section", "Phone status") {
             val current = status
             if (current == null) {
                 CircularProgressIndicator(Modifier.size(20.dp).testTag("status-loading"), strokeWidth = 2.dp)
@@ -330,7 +330,7 @@ private fun CompanionScreen() {
             ) { Text("Open battery settings") }
         }
 
-        Section("gateway-settings-section", "Gateway settings") {
+        Section("gateway-settings-section", "Phone settings") {
             Row(Modifier.fillMaxWidth().testTag("settings-sms-capture-toggle"), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f)) {
                     Text("Enable SMS capture")

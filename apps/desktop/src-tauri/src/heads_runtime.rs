@@ -1300,6 +1300,27 @@ pub async fn dismiss(app: &AppHandle, conversation_id: &str) -> BridgeResult<()>
     dismiss_generation(app, conversation_id, generation).await
 }
 
+/// A deleted local draft cannot retain a persistent floating-head pin. The normal state hint
+/// refresh hides any native head and updates the tray after this durable cleanup.
+pub fn forget_deleted_conversation(app: &AppHandle, conversation_id: &str) -> BridgeResult<()> {
+    let binding = runtime(app)
+        .state
+        .lock()
+        .map_err(|_| BridgeError::host_state())?
+        .binding
+        .clone();
+    if let Some(binding) = binding {
+        runtime(app)
+            .pins
+            .remove(&binding, conversation_id)
+            .map_err(|message| BridgeError::new("heads", message))?;
+    }
+    if let Ok(mut state) = runtime(app).state.lock() {
+        state.heads.remove(conversation_id);
+    }
+    Ok(())
+}
+
 pub(crate) async fn dismiss_generation(
     app: &AppHandle,
     conversation_id: &str,

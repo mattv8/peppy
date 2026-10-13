@@ -13,6 +13,7 @@ import type {
   Draft,
   DesktopSnapshot,
   DraftInput,
+  DiscardDraftInput,
   SendDraftInput,
   PublicCopy,
   NotificationTarget,
@@ -42,6 +43,7 @@ import type {
   AppLockStatus,
   DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
+import { normalizePhoneNumber } from "@peppy/desktop-ui";
 
 export {
   type ConnectionState,
@@ -54,6 +56,7 @@ export {
   type Draft,
   type DesktopSnapshot,
   type DraftInput,
+  type DiscardDraftInput,
   type SendDraftInput,
   type PublicCopy,
   type NotificationTarget,
@@ -101,6 +104,31 @@ fixtureSnapshot.contactsPendingCount = 1;
 const fixtureDrafts = new Map<string, Draft>();
 let fixtureCreated = 0;
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
+const canonicalRecipient = (recipient: string) => normalizePhoneNumber(recipient) ?? recipient.trim();
+const canonicalRecipients = (recipientIds: string[]) => [...new Set(recipientIds.map(canonicalRecipient).filter(Boolean))];
+const recipientSetKey = (recipientIds: string[]) => canonicalRecipients(recipientIds).sort().join("\n");
+const sameRecipientSet = (left: string[], right: string[]) => recipientSetKey(left) === recipientSetKey(right);
+const isEstablishedFixtureConversation = (conversationId: string) => fixtureSnapshot.conversations.some((conversation) => conversation.id === conversationId);
+const matchingFixtureConversationId = (recipientIds: string[]) => fixtureSnapshot.conversations.find((conversation) => sameRecipientSet(conversation.participants ?? [], recipientIds))?.id
+  ?? [...fixtureDrafts.values()].find((draft) => !isEstablishedFixtureConversation(draft.conversationId) && sameRecipientSet(draft.recipientIds, recipientIds))?.conversationId;
+const mergeDraftText = (target: string, incoming: string) => target && incoming && target !== incoming ? `${target}\n${incoming}` : target || incoming;
+const mergeAttachmentIds = (target: string[], incoming: string[]) => [...new Set([...target, ...incoming])];
+const newFixtureDraft = (conversationId: string): Draft => ({
+  id: `draft-fixture-${conversationId}`,
+  conversationId,
+  text: "",
+  recipientIds: [],
+  attachmentIds: [],
+  revision: "0",
+});
+const fixtureMovedError = (target: Draft) => ({
+  code: "draft-moved",
+  message: "Draft moved to an existing unsent draft; its content was preserved.",
+  conversationId: target.conversationId,
+  draftId: target.id,
+  currentRevision: target.revision,
+  details: { conversationId: target.conversationId, draftId: target.id, currentRevision: target.revision },
+});
 const fixtureAccount = (): HostedAccountView => ({ available: true, signedIn: false, accountLabel: null, classification: null, entitlement: null, access: null, hasVault: false, resumable: false });
 /** Display-only fixture views deliberately have no reducer or event transition logic. */
 const cannedHostedView = (screen = "welcome", scenario = "new"): HostedPreviewView => ({
@@ -113,7 +141,7 @@ const fixtureConversationIds = () => [...fixtureSnapshot.conversations.map(c => 
 /** Draft-only conversations are listed like the host lists them. */
 const fixtureDraftConversations = (): ConversationView[] => [...fixtureDrafts.values()]
   .filter(draft => !fixtureSnapshot.conversations.some(c => c.id === draft.conversationId))
-  .map(draft => ({ id: draft.conversationId, name: draft.recipientIds.join(", ") || "New message", preview: draft.text ? `Draft: ${draft.text.slice(0, 80)}` : "Draft", unread: 0, messages: [] }));
+  .map(draft => ({ id: draft.conversationId, name: draft.recipientIds.join(", ") || "New message", preview: draft.text ? `Draft: ${draft.text.slice(0, 80)}` : "Draft", unread: 0, messages: [], draftOnly: true, recipientlessDraft: draft.recipientIds.length === 0 }));
 /**
  * Empty draft ID: create the draft (or attach to the conversation's existing one); an empty
  * conversation ID also creates a new conversation. Saves are CAS on a numeric revision.
@@ -121,24 +149,51 @@ const fixtureDraftConversations = (): ConversationView[] => [...fixtureDrafts.va
 const fixtureSave = (input: DraftInput): Draft => {
   const expected = Number(input.expectedRevision);
   if (!/^\d+$/.test(input.expectedRevision)) throw fixtureError("invalid-draft", "The draft revision is invalid.");
-  let current: Draft | undefined;
-  if (input.id === "") {
-    const conversationId = input.conversationId || `conv-fixture-new-${++fixtureCreated}`;
-    current = fixtureDrafts.get(conversationId) ?? { id: `draft-fixture-${conversationId}`, conversationId, text: "", recipientIds: [], attachmentIds: [], revision: "0" };
-  } else {
-    current = [...fixtureDrafts.values()].find(draft => draft.id === input.id);
-    if (!current) throw fixtureError("not-found", "The requested stored item was not found.");
-  }
-  if (input.conversationId && input.conversationId !== current.conversationId) throw fixtureError("invalid-draft", "The draft does not belong to this conversation.");
-  if (Number(current.revision) !== expected) throw fixtureError("stale-draft", `The draft changed elsewhere (current revision ${current.revision}); both versions were kept.`);
+  const recipientIds = canonicalRecipients(input.recipientIds);
+  const source = input.id ? [...fixtureDrafts.values()].find((draft) => draft.id === input.id) : undefined;
+  if (input.id && !source) throw fixtureError("not-found", "The requested stored item was not found.");
+  if (source && input.conversationId && input.conversationId !== source.conversationId) throw fixtureError("invalid-draft", "The draft does not belong to this conversation.");
+  if (source && Number(source.revision) !== expected) throw fixtureError("stale-draft", `The draft changed elsewhere (current revision ${source.revision}); both versions were kept.`);
   if (Boolean(input.gatewayId) !== Boolean(input.simId)) throw fixtureError("invalid-route", "Select a gateway and SIM together.");
+  const emptyCreate = !source && !input.conversationId && !recipientIds.length;
+  const recipientless = emptyCreate ? [...fixtureDrafts.values()].find((draft) => !isEstablishedFixtureConversation(draft.conversationId) && !draft.recipientIds.length) : undefined;
+  if (recipientless) {
+    if (!input.text && !input.attachmentIds.length) return recipientless;
+    throw fixtureMovedError(recipientless);
+  }
+
+  const matchingConversationId = recipientIds.length ? matchingFixtureConversationId(recipientIds) : undefined;
+  const sourceRecipients = source ? canonicalRecipients(source.recipientIds) : [];
+  const recipientSetChanged = source && !sameRecipientSet(sourceRecipients, recipientIds);
+  const adoptedHistory = Boolean(source && isEstablishedFixtureConversation(source.conversationId));
+  const shouldFork = adoptedHistory && recipientSetChanged && !matchingConversationId;
+  const targetConversationId = shouldFork
+    ? `conv-fixture-new-${++fixtureCreated}`
+    : ((matchingConversationId ?? source?.conversationId ?? input.conversationId) || `conv-fixture-new-${++fixtureCreated}`);
+  const target = fixtureDrafts.get(targetConversationId) ?? newFixtureDraft(targetConversationId);
+  if (!source && !input.conversationId && fixtureDrafts.has(targetConversationId)) {
+    if (!input.text && !input.attachmentIds.length) return target;
+    throw fixtureMovedError(target);
+  }
+  if (!source && Number(target.revision) !== expected) {
+    throw fixtureError("stale-draft", `The draft changed elsewhere (current revision ${target.revision}); both versions were kept.`);
+  }
+  if (source && target !== source && Number(target.revision) > 0 && !matchingConversationId) {
+    throw fixtureError("stale-draft", `The draft changed elsewhere (current revision ${target.revision}); both versions were kept.`);
+  }
+  const incomingText = input.text;
+  const incomingAttachments = input.attachmentIds;
   const saved: Draft = {
-    id: current.id, conversationId: current.conversationId, text: input.text,
-    recipientIds: input.recipientIds.map(r => r.trim()),
-    attachmentIds: input.attachmentIds,
-    gatewayId: input.gatewayId || current.gatewayId, simId: input.simId || current.simId,
-    revision: String(expected + 1),
+    id: target.id,
+    conversationId: targetConversationId,
+    text: !source || target === source ? incomingText : mergeDraftText(target.text, incomingText),
+    recipientIds,
+    attachmentIds: !source || target === source ? incomingAttachments : mergeAttachmentIds(target.attachmentIds, incomingAttachments),
+    gatewayId: input.gatewayId || target.gatewayId || source?.gatewayId,
+    simId: input.simId || target.simId || source?.simId,
+    revision: String(Number(target.revision) + 1),
   };
+  if (source && source.conversationId !== targetConversationId) fixtureDrafts.delete(source.conversationId);
   fixtureDrafts.set(saved.conversationId, saved);
   return saved;
 };
@@ -154,6 +209,13 @@ export const fixtureBridge: DesktopBridge = {
   set_app_lock: async () => true,
   unlock_app: async () => true,
   save_draft: async input => fixtureSave(input),
+  discard_draft: async input => {
+    const draft = fixtureDrafts.get(input.conversationId);
+    if (!draft) return;
+    if (draft.id !== input.id || draft.revision !== input.expectedRevision) throw fixtureError("stale-draft", "The draft changed elsewhere; reload before deleting it.");
+    if (draft.recipientIds.length || fixtureSnapshot.conversations.some(conversation => conversation.id === draft.conversationId && conversation.messages.length)) throw fixtureError("draft-not-discardable", "Only an empty recipientless draft can be deleted.");
+    fixtureDrafts.delete(input.conversationId);
+  },
   send_draft: async () => ({ accepted: false, status: "failed-before-submit", reason: "Fixture gateway is offline; the draft was preserved." }),
   mark_seen: async () => undefined,
   dismiss_notification: async target => { const item = fixtureSnapshot.notifications.find(notification => notification.target.sourceDeviceId === target.sourceDeviceId && notification.target.notificationKey === target.notificationKey && notification.target.lifetime === target.lifetime); if (item) item.dismissalPending = true; },
@@ -228,7 +290,7 @@ export const fixtureBridge: DesktopBridge = {
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
 export const tauriBridge: DesktopBridge = {
-  load_state: conversationId => invoke("load_state", { conversationId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
+  load_state: conversationId => invoke("load_state", { conversationId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
   list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset) => invoke("list_contacts", { bookId, query, offset }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), enrollment_discover: origin => invoke("enrollment_discover", { origin }), enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };

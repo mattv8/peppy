@@ -87,3 +87,78 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(5, "reveal_vault_secret", undefined);
   });
 });
+
+describe("fixture draft saves", () => {
+  let fixtureBridge: (typeof import("./bridge"))["fixtureBridge"];
+
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ fixtureBridge } = await import("./bridge"));
+  });
+
+  it("reuses one blank draft without overwriting its content", async () => {
+    const blank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+    const filled = await fixtureBridge.save_draft({ id: blank.id, conversationId: blank.conversationId, text: "Keep this", recipientIds: [], attachmentIds: [], expectedRevision: blank.revision });
+    const reopened = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+
+    expect(reopened).toMatchObject({ id: filled.id, text: "Keep this", revision: filled.revision });
+    await expect(fixtureBridge.save_draft({ id: "", conversationId: "", text: "Discard this", recipientIds: [], attachmentIds: [], expectedRevision: "0" })).rejects.toMatchObject({
+      code: "draft-moved",
+      details: { conversationId: filled.conversationId, draftId: filled.id, currentRevision: filled.revision },
+    });
+  });
+
+  it("does not reuse a reply draft as a new blank draft", async () => {
+    const reply = await fixtureBridge.save_draft({ id: "", conversationId: "conv-aurora", text: "Reply", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+    const blank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+
+    expect(blank.conversationId).not.toBe(reply.conversationId);
+    expect((await fixtureBridge.load_state(blank.conversationId)).draft).toMatchObject({ id: blank.id, text: "" });
+  });
+
+  it("reuses exact draft-only recipient sets without changing stored chip order", async () => {
+    const original = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: ["+12025550181", "+12025550180"], attachmentIds: [], expectedRevision: "0" });
+    const reused = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: ["(202) 555-0180", "+12025550181"], attachmentIds: [], expectedRevision: "0" });
+    const state = await fixtureBridge.load_state();
+
+    expect(reused).toMatchObject({ id: original.id, recipientIds: ["+12025550181", "+12025550180"] });
+    expect(state.conversations.filter((conversation) => conversation.id === original.conversationId)).toHaveLength(1);
+    await expect(fixtureBridge.save_draft({ id: "", conversationId: "", text: "Conflicting", recipientIds: ["+12025550180", "+12025550181"], attachmentIds: [], expectedRevision: "0" })).rejects.toMatchObject({
+      code: "draft-moved",
+      details: { conversationId: original.conversationId, draftId: original.id, currentRevision: original.revision },
+    });
+  });
+
+  it("adopts canonical history recipients and merges an existing target draft", async () => {
+    const target = await fixtureBridge.save_draft({ id: "", conversationId: "conv-aurora", text: "Existing target", recipientIds: ["+12025550123"], attachmentIds: ["target-file"], expectedRevision: "0" });
+    const blank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+    const saved = await fixtureBridge.save_draft({ id: blank.id, conversationId: blank.conversationId, text: "Local text", recipientIds: ["(202) 555-0123"], attachmentIds: ["local-file"], expectedRevision: blank.revision });
+
+    expect(saved).toMatchObject({ id: target.id, conversationId: "conv-aurora", recipientIds: ["+12025550123"], text: "Existing target\nLocal text", attachmentIds: ["target-file", "local-file"] });
+    expect(Number(saved.revision)).toBeGreaterThan(Number(target.revision));
+  });
+
+  it("forks recipient changes after adopting history instead of changing that history", async () => {
+    const blank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+    const adopted = await fixtureBridge.save_draft({ id: blank.id, conversationId: blank.conversationId, text: "Reply", recipientIds: ["+12025550123"], attachmentIds: [], expectedRevision: blank.revision });
+    const forked = await fixtureBridge.save_draft({ id: adopted.id, conversationId: adopted.conversationId, text: "Group reply", recipientIds: ["+12025550123", "+12025550125"], attachmentIds: [], expectedRevision: adopted.revision });
+    const state = await fixtureBridge.load_state(forked.conversationId);
+
+    expect(forked.conversationId).not.toBe("conv-aurora");
+    expect(state.draft).toMatchObject({ recipientIds: ["+12025550123", "+12025550125"], text: "Group reply" });
+    expect((await fixtureBridge.load_state("conv-aurora")).conversations.find((conversation) => conversation.id === "conv-aurora")?.participants).toEqual(["+12025550123"]);
+  });
+
+  it("rejects stale and mismatched saves, and makes empty draft discard idempotent", async () => {
+    const blank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+    await expect(fixtureBridge.save_draft({ id: blank.id, conversationId: blank.conversationId, text: "Late", recipientIds: [], attachmentIds: [], expectedRevision: "0" })).rejects.toMatchObject({ code: "stale-draft" });
+    await expect(fixtureBridge.save_draft({ id: blank.id, conversationId: "wrong-conversation", text: "", recipientIds: [], attachmentIds: [], expectedRevision: blank.revision })).rejects.toMatchObject({ code: "invalid-draft" });
+
+    await fixtureBridge.discard_draft({ id: blank.id, conversationId: blank.conversationId, expectedRevision: blank.revision });
+    await expect(fixtureBridge.discard_draft({ id: blank.id, conversationId: blank.conversationId, expectedRevision: blank.revision })).resolves.toBeUndefined();
+
+    const nextBlank = await fixtureBridge.save_draft({ id: "", conversationId: "", text: "", recipientIds: [], attachmentIds: [], expectedRevision: "0" });
+    const addressed = await fixtureBridge.save_draft({ id: nextBlank.id, conversationId: nextBlank.conversationId, text: "Keep", recipientIds: ["+12025550199"], attachmentIds: [], expectedRevision: nextBlank.revision });
+    await expect(fixtureBridge.discard_draft({ id: addressed.id, conversationId: addressed.conversationId, expectedRevision: addressed.revision })).rejects.toMatchObject({ code: "draft-not-discardable" });
+  });
+});

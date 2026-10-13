@@ -9,7 +9,7 @@ use peppy_client_core::{
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
     self as dto, GatewayView, NotificationPreferences,
-    compose::{self, ComposeError, DraftInput},
+    compose::{self, ComposeError, DiscardDraftInput, DraftInput},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
@@ -66,6 +66,10 @@ pub(crate) struct Failure {
     message: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_id: Option<String>,
 }
 
 impl Failure {
@@ -74,6 +78,8 @@ impl Failure {
             code,
             message,
             current_revision: None,
+            conversation_id: None,
+            draft_id: None,
         }
     }
 }
@@ -114,7 +120,32 @@ pub(crate) fn core(error: CoreError) -> Failure {
             code: "stale-draft",
             message: "The draft changed elsewhere.",
             current_revision: Some(current_revision.to_string()),
+            conversation_id: None,
+            draft_id: None,
         },
+        CoreError::DraftMoved {
+            draft_id,
+            conversation_id,
+            current_revision,
+        } => Failure {
+            code: "draft-moved",
+            message: "The draft moved to another conversation.",
+            current_revision: Some(current_revision.to_string()),
+            conversation_id: Some(conversation_id.to_string()),
+            draft_id: Some(draft_id.to_string()),
+        },
+        CoreError::DraftNotDiscardable => Failure::new(
+            "draft-not-discardable",
+            "Only an empty recipientless draft can be deleted.",
+        ),
+        CoreError::RecipientlessDraftExists => Failure::new(
+            "recipientless-draft-exists",
+            "A recipientless draft already exists.",
+        ),
+        CoreError::DraftMergeOverflow => Failure::new(
+            "draft-merge-overflow",
+            "Combining these drafts would exceed a compose limit.",
+        ),
         CoreError::InvalidMedia => Failure::new(
             "attachment-invalid",
             "The attachment could not be verified.",
@@ -241,6 +272,7 @@ impl BrowserCore {
             "set_host_context" => self.set_host_context(args_value(raw_args)?),
             "snapshot" => self.snapshot(args_value(raw_args)?),
             "save_draft" => self.save_draft(args_value(raw_args)?),
+            "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
             _ if media::handles(command) => self.media_command(command, args_value(raw_args)?),
@@ -373,6 +405,11 @@ impl BrowserCore {
             let draft = drafts
                 .iter()
                 .find(|draft| draft.conversation_id == conversation.conversation_id);
+            let draft_only = draft
+                .map(|draft| client.compose_draft_is_new(draft.draft_id))
+                .transpose()
+                .map_err(core)?
+                .unwrap_or(false);
             let name = latest
                 .map(dto::counterpart)
                 .or_else(|| draft.map(|draft| draft.recipients.join(", ")))
@@ -423,6 +460,8 @@ impl BrowserCore {
                     .as_ref()
                     .map(|context| context.recipients.clone()),
                 reply_blocked_reason: reply_context.and_then(|context| context.blocked_reason),
+                recipientless_draft: false,
+                draft_only,
             });
         }
         for draft in drafts.iter().filter(|draft| {
@@ -446,6 +485,10 @@ impl BrowserCore {
                 messages: Vec::new(),
                 participants: None,
                 reply_blocked_reason: None,
+                // Old recipientless compose rows predate the persisted intent bit. A row that
+                // has no history is still a draft-only row for presentation purposes.
+                recipientless_draft: draft.recipients.is_empty(),
+                draft_only: true,
             });
         }
         let keys = client.key_status().map_err(core)?;
@@ -517,6 +560,12 @@ impl BrowserCore {
             compose::send_draft(self.client()?, &input, gateways).map_err(compose_failure)?,
         )
         .map_err(|_| core(CoreError::Database))
+    }
+    fn discard_draft(&self, args: Value) -> Result<Value, Failure> {
+        let input: DiscardDraftInput = serde_json::from_value(args).map_err(|_| invalid())?;
+        parse_revision(&input.expected_revision)?;
+        compose::discard_draft(self.client()?, &input).map_err(compose_failure)?;
+        Ok(json!({}))
     }
     fn mark_seen(&self, args: Value) -> Result<Value, Failure> {
         for id in args
@@ -688,7 +737,7 @@ pub unsafe extern "C" fn peppy_browser_free_response(response: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_client_core::DraftId;
+    use peppy_client_core::{ComposeDraftUpdate, DraftId, IncomingSms};
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
     fn value(response: &str) -> Value {
@@ -833,5 +882,118 @@ mod tests {
                 .to_string(),
             saved["revision"].as_str().unwrap()
         );
+    }
+
+    #[test]
+    fn initial_blank_save_reuses_the_recipientless_draft_without_overwriting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        let device = DeviceId::new();
+        open(&mut core, VaultId::new(), device, [7; 32]);
+
+        let initial = value(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ));
+        let saved = value(&core.dispatch(
+            &json!({"command":"save_draft","args":{"id":initial["id"],"conversationId":initial["conversationId"],"text":"keep this","recipientIds":[],"attachmentIds":[],"expectedRevision":initial["revision"]}}).to_string(),
+        ));
+        let reopened = value(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ));
+
+        assert_eq!(reopened["id"], saved["id"]);
+        assert_eq!(reopened["text"], "keep this");
+        let text_reopen: Value = serde_json::from_str(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"new content","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(text_reopen["error"]["code"], "draft-moved");
+        assert_eq!(text_reopen["error"]["draftId"], saved["id"]);
+        assert_eq!(
+            text_reopen["error"]["conversationId"],
+            saved["conversationId"]
+        );
+        let snapshot = value(&core.dispatch(r#"{"command":"snapshot"}"#));
+        assert_eq!(snapshot["conversations"][0]["recipientlessDraft"], true);
+        assert_eq!(snapshot["conversations"][0]["draftOnly"], true);
+    }
+
+    #[test]
+    fn discard_draft_is_dispatched_and_removes_an_empty_recipientless_row() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        open(&mut core, VaultId::new(), DeviceId::new(), [7; 32]);
+        let draft = value(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ));
+
+        value(&core.dispatch(
+            &json!({"command":"discard_draft","args":{"id":draft["id"],"conversationId":draft["conversationId"],"expectedRevision":draft["revision"]}}).to_string(),
+        ));
+        assert!(
+            value(&core.dispatch(r#"{"command":"snapshot"}"#))["conversations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_new_draft_input_does_not_allocate_a_recipientless_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        open(&mut core, VaultId::new(), DeviceId::new(), [7; 32]);
+
+        let rejected: Value = serde_json::from_str(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":["not a phone"],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ))
+        .unwrap();
+
+        assert_eq!(rejected["error"]["code"], "invalid-recipient");
+        assert!(
+            value(&core.dispatch(r#"{"command":"snapshot"}"#))["conversations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn history_rows_are_never_recipientless_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        open(&mut core, VaultId::new(), DeviceId::new(), [7; 32]);
+        let client = core.client().unwrap();
+        let history = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+14155552671".into(),
+                body: "history".into(),
+                provider_message_id: Some("history-row".into()),
+                imported: false,
+            })
+            .unwrap();
+        let source = client.recipientless_compose_draft().unwrap();
+        client
+            .save_compose_draft(
+                source.draft_id,
+                source.revision,
+                ComposeDraftUpdate {
+                    text: "draft".into(),
+                    recipients: vec!["+14155552671".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let snapshot = value(&core.dispatch(r#"{"command":"snapshot"}"#));
+        let row = snapshot["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == history.conversation_id.to_string())
+            .unwrap();
+        assert_eq!(row["recipientlessDraft"], false);
+        assert_eq!(row["draftOnly"], true);
     }
 }

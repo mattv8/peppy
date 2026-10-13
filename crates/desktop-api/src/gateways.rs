@@ -200,7 +200,7 @@ pub fn gateway_views(
                     && valid_optional_mms_fields(&sim)
                     && limits.0.is_some_and(|version| version >= 2);
                 let name = clean_label(sim.label.as_deref().unwrap_or(""))
-                    .unwrap_or_else(|| format!("Gateway {short}"));
+                    .unwrap_or_else(|| format!("Phone {short}"));
                 let mut note = format!(
                     "SMS {}; MMS {}. Presence is not reported by the server; commands wait durably until the gateway syncs.",
                     sim.sms.describe(),
@@ -229,7 +229,7 @@ pub fn gateway_views(
                 });
             }
         } else {
-            views.push(GatewayView { id: id.to_string(), name: format!("Gateway {short}"), sim_id: String::new(), online: false, simulated, supports_sms: false, supports_mms: false, capability_note: Some("This gateway has not reported valid SIM capabilities; sending through it is disabled.".into()), mms_content_version: None, mms_max_bytes: None, mms_limit_source: None, mms_max_recipients: None });
+            views.push(GatewayView { id: id.to_string(), name: format!("Phone {short}"), sim_id: String::new(), online: false, simulated, supports_sms: false, supports_mms: false, capability_note: Some("This phone has not reported valid SIM capabilities; sending through it is disabled.".into()), mms_content_version: None, mms_max_bytes: None, mms_limit_source: None, mms_max_recipients: None });
         }
     }
     views
