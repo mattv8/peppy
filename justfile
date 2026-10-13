@@ -99,6 +99,9 @@ android-test:
 android-emulator:
     bash infra/dev/android.sh emulator
 
+android-forward:
+    bash infra/dev/android.sh forward
+
 android-deploy:
     bash infra/dev/android.sh deploy
 

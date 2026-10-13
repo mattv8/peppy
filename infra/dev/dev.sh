@@ -62,7 +62,7 @@ case "$recipe" in
   dev-start|android-build|android-run|desktop-dev|desktop-bundle|desktop-run|ios-run)
     select_source_tree
     exec just "$recipe" "$@" ;;
-  android-test|android-emulator|android-deploy|android-open|android-smoke|android-sms|desktop-open)
+  android-test|android-emulator|android-forward|android-deploy|android-open|android-smoke|android-sms|desktop-open)
     exec just "$recipe" "$@" ;;
   *)
     echo "unknown development recipe: ${recipe:-<missing>}" >&2
