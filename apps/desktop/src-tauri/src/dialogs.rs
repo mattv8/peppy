@@ -18,6 +18,7 @@ pub enum PassphrasePurpose {
     Unlock,
     ResumeOwnerSecret,
     RecoverVaultSecret,
+    ApprovePhoneSecret,
     Create,
     SetupToken,
     AdminPassword,
@@ -422,16 +423,64 @@ mod windows_dialog {
         let mut username = Zeroizing::new([0u16; USERNAME_BUFFER]);
         let mut password = Zeroizing::new([0u16; PASSWORD_BUFFER]);
         let (message, caption) = match purpose {
-            PassphrasePurpose::Unlock => (w!("Enter the vault passphrase. It is verified only on this device and is never stored."), w!("Unlock Peppy sync")),
-            PassphrasePurpose::ResumeOwnerSecret => (w!("Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server."), w!("Resume Peppy server setup")),
-            PassphrasePurpose::RecoverVaultSecret => (w!("Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server."), w!("Complete vault setup")),
-            PassphrasePurpose::Create => (w!("Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered."), w!("Create encryption passphrase")),
-            PassphrasePurpose::AppLockCreate => (w!("Choose a password required when Peppy opens on this computer."), w!("Require a password to open Peppy")),
-            PassphrasePurpose::AppLockConfirm => (w!("Enter the same password again."), w!("Confirm Peppy password")),
-            PassphrasePurpose::AppLockUnlock => (w!("Enter the password required to open Peppy on this computer."), w!("Unlock Peppy")),
-            PassphrasePurpose::AppLockDisable => (w!("Enter your current Peppy password to turn off the app lock."), w!("Turn off Peppy app lock")),
-            PassphrasePurpose::SetupToken => (w!("Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window."), w!("Claim Peppy server")),
-            PassphrasePurpose::AdminPassword => (w!("Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window."), w!("Peppy server administrator")),
+            PassphrasePurpose::Unlock => (
+                w!(
+                    "Enter the vault passphrase. It is verified only on this device and is never stored."
+                ),
+                w!("Unlock Peppy sync"),
+            ),
+            PassphrasePurpose::ResumeOwnerSecret => (
+                w!(
+                    "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server."
+                ),
+                w!("Resume Peppy server setup"),
+            ),
+            PassphrasePurpose::RecoverVaultSecret => (
+                w!(
+                    "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server."
+                ),
+                w!("Complete vault setup"),
+            ),
+            PassphrasePurpose::ApprovePhoneSecret => (
+                w!(
+                    "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and saved in this computer's secure storage so you won't be asked again."
+                ),
+                w!("Approve phone"),
+            ),
+            PassphrasePurpose::Create => (
+                w!(
+                    "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered."
+                ),
+                w!("Create encryption passphrase"),
+            ),
+            PassphrasePurpose::AppLockCreate => (
+                w!("Choose a password required when Peppy opens on this computer."),
+                w!("Require a password to open Peppy"),
+            ),
+            PassphrasePurpose::AppLockConfirm => (
+                w!("Enter the same password again."),
+                w!("Confirm Peppy password"),
+            ),
+            PassphrasePurpose::AppLockUnlock => (
+                w!("Enter the password required to open Peppy on this computer."),
+                w!("Unlock Peppy"),
+            ),
+            PassphrasePurpose::AppLockDisable => (
+                w!("Enter your current Peppy password to turn off the app lock."),
+                w!("Turn off Peppy app lock"),
+            ),
+            PassphrasePurpose::SetupToken => (
+                w!(
+                    "Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window."
+                ),
+                w!("Claim Peppy server"),
+            ),
+            PassphrasePurpose::AdminPassword => (
+                w!(
+                    "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window."
+                ),
+                w!("Peppy server administrator"),
+            ),
         };
         let info = CREDUI_INFOW {
             cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
@@ -448,7 +497,8 @@ mod windows_dialog {
                 match purpose {
                     PassphrasePurpose::Unlock
                     | PassphrasePurpose::ResumeOwnerSecret
-                    | PassphrasePurpose::RecoverVaultSecret => w!("Peppy sync vault"),
+                    | PassphrasePurpose::RecoverVaultSecret
+                    | PassphrasePurpose::ApprovePhoneSecret => w!("Peppy sync vault"),
                     PassphrasePurpose::Create => w!("Peppy encryption passphrase"),
                     PassphrasePurpose::AppLockCreate
                     | PassphrasePurpose::AppLockConfirm
@@ -533,6 +583,10 @@ mod linux {
             PassphrasePurpose::RecoverVaultSecret => {
                 (RECOVER_VAULT_SECRET_TITLE, RECOVER_VAULT_SECRET_MESSAGE)
             }
+            PassphrasePurpose::ApprovePhoneSecret => (
+                "Approve phone",
+                "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and saved in this computer's secure storage so you won't be asked again.",
+            ),
             PassphrasePurpose::Create => (CREATE_TITLE, CREATE_MESSAGE),
             PassphrasePurpose::AppLockCreate => (
                 "Require a password to open Peppy",
@@ -746,7 +800,10 @@ mod tests {
         let resume = super::macos::copy(super::PassphrasePurpose::ResumeOwnerSecret);
         let recover = super::macos::copy(super::PassphrasePurpose::RecoverVaultSecret);
         assert_eq!(unlock.0, "Unlock Peppy sync");
-        assert_eq!(unlock.1, "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.");
+        assert_eq!(
+            unlock.1,
+            "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored."
+        );
         assert_eq!(unlock.2, "Unlock");
         assert_ne!(unlock, create);
         assert_eq!(create.2, "Create");
@@ -803,16 +860,61 @@ mod macos {
         purpose: super::PassphrasePurpose,
     ) -> (&'static str, &'static str, &'static str) {
         match purpose {
-            super::PassphrasePurpose::Unlock => ("Unlock Peppy sync", "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.", "Unlock"),
-            super::PassphrasePurpose::ResumeOwnerSecret => ("Resume Peppy server setup", "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.", "Continue"),
-            super::PassphrasePurpose::RecoverVaultSecret => ("Complete vault setup", "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.", "Continue"),
-            super::PassphrasePurpose::Create => ("Create encryption passphrase", "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.", "Create"),
-            super::PassphrasePurpose::SetupToken => ("Claim Peppy server", "Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
-            super::PassphrasePurpose::AdminPassword => ("Peppy server administrator", "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.", "Continue"),
-            super::PassphrasePurpose::AppLockCreate => ("Require a password to open Peppy", "Choose a password required when Peppy opens on this computer.", "Continue"),
-            super::PassphrasePurpose::AppLockConfirm => ("Confirm Peppy password", "Enter the same password again.", "Continue"),
-            super::PassphrasePurpose::AppLockUnlock => ("Unlock Peppy", "Enter the password required to open Peppy on this computer.", "Unlock"),
-            super::PassphrasePurpose::AppLockDisable => ("Turn off Peppy app lock", "Enter your current Peppy password to turn off the app lock.", "Continue"),
+            super::PassphrasePurpose::Unlock => (
+                "Unlock Peppy sync",
+                "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.",
+                "Unlock",
+            ),
+            super::PassphrasePurpose::ResumeOwnerSecret => (
+                "Resume Peppy server setup",
+                "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::RecoverVaultSecret => (
+                "Complete vault setup",
+                "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::ApprovePhoneSecret => (
+                "Approve phone",
+                "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and saved in this computer's secure storage so you won't be asked again.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::Create => (
+                "Create encryption passphrase",
+                "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.",
+                "Create",
+            ),
+            super::PassphrasePurpose::SetupToken => (
+                "Claim Peppy server",
+                "Enter the server setup token. It is sent only to this server and is never exposed to the Peppy window.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AdminPassword => (
+                "Peppy server administrator",
+                "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AppLockCreate => (
+                "Require a password to open Peppy",
+                "Choose a password required when Peppy opens on this computer.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AppLockConfirm => (
+                "Confirm Peppy password",
+                "Enter the same password again.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AppLockUnlock => (
+                "Unlock Peppy",
+                "Enter the password required to open Peppy on this computer.",
+                "Unlock",
+            ),
+            super::PassphrasePurpose::AppLockDisable => (
+                "Turn off Peppy app lock",
+                "Enter your current Peppy password to turn off the app lock.",
+                "Continue",
+            ),
         }
     }
 

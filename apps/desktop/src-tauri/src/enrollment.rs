@@ -2270,6 +2270,139 @@ pub async fn enrollment_rotate_phone(
     .await
 }
 
+struct PhoneApprovalPreparation {
+    invitation_id: uuid::Uuid,
+    claim_digest: String,
+    passphrase: Zeroizing<String>,
+}
+
+fn claimed_phone_invitation(controller: &Controller) -> BridgeResult<(uuid::Uuid, String)> {
+    let status = controller
+        .invitation
+        .as_ref()
+        .ok_or_else(enrollment_error)?;
+    if status.state != EnrollmentState::Claimed {
+        return Err(BridgeError::new(
+            "enrollment-state",
+            "The phone has not completed its connection request.",
+        ));
+    }
+    let invitation_id = controller.invitation_id.ok_or_else(enrollment_error)?;
+    let view = controller
+        .client
+        .as_ref()
+        .ok_or_else(enrollment_error)?
+        .owner_phone_view(serde_json::to_string(status).map_err(|_| enrollment_error())?)
+        .map_err(|_| enrollment_error())?;
+    if view.invitation_id != invitation_id {
+        return Err(enrollment_error());
+    }
+    Ok((
+        invitation_id,
+        view.claim_digest.ok_or_else(enrollment_error)?,
+    ))
+}
+
+fn invitation_is_current(
+    controller: &Controller,
+    invitation_id: uuid::Uuid,
+    claim_digest: &str,
+) -> bool {
+    claimed_phone_invitation(controller).is_ok_and(|(current_id, current_claim_digest)| {
+        current_id == invitation_id && current_claim_digest == claim_digest
+    })
+}
+
+/// Obtains and verifies the secret needed to create a phone approval. A missing binding secret
+/// may be recovered through the native prompt, but a secure-store failure is never treated as a
+/// missing value.
+async fn prepare_phone_approval<P, PF>(
+    controller: &std::sync::Mutex<Controller>,
+    store: &dyn SecretStore,
+    binding_account: &str,
+    prompt: P,
+) -> BridgeResult<Option<PhoneApprovalPreparation>>
+where
+    P: FnOnce(PassphrasePurpose) -> PF,
+    PF: std::future::Future<Output = BridgeResult<Option<Zeroizing<String>>>>,
+{
+    let (invitation_id, claim_digest, method) = {
+        let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+        let (invitation_id, claim_digest) = claimed_phone_invitation(&controller)?;
+        (
+            invitation_id,
+            claim_digest,
+            controller.invitation_method.ok_or_else(enrollment_error)?,
+        )
+    };
+    let mut fallback = false;
+    let passphrase = match method {
+        EnrollmentMethod::SharedSecret => Zeroizing::new(String::new()),
+        EnrollmentMethod::Transfer => match read_text_secret(store, binding_account)? {
+            Some(secret) => secret,
+            None => {
+                let Some(secret) = prompt(PassphrasePurpose::ApprovePhoneSecret).await? else {
+                    return Ok(None);
+                };
+                let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+                if !invitation_is_current(&controller, invitation_id, &claim_digest) {
+                    return Ok(None);
+                }
+                fallback = true;
+                secret
+            }
+        },
+    };
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if !invitation_is_current(&controller, invitation_id, &claim_digest) {
+        return Ok(None);
+    }
+    let client = controller.client.as_ref().ok_or_else(enrollment_error)?;
+    if method == EnrollmentMethod::Transfer
+        && !client
+            .owner_passphrase_matches(&passphrase)
+            .map_err(|_| enrollment_error())?
+    {
+        return Err(wrong_owner_passphrase());
+    }
+    if fallback && matches!(read_text_secret(store, binding_account), Ok(None)) {
+        let _ = store.set(binding_account, passphrase.as_bytes());
+    }
+    Ok(Some(PhoneApprovalPreparation {
+        invitation_id,
+        claim_digest,
+        passphrase,
+    }))
+}
+
+fn prepare_phone_approval_request(
+    controller: &std::sync::Mutex<Controller>,
+    preparation: &PhoneApprovalPreparation,
+) -> BridgeResult<Option<String>> {
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if !invitation_is_current(
+        &controller,
+        preparation.invitation_id,
+        &preparation.claim_digest,
+    ) {
+        return Ok(None);
+    }
+    let status = controller
+        .invitation
+        .as_ref()
+        .ok_or_else(enrollment_error)?;
+    controller
+        .client
+        .as_ref()
+        .ok_or_else(enrollment_error)?
+        .approve_phone_invitation(
+            serde_json::to_string(status).map_err(|_| enrollment_error())?,
+            preparation.passphrase.to_string(),
+        )
+        .map(Some)
+        .map_err(|_| enrollment_error())
+}
+
 #[tauri::command]
 pub async fn enrollment_approve(
     window: WebviewWindow,
@@ -2279,42 +2412,37 @@ pub async fn enrollment_approve(
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
     refresh_invitation(&state, &hosted).await?;
-    let Some(passphrase) = dialogs::passphrase(&app, PassphrasePurpose::Unlock).await? else {
+    let session = state.require_session().await?;
+    let binding = session.binding.clone();
+    let Some(preparation) = prepare_phone_approval(
+        &state.enrollment,
+        &*state.store,
+        &binding.vault_secret_account(),
+        |purpose| dialogs::passphrase(&app, purpose),
+    )
+    .await?
+    else {
         return Ok(state
             .enrollment
             .lock()
             .map_err(|_| BridgeError::host_state())?
             .view());
     };
-    let (id, request) = {
-        let controller = state
+    let session = state.require_session().await?;
+    if session.binding != binding {
+        return Ok(state
             .enrollment
             .lock()
-            .map_err(|_| BridgeError::host_state())?;
-        let status = controller
-            .invitation
-            .as_ref()
-            .ok_or_else(enrollment_error)?;
-        if status.state != EnrollmentState::Claimed {
-            return Err(BridgeError::new(
-                "enrollment-state",
-                "The phone has not completed its connection request.",
-            ));
-        }
-        (
-            controller.invitation_id.ok_or_else(enrollment_error)?,
-            controller
-                .client
-                .as_ref()
-                .ok_or_else(enrollment_error)?
-                .approve_phone_invitation(
-                    serde_json::to_string(status).map_err(|_| enrollment_error())?,
-                    passphrase.to_string(),
-                )
-                .map_err(|_| enrollment_error())?,
-        )
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    let Some(request) = prepare_phone_approval_request(&state.enrollment, &preparation)? else {
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
     };
-    let session = state.require_session().await?;
     let origin = session.api.origin().to_owned();
     let account = hosted_account_header(&state, &hosted).await?;
     body(
@@ -2323,8 +2451,9 @@ pub async fn enrollment_approve(
             &origin,
             http(&origin)?
                 .post(format!(
-                    "{origin}{}/{id}/approve",
-                    enrollment::routes::ENROLLMENT_INVITATIONS
+                    "{origin}{}/{}/approve",
+                    enrollment::routes::ENROLLMENT_INVITATIONS,
+                    preparation.invitation_id
                 ))
                 .header("content-type", "application/json")
                 .body(request),
@@ -2493,8 +2622,11 @@ mod owner_retry_tests {
     use super::*;
     use crate::secure_store::{MemoryStore, SecretStore};
     use crate::tests::gateway;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use peppy_hosted_api::enrollment::{
-        ClaimInstanceRequest, ClaimInstanceResponse, InstanceSession,
+        ApproveInvitationRequest, ClaimInstanceRequest, ClaimInstanceResponse,
+        ClaimInvitationRequest, CreateInvitationRequest, EnrollmentTranscript, InstanceSession,
+        InvitationClaim,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -3335,6 +3467,352 @@ mod owner_retry_tests {
             transfer_nonce: None,
             profile: None,
         }
+    }
+
+    fn claimed_phone_fixture(method: EnrollmentMethod) -> (Mutex<Controller>, EnrollmentClient) {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        let owner_request: ClaimInstanceRequest = serde_json::from_str(
+            &owner
+                .create_owner_request(
+                    "setup".into(),
+                    "admin".into(),
+                    "password long enough".into(),
+                    RECOVERY_SECRET.into(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let invitation: CreateInvitationRequest =
+            serde_json::from_str(&owner.create_phone_invitation(method).unwrap()).unwrap();
+        let invitation_id = uuid::Uuid::from_u128(7);
+        owner
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id,
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let qr = owner.get_qr_payload().unwrap();
+        let mut recipient =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Android, "phone".into()).unwrap();
+        let claim_request: ClaimInvitationRequest =
+            serde_json::from_str(&recipient.claim_phone_invitation(qr).unwrap()).unwrap();
+        let profile: peppy_crypto::KeyProfile =
+            serde_json::from_value(owner_request.material.profile.clone()).unwrap();
+        recipient
+            .consume_claim_response(
+                serde_json::to_string(&InvitationClaim {
+                    invitation_id,
+                    claim_secret: URL_SAFE_NO_PAD.encode([4; 32]),
+                    origin: ORIGIN.into(),
+                    vault_id: profile.vault_id,
+                    fingerprint: owner_request.material.fingerprint.clone(),
+                    key_epoch: 1,
+                    method,
+                    owner_transfer_public_key: invitation.transfer_public_key.clone(),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let transcript = EnrollmentTranscript {
+            origin: ORIGIN.into(),
+            vault_id: profile.vault_id,
+            fingerprint: owner_request.material.fingerprint,
+            key_epoch: 1,
+            enrollment_id: invitation_id,
+            nonce: claim_request.invitation_token_digest,
+            owner_transfer_public_key: invitation.transfer_public_key,
+            recipient_transfer_public_key: claim_request.transfer_public_key.clone(),
+            signing_public_key: claim_request.device.signing_public_key.clone(),
+            device_id: claim_request.device.device_id,
+            credential_digest: claim_request.credential_digest.clone(),
+            role: EnrollmentRole::Gateway,
+        };
+        let claimed = InvitationStatus {
+            state: EnrollmentState::Claimed,
+            expires_in_seconds: 300,
+            claim: Some(peppy_hosted_api::enrollment::InvitationPublicClaim {
+                device: claim_request.device,
+                transfer_public_key: transcript.recipient_transfer_public_key.clone(),
+                credential_digest: transcript.credential_digest.clone(),
+                claim_authenticator: claim_request.claim_authenticator,
+            }),
+            transcript: Some(transcript),
+            encrypted_key_package: None,
+            transfer_nonce: None,
+            profile: None,
+        };
+        (
+            Mutex::new(Controller {
+                client: Some(owner),
+                invitation_id: Some(invitation_id),
+                invitation: Some(claimed),
+                invitation_method: Some(method),
+                ..ready_controller()
+            }),
+            recipient,
+        )
+    }
+
+    #[tokio::test]
+    async fn stored_binding_secret_creates_a_decryptable_phone_handoff_without_prompting() {
+        let (controller, mut recipient) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        store
+            .set(&binding_account, RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        let prepared = prepare_phone_approval(&controller, &store, &binding_account, |_| async {
+            panic!("stored secret must not prompt")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let request: ApproveInvitationRequest = serde_json::from_str(
+            &prepare_phone_approval_request(&controller, &prepared)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut approved = controller.lock().unwrap().invitation.clone().unwrap();
+        approved.state = EnrollmentState::Approved;
+        approved.encrypted_key_package = request.encrypted_key_package;
+        approved.transfer_nonce = request.transfer_nonce;
+        let confirmation = recipient
+            .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
+            .unwrap();
+        assert!(!confirmation.is_empty());
+    }
+
+    #[tokio::test]
+    async fn phone_approval_uses_the_binding_secret_without_prompting() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        store
+            .set(&binding_account, RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let seen = prompts.clone();
+
+        let prepared = prepare_phone_approval(&controller, &store, &binding_account, move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(Some(Zeroizing::new("wrong".into()))))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(prompts.load(Ordering::SeqCst), 0);
+        assert_eq!(prepared.passphrase.as_str(), RECOVERY_SECRET);
+    }
+
+    #[tokio::test]
+    async fn phone_approval_prompts_only_when_the_binding_secret_is_missing() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let seen = prompts.clone();
+
+        let prepared = prepare_phone_approval(&controller, &store, &binding_account, move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
+        })
+        .await
+        .unwrap();
+
+        assert!(prepared.is_some());
+        assert_eq!(prompts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stored(&store, &binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+        assert!(
+            prepare_phone_approval(&controller, &store, &binding_account, |_| async {
+                panic!("verified fallback secret must be saved")
+            })
+            .await
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_phone_approval_prompt_creates_no_request() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let prepared = prepare_phone_approval(
+            &controller,
+            &MemoryStore::default(),
+            &binding_account,
+            |_| std::future::ready(Ok(None)),
+        )
+        .await
+        .unwrap();
+        assert!(prepared.is_none());
+    }
+
+    #[tokio::test]
+    async fn wrong_stored_or_fallback_phone_secret_is_rejected_before_a_request() {
+        for secret_was_stored in [true, false] {
+            let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+            let binding_account = active_binding().vault_secret_account();
+            let store = MemoryStore::default();
+            if secret_was_stored {
+                store.set(&binding_account, b"wrong secret").unwrap();
+            }
+            let result = prepare_phone_approval(&controller, &store, &binding_account, |_| {
+                std::future::ready(Ok(Some(Zeroizing::new("wrong secret".into()))))
+            })
+            .await;
+            let Err(error) = result else {
+                panic!("wrong secret must not prepare a request");
+            };
+            assert_eq!(error.code, "wrong-passphrase");
+            if !secret_was_stored {
+                assert!(stored(&store, &binding_account).is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn phone_approval_never_uses_another_binding_secret() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let other_binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        store
+            .set(&other_binding_account, RECOVERY_SECRET.as_bytes())
+            .unwrap();
+        store.set(&binding_account, b"").unwrap();
+        let prepared = prepare_phone_approval(&controller, &store, &binding_account, |_| {
+            std::future::ready(Ok(None))
+        })
+        .await
+        .unwrap();
+        assert!(prepared.is_none());
+        assert_eq!(
+            stored(&store, &other_binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+    }
+
+    #[tokio::test]
+    async fn phone_approval_ignores_a_fallback_secret_write_failure() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let store = BindingWriteFails {
+            inner: MemoryStore::default(),
+            binding_account: binding_account.clone(),
+        };
+        assert!(
+            prepare_phone_approval(&controller, &store, &binding_account, |_| {
+                std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
+            })
+            .await
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn phone_approval_refuses_a_transcript_changed_during_the_fallback_prompt() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let controller = Arc::new(controller);
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+        let changed = controller.clone();
+
+        let prepared = prepare_phone_approval(&controller, &store, &binding_account, move |_| {
+            changed
+                .lock()
+                .unwrap()
+                .invitation
+                .as_mut()
+                .unwrap()
+                .transcript
+                .as_mut()
+                .unwrap()
+                .key_epoch += 1;
+            std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
+        })
+        .await
+        .unwrap();
+
+        assert!(prepared.is_none());
+    }
+
+    #[tokio::test]
+    async fn phone_approval_rejects_a_forged_claimed_status_before_prompting() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        controller
+            .lock()
+            .unwrap()
+            .invitation
+            .as_mut()
+            .unwrap()
+            .transcript
+            .as_mut()
+            .unwrap()
+            .enrollment_id = uuid::Uuid::new_v4();
+        let binding_account = active_binding().vault_secret_account();
+
+        let result = prepare_phone_approval(
+            &controller,
+            &MemoryStore::default(),
+            &binding_account,
+            |_| async { panic!("invalid claimed status must fail before prompting") },
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("invalid claimed status must fail")
+        };
+
+        assert_eq!(error.code, "enrollment");
+    }
+
+    #[tokio::test]
+    async fn shared_secret_phone_approval_neither_reads_nor_prompts() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::SharedSecret);
+        let binding_account = active_binding().vault_secret_account();
+        let store = CountingStore {
+            reads: AtomicUsize::new(0),
+        };
+        let prepared = prepare_phone_approval(&controller, &store, &binding_account, |_| async {
+            panic!("shared-secret approval must not prompt")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(prepared.passphrase.is_empty());
+        assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn phone_approval_fails_closed_when_the_binding_secret_cannot_be_read() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let seen = prompts.clone();
+
+        let result =
+            prepare_phone_approval(&controller, &FailingStore, &binding_account, move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
+            })
+            .await;
+        let Err(error) = result else {
+            panic!("a secure-store read error must fail closed");
+        };
+
+        assert_eq!(error.code, "secure-store-unavailable");
+        assert_eq!(prompts.load(Ordering::SeqCst), 0);
     }
 
     #[test]
