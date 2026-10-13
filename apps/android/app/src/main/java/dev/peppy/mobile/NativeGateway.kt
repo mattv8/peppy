@@ -62,6 +62,13 @@ class GatewaySession(val client: NativeClient, val origin: String, val deviceId:
 internal class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String) {
     override fun toString() = "GatewayAccountCredential(redacted)"
 }
+internal class OwnerEnrollmentMaterial(
+    val origin: String,
+    val vaultId: String,
+    val deviceId: String,
+    val profileJson: String,
+    val headerJson: String,
+)
 
 /**
  * The one process-wide owner of the generated [NativeClient]. Rust remains the sole owner of
@@ -171,6 +178,15 @@ object NativeGateway {
         val token = prefs.getString(P_TOKEN, null)?.let { secretBox.open(P_TOKEN, it) } ?: return null
         try { GatewayAccountCredential(identity.origin, identity.vaultId, identity.deviceId, String(token, Charsets.UTF_8)) }
         finally { token.fill(0) }
+    }
+
+    internal fun ownerEnrollmentMaterial(context: Context): OwnerEnrollmentMaterial? = synchronized(lock) {
+        if (!sharedKeysReady) return null
+        val prefs = prefs(context)
+        val identity = identity(prefs) ?: return null
+        val profile = openString(prefs, P_PROFILE) ?: return null
+        val header = openString(prefs, P_HEADER) ?: return null
+        OwnerEnrollmentMaterial(identity.origin, identity.vaultId, identity.deviceId, profile, header)
     }
 
     /**

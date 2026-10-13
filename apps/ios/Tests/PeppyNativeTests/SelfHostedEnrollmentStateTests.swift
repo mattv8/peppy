@@ -56,19 +56,16 @@ import Testing
         #expect(state.setupCodeRequired)
     }
 
-    @Test func ownerClaimRequiresSavedGeneratedSecret() {
+    @Test func ownerClaimUsesGeneratedSecretWithoutAcknowledgement() {
         var state = validOwnerState()
         state.prepareOwnerSecret { "alpha beta gamma delta epsilon zeta" }
 
-        #expect(!state.canSubmitOwnerClaim)
-        state.acknowledgedSecretSave = true
         #expect(state.canSubmitOwnerClaim)
     }
 
     @Test func ownerClaimGateRejectsBusyOrInactiveSubmission() {
         var state = validOwnerState()
         state.prepareOwnerSecret { "alpha beta gamma delta epsilon zeta" }
-        state.acknowledgedSecretSave = true
 
         #expect(!state.ownerClaimEnabled(isBusy: true, sceneIsActive: true))
         #expect(!state.ownerClaimEnabled(isBusy: false, sceneIsActive: false))
@@ -95,7 +92,7 @@ import Testing
         #expect(state.canSubmitJoin)
     }
 
-    @Test func vaultCreationRequiresAnAcknowledgedStableGeneratedSecret() {
+    @Test func vaultCreationUsesStableGeneratedSecretWithoutAcknowledgement() {
         var state = SelfHostedEnrollmentState()
         state.vaultUsername = "family"
         state.vaultPassword = "long-owner-password"
@@ -103,8 +100,6 @@ import Testing
         state.prepareVaultSecret { "first stable secret" }
         state.prepareVaultSecret { "replacement secret" }
 
-        #expect(!state.canSubmitVaultCreation)
-        state.acknowledgedSecretSave = true
         #expect(state.canSubmitVaultCreation)
         #expect(state.generatedSecret == "first stable secret")
     }
@@ -121,6 +116,54 @@ import Testing
         #expect(state.inviteStage == .none)
         #expect(state.generatedSecret.isEmpty)
         #expect(state.origin == "https://peppy.example")
+    }
+
+    @Test func preparedVaultWithoutStoredSecretRequiresEnteredSecret() {
+        var state = vaultCreationState()
+        state.applyPreparedOwnerMaterial(storedSecret: false)
+
+        #expect(state.requiresEnteredSecret)
+        #expect(!state.requiresSavedSecret)
+        #expect(!state.canSubmitVaultCreation, "an entry is required before the request")
+        state.savedSecret = "entered secret"
+        #expect(state.canSubmitVaultCreation)
+    }
+
+    @Test func preparedVaultWithStoredSecretNeedsNoEntry() {
+        var state = vaultCreationState()
+        state.applyPreparedOwnerMaterial(storedSecret: true)
+
+        #expect(state.requiresSavedSecret)
+        #expect(!state.requiresEnteredSecret)
+        #expect(state.canSubmitVaultCreation)
+    }
+
+    @Test func savedSecretHintAppearsOnlyWhenTheSecretIsAlreadyStored() {
+        var state = vaultCreationState()
+        state.prepareVaultSecret { "generated secret" }
+        #expect(!state.savedSecretHintVisible, "a generated but unwritten secret is not yet stored")
+
+        state.applyPreparedOwnerMaterial(storedSecret: true)
+        #expect(state.savedSecretHintVisible)
+    }
+
+    @Test func clearingTheInviteDropsAnEnteredSecret() {
+        var state = vaultCreationState()
+        state.applyPreparedOwnerMaterial(storedSecret: false)
+        state.savedSecret = "entered secret"
+
+        state.clearInvite()
+
+        #expect(!state.requiresEnteredSecret)
+        #expect(state.savedSecret.isEmpty)
+    }
+
+    private func vaultCreationState() -> SelfHostedEnrollmentState {
+        var state = SelfHostedEnrollmentState()
+        state.vaultUsername = "family"
+        state.vaultPassword = "long-owner-password"
+        state.vaultPasswordConfirmation = state.vaultPassword
+        return state
     }
 
     private func validOwnerState() -> SelfHostedEnrollmentState {

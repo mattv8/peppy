@@ -46,6 +46,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -65,6 +66,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.theme.PeppyTheme
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -152,12 +154,53 @@ private fun CompanionScreen() {
     var destination by remember { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
     var welcomeDestination by rememberSaveable { mutableStateOf(WelcomeDestination.HOSTED) }
+    var ownerPhoneHost by remember { mutableStateOf<OwnerPhoneApprovalHost?>(null) }
+    // Plain remember: the owner flow is transient, so it must not outlive its live host (no saved state).
+    var addPhoneOpen by remember { mutableStateOf(false) }
+    var ownerPhoneAvailable by remember { mutableStateOf(false) }
+    val ownerDeviceAuth = rememberDeviceAuthenticator(
+        title = stringResource(R.string.peppy_owner_phone_secret_reveal_cta),
+        description = stringResource(R.string.peppy_owner_phone_secret_saved_hint),
+    )
+    val ownerPhoneActions = remember(ownerPhoneHost) { ownerPhoneHost?.actions() }
+    val leavingOwnerPhoneHost = ownerPhoneHost
+    // Leaving the flow (done, cancel, back, or recreation) closes the client and cancels any waiting invitation.
+    DisposableEffect(leavingOwnerPhoneHost) {
+        onDispose {
+            leavingOwnerPhoneHost?.let { host ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    host.cancel()
+                    host.close()
+                }
+            }
+        }
+    }
 
     LaunchedEffect(refresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
         if (MmsPreferences(context).enabled) MmsCaptureWork.ensurePeriodic(context)
         status = current
+        ownerPhoneAvailable = current.sharedKeysReady &&
+            GatewayAccountHost.load(context)?.self?.let { it.role == "owner" && !it.revoked } == true
+    }
+
+    if (addPhoneOpen && ownerPhoneActions != null) {
+        // System back behaves like the screen's Cancel: close only once the invitation is cancelled.
+        BackHandler {
+            scope.launch {
+                if (ownerPhoneActions.cancel() is OwnerPhoneApprovalHost.Result.Cancelled) {
+                    ownerPhoneHost = null
+                    addPhoneOpen = false
+                }
+            }
+        }
+        OwnerPhoneApprovalScreen(
+            host = ownerPhoneActions,
+            onDone = { ownerPhoneHost = null; addPhoneOpen = false },
+            revealSecret = { revealOwnerVaultSecret(context, ownerDeviceAuth) },
+        )
+        return
     }
 
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -350,6 +393,18 @@ private fun CompanionScreen() {
             requestPermissions = { mmsPermissionRequest.launch(MMS_PERMISSIONS) },
             onChanged = { refresh++ },
         )
+
+        if (ownerPhoneAvailable) Section("owner-phone-section", stringResource(R.string.peppy_owner_phone_section_title)) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }
+                        addPhoneOpen = ownerPhoneHost != null
+                    }
+                },
+                modifier = Modifier.testTag("add-phone-button"),
+            ) { Text(stringResource(R.string.peppy_owner_phone_add_cta)) }
+        }
 
         Section("limitations-section", "Messaging limits") {
             Bullet("limitation-mms", "MMS messages sync after the phone finishes downloading them and uploading encrypted copies.")

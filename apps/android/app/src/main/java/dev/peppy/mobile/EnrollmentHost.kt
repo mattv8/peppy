@@ -50,10 +50,16 @@ internal class EnrollmentHost(
         NativeGateway.installEnrollmentIdentity(context, identity)
     },
     private val transport: EnrollmentTransport? = null,
+    private val vaultSecrets: VaultSecretStore = VaultSecretStore(AndroidHostedSecureStore(context)),
 ) : AutoCloseable {
     enum class PhoneState { PENDING, CLAIMED, APPROVED, DENIED, EXPIRED }
 
+    enum class PhoneClaimFailure { INVALID_QR, NETWORK, EXPIRED, REJECTED }
+
     enum class VaultRequestState { PENDING, APPROVED, DENIED, EXPIRED }
+
+    /** Pending-secret state for creation resume: STORED uses the pending slot, PROMPT asks because it is missing, UNAVAILABLE fails closed. */
+    enum class ResumeSecret { NONE, STORED, PROMPT, UNAVAILABLE }
 
     private enum class Operation { OWNER, MANUAL, VAULT_REQUEST }
     private data class ActiveClient(val origin: String, val operation: Operation, val client: NativeEnrollmentClient)
@@ -62,6 +68,7 @@ internal class EnrollmentHost(
     private val clientLock = Any()
     private var activeClient: ActiveClient? = null
     @Volatile private var lastErrorCode: String? = null
+    @Volatile private var lastPhoneClaimFailure: PhoneClaimFailure? = null
 
     fun discover(origin: String): String? = request(origin, "GET", "/v1/instance", null)
 
@@ -73,16 +80,55 @@ internal class EnrollmentHost(
         true
     }
 
+    /** Pending-slot state for an unclaimed origin; a read failure fails closed and never prompts or regenerates. */
+    fun ownerResumeSecret(origin: String): ResumeSecret = try {
+        if (checkpointStore.read(ownerCheckpointKey(origin)) == null) ResumeSecret.NONE else pendingResumeState(origin)
+    } catch (_: Exception) {
+        ResumeSecret.UNAVAILABLE
+    }
+
+    /** Pending-slot state for an approved vault request; only prepared owner material needs the secret again. */
+    fun vaultCreationSecret(origin: String): ResumeSecret = try {
+        if (clientFor(origin, Operation.VAULT_REQUEST).hasPreparedOwnerMaterial()) pendingResumeState(origin) else ResumeSecret.NONE
+    } catch (_: Exception) {
+        ResumeSecret.UNAVAILABLE
+    }
+
+    private fun pendingResumeState(origin: String): ResumeSecret = when (val pending = vaultSecrets.readPending(origin)) {
+        is StoredSecret.Present -> {
+            pending.value.fill('\u0000')
+            ResumeSecret.STORED
+        }
+        StoredSecret.Missing -> ResumeSecret.PROMPT
+    }
+
+    /**
+     * [secret] is the entered secret, blank when the stored pending secret is used. Creation and legacy resume
+     * require the entered secret to be durable before the checkpoint and claim request.
+     */
     fun claimOwner(origin: String, username: String, setupToken: String, adminPassword: String, secret: String): ImportResult {
+        lastErrorCode = null
         return try {
+        val resumed = checkpointStore.read(ownerCheckpointKey(origin)) != null
         val client = clientFor(origin, Operation.OWNER)
-        val body = client.createOwnerRequest(setupToken, username, adminPassword, secret)
+        val passphrase = try {
+            resolvePendingSecret(origin, client, resumed, secret)
+        } catch (_: SecureStoreUnavailable) {
+            lastErrorCode = "secure-store-unavailable"
+            return ImportResult.STORAGE_ERROR
+        }
+        if (passphrase == null) return ImportResult.SERVER_REJECTED
+        if (!vaultSecrets.savePending(origin, passphrase.toCharArray())) {
+            lastErrorCode = "secure-store-unavailable"
+            return ImportResult.STORAGE_ERROR
+        }
+        val body = client.createOwnerRequest(setupToken, username, adminPassword, passphrase)
         persistOwnerCheckpoint(origin, client.checkpoint())
         val response = claimRequest(origin, body)
             ?: return ImportResult.NETWORK_ERROR
         claimErrorResult(response)?.let { return it }
         if (recordError(response)) return ImportResult.SERVER_REJECTED
-        val result = install(client.finishOwnerAdmission(response, secret))
+        val result = install(client.finishOwnerAdmission(response, passphrase), origin)
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
             clearOwnerCheckpoint(origin)
             closeActiveClient()
@@ -92,6 +138,37 @@ internal class EnrollmentHost(
             ImportResult.SERVER_REJECTED
         }
     }
+
+    /**
+     * Stored pending secret wins (desktop order). Without one, a resumed checkpoint needs the entered secret,
+     * verified against the checkpoint before it is adopted; a fresh creation uses the entered secret.
+     * Returns null with [lastErrorCode] set when the request must not proceed. Read failures throw [SecureStoreUnavailable].
+     */
+    private fun resolvePendingSecret(origin: String, client: NativeEnrollmentClient, resumed: Boolean, entered: String): String? =
+        when (val pending = vaultSecrets.readPending(origin)) {
+            is StoredSecret.Present -> {
+                val stored = String(pending.value)
+                pending.value.fill('\u0000')
+                if (resumed && !client.ownerPassphraseMatches(stored)) {
+                    lastErrorCode = "vault-secret-mismatch"
+                    null
+                } else {
+                    stored
+                }
+            }
+            StoredSecret.Missing -> when {
+                !resumed -> entered.takeIf(String::isNotBlank)
+                entered.isBlank() -> {
+                    lastErrorCode = "owner-secret-required"
+                    null
+                }
+                !client.ownerPassphraseMatches(entered) -> {
+                    lastErrorCode = "wrong-passphrase"
+                    null
+                }
+                else -> entered
+            }
+        }
 
     fun joinWithSecret(origin: String, vaultOwner: String?, secret: String): ImportResult {
         return try {
@@ -114,6 +191,10 @@ internal class EnrollmentHost(
             return if (completeResponse.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
         }
         val result = install(client.finishManualAdmission(complete, secret))
+        if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
+            val credential = NativeGateway.accountCredential(context)
+            if (credential != null) vaultSecrets.saveIfMissing(credential.vaultId, credential.deviceId, secret.toCharArray())
+        }
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) closeActiveClient()
         result
         } catch (_: Exception) {
@@ -209,11 +290,23 @@ internal class EnrollmentHost(
         } catch (_: Exception) { null }
     }
 
+    /** [secret] is the entered secret, blank when the stored pending secret is used (desktop order: stored, then prompt). */
     fun createVault(origin: String, username: String, adminPassword: String, secret: String): ImportResult {
         lastErrorCode = null
         return try {
         val client = clientFor(origin, Operation.VAULT_REQUEST)
-        val body = client.createVaultRequest(username, adminPassword, secret)
+        val passphrase = try {
+            resolvePendingSecret(origin, client, client.hasPreparedOwnerMaterial(), secret)
+        } catch (_: SecureStoreUnavailable) {
+            lastErrorCode = "secure-store-unavailable"
+            return ImportResult.STORAGE_ERROR
+        }
+        if (passphrase == null) return ImportResult.SERVER_REJECTED
+        if (!vaultSecrets.savePending(origin, passphrase.toCharArray())) {
+            lastErrorCode = "secure-store-unavailable"
+            return ImportResult.STORAGE_ERROR
+        }
+        val body = client.createVaultRequest(username, adminPassword, passphrase)
         persistVaultRequestCheckpoint(origin, client.checkpoint())
         val response = enrollmentRequest(origin, "POST", "/v1/instance/vaults", body) ?: return ImportResult.NETWORK_ERROR
         val responseBody = response.body ?: return ImportResult.NETWORK_ERROR
@@ -221,7 +314,7 @@ internal class EnrollmentHost(
             recordError(responseBody)
             return if (response.status in TRANSIENT_STATUSES) ImportResult.NETWORK_ERROR else ImportResult.SERVER_REJECTED
         }
-        val result = install(client.finishOwnerAdmission(responseBody, secret))
+        val result = install(client.finishOwnerAdmission(responseBody, passphrase), origin)
         if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) {
             client.clearVaultRequest()
             clearVaultRequestCheckpoint(origin)
@@ -242,9 +335,7 @@ internal class EnrollmentHost(
 
     fun takeErrorCode(): String? = lastErrorCode.also { lastErrorCode = null }
 
-    fun hasPreparedVaultCreation(origin: String): Boolean = try {
-        clientFor(origin, Operation.VAULT_REQUEST).hasPreparedOwnerMaterial()
-    } catch (_: Exception) { false }
+    fun takePhoneClaimFailure(): PhoneClaimFailure? = lastPhoneClaimFailure.also { lastPhoneClaimFailure = null }
 
     private fun clearRejectedVaultRequest(origin: String) {
         try { clientFor(origin, Operation.VAULT_REQUEST).clearVaultRequest() } catch (_: Exception) { }
@@ -253,18 +344,27 @@ internal class EnrollmentHost(
     }
 
     fun beginPhoneClaim(qr: String): PhoneEnrollment? {
-        val origin = try { JSONObject(qr).getString("origin") } catch (_: Exception) { return null }
-        val client = try { newNativeEnrollmentClient(origin, NativeEnrollmentClientKind.ANDROID, "Android phone") } catch (_: Exception) { return null }
+        lastPhoneClaimFailure = null
+        val origin = try { JSONObject(qr).getString("origin") } catch (_: Exception) {
+            return failedPhoneClaim(null, PhoneClaimFailure.INVALID_QR)
+        }
+        val client = try { newNativeEnrollmentClient(origin, NativeEnrollmentClientKind.ANDROID, "Android phone") } catch (_: Exception) {
+            return failedPhoneClaim(null, PhoneClaimFailure.INVALID_QR)
+        }
+        val request = try { client.claimPhoneInvitationRequest(qr) } catch (_: Exception) {
+            return failedPhoneClaim(client, PhoneClaimFailure.INVALID_QR)
+        }
         return try {
-            val claim = request(origin, "POST", "/v1/enrollment/invitations/claim", client.claimPhoneInvitationRequest(qr))
-                ?: run { client.close(); return null }
+            val response = enrollmentRequest(origin, "POST", "/v1/enrollment/invitations/claim", request)
+                ?: return failedPhoneClaim(client, PhoneClaimFailure.NETWORK)
+            if (!response.isSuccess) return failedPhoneClaim(client, phoneClaimFailure(response.status))
+            val claim = response.body ?: return failedPhoneClaim(client, PhoneClaimFailure.REJECTED)
             client.consumePhoneClaim(claim)
             val method = JSONObject(claim).getString("method")
             if (method != "transfer" && method != "shared_secret") throw IllegalArgumentException("Unsupported enrollment method")
             PhoneEnrollment(origin, client, method == "shared_secret")
         } catch (_: Exception) {
-            client.close()
-            null
+            failedPhoneClaim(client, PhoneClaimFailure.REJECTED)
         }
     }
 
@@ -273,7 +373,7 @@ internal class EnrollmentHost(
         private val client: NativeEnrollmentClient,
         private val sharedSecret: Boolean,
     ) : AutoCloseable {
-        private var closed = false
+        @Volatile private var closed = false
 
         fun requiresSharedSecret(): Boolean = sharedSecret
 
@@ -317,7 +417,10 @@ internal class EnrollmentHost(
                     client.confirmPhoneInvitationRequest(status, secret),
                     descriptor.getJSONObject("headers"),
                 ) ?: return ImportResult.NETWORK_ERROR
-                val result = install(client.finishPhoneAdmission(complete))
+                val result = synchronized(this) {
+                    if (closed) return ImportResult.SERVER_REJECTED
+                    install(client.finishPhoneAdmission(complete))
+                }
                 if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) close()
                 result
             } catch (_: Exception) {
@@ -325,7 +428,7 @@ internal class EnrollmentHost(
             }
         }
 
-        override fun close() {
+        @Synchronized override fun close() {
             if (closed) return
             closed = true
             try { client.cancelPhoneFlow() } catch (_: Exception) { }
@@ -430,10 +533,27 @@ internal class EnrollmentHost(
         activeClient = null
     }
 
-    private fun install(identity: NativeEnrollmentIdentity): ImportResult = try {
-        identityInstaller(identity)
+    private fun install(identity: NativeEnrollmentIdentity, pendingOrigin: String? = null): ImportResult = try {
+        val metadata = identity.metadata()
+        identityInstaller(identity).also { result ->
+            if ((result == ImportResult.IMPORTED || result == ImportResult.UPDATED) && pendingOrigin != null) {
+                try { vaultSecrets.movePendingToBinding(pendingOrigin, metadata.vaultId, metadata.deviceId) } catch (_: Exception) { }
+            }
+        }
     } finally {
         identity.close()
+    }
+
+    private fun failedPhoneClaim(client: NativeEnrollmentClient?, failure: PhoneClaimFailure): PhoneEnrollment? {
+        lastPhoneClaimFailure = failure
+        try { client?.close() } catch (_: Exception) { }
+        return null
+    }
+
+    private fun phoneClaimFailure(status: Int): PhoneClaimFailure = when {
+        status == 404 || status == 410 -> PhoneClaimFailure.EXPIRED
+        status == 429 || status >= 500 -> PhoneClaimFailure.NETWORK
+        else -> PhoneClaimFailure.REJECTED
     }
 
     /** Legacy phone/claim callers deliberately see only 2xx bodies. */

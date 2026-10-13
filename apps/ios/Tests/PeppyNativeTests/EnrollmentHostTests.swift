@@ -258,6 +258,65 @@ extension EnrollmentHostTests {
         }
     }
 
+    @Test func delayedSharedSecretConfirmationCanceledBeforeResponseDoesNotActivateOrDiscardNewerFlow() async throws {
+        let gate = ConfirmationGate()
+        let transport = try PhoneEnrollmentTransport(method: "shared_secret", confirmationGate: gate)
+        let store = InMemorySecureStore()
+        let session = makePhoneSession(transport: transport, store: store)
+        _ = try await session.beginPhoneEnrollment(qrPayload: transport.qrPayload, deviceName: "iPhone")
+
+        let confirmation = Task { try await session.confirmPhoneEnrollment(sharedSecret: PhoneEnrollmentTransport.passphrase) }
+        await gate.waitUntilDelayed()
+        await session.cancelPhoneEnrollment()
+        _ = try await session.beginPhoneEnrollment(qrPayload: transport.qrPayload, deviceName: "replacement iPhone")
+        await gate.release()
+
+        await #expect(throws: ClientError.canceled) { try await confirmation.value }
+        #expect(store.accounts.isEmpty)
+        let replacementCanRetry = await session.phoneEnrollmentCanRetryConfirmation()
+        #expect(!replacementCanRetry)
+        let replacementStatus = try await session.phoneEnrollmentStatus()
+        #expect(replacementStatus.requiresSharedSecret)
+    }
+
+    @Test func canceledConfirmationTaskCannotActivateSharedSecretEnrollment() async throws {
+        let gate = ConfirmationGate()
+        let transport = try PhoneEnrollmentTransport(method: "shared_secret", confirmationGate: gate)
+        let store = InMemorySecureStore()
+        let session = makePhoneSession(transport: transport, store: store)
+        _ = try await session.beginPhoneEnrollment(qrPayload: transport.qrPayload, deviceName: "iPhone")
+
+        let confirmation = Task { try await session.confirmPhoneEnrollment(sharedSecret: PhoneEnrollmentTransport.passphrase) }
+        await gate.waitUntilDelayed()
+        confirmation.cancel()
+        await gate.release()
+
+        await #expect(throws: ClientError.canceled) { try await confirmation.value }
+        #expect(store.accounts.isEmpty)
+        let canRetry = await session.phoneEnrollmentCanRetryConfirmation()
+        #expect(!canRetry)
+    }
+
+    @Test func canceledConfirmationStatusCannotClearOrConfirmAReplacementFlow() async throws {
+        let gate = ConfirmationGate()
+        let transport = try PhoneEnrollmentTransport(method: "shared_secret", confirmationStatusGate: gate)
+        let session = makePhoneSession(transport: transport)
+        _ = try await session.beginPhoneEnrollment(qrPayload: transport.qrPayload, deviceName: "iPhone")
+
+        let confirmation = Task { try await session.confirmPhoneEnrollment(sharedSecret: PhoneEnrollmentTransport.passphrase) }
+        await gate.waitUntilDelayed()
+        await session.cancelPhoneEnrollment()
+        _ = try await session.beginPhoneEnrollment(qrPayload: transport.qrPayload, deviceName: "replacement iPhone")
+        await gate.release()
+
+        await #expect(throws: ClientError.canceled) { try await confirmation.value }
+        #expect(transport.confirmationAttempts == 0)
+        let replacementStatus = try await session.phoneEnrollmentStatus()
+        #expect(replacementStatus.requiresSharedSecret)
+        let canRetry = await session.phoneEnrollmentCanRetryConfirmation()
+        #expect(!canRetry)
+    }
+
     @Test func confirmationNetworkFailureRetriesThePreparedRustRequest() async throws {
         let transport = try PhoneEnrollmentTransport(method: "shared_secret", confirmationNetworkFailures: 1)
         let session = makePhoneSession(transport: transport)
@@ -328,6 +387,9 @@ private final class PhoneEnrollmentTransport: HTTPTransport, @unchecked Sendable
     private var claimRequest: [String: Any]?
     private var latestStatus: [String: Any]?
     private var remainingConfirmationFailures: Int
+    private let confirmationGate: ConfirmationGate?
+    private let confirmationStatusGate: ConfirmationGate?
+    private var statusRequestCount = 0
 
     var paths: [String] {
         lock.withLock { recordedRequests.map { "\($0.method) \($0.url.path)" } }
@@ -336,11 +398,15 @@ private final class PhoneEnrollmentTransport: HTTPTransport, @unchecked Sendable
     init(
         method: String,
         malformedClaim: Bool = false,
-        confirmationNetworkFailures: Int = 0
+        confirmationNetworkFailures: Int = 0,
+        confirmationGate: ConfirmationGate? = nil,
+        confirmationStatusGate: ConfirmationGate? = nil
     ) throws {
         self.method = method
         self.malformedClaim = malformedClaim
         remainingConfirmationFailures = confirmationNetworkFailures
+        self.confirmationGate = confirmationGate
+        self.confirmationStatusGate = confirmationStatusGate
         let owner = try NativeEnrollmentRequestProducer(origin: Self.origin, deviceName: "fixture owner")
         let ownerRequest = try Self.object(owner.createOwnerRequest(
             setupToken: "operator-code",
@@ -360,7 +426,17 @@ private final class PhoneEnrollmentTransport: HTTPTransport, @unchecked Sendable
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        try lock.withLock {
+        if request.method == "GET", request.url.path == "/v1/enrollment/invitations/\(invitationID)" {
+            let ordinal = lock.withLock {
+                statusRequestCount += 1
+                return statusRequestCount
+            }
+            if ordinal == 2 { await confirmationStatusGate?.delay() }
+        }
+        if request.method == "POST", request.url.path == "/v1/enrollment/invitations/\(invitationID)/confirm" {
+            await confirmationGate?.delay()
+        }
+        return try lock.withLock {
             recordedRequests.append(request)
             switch (request.method, request.url.path) {
             case ("POST", "/v1/enrollment/invitations/claim"):
@@ -486,5 +562,27 @@ private final class PhoneEnrollmentTransport: HTTPTransport, @unchecked Sendable
 
     private enum FixtureError: Error {
         case invalid
+    }
+}
+
+private actor ConfirmationGate {
+    private var delayed = false
+    private var delayedWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func delay() async {
+        delayed = true
+        delayedWaiter?.resume()
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilDelayed() async {
+        guard !delayed else { return }
+        await withCheckedContinuation { delayedWaiter = $0 }
+    }
+
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
 }

@@ -30,8 +30,6 @@ struct SelfHostedEnrollmentState {
     var confirmation = ""
     var sharedSecret = ""
     private(set) var generatedSecret = ""
-    var acknowledgedSecretSave = false
-    var revealsGeneratedSecret = false
     var claimedChooserActive = false
     var inviteLink = ""
     var displayName = ""
@@ -39,7 +37,10 @@ struct SelfHostedEnrollmentState {
     var vaultPassword = ""
     var vaultPasswordConfirmation = ""
     var vaultSecretPrepared = false
+    /// The prepared request resumes with the protected stored secret; no entry is shown.
     var requiresSavedSecret = false
+    /// The prepared request exists but no stored copy does, so the owner must re-enter the secret.
+    var requiresEnteredSecret = false
     var savedSecret = ""
     var inviteStage = InviteStage.none
     var vaultOwner = ""
@@ -53,7 +54,7 @@ struct SelfHostedEnrollmentState {
     }
 
     var canSubmitOwnerClaim: Bool {
-        canContinueOwnerSetup && !generatedSecret.isEmpty && acknowledgedSecretSave
+        canContinueOwnerSetup && !generatedSecret.isEmpty
     }
 
     var canSubmitJoin: Bool {
@@ -63,8 +64,17 @@ struct SelfHostedEnrollmentState {
     var canSubmitVaultCreation: Bool {
         !vaultUsername.isEmpty && vaultPassword.utf8.count >= 12
             && vaultPassword == vaultPasswordConfirmation
-            && (requiresSavedSecret ? !savedSecret.isEmpty : !generatedSecret.isEmpty) && acknowledgedSecretSave
+            && vaultSecretReady
     }
+
+    /// The secret the next vault creation will use: stored, re-entered, or generated for this invite.
+    var vaultSecretReady: Bool {
+        if requiresSavedSecret { return true }
+        return requiresEnteredSecret ? !savedSecret.isEmpty : !generatedSecret.isEmpty
+    }
+
+    /// The saved-secret hint describes storage that already happened, so it is shown only on the resumed path.
+    var savedSecretHintVisible: Bool { requiresSavedSecret }
 
     func ownerClaimEnabled(isBusy: Bool, sceneIsActive: Bool) -> Bool {
         canSubmitOwnerClaim && !isBusy && sceneIsActive
@@ -114,8 +124,6 @@ struct SelfHostedEnrollmentState {
         sharedSecret = ""
         signInPassword = ""
         generatedSecret = ""
-        acknowledgedSecretSave = false
-        revealsGeneratedSecret = false
         invalidateDiscovery()
     }
 
@@ -131,6 +139,13 @@ struct SelfHostedEnrollmentState {
         vaultSecretPrepared = true
     }
 
+    /// Records what a resumed vault request holds. Without a stored copy, the owner must re-enter the secret.
+    mutating func applyPreparedOwnerMaterial(storedSecret: Bool) {
+        vaultSecretPrepared = true
+        requiresSavedSecret = storedSecret
+        requiresEnteredSecret = !storedSecret
+    }
+
     mutating func clearInvite() {
         inviteEpoch &+= 1
         inviteLink = ""
@@ -139,10 +154,9 @@ struct SelfHostedEnrollmentState {
         vaultPassword = ""
         vaultPasswordConfirmation = ""
         generatedSecret = ""
-        acknowledgedSecretSave = false
-        revealsGeneratedSecret = false
         vaultSecretPrepared = false
         requiresSavedSecret = false
+        requiresEnteredSecret = false
         savedSecret = ""
         inviteStage = .none
     }

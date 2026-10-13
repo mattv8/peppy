@@ -132,12 +132,13 @@ class SmsDispatcherTest : GatewayTestBase() {
     @Test
     fun permittedCommandIsSentExactlyOnceWithUniqueCallbackIntents() {
         val client = enrollAndUnlock()
-        val command = queueCommand(client, route, "a multipart body that spans parts")
+        val recipient = nextTestRecipient()
+        val command = queueCommand(client, route, "a multipart body that spans parts", listOf(recipient))
         val carrier = FakeCarrier(partSize = 10)
         assertEquals(1, dispatcher(client, carrier).dispatch().submitted)
         val call = carrier.calls.single()
         assertEquals(3, call.subscriptionId)
-        assertEquals("+15551234567", call.destination)
+        assertEquals(recipient, call.destination)
         assertEquals(4, call.parts.size)
 
         val all = call.sent + call.delivered
@@ -166,5 +167,32 @@ class SmsDispatcherTest : GatewayTestBase() {
         dispatcher(client, FakeCarrier(failure = IllegalStateException("radio"))).dispatch()
         assertEquals(NativePermitState.ALREADY_ATTEMPTED, permitState(client, unknown).state)
         assertEquals("AttemptRecorded", permitState(client, unknown).existingSendState)
+    }
+
+    @Test
+    fun helperDefaultRecipientIsolatesConversationsAfterMms() {
+        val client = enrollAndUnlock()
+        queueMmsWithImage(client, "+15551234567")
+        val text = queueCommand(client, route, "plain text after MMS")
+        assertEquals("sms", client.pendingCommands().single { it.commandId == text }.message.transport)
+    }
+
+    /** Creates an MMS (attachment) to [recipient] on the shared desktop client and ingests it into [client]. */
+    private fun queueMmsWithImage(client: NativeClient, recipient: String): String {
+        val desktop = SharedVault.desktop
+        val image = java.io.File.createTempFile("peppy", ".png").apply { writeBytes(ByteArray(64) { it.toByte() }); deleteOnExit() }
+        val attachment = desktop.prepareAttachment(image.path, "image/png", "photo.png")
+        val draft = desktop.createComposeDraft(null)
+        val routeJson = org.json.JSONObject().put("gateway_device_id", deviceId).put("subscription_id", route).toString()
+        val saved = desktop.saveComposeDraft(
+            draft.draftId, draft.revision,
+            uniffi.peppy_mobile_bindings.NativeComposeDraftUpdate("caption", listOf(recipient), listOf(attachment.attachmentId), routeJson),
+        )
+        val queued = desktop.sendComposeDraft(saved.draftId, saved.revision)
+        desktop.markAttachmentUploaded(attachment.attachmentId, java.util.UUID.randomUUID().toString())
+        val wire = desktop.pendingOutboxJson().single { org.json.JSONObject(it).getString("envelope_id") == queued.envelopeId }
+        desktop.ackOutbox(queued.envelopeId)
+        applyEnvelope(client, wire)
+        return queued.commandId
     }
 }

@@ -137,7 +137,7 @@ public struct EnrollmentHost: Sendable {
     }
 
     public func createPhoneInvitation(_ request: String, credential: String) async throws -> String {
-        try await exchange(method: "POST", path: "/v1/enrollment/invitations", body: request, headers: authorization(credential))
+        try await exchange(method: "POST", path: "/v1/enrollment/invitations", body: request, headers: ownerEnrollmentHeaders(credential))
     }
 
     public func claimPhoneInvitation(_ request: String) async throws -> String {
@@ -145,13 +145,13 @@ public struct EnrollmentHost: Sendable {
     }
 
     public func phoneInvitationStatus(id: String, credential: String? = nil, claimSecret: String? = nil) async throws -> String {
-        var headers = credential.map(authorization) ?? [:]
+        var headers = credential.map(ownerEnrollmentHeaders) ?? [:]
         if let claimSecret { headers["Peppy-Claim-Secret"] = claimSecret }
         return try await exchange(method: "GET", path: "/v1/enrollment/invitations/\(try enrollmentID(id))", body: nil, headers: headers)
     }
 
     public func approvePhoneInvitation(id: String, request: String, credential: String) async throws -> String {
-        try await exchange(method: "POST", path: "/v1/enrollment/invitations/\(try enrollmentID(id))/approve", body: request, headers: authorization(credential))
+        try await exchange(method: "POST", path: "/v1/enrollment/invitations/\(try enrollmentID(id))/approve", body: request, headers: ownerEnrollmentHeaders(credential))
     }
 
     public func confirmPhoneInvitation(id: String, request: String) async throws -> String {
@@ -159,7 +159,7 @@ public struct EnrollmentHost: Sendable {
     }
 
     public func cancelPhoneInvitation(id: String, credential: String) async throws {
-        _ = try await exchange(method: "DELETE", path: "/v1/enrollment/invitations/\(try enrollmentID(id))", body: nil, headers: authorization(credential))
+        _ = try await exchange(method: "DELETE", path: "/v1/enrollment/invitations/\(try enrollmentID(id))", body: nil, headers: ownerEnrollmentHeaders(credential))
     }
 
     /// Runs a Rust-produced, claimant-authenticated descriptor. Its restricted
@@ -212,6 +212,12 @@ public struct EnrollmentHost: Sendable {
 
     private func authorization(_ credential: String) -> [String: String] {
         ["Authorization": "Bearer \(credential)"]
+    }
+
+    private func ownerEnrollmentHeaders(_ credential: String) -> [String: String] {
+        var headers = authorization(credential)
+        headers.merge(hostedHeaders()) { _, account in account }
+        return headers
     }
 
     private func hostedHeaders() -> [String: String] {

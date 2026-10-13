@@ -591,12 +591,12 @@
         }
       }
     },
-    "peppy.production_pairing_verify": {
+    "peppy.production_pairing_connecting": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "I checked that the verification codes match"
+            "value": "Connecting…"
           }
         }
       }
@@ -647,6 +647,336 @@
           "stringUnit": {
             "state": "translated",
             "value": "Could not reach Peppy. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_add_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_waiting_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect your phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_waiting_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Peppy on your phone and scan this code."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_waiting_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code connects your phone to this server. It does not grant any permissions by itself."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_qr_accessibility": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone connection QR code"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_shared_secret_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter shared secret on phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_verify_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verify the code"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_verify_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compare this code with the code shown in Peppy on the phone you are adding. Approve only if they match."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_codes_match": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The codes match on both devices."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_approve_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm and approve"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_countdown_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code expires in"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_approved_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approved. Waiting for the phone to finish connecting…"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_connected_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone connected"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_connected_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setup on the phone."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_done_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_expired_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code expired"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_expired_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code expired. Start again to get a new one."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_restart_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start again"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_prompt_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_prompt_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the vault shared secret you saved when this vault was created. This is not your admin password."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_secret_reveal_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show shared secret"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_secret_hide_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide shared secret"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_secret_saved_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps your vault shared secret in this phone's secure storage. Show it when you add another device."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_wrong_passphrase": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That shared secret does not match this vault."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_secret_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The vault shared secret saved on this phone no longer matches this vault."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_secret_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The vault shared secret is not saved on this phone."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_lock_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set a screen lock on this phone to show the shared secret."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_account_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to your Peppy account to add a phone."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone was not approved. Start again to create a new code."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_state": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The phone pairing state changed unexpectedly. Start again."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_server_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server rejected this request. Start again."
           }
         }
       }
