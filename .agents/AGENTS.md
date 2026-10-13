@@ -96,11 +96,19 @@ This reference records non-obvious Peppy domain constraints. Related references:
   differing value alone is not grounds to discard the local checkpoint. See
   [mobile provisioning](../crates/mobile-bindings/src/hosted.rs); the account
   selection query is in `peppy-platform/src/service.rs`.
-- Generated vault shared secrets require an explicit save acknowledgement.
+- Generated vault shared secrets require either an explicit save
+  acknowledgement (browser, mobile) or protected native secure storage bound to
+  the vault and device with a native-only reveal path (desktop). Copying a
+  secret never counts as acknowledgement. Desktop writes the pending secret to
+  secure storage before the owner or vault-request checkpoint, reads it back to
+  resume, and prompts only when it is missing. After verified activation it
+  stores the secret under the device binding, including a user-entered secret
+  from shared-secret admission; a failed write there does not undo enrollment.
+  Stored binding secrets are not yet removed on revocation or vault teardown.
   Preserve an in-progress secret in transient private state across same-page
-  retries; do not put it in logs, process arguments, Android saved state, or
-  browser local/session storage. Recover protected prepared material after a
-  restart using the user's saved secret, not a silently regenerated phrase.
+  retries; do not put it in logs, process arguments, Tauri IPC, Android saved
+  state, or browser local/session storage. Recover protected prepared material
+  after a restart using the saved secret, not a silently regenerated phrase.
 - Enrollment has one `connect_phone` QR: version, purpose, canonical origin,
   invitation secret, and transfer public key. The invitation secret stays on
   the two clients: the claimant supplies an HMAC-bound claim, the owner checks
