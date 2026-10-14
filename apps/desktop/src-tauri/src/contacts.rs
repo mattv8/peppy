@@ -19,7 +19,7 @@ use peppy_client_core::{AttachmentId, Client, Error as CoreError};
 use peppy_desktop_api::contacts as shared;
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -408,21 +408,9 @@ pub fn submit(session: &Session, input: &Value) -> BridgeResult<Value> {
 // Display-only resolution, recipient discovery and repair
 // ---------------------------------------------------------------------------------------------
 
-/// Core's per-call address cap for `resolve_contact_addresses_json`.
-const RESOLVE_BATCH: usize = 100;
-/// Distinct addresses resolved per snapshot; the rest show their raw number.
-const MAX_RESOLVED_ADDRESSES: usize = 1000;
 /// Avatars attached to one snapshot (decrypts are cached, so this bounds snapshot size).
 const SNAPSHOT_AVATARS: usize = 64;
 pub use shared::Resolved;
-
-fn looks_like_phone(address: &str) -> bool {
-    let digits = address.bytes().filter(u8::is_ascii_digit).count();
-    (3..=15).contains(&digits)
-        && address
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b' ' | b'(' | b')' | b'.' | b'-'))
-}
 
 /// Resolves phone-number addresses through core's bounded projection, preferring the given
 /// source device's book. Ambiguous or unknown numbers are simply absent (shown raw). Purely
@@ -431,22 +419,9 @@ pub fn resolve_addresses(
     client: &Client,
     addresses: &[(String, Option<String>)],
 ) -> HashMap<String, Resolved> {
-    let mut by_source: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
-    let mut seen = HashSet::new();
-    for (address, source) in addresses {
-        if address.len() <= 256 && looks_like_phone(address) && seen.insert(address.as_str()) {
-            by_source
-                .entry(source.as_deref().filter(|s| valid_id(s)))
-                .or_default()
-                .push(address);
-        }
-        if seen.len() >= MAX_RESOLVED_ADDRESSES {
-            break;
-        }
-    }
     let mut out = HashMap::new();
-    for (source, list) in by_source {
-        for batch in list.chunks(RESOLVE_BATCH) {
+    for (source, list) in shared::resolution_candidates(addresses) {
+        for batch in list.chunks(shared::RESOLVE_ADDRESS_BATCH) {
             let mut input = json!({"addresses": batch});
             if let Some(source) = source {
                 input["source_device_id"] = json!(source);

@@ -1,7 +1,6 @@
 use super::*;
 use peppy_desktop_api::{ContactError, contacts as shared};
 use std::{
-    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     time::{SystemTime, UNIX_EPOCH},
@@ -112,29 +111,9 @@ impl BrowserCore {
         &self,
         addresses: &[(String, Option<String>)],
     ) -> Result<ContactSnapshot, Failure> {
-        const MAX_ADDRESSES: usize = 1000;
-        const RESOLVE_BATCH: usize = 100;
-        let mut by_source: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
-        let mut seen = HashSet::new();
-        for (address, source) in addresses {
-            let digits = address.bytes().filter(u8::is_ascii_digit).count();
-            let phone = (3..=15).contains(&digits)
-                && address.bytes().all(|byte| {
-                    byte.is_ascii_digit() || matches!(byte, b'+' | b' ' | b'(' | b')' | b'.' | b'-')
-                });
-            if address.len() <= 256 && phone && seen.insert(address.as_str()) {
-                by_source
-                    .entry(source.as_deref().filter(|id| shared::valid_id(id)))
-                    .or_default()
-                    .push(address);
-            }
-            if seen.len() >= MAX_ADDRESSES {
-                break;
-            }
-        }
         let mut resolution = serde_json::Map::new();
-        for (source, addresses) in by_source {
-            for batch in addresses.chunks(RESOLVE_BATCH) {
+        for (source, addresses) in shared::resolution_candidates(addresses) {
+            for batch in addresses.chunks(shared::RESOLVE_ADDRESS_BATCH) {
                 let mut input = json!({"addresses": batch});
                 if let Some(source) = source {
                     input["source_device_id"] = json!(source);

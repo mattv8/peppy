@@ -67,6 +67,7 @@ import { NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
+import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
 
 /**
@@ -979,12 +980,7 @@ function SettingsView({
   const [startupError, setStartupError] = useState("");
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
-  const syncText =
-    encryption === "unlocked"
-      ? "Device sync encrypted"
-      : encryption === "mismatch"
-        ? "Device sync key mismatch"
-        : "Device sync not unlocked";
+  const syncText = syncStatusText(encryption);
 
   const runAction = async (action: SettingsAction) => {
     if (pendingAction) return;
@@ -1279,27 +1275,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     });
   const store = storeRef.current;
 
-  const persistLayout = (
-    next: {
-      listWidth?: number;
-      listCollapsed?: boolean;
-      composerHeight?: number | null;
-      headComposerHeight?: number | null;
-      recipientPosition?: RecipientPosition;
-      navigationPosition?: NavigationPosition;
-    } = {},
-  ) => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
-      const layout =
-        typeof stored === "object" && stored !== null && !Array.isArray(stored)
-          ? stored
-          : {};
-      localStorage.setItem("peppy.layout.v1", JSON.stringify({ ...layout, ...next }));
-    } catch {
-      /* Storage is optional in embedded previews. */
-    }
-  };
+  const persistLayout = persistLayoutPatch;
   const changeNavigationPosition = (position: NavigationPosition) => {
     setNavigationPosition(position);
     persistLayout({ navigationPosition: position });
@@ -1651,20 +1627,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const changeRecipientPosition = (position: RecipientPosition) => {
     setRecipientPosition(position);
-    try {
-      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
-      const layout =
-        typeof stored === "object" && stored !== null && !Array.isArray(stored)
-          ? stored
-          : {};
-      delete layout.recipientAnchor;
-      localStorage.setItem(
-        "peppy.layout.v1",
-        JSON.stringify({ ...layout, recipientPosition: position }),
-      );
-    } catch {
-      /* Storage is optional in embedded previews. */
-    }
+    persistRecipientPosition(position);
   };
 
   const startNewMessage = (recipient?: string) => {

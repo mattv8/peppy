@@ -39,6 +39,41 @@ pub fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_ID
 }
 
+/// Core's per-call address cap for contact resolution.
+pub const RESOLVE_ADDRESS_BATCH: usize = 100;
+/// Distinct eligible addresses resolved per snapshot; the rest show their raw number.
+pub const MAX_RESOLVED_ADDRESSES: usize = 1000;
+
+/// Groups eligible resolution candidates by source. The first eligible address occurrence wins
+/// across sources; an invalid source becomes `None`. The 1,000-address cap is global, each
+/// source preserves input order, and callers must not rely on map iteration order.
+pub fn resolution_candidates(
+    addresses: &[(String, Option<String>)],
+) -> HashMap<Option<&str>, Vec<&str>> {
+    let mut by_source = HashMap::new();
+    let mut seen = HashSet::new();
+    for (address, source) in addresses {
+        if address.len() <= 256 && is_phone_address(address) && seen.insert(address.as_str()) {
+            by_source
+                .entry(source.as_deref().filter(|id| valid_id(id)))
+                .or_insert_with(Vec::new)
+                .push(address.as_str());
+        }
+        if seen.len() >= MAX_RESOLVED_ADDRESSES {
+            break;
+        }
+    }
+    by_source
+}
+
+fn is_phone_address(address: &str) -> bool {
+    let digits = address.bytes().filter(u8::is_ascii_digit).count();
+    (3..=15).contains(&digits)
+        && address.bytes().all(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b'+' | b' ' | b'(' | b')' | b'.' | b'-')
+        })
+}
+
 pub fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -1061,6 +1096,69 @@ mod tests {
             request["expected_old"]["phones"],
             json!([{"id":"p1","label":"mobile","value":"1"}])
         );
+    }
+
+    #[test]
+    fn resolution_candidates_enforce_phone_bounds_and_source_first_wins() {
+        let maximum_length = format!("{}{}", "1".repeat(15), " ".repeat(241));
+        let addresses = vec![
+            ("+12".into(), Some("first".into())),
+            ("+123".into(), Some("first".into())),
+            ("123456789012345".into(), Some("second".into())),
+            ("1234567890123456".into(), Some("second".into())),
+            ("+12a3".into(), Some("first".into())),
+            ("+12é3".into(), Some("first".into())),
+            ("+(12) 3.4-5".into(), Some("first".into())),
+            (maximum_length, Some("first".into())),
+            (
+                format!("{}{}", "1".repeat(15), " ".repeat(242)),
+                Some("first".into()),
+            ),
+            ("+123".into(), Some("second".into())),
+            ("+987".into(), Some(String::new())),
+        ];
+
+        let candidates = resolution_candidates(&addresses);
+        assert_eq!(
+            candidates.get(&Some("first")).unwrap(),
+            &vec!["+123", "+(12) 3.4-5", addresses[7].0.as_str()]
+        );
+        assert_eq!(
+            candidates.get(&Some("second")).unwrap(),
+            &vec!["123456789012345"]
+        );
+        assert_eq!(candidates.get(&None).unwrap(), &vec!["+987"]);
+    }
+
+    #[test]
+    fn resolution_candidates_cap_distinct_eligible_addresses() {
+        let mut addresses = vec![
+            ("not a phone number".into(), Some("ignored".into())),
+            ("+12025550000".into(), Some("first".into())),
+            ("+12025550000".into(), Some("second".into())),
+            ("+12025550001".into(), Some("second".into())),
+        ];
+        addresses.extend(
+            (2..=MAX_RESOLVED_ADDRESSES).map(|index| (format!("+1202555{index:04}"), None)),
+        );
+
+        let candidates = resolution_candidates(&addresses);
+        assert_eq!(
+            candidates.values().map(Vec::len).sum::<usize>(),
+            MAX_RESOLVED_ADDRESSES
+        );
+        assert_eq!(
+            candidates.get(&Some("first")).unwrap(),
+            &vec!["+12025550000"]
+        );
+        assert_eq!(
+            candidates.get(&Some("second")).unwrap(),
+            &vec!["+12025550001"]
+        );
+        let unscoped = candidates.get(&None).unwrap();
+        assert_eq!(unscoped.len(), 998);
+        assert_eq!(unscoped.first(), Some(&"+12025550002"));
+        assert_eq!(unscoped.last(), Some(&"+12025550999"));
     }
 }
 
