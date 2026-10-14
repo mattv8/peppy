@@ -11,7 +11,7 @@ struct OwnerPhoneApprovalView: View {
     let host: OwnerPhoneApprovalHost
     @Binding var isPresented: Bool
     /// The Phase-B owner supplies a device-authenticated, transient reveal surface.
-    let revealSecret: () async -> String?
+    let revealSecret: () async -> AppModel.OwnerVaultSecretRevealOutcome
 
     @State private var status: OwnerPhoneStatus?
     @State private var qr: String?
@@ -23,10 +23,13 @@ struct OwnerPhoneApprovalView: View {
     @State private var promptSecret = ""
     @State private var promptContinuation: CheckedContinuation<String?, Never>?
     @State private var revealedSecret: String?
+    @State private var revealError: String?
+    @State private var showingRevealSheet = false
     @State private var requestedMethod = OwnerPhoneMethod.transfer
+    @State private var hasCancelledInvitation = false
     @Environment(\.scenePhase) private var scenePhase
 
-    init(host: OwnerPhoneApprovalHost, isPresented: Binding<Bool>, revealSecret: @escaping () async -> String? = { nil }) {
+    init(host: OwnerPhoneApprovalHost, isPresented: Binding<Bool>, revealSecret: @escaping () async -> AppModel.OwnerVaultSecretRevealOutcome = { .unavailable }) {
         self.host = host
         _isPresented = isPresented
         self.revealSecret = revealSecret
@@ -63,23 +66,37 @@ struct OwnerPhoneApprovalView: View {
         .task { await start() }
         .task(id: status?.stage) { await pollUntilSettled() }
         .sheet(isPresented: $showingApprovalPrompt) { approvalPrompt }
-        .sheet(isPresented: Binding(get: { revealedSecret != nil }, set: { if !$0 { revealedSecret = nil } })) {
+        .sheet(isPresented: $showingRevealSheet, onDismiss: { revealedSecret = nil; revealError = nil }) {
             NavigationStack {
-                Text(revealedSecret ?? "")
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                    .privacySensitive()
-                    .padding(24)
-                    .accessibilityIdentifier("owner-phone-reveal")
-                    .navigationTitle(Text("peppy.owner_phone_secret_reveal_cta", tableName: "Peppy"))
-                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button(String(localized: "peppy.owner_phone_secret_hide_cta", table: "Peppy")) { revealedSecret = nil } } }
+                Group {
+                    if let revealedSecret {
+                        Text(revealedSecret)
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .privacySensitive()
+                            .accessibilityIdentifier("owner-phone-reveal")
+                    } else if let revealError {
+                        Text(revealError)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("owner-phone-reveal-error")
+                    }
+                }
+                .padding(24)
+                .navigationTitle(Text("peppy.owner_phone_secret_reveal_cta", tableName: "Peppy"))
+                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button(String(localized: "peppy.owner_phone_secret_hide_cta", table: "Peppy")) { showingRevealSheet = false } } }
             }
         }
         .onChange(of: scenePhase) { _, phase in
             // The revealed secret must not stay on screen while the app is inactive or in the app switcher.
-            if phase != .active { revealedSecret = nil }
+            if phase != .active {
+                revealedSecret = nil
+                showingRevealSheet = false
+            }
         }
-        .onDisappear { resumePrompt(with: nil) }
+        .onDisappear {
+            resumePrompt(with: nil)
+            cancelWaitingInvitation()
+        }
     }
 
     @ViewBuilder private var stageContent: some View {
@@ -200,10 +217,27 @@ struct OwnerPhoneApprovalView: View {
 
     /// The reveal is offered only after the invitation has switched to the shared-secret method, as on desktop.
     private func revealSharedSecret() async {
+        let rotation = await host.rotateIfNeeded(requested: .sharedSecret)
+        guard case .view = rotation else {
+            apply(rotation)
+            return
+        }
         requestedMethod = .sharedSecret
-        apply(await host.rotateIfNeeded(requested: .sharedSecret))
-        guard errorCode == nil else { return }
-        revealedSecret = await revealSecret()
+        apply(rotation)
+        switch await revealSecret() {
+        case .revealed(let secret):
+            revealedSecret = secret
+            revealError = nil
+            showingRevealSheet = true
+        case .cancelled:
+            break
+        case .unavailable:
+            revealError = String(localized: "peppy.owner_phone_error_lock_required", table: "Peppy")
+            showingRevealSheet = true
+        case .failed:
+            revealError = String(localized: "peppy.owner_phone_error_secret_unavailable", table: "Peppy")
+            showingRevealSheet = true
+        }
     }
 
     private func approve() async {
@@ -215,13 +249,35 @@ struct OwnerPhoneApprovalView: View {
     /// Cancel always closes the sheet. The Waiting invitation is cancelled best-effort.
     private func cancel() async {
         resumePrompt(with: nil)
+        hasCancelledInvitation = true
         isPresented = false
         _ = await host.cancel()
     }
 
     private func retry() async {
+        // A 404/410 poll leaves the stage at Waiting; that invitation is gone, so rotating it would fail again.
+        let invitationGone = errorCode == "expired"
         errorCode = nil
-        if status?.stage == .verify { await approve() } else { await start() }
+        switch status?.stage {
+        case .verify:
+            await approve()
+        case .approved:
+            apply(await host.poll(), keepsError: true)
+        case .waiting where invitationGone:
+            await start()
+        case .waiting:
+            apply(await host.rotateIfNeeded(requested: requestedMethod), keepsError: true)
+        case .expired, .denied, .none:
+            await start()
+        case .connected:
+            break
+        }
+    }
+
+    private func cancelWaitingInvitation() {
+        guard status?.stage == .waiting, !hasCancelledInvitation else { return }
+        hasCancelledInvitation = true
+        Task { _ = await host.cancel() }
     }
 
     private func apply(_ result: OwnerPhoneResult, keepsError: Bool = false) {

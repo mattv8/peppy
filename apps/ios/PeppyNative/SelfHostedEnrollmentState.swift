@@ -29,6 +29,8 @@ struct SelfHostedEnrollmentState {
     var adminPassword = ""
     var confirmation = ""
     var sharedSecret = ""
+    /// True only after the native host confirms a protected pending secret for this origin.
+    var hasPendingSecretForJoin = false
     private(set) var generatedSecret = ""
     var claimedChooserActive = false
     var inviteLink = ""
@@ -58,7 +60,7 @@ struct SelfHostedEnrollmentState {
     }
 
     var canSubmitJoin: Bool {
-        !origin.isEmpty && !sharedSecret.isEmpty
+        !origin.isEmpty && (!sharedSecret.isEmpty || hasPendingSecretForJoin)
     }
 
     var canSubmitVaultCreation: Bool {
@@ -114,6 +116,7 @@ struct SelfHostedEnrollmentState {
         discoveredOrigin = nil
         setupCodeRequired = true
         setupToken = ""
+        hasPendingSecretForJoin = false
     }
 
     mutating func clearSecrets() {

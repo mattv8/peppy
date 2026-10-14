@@ -157,6 +157,18 @@ import Testing
         #expect(transport.requests.allSatisfy { !$0.hasPrefix("DELETE") && !$0.hasPrefix("POST /v1/enrollment/invitations ") })
     }
 
+    @Test func approvedPollFailureNeverCreatesAReplacementInvitation() async {
+        let secure = OwnerFaultyStore(); secure.seed(account, "synthetic vault secret")
+        let producer = OwnerProducerFake()
+        producer.statusByBody["approved"] = .init(invitationId: "invite", stage: .approved, expiresInSeconds: 30, sas: nil, claimDigest: "digest")
+        let transport = OwnerTransportFake([http(200), .init(status: 200, body: "approved"), nil])
+        let approver = host(producer, transport, secure)
+
+        _ = await approver.approve(prompt: { nil })
+        #expect(await approver.poll() == .failed("offline"))
+        #expect(!transport.requests.contains("POST /v1/enrollment/invitations"))
+    }
+
     // MARK: Rotation and cancellation
 
     @Test func waitingWithTimeLeftIsNotRotated() async {

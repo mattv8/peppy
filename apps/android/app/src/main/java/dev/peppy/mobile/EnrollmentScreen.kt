@@ -321,6 +321,7 @@ internal fun EnrollmentScreen(
                         busy = true
                         scope.launch(Dispatchers.IO) {
                             val discovery = try { host.discover(canonical)?.let(::parseInstanceDiscovery) } catch (_: Exception) { null }
+                            val resume = if (discovery?.claimed == false) host.ownerResumeSecret(canonical) else EnrollmentHost.ResumeSecret.NONE
                             withContext(Dispatchers.Main) {
                                 busy = false
                                 if (generation != discoveryGeneration) Unit
@@ -329,7 +330,6 @@ internal fun EnrollmentScreen(
                                     origin = canonical
                                     setupToken = ""
                                     setupCodeRequired = discovery.setupCodeRequired
-                                    val resume = if (discovery.claimed) EnrollmentHost.ResumeSecret.NONE else host.ownerResumeSecret(canonical)
                                     if (discovery.claimed && host.pendingVaultRequest(canonical)) {
                                         stage = EnrollmentStage.INVITE_WAITING
                                     } else if (resume == EnrollmentHost.ResumeSecret.UNAVAILABLE) {

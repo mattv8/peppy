@@ -53,6 +53,13 @@ struct SelfHostedEnrollmentView: View {
             }
         }
         .accessibilityIdentifier("self-hosted-enrollment-screen")
+        .task(id: enrollment.joining ? enrollment.origin : "") {
+            enrollment.hasPendingSecretForJoin = false
+            guard enrollment.joining, !enrollment.origin.isEmpty else { return }
+            let hasPendingSecret = await model.hasPendingVaultSecret(origin: enrollment.origin)
+            guard !Task.isCancelled else { return }
+            enrollment.hasPendingSecretForJoin = hasPendingSecret
+        }
         .onDisappear { enrollment.clearSecrets() }
     }
 

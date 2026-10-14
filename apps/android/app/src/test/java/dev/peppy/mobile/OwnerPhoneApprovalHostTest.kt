@@ -174,6 +174,34 @@ class OwnerPhoneApprovalHostTest {
         }
     }
 
+    @Test fun `approval without a response body stays approved`() = runBlocking {
+        val (host, client, transport) = fixture()
+        transport.approveResponse = EnrollmentHttpResponse(200, null)
+
+        val result = host.approve(SecretPrompt { "secret".toCharArray() })
+
+        assertEquals(OwnerPhoneStage.APPROVED, (result as OwnerPhoneApprovalHost.Result.View).status.stage)
+        assertEquals(1, client.approvals)
+    }
+
+    @Test fun `approved invitation remains approved through expired poll then connects`() = runBlocking {
+        val (host, client, transport) = fixture()
+
+        host.approve(SecretPrompt { "secret".toCharArray() })
+        transport.calls.clear()
+        client.current = client.current.copy(stage = OwnerPhoneStage.EXPIRED)
+        val expired = host.poll() as OwnerPhoneApprovalHost.Result.View
+        client.current = client.current.copy(stage = OwnerPhoneStage.VERIFY)
+        val staleVerify = host.poll() as OwnerPhoneApprovalHost.Result.View
+        client.current = client.current.copy(stage = OwnerPhoneStage.CONNECTED)
+        val connected = host.poll() as OwnerPhoneApprovalHost.Result.View
+
+        assertEquals(OwnerPhoneStage.APPROVED, expired.status.stage)
+        assertEquals(OwnerPhoneStage.APPROVED, staleVerify.status.stage)
+        assertEquals(OwnerPhoneStage.CONNECTED, connected.status.stage)
+        assertTrue(transport.calls.none { it.startsWith("POST /v1/enrollment/invitations") })
+    }
+
     @Test fun `hosted requests require an account session before transport`() = runBlocking {
         val (host, _, transport) = fixture(hosted = true)
         assertEquals(OwnerPhoneApprovalHost.Result.Failed("account-required"), host.poll())

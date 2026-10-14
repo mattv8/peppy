@@ -55,6 +55,7 @@ internal class OwnerPhoneApprovalHost(
     private val gate = Mutex()
     private var latest: OwnerPhoneStatus? = null
     private var latestStatusJson: String? = null
+    private var approvedInvitationId: String? = null
 
     fun close() = client.close()
 
@@ -65,6 +66,7 @@ internal class OwnerPhoneApprovalHost(
     suspend fun rotateIfNeeded(requested: OwnerPhoneMethod): Result = serialized {
         val result = pollLocked()
         val status = (result as? Result.View)?.status ?: return@serialized result
+        if (status.stage == OwnerPhoneStage.APPROVED) return@serialized result
         val active = client.method() ?: return@serialized Result.Failed("enrollment-state")
         if (!shouldRotate(status.stage, status.expiresInSeconds, active, requested)) return@serialized result
         replaceInvitationLocked(requested)
@@ -155,8 +157,10 @@ internal class OwnerPhoneApprovalHost(
             val response = request("POST", "${invitationPath(status.invitationId)}/approve", client.approveRequest(statusJson, secret))
                 ?: return accountRequired()
             if (response.status !in 200..299) return failed(response.status)
-            val body = response.body ?: statusJson
-            view(approvedView(client.status(body)), body)
+            approvedInvitationId = status.invitationId
+            val body = response.body
+            if (body == null) view(status.copy(stage = OwnerPhoneStage.APPROVED), statusJson)
+            else view(normalized(client.status(body)), body)
         } catch (_: Exception) {
             Result.Failed("enrollment")
         } finally {
@@ -164,14 +168,17 @@ internal class OwnerPhoneApprovalHost(
         }
     }
 
-    /** Once approval succeeded, an invitation the server now reports as expired still shows approved, never restart. */
-    private fun approvedView(status: OwnerPhoneStatus): OwnerPhoneStatus =
-        if (status.stage == OwnerPhoneStage.EXPIRED) status.copy(stage = OwnerPhoneStage.APPROVED) else status
+    /** An approved invitation remains approved until its recipient reports that it connected. */
+    private fun normalized(status: OwnerPhoneStatus): OwnerPhoneStatus =
+        if (status.invitationId == approvedInvitationId &&
+            (status.stage == OwnerPhoneStage.EXPIRED || status.stage == OwnerPhoneStage.VERIFY)
+        ) status.copy(stage = OwnerPhoneStage.APPROVED) else status
 
     private fun view(status: OwnerPhoneStatus, statusJson: String): Result.View {
-        latest = status
+        val normalized = normalized(status)
+        latest = normalized
         latestStatusJson = statusJson
-        return Result.View(status, if (status.stage == OwnerPhoneStage.WAITING) client.qrPayload() else null)
+        return Result.View(normalized, if (normalized.stage == OwnerPhoneStage.WAITING) client.qrPayload() else null)
     }
 
     private fun request(method: String, path: String, body: String?): EnrollmentHttpResponse? {
