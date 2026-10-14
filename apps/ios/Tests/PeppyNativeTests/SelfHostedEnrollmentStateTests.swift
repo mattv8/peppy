@@ -92,6 +92,18 @@ import Testing
         #expect(state.canSubmitJoin)
     }
 
+    @Test func joiningAllowsAnEmptyEntryOnlyWhenAPendingSecretExists() {
+        var state = SelfHostedEnrollmentState()
+        state.joining = true
+        state.origin = "https://peppy.example"
+
+        #expect(!state.canSubmitJoin)
+        state.hasPendingSecretForJoin = true
+        #expect(state.canSubmitJoin)
+        state.origin = "https://other.example"
+        #expect(!state.canSubmitJoin, "changing origins must not reuse pending-secret availability")
+    }
+
     @Test func vaultCreationUsesStableGeneratedSecretWithoutAcknowledgement() {
         var state = SelfHostedEnrollmentState()
         state.vaultUsername = "family"

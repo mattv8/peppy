@@ -199,6 +199,12 @@ public actor NativeSession {
         }
     }
 
+    /// A Keychain read failure is propagated so callers can fail closed rather than enabling an empty submission.
+    public func hasPendingVaultSecret(origin: String) throws -> Bool {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        return try VaultSecretStore(secure: store.secure).pendingSecret(origin: serverOrigin.serialized) != nil
+    }
+
     /// Password login is scoped to one instance vault. It is kept in memory only and does not create a browser cookie.
     public func signIn(origin: String, username: String, password: String) async throws {
         let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)

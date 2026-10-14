@@ -45,6 +45,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.CompletableDeferred
@@ -52,6 +55,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.icu.text.MeasureFormat
+import android.icu.util.Measure
+import android.icu.util.MeasureUnit
+import java.util.Locale
 
 internal interface OwnerPhoneApprovalActions {
     suspend fun start(method: OwnerPhoneMethod): OwnerPhoneApprovalHost.Result
@@ -94,6 +101,7 @@ internal fun OwnerPhoneApprovalScreen(
     secureWindow: SecureWindow = rememberActivitySecureWindow(),
 ) {
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
     val prompt = remember { ApprovalPromptBridge() }
     // The last good view survives transient failures; an error never replaces the invitation on screen.
     var view by remember { mutableStateOf<OwnerPhoneApprovalHost.Result.View?>(null) }
@@ -135,6 +143,7 @@ internal fun OwnerPhoneApprovalScreen(
     fun retry() {
         val current = view?.status?.stage
         when {
+            current == OwnerPhoneStage.APPROVED -> launch { host.poll() }
             error == "expired" || current == null || current == OwnerPhoneStage.EXPIRED || current == OwnerPhoneStage.DENIED -> restart()
             current == OwnerPhoneStage.VERIFY -> approve()
             else -> launch { host.poll() }
@@ -186,6 +195,13 @@ internal fun OwnerPhoneApprovalScreen(
         if (isRevealed) secureWindow.setSecure(true)
         onDispose { if (isRevealed) secureWindow.setSecure(false) }
     }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) revealed = null
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(host) {
         apply(host.start(OwnerPhoneMethod.TRANSFER))
@@ -196,7 +212,8 @@ internal fun OwnerPhoneApprovalScreen(
             when (view?.status?.stage) {
                 OwnerPhoneStage.WAITING -> apply(host.rotateIfNeeded(method))
                 OwnerPhoneStage.VERIFY -> apply(host.poll())
-                // APPROVED, CONNECTED, EXPIRED, and DENIED are terminal for polling.
+                OwnerPhoneStage.APPROVED -> apply(host.poll())
+                // CONNECTED, EXPIRED, and DENIED are terminal for polling.
                 else -> Unit
             }
         }
@@ -215,7 +232,12 @@ internal fun OwnerPhoneApprovalScreen(
                 Text(stringResource(R.string.peppy_owner_phone_waiting_headline))
                 Text(stringResource(R.string.peppy_owner_phone_waiting_body))
                 QrCode(view?.qr.orEmpty(), Modifier.fillMaxWidth().weight(1f).testTag("owner-phone-qr"))
-                Text("${view?.status?.expiresInSeconds ?: 0}s", Modifier.testTag("owner-phone-countdown"))
+                val expiresInSeconds = MeasureFormat.getInstance(Locale.getDefault(), MeasureFormat.FormatWidth.WIDE)
+                    .format(Measure(view?.status?.expiresInSeconds ?: 0, MeasureUnit.SECOND))
+                Text(
+                    "${stringResource(R.string.peppy_owner_phone_countdown_label)} $expiresInSeconds",
+                    Modifier.testTag("owner-phone-countdown"),
+                )
                 Text(stringResource(R.string.peppy_owner_phone_waiting_hint), style = MaterialTheme.typography.bodySmall)
                 OutlinedButton(
                     onClick = { toggleReveal() },

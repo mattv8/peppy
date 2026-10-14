@@ -182,6 +182,11 @@ final class AppModel {
         }
     }
 
+    /// Pending-secret availability is intentionally all the UI learns; the secret never enters UI state.
+    func hasPendingVaultSecret(origin: String) async -> Bool {
+        (try? await session.hasPendingVaultSecret(origin: origin)) ?? false
+    }
+
     func signIn(origin: String, username: String, password: String) async -> Bool {
         activity = .enrolling
         defer { activity = .idle }
@@ -293,23 +298,31 @@ final class AppModel {
         }
     }
 
-    func revealOwnerVaultSecret() async -> String? {
+    enum OwnerVaultSecretRevealOutcome {
+        case revealed(String)
+        case cancelled
+        case unavailable
+        case failed
+    }
+
+    func revealOwnerVaultSecret() async -> OwnerVaultSecretRevealOutcome {
         #if canImport(LocalAuthentication)
         let context = LAContext()
         do {
             guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
-                lastError = String(localized: "peppy.owner_phone_error_lock_required", table: "Peppy")
-                return nil
+                return .unavailable
             }
             try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: String(localized: "peppy.owner_phone_secret_reveal_cta", table: "Peppy"))
-            return try await session.ownerVaultSecret()
+            return .revealed(try await session.ownerVaultSecret())
         } catch {
-            lastError = String(localized: "peppy.owner_phone_error_secret_unavailable", table: "Peppy")
-            return nil
+            if let error = error as? LAError,
+               [.userCancel, .appCancel, .systemCancel].contains(error.code) {
+                return .cancelled
+            }
+            return .failed
         }
         #else
-        lastError = String(localized: "peppy.owner_phone_error_lock_required", table: "Peppy")
-        return nil
+        return .unavailable
         #endif
     }
 
