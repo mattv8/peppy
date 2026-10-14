@@ -84,14 +84,19 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
     let client = open(&config);
     drop(client);
 
-    // Simulate the final pre-settings schema without touching any SMS tables.
+    // Simulate the final pre-settings schema without touching any SMS tables. Later migrations are
+    // undone too, because an upgrade from version 17 replays every one of them.
     let conn = rusqlite::Connection::open(&config.database_path).unwrap();
     conn.execute_batch(
         "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
     )
     .unwrap();
-    conn.execute_batch("DROP TABLE gateway_settings; UPDATE schema_meta SET version=17;")
-        .unwrap();
+    conn.execute_batch(
+        "DROP TABLE gateway_settings; DROP TABLE outbox_attachments; \
+         DROP TABLE compose_draft_redirects; ALTER TABLE compose_drafts DROP COLUMN draft_only; \
+         UPDATE schema_meta SET version=17;",
+    )
+    .unwrap();
     drop(conn);
 
     let upgraded = open(&config);
