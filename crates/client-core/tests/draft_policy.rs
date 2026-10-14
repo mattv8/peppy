@@ -2,16 +2,27 @@
 mod common;
 
 use common::*;
-use std::{fs, sync::{Arc, Barrier}, thread};
+use std::{
+    fs,
+    sync::{Arc, Barrier},
+    thread,
+};
 use tempfile::TempDir;
 
 const PEER: &str = "+14155552671";
 const OTHER_PEER: &str = "+14155552672";
 
-fn update(text: &str, recipients: &[&str], attachment_ids: Vec<AttachmentId>) -> ComposeDraftUpdate {
+fn update(
+    text: &str,
+    recipients: &[&str],
+    attachment_ids: Vec<AttachmentId>,
+) -> ComposeDraftUpdate {
     ComposeDraftUpdate {
         text: text.into(),
-        recipients: recipients.iter().map(|recipient| (*recipient).into()).collect(),
+        recipients: recipients
+            .iter()
+            .map(|recipient| (*recipient).into())
+            .collect(),
         attachment_ids,
         route: None,
     }
@@ -26,7 +37,12 @@ fn attachment(client: &Client, dir: &TempDir, name: &str) -> AttachmentId {
         .attachment_id
 }
 
-fn incoming_group(id: &str, thread: Option<&str>, sender: &str, recipients: &[&str]) -> MmsAcquisitionInput {
+fn incoming_group(
+    id: &str,
+    thread: Option<&str>,
+    sender: &str,
+    recipients: &[&str],
+) -> MmsAcquisitionInput {
     MmsAcquisitionInput {
         source: MmsSource {
             source_generation: "telephony-v1".into(),
@@ -36,7 +52,10 @@ fn incoming_group(id: &str, thread: Option<&str>, sender: &str, recipients: &[&s
         },
         direction: Direction::Incoming,
         sender_address: Some(sender.into()),
-        recipients: recipients.iter().map(|recipient| (*recipient).into()).collect(),
+        recipients: recipients
+            .iter()
+            .map(|recipient| (*recipient).into())
+            .collect(),
         subject: None,
         body: "group message".into(),
         imported: false,
@@ -53,7 +72,11 @@ fn discard_refuses_recipient_or_history_drafts_without_creating_outbox_work() {
 
     let source = client.recipientless_compose_draft().unwrap();
     let recipient_draft = client
-        .save_compose_draft(source.draft_id, source.revision, update("unsent", &[PEER], vec![]))
+        .save_compose_draft(
+            source.draft_id,
+            source.revision,
+            update("unsent", &[PEER], vec![]),
+        )
         .unwrap();
     let outbox_before = client.pending_outbox().unwrap();
     assert_eq!(
@@ -62,17 +85,27 @@ fn discard_refuses_recipient_or_history_drafts_without_creating_outbox_work() {
     );
     assert_eq!(client.pending_outbox().unwrap(), outbox_before);
     assert_eq!(
-        client.compose_draft(recipient_draft.draft_id).unwrap().unwrap(),
+        client
+            .compose_draft(recipient_draft.draft_id)
+            .unwrap()
+            .unwrap(),
         recipient_draft
     );
 
-    let history = client.capture_incoming(incoming("history", "history-1")).unwrap();
-    let reply = client.create_compose_draft(Some(history.conversation_id)).unwrap();
+    let history = client
+        .capture_incoming(incoming("history", "history-1"))
+        .unwrap();
+    let reply = client
+        .create_compose_draft(Some(history.conversation_id))
+        .unwrap();
     assert_eq!(
         client.discard_compose_draft(reply.draft_id, reply.revision),
         Err(Error::DraftNotDiscardable)
     );
-    assert_eq!(client.pending_outbox().unwrap().len(), outbox_before.len() + 1);
+    assert_eq!(
+        client.pending_outbox().unwrap().len(),
+        outbox_before.len() + 1
+    );
     assert!(client.compose_draft(reply.draft_id).unwrap().is_some());
 }
 
@@ -89,7 +122,11 @@ fn discard_is_cas_idempotent_and_keeps_attachment_shared_by_another_draft() {
         .unwrap();
     let second = client.create_compose_draft(None).unwrap();
     let second = client
-        .save_compose_draft(second.draft_id, second.revision, update("", &[], vec![media]))
+        .save_compose_draft(
+            second.draft_id,
+            second.revision,
+            update("", &[], vec![media]),
+        )
         .unwrap();
 
     assert!(matches!(
@@ -103,9 +140,16 @@ fn discard_is_cas_idempotent_and_keeps_attachment_shared_by_another_draft() {
         .discard_compose_draft(first.draft_id, first.revision)
         .unwrap();
     assert!(client.compose_draft(first.draft_id).unwrap().is_none());
-    assert!(client.attachment_info(media).is_ok(), "shared media survives deletion");
+    assert!(
+        client.attachment_info(media).is_ok(),
+        "shared media survives deletion"
+    );
     assert_eq!(
-        client.compose_draft(second.draft_id).unwrap().unwrap().attachment_ids,
+        client
+            .compose_draft(second.draft_id)
+            .unwrap()
+            .unwrap()
+            .attachment_ids,
         vec![media]
     );
 }
@@ -118,7 +162,11 @@ fn clearing_recipients_when_a_recipientless_draft_exists_is_atomic() {
     let existing = client.recipientless_compose_draft().unwrap();
     let source = client.create_compose_draft(None).unwrap();
     let committed = client
-        .save_compose_draft(source.draft_id, source.revision, update("keep me", &[PEER], vec![]))
+        .save_compose_draft(
+            source.draft_id,
+            source.revision,
+            update("keep me", &[PEER], vec![]),
+        )
         .unwrap();
 
     assert_eq!(
@@ -134,7 +182,11 @@ fn clearing_recipients_when_a_recipientless_draft_exists_is_atomic() {
         committed
     );
     assert_eq!(
-        client.compose_draft(existing.draft_id).unwrap().unwrap().recipients,
+        client
+            .compose_draft(existing.draft_id)
+            .unwrap()
+            .unwrap()
+            .recipients,
         Vec::<String>::new()
     );
 }
@@ -155,7 +207,10 @@ fn concurrent_recipientless_get_or_create_returns_one_draft() {
             })
         })
         .collect();
-    let ids: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+    let ids: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
 
     assert!(ids.iter().all(|id| *id == ids[0]));
     assert_eq!(client.compose_drafts().unwrap().len(), 1);
@@ -187,7 +242,10 @@ fn movement_merges_destination_content_and_rejects_both_overflow_limits_atomical
         .unwrap();
     assert_eq!(merged.draft_id, destination.draft_id);
     assert_eq!(merged.text, "destination\n\nsource");
-    assert_eq!(merged.attachment_ids, vec![destination_attachment, source_attachment]);
+    assert_eq!(
+        merged.attachment_ids,
+        vec![destination_attachment, source_attachment]
+    );
     assert_eq!(merged.revision, destination.revision + 1);
 
     let full = client.recipientless_compose_draft().unwrap();
@@ -208,7 +266,10 @@ fn movement_merges_destination_content_and_rejects_both_overflow_limits_atomical
         Err(Error::DraftMergeOverflow)
     );
     assert_eq!(client.compose_draft(full.draft_id).unwrap().unwrap(), full);
-    assert_eq!(client.compose_draft(text_source.draft_id).unwrap().unwrap(), text_source);
+    assert_eq!(
+        client.compose_draft(text_source.draft_id).unwrap().unwrap(),
+        text_source
+    );
 
     let attachments: Vec<_> = (0..11)
         .map(|index| attachment(&client, &dir, &format!("overflow-{index}.png")))
@@ -250,17 +311,36 @@ fn moved_draft_refuses_late_save_send_and_discard_without_an_extra_command() {
         .unwrap();
     let source = client.recipientless_compose_draft().unwrap();
     let moved = client
-        .save_compose_draft(source.draft_id, source.revision, update("moved", &[PEER], vec![]))
+        .save_compose_draft(
+            source.draft_id,
+            source.revision,
+            update("moved", &[PEER], vec![]),
+        )
         .unwrap();
     assert_ne!(moved.draft_id, source.draft_id);
     assert_eq!(moved.conversation_id, history.conversation_id);
-    assert!(client.compose_draft_redirect(source.draft_id).unwrap().is_some());
+    assert!(
+        client
+            .compose_draft_redirect(source.draft_id)
+            .unwrap()
+            .is_some()
+    );
     let outbox_before = client.pending_outbox().unwrap();
 
     for result in [
-        client.save_compose_draft(source.draft_id, source.revision, update("late", &[PEER], vec![])).map(|_| ()),
-        client.resolve_compose_draft_for_send(source.draft_id, source.revision).map(|_| ()),
-        client.send_compose_draft(source.draft_id, source.revision).map(|_| ()),
+        client
+            .save_compose_draft(
+                source.draft_id,
+                source.revision,
+                update("late", &[PEER], vec![]),
+            )
+            .map(|_| ()),
+        client
+            .resolve_compose_draft_for_send(source.draft_id, source.revision)
+            .map(|_| ()),
+        client
+            .send_compose_draft(source.draft_id, source.revision)
+            .map(|_| ()),
         client.discard_compose_draft(source.draft_id, source.revision),
     ] {
         assert!(matches!(
@@ -292,7 +372,9 @@ fn two_clients_deliver_a_command_and_canonicalize_a_formatted_sms_reply_to_its_c
         .unwrap();
     server.upload(&phone);
     server.sync(&desktop);
-    let reply = desktop.create_compose_draft(Some(incoming.conversation_id)).unwrap();
+    let reply = desktop
+        .create_compose_draft(Some(incoming.conversation_id))
+        .unwrap();
     let reply = desktop
         .save_compose_draft(
             reply.draft_id,
@@ -305,10 +387,15 @@ fn two_clients_deliver_a_command_and_canonicalize_a_formatted_sms_reply_to_its_c
             },
         )
         .unwrap();
-    let queued = desktop.send_compose_draft(reply.draft_id, reply.revision).unwrap();
+    let queued = desktop
+        .send_compose_draft(reply.draft_id, reply.revision)
+        .unwrap();
     server.upload(&desktop);
     server.sync(&phone);
-    assert_eq!(phone.pending_commands().unwrap()[0].command_id, queued.command_id);
+    assert_eq!(
+        phone.pending_commands().unwrap()[0].command_id,
+        queued.command_id
+    );
 
     let formatted_reply = phone
         .capture_incoming(IncomingSms {
@@ -337,7 +424,9 @@ fn mms_reuses_only_exact_known_groups_while_provider_threads_remain_authoritativ
             &[ADDRESS, OTHER_PEER],
         ))
         .unwrap();
-    known.complete_mms_acquisition(&first.acquisition_id).unwrap();
+    known
+        .complete_mms_acquisition(&first.acquisition_id)
+        .unwrap();
     let exact = known
         .begin_mms_acquisition(incoming_group(
             "exact-second",
@@ -386,5 +475,8 @@ fn mms_reuses_only_exact_known_groups_while_provider_threads_remain_authoritativ
             &[ADDRESS, OTHER_PEER],
         ))
         .unwrap();
-    assert_ne!(unknown_second.conversation_id, unknown_first.conversation_id);
+    assert_ne!(
+        unknown_second.conversation_id,
+        unknown_first.conversation_id
+    );
 }
