@@ -7,10 +7,17 @@ use tempfile::TempDir;
 
 const PEER: &str = "+14155552671";
 
-fn update(text: &str, recipients: &[&str], attachment_ids: Vec<AttachmentId>) -> ComposeDraftUpdate {
+fn update(
+    text: &str,
+    recipients: &[&str],
+    attachment_ids: Vec<AttachmentId>,
+) -> ComposeDraftUpdate {
     ComposeDraftUpdate {
         text: text.into(),
-        recipients: recipients.iter().map(|recipient| (*recipient).into()).collect(),
+        recipients: recipients
+            .iter()
+            .map(|recipient| (*recipient).into())
+            .collect(),
         attachment_ids,
         route: None,
     }
@@ -64,7 +71,10 @@ fn recipientless_attachment_draft_is_not_bypassed_or_overwritten() {
                 && conversation_id == existing.conversation_id
                 && current_revision == existing.revision
     ));
-    assert_eq!(client.compose_draft(existing.draft_id).unwrap().unwrap(), existing);
+    assert_eq!(
+        client.compose_draft(existing.draft_id).unwrap().unwrap(),
+        existing
+    );
 }
 
 #[test]
@@ -103,7 +113,9 @@ fn preset_recipients_resolve_history_without_a_recipientless_row() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "client", &vault), &vault);
-    let history = client.capture_incoming(incoming("history", "history-1")).unwrap();
+    let history = client
+        .capture_incoming(incoming("history", "history-1"))
+        .unwrap();
 
     let draft = client
         .save_new_compose_draft(update("initial", &[ADDRESS], vec![]))
@@ -120,12 +132,18 @@ fn blank_preset_reply_adopts_new_compose_intent_before_group_fork() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "client", &vault), &vault);
-    let history = client.capture_incoming(incoming("history", "history-1")).unwrap();
+    let history = client
+        .capture_incoming(incoming("history", "history-1"))
+        .unwrap();
     let reply = client
         .create_compose_draft(Some(history.conversation_id))
         .unwrap();
     let reply = client
-        .save_compose_draft(reply.draft_id, reply.revision, update("retained", &[ADDRESS], vec![]))
+        .save_compose_draft(
+            reply.draft_id,
+            reply.revision,
+            update("retained", &[ADDRESS], vec![]),
+        )
         .unwrap();
 
     let opened = client
@@ -172,5 +190,8 @@ fn preset_existing_content_returns_its_recovery_identity() {
                 && conversation_id == existing.conversation_id
                 && current_revision == existing.revision
     ));
-    assert_eq!(client.compose_draft(existing.draft_id).unwrap().unwrap(), existing);
+    assert_eq!(
+        client.compose_draft(existing.draft_id).unwrap().unwrap(),
+        existing
+    );
 }

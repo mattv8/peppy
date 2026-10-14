@@ -5713,10 +5713,10 @@ fn conversation_for_compose_recipients(
     source_conversation: ConversationId,
     region: &str,
 ) -> Result<Option<ConversationId>, Error> {
-    if let Some(conversation) = conversation_match::conversation_for_recipients(conn, recipients)? {
-        if conversation != source_conversation {
-            return Ok(Some(conversation));
-        }
+    if let Some(conversation) = conversation_match::conversation_for_recipients(conn, recipients)?
+        && conversation != source_conversation
+    {
+        return Ok(Some(conversation));
     }
     let expected = conversation_match::recipient_set(recipients, Some(region));
     let mut statement = conn.prepare(&format!(
