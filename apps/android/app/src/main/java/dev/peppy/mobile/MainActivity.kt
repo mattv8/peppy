@@ -39,6 +39,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sms
@@ -266,9 +267,9 @@ private fun CompanionScreen() {
         },
         bottomBar = {
             if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen) NavigationBar {
-                listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
+                listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
                     val label = stringResource(labelRes)
-                    val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; else -> Icons.Default.Settings }
+                    val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Settings }
                     NavigationBarItem(selected = destination == route, onClick = { destination = route }, icon = { Icon(icon, contentDescription = label) }, label = { Text(label) }, modifier = Modifier.testTag("tab-$route"))
                 }
             }
@@ -418,14 +419,16 @@ private fun CompanionScreen() {
         }
         }
         if (!settingsOpen && status?.enrolled == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ })
+        if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
+            ContactSyncSettings(context = context, refresh = refresh, requestPermissions = { contactsPermissionRequest.launch(CONTACT_PERMISSIONS) }, onChanged = { refresh++ })
+        }
         if (!settingsOpen && status?.enrolled == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ })
         if (settingsOpen) {
-            Section("settings-screen", "Contacts") {
-                ContactSyncSettings(context = context, refresh = refresh, requestPermissions = { contactsPermissionRequest.launch(CONTACT_PERMISSIONS) }, onChanged = { refresh++ })
-            }
-            Section("about-section", "About") {
-                Text(stringResource(R.string.peppy_encrypted))
-                StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
+            Column(Modifier.fillMaxWidth().testTag("settings-screen")) {
+                Section("about-section", "About") {
+                    Text(stringResource(R.string.peppy_encrypted))
+                    StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
+                }
             }
         }
     } }
