@@ -1,7 +1,6 @@
 use super::*;
 use peppy_desktop_api::{ContactError, contacts as shared};
 use std::{
-    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     time::{SystemTime, UNIX_EPOCH},
@@ -52,6 +51,20 @@ struct ContactSnapshot {
     books: Option<Vec<Value>>,
     pending_count: Option<u64>,
     sync: Value,
+}
+
+fn projection_state_display(
+    state: peppy_client_core::SnapshotProjectionState,
+    reason: Option<String>,
+) -> (&'static str, Option<String>) {
+    use peppy_client_core::SnapshotProjectionState as State;
+
+    let display = match state {
+        State::Draining | State::Staging => "rebuilding",
+        State::Promoted => "current",
+        State::Failed => "failed",
+    };
+    (display, reason)
 }
 
 impl BrowserCore {
@@ -112,29 +125,9 @@ impl BrowserCore {
         &self,
         addresses: &[(String, Option<String>)],
     ) -> Result<ContactSnapshot, Failure> {
-        const MAX_ADDRESSES: usize = 1000;
-        const RESOLVE_BATCH: usize = 100;
-        let mut by_source: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
-        let mut seen = HashSet::new();
-        for (address, source) in addresses {
-            let digits = address.bytes().filter(u8::is_ascii_digit).count();
-            let phone = (3..=15).contains(&digits)
-                && address.bytes().all(|byte| {
-                    byte.is_ascii_digit() || matches!(byte, b'+' | b' ' | b'(' | b')' | b'.' | b'-')
-                });
-            if address.len() <= 256 && phone && seen.insert(address.as_str()) {
-                by_source
-                    .entry(source.as_deref().filter(|id| shared::valid_id(id)))
-                    .or_default()
-                    .push(address);
-            }
-            if seen.len() >= MAX_ADDRESSES {
-                break;
-            }
-        }
         let mut resolution = serde_json::Map::new();
-        for (source, addresses) in by_source {
-            for batch in addresses.chunks(RESOLVE_BATCH) {
+        for (source, addresses) in shared::resolution_candidates(addresses) {
+            for batch in addresses.chunks(shared::RESOLVE_ADDRESS_BATCH) {
                 let mut input = json!({"addresses": batch});
                 if let Some(source) = source {
                     input["source_device_id"] = json!(source);
@@ -174,15 +167,7 @@ impl BrowserCore {
             .snapshot_projection_status()
             .ok()
             .flatten()
-            .map(|status| {
-                use peppy_client_core::SnapshotProjectionState as State;
-                let state = match status.state {
-                    State::Draining | State::Staging => "rebuilding",
-                    State::Promoted => "current",
-                    State::Failed => "failed",
-                };
-                (state, status.reason)
-            });
+            .map(|status| projection_state_display(status.state, status.reason));
         let sync = shared::sync_status(
             self.client()?.contact_repair_required().unwrap_or(false),
             readiness,
@@ -445,15 +430,7 @@ impl BrowserCore {
             .snapshot_projection_status()
             .ok()
             .flatten()
-            .map(|status| {
-                let state = match status.state {
-                    peppy_client_core::SnapshotProjectionState::Draining
-                    | peppy_client_core::SnapshotProjectionState::Staging => "rebuilding",
-                    peppy_client_core::SnapshotProjectionState::Promoted => "current",
-                    peppy_client_core::SnapshotProjectionState::Failed => "failed",
-                };
-                (state, status.reason)
-            });
+            .map(|status| projection_state_display(status.state, status.reason));
         Ok(shared::sync_status(
             client.contact_repair_required().unwrap_or(true),
             readiness,
@@ -687,6 +664,34 @@ mod tests {
         let path = fixture.browser.root.join("contact-photo-staging");
         if path.exists() {
             assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn projection_state_display_preserves_each_reason() {
+        use peppy_client_core::SnapshotProjectionState as State;
+
+        for (state, reason, expected_state, expected_reason) in [
+            (State::Draining, None, "rebuilding", None),
+            (State::Staging, Some("staged"), "rebuilding", Some("staged")),
+            (
+                State::Promoted,
+                Some("retained"),
+                "current",
+                Some("retained"),
+            ),
+            (
+                State::Failed,
+                Some("missing_record"),
+                "failed",
+                Some("missing_record"),
+            ),
+        ] {
+            let (display_state, display_reason) =
+                projection_state_display(state, reason.map(str::to_owned));
+
+            assert_eq!(display_state, expected_state);
+            assert_eq!(display_reason.as_deref(), expected_reason);
         }
     }
 

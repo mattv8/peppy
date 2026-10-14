@@ -1,8 +1,11 @@
 //! SIMULATED acceptance tests: real PostgreSQL, TCP HTTP/WS, SQLCipher clients and crypto.
+mod common;
+
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use common::{ADDRESS, NETWORK_TIMEOUT, PHRASE, Paired, create_vault};
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::*;
 use peppy_crypto::{
@@ -12,7 +15,7 @@ use peppy_gateway_simulator::{
     drain_media, effects_path, publish_capabilities, run_one_carrier_effect,
     run_one_carrier_effect_for_route, sync_http, upload_pending,
 };
-use peppy_server::api::{create_owner, router};
+use peppy_server::api::router;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -26,16 +29,11 @@ use tokio_tungstenite::{
 use url::Url;
 use uuid::Uuid;
 
-const PHRASE: &str = "correct horse battery staple";
 const ROTATED_PHRASE: &str = "different manual rotation phrase";
-const ADDRESS: &str = "+15555550100";
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn network<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
-    tokio::time::timeout(NETWORK_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("phase={phase} status=timeout"))
+    common::network(phase, future).await
 }
 
 struct Server {
@@ -51,11 +49,6 @@ struct Server {
     header: VaultCheckHeader,
     fingerprint: String,
 }
-struct Paired {
-    id: DeviceId,
-    token: String,
-}
-
 impl Server {
     async fn start() -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL").expect(
@@ -84,20 +77,7 @@ impl Server {
             .run(&pool)
             .await
             .unwrap();
-        let vault = VaultId::new();
-        let profile = KeyProfile::new(vault.0, 1).unwrap();
-        let fingerprint = profile.fingerprint().unwrap();
-        let root = derive_root_key(PHRASE, &profile).unwrap();
-        let header = create_vault_check_header(&root, profile.clone()).unwrap();
-        let owner = create_owner(
-            &pool,
-            serde_json::to_value(&profile).unwrap(),
-            serde_json::to_vec(&header).unwrap(),
-            fingerprint.clone(),
-            1,
-        )
-        .await
-        .unwrap();
+        let fixture = create_vault(&pool).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server_pool = pool.clone();
@@ -111,11 +91,11 @@ impl Server {
             url: format!("http://{addr}"),
             ws: format!("ws://{addr}/v1/ws"),
             task,
-            owner: owner.device_token,
-            vault,
-            profile,
-            header,
-            fingerprint,
+            owner: fixture.owner_token,
+            vault: fixture.vault,
+            profile: fixture.profile,
+            header: fixture.header,
+            fingerprint: fixture.fingerprint,
         }
     }
     async fn enroll_fixture_device(&self, role: &str) -> Paired {

@@ -378,16 +378,7 @@ impl Client {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(id, conversation, input, state, reason)| {
-                Ok(MmsAcquisition {
-                    attachment_ids: acquisition_parts(&guard.conn, &id)?,
-                    acquisition_id: id,
-                    conversation_id: super::parse(&conversation)?,
-                    input: super::decode(input.as_bytes())?,
-                    state: MmsAcquisitionState::parse(&state).ok_or(Error::Database)?,
-                    reason,
-                })
-            })
+            .map(|row| decode_acquisition_row(&guard.conn, row))
             .collect()
     }
 
@@ -777,17 +768,23 @@ fn acquisition_by_source(
         params![source.source_generation, source.subscription_id, source.provider_message_id, direction_code(direction)],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional()?;
-    row.map(|(id, conversation, input, state, reason)| {
-        Ok(MmsAcquisition {
-            attachment_ids: acquisition_parts(conn, &id)?,
-            acquisition_id: id,
-            conversation_id: super::parse(&conversation)?,
-            input: super::decode(input.as_bytes())?,
-            state: MmsAcquisitionState::parse(&state).ok_or(Error::Database)?,
-            reason,
-        })
+    row.map(|row| decode_acquisition_row(conn, row)).transpose()
+}
+
+type AcquisitionRow = (String, String, String, String, Option<String>);
+
+fn decode_acquisition_row(
+    conn: &rusqlite::Connection,
+    (acquisition_id, conversation, input, state, reason): AcquisitionRow,
+) -> Result<MmsAcquisition, Error> {
+    Ok(MmsAcquisition {
+        attachment_ids: acquisition_parts(conn, &acquisition_id)?,
+        acquisition_id,
+        conversation_id: super::parse(&conversation)?,
+        input: super::decode(input.as_bytes())?,
+        state: MmsAcquisitionState::parse(&state).ok_or(Error::Database)?,
+        reason,
     })
-    .transpose()
 }
 
 fn acquisition_parts(conn: &rusqlite::Connection, id: &str) -> Result<Vec<AttachmentId>, Error> {
@@ -1175,4 +1172,100 @@ fn namespaced_provider_id(input: &MmsAcquisitionInput) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded_row(conn: &rusqlite::Connection) -> AcquisitionRow {
+        conn.execute_batch(
+            "CREATE TABLE mms_acquisition_parts (
+                acquisition_id TEXT NOT NULL,
+                attachment_id TEXT NOT NULL,
+                position INTEGER NOT NULL
+            )",
+        )
+        .unwrap();
+        let attachment_id = AttachmentId::new();
+        conn.execute(
+            "INSERT INTO mms_acquisition_parts(acquisition_id,attachment_id,position) VALUES('acquisition',?,0)",
+            params![attachment_id.to_string()],
+        )
+        .unwrap();
+        let input = MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "generation".into(),
+                subscription_id: "subscription".into(),
+                provider_message_id: "message".into(),
+                provider_thread_id: None,
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+15555550100".into()),
+            recipients: Vec::new(),
+            subject: None,
+            body: "body".into(),
+            imported: false,
+            observed_at_ms: 1,
+            transaction_id: None,
+        };
+        (
+            "acquisition".into(),
+            ConversationId::new().to_string(),
+            serde_json::to_string(&input).unwrap(),
+            "blocked".into(),
+            Some("awaiting media".into()),
+        )
+    }
+
+    #[test]
+    fn decoded_acquisition_preserves_state_and_reason() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+        let acquisition = decode_acquisition_row(&conn, seeded_row(&conn)).unwrap();
+
+        assert_eq!(acquisition.state, MmsAcquisitionState::Blocked);
+        assert_eq!(acquisition.reason.as_deref(), Some("awaiting media"));
+        assert_eq!(acquisition.attachment_ids.len(), 1);
+    }
+
+    #[test]
+    fn decoded_acquisition_rejects_a_malformed_attachment_id() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let row = seeded_row(&conn);
+        conn.execute(
+            "UPDATE mms_acquisition_parts SET attachment_id='malformed'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(decode_acquisition_row(&conn, row), Err(Error::Database));
+    }
+
+    #[test]
+    fn decoded_acquisition_rejects_a_malformed_conversation_id() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut row = seeded_row(&conn);
+        row.1 = "malformed".into();
+
+        assert_eq!(decode_acquisition_row(&conn, row), Err(Error::Database));
+    }
+
+    #[test]
+    fn decoded_acquisition_rejects_malformed_input_json() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut row = seeded_row(&conn);
+        row.2 = "not JSON".into();
+
+        assert_eq!(decode_acquisition_row(&conn, row), Err(Error::Database));
+    }
+
+    #[test]
+    fn decoded_acquisition_rejects_an_unknown_state() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut row = seeded_row(&conn);
+        row.3 = "unknown".into();
+
+        assert_eq!(decode_acquisition_row(&conn, row), Err(Error::Database));
+    }
 }

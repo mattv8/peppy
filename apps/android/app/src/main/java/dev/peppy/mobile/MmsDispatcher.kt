@@ -21,9 +21,7 @@ interface MmsCarrier { fun send(subscriptionId: Int, pdu: Uri, sent: PendingInte
 
 class AndroidMmsCarrier(private val context: Context) : MmsCarrier {
     override fun send(subscriptionId: Int, pdu: Uri, sent: PendingIntent) {
-        val manager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
-            context.getSystemService(android.telephony.SmsManager::class.java).createForSubscriptionId(subscriptionId)
-        else @Suppress("DEPRECATION") android.telephony.SmsManager.getSmsManagerForSubscriptionId(subscriptionId)
+        val manager = subscriptionSmsManager(context, subscriptionId)
         manager.sendMultimediaMessage(context, pdu, null, null, sent)
     }
 }

@@ -47,21 +47,25 @@ check_native_pins() {
   [[ "$rust_version" == "rustc $expected_rust "* ]] || die "Rust $expected_rust is required (found $rust_version)."
 }
 
+find_homebrew() {
+  if command -v brew >/dev/null 2>&1; then
+    command -v brew
+  elif [[ -x /opt/homebrew/bin/brew ]]; then
+    printf '%s\n' /opt/homebrew/bin/brew
+  elif [[ -x /usr/local/bin/brew ]]; then
+    printf '%s\n' /usr/local/bin/brew
+  else
+    printf '\n'
+  fi
+}
+
 select_macos_pinned_tools() {
   local expected_node expected_rust brew prefix
   expected_node=$(tr -d '[:space:]' < "$source_root/.node-version")
   expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$source_root/rust-toolchain.toml")
 
   if ! command -v node >/dev/null 2>&1 || [[ "$(node --version 2>/dev/null)" != "v$expected_node" ]]; then
-    if command -v brew >/dev/null 2>&1; then
-      brew=$(command -v brew)
-    elif [[ -x /opt/homebrew/bin/brew ]]; then
-      brew=/opt/homebrew/bin/brew
-    elif [[ -x /usr/local/bin/brew ]]; then
-      brew=/usr/local/bin/brew
-    else
-      brew=
-    fi
+    brew=$(find_homebrew)
     if [[ -n "$brew" ]] && prefix=$("$brew" --prefix node@24 2>/dev/null) && [[ -d "$prefix/bin" ]]; then
       PATH="$prefix/bin:$PATH"
       export PATH
@@ -70,13 +74,7 @@ select_macos_pinned_tools() {
 
   if ! command -v rustc >/dev/null 2>&1 || [[ "$(rustc --version 2>/dev/null)" != "rustc $expected_rust "* ]]; then
     if [[ -z ${brew:-} ]]; then
-      if command -v brew >/dev/null 2>&1; then
-        brew=$(command -v brew)
-      elif [[ -x /opt/homebrew/bin/brew ]]; then
-        brew=/opt/homebrew/bin/brew
-      elif [[ -x /usr/local/bin/brew ]]; then
-        brew=/usr/local/bin/brew
-      fi
+      brew=$(find_homebrew)
     fi
     if [[ -n ${brew:-} ]] && prefix=$("$brew" --prefix rustup 2>/dev/null) && [[ -d "$prefix/bin" ]]; then
       PATH="$prefix/bin:$PATH"

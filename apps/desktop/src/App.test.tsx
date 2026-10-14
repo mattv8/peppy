@@ -2952,3 +2952,24 @@ describe("desktop app lock", () => {
     expect(screen.queryByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
   });
 });
+
+describe("vault shared secret reveal", () => {
+  it("shows the generic fallback, not the raw native message, for an unknown reveal error", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue({
+      ...host.load(),
+      deviceRole: "owner",
+      connection: { state: "connected", origin: "https://example.test" },
+    });
+    const reveal = vi.spyOn(bridge, "reveal_vault_secret").mockRejectedValue(
+      Object.assign(new Error("raw keychain detail /private/secret"), { code: "keychain-unexpected" }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show vault shared secret" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The native operation failed. Your edits remain in this window.",
+    );
+    expect(reveal).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/raw keychain detail/)).not.toBeInTheDocument();
+  });
+});
