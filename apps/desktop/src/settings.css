@@ -88,7 +88,7 @@
 #settings-view .settings-disclosure > div {
   display: grid;
   gap: 8px;
-  margin: 0 8px 8px;
+  margin: 0 0 8px;
 }
 
 @container (max-width: 559px) {

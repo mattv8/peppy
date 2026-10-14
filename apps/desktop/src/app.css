@@ -818,15 +818,16 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   font-family: var(--peppy-font-mono);
   overflow-wrap: anywhere;
 }
+/* Disclosures live inside settings cards, so they are divided by a rule rather than boxed. */
 .settings-disclosure {
   width: 100%;
   padding: 0;
-  border: 1px solid var(--peppy-border);
-  border-radius: var(--peppy-control-radius);
-  background: var(--peppy-surface-widget);
+  border: 0;
+  border-top: 1px solid var(--peppy-border);
+  background: transparent;
 }
 .settings-disclosure > summary {
-  padding: 8px;
+  padding: 8px 0;
   cursor: pointer;
   color: var(--peppy-text-primary);
   font-size: 12px;
@@ -836,7 +837,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   outline-offset: 2px;
 }
 .settings-disclosure[open] > :not(summary) {
-  margin: 0 8px 8px;
+  margin: 0 0 8px;
 }
 
 .app-lock-screen {
