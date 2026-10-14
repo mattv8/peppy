@@ -311,6 +311,48 @@ describe("SetupLanding", () => {
     expect(bridge.hosted_account).not.toHaveBeenCalled();
   });
 
+  it.each(["setup", "signin"] as const)("rechecks a stale owner %s status until it can create a phone invitation", async (staleStage) => {
+    vi.useFakeTimers();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(view({ stage: staleStage }))
+      .mockResolvedValueOnce(view({ stage: staleStage }))
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true, hasGateway: false }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "Create server" })).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("heading", { name: /connect your phone/i })).toBeInTheDocument();
+    expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer");
+    vi.useRealTimers();
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+  });
+
+  it("reports a retryable error when owner status stays stale", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "setup" }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await act(async () => {});
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    }
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "owner-status-pending");
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("continues to show setup for an unclaimed self-hosted server", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    renderLanding({ mode: "self-hosted", fixedOrigin: "https://server.example" });
+
+    expect(await screen.findByRole("button", { name: "Create server" })).toBeInTheDocument();
+  });
+
   it("retries an initial rejected status request with foreground busy feedback", async () => {
     const retryStatus = deferred<EnrollmentView>();
     vi.spyOn(bridge, "enrollment_status")

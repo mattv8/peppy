@@ -292,6 +292,59 @@ describe("setup landing routing", () => {
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
   });
 
+  it("rechecks a remounted connected owner until its stale status becomes ready", async () => {
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline", origin: "https://community.example", errorCode: "server-required" },
+      encryption: { state: "locked" },
+      deviceRole: undefined,
+      gateways: [],
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(enrollment("server", { stage: "setup" }))
+      .mockResolvedValueOnce(enrollment("ready", { owner: true, hasGateway: false }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    expect(await screen.findByRole("button", { name: "Create server" })).toBeInTheDocument();
+    vi.useFakeTimers();
+    try {
+      current = { ...current, connection: { state: "offline", origin: "https://community.example", errorCode: "connecting" } };
+      await act(async () => hint?.());
+      expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+      current = { ...current, connection: { state: "connected", origin: "https://community.example" }, deviceRole: "owner" };
+      current = { ...current, encryption: { state: "unlocked" } };
+      await act(async () => hint?.());
+      expect(document.getElementById("enrollment-checking")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+      expect(screen.queryByRole("button", { name: "Create server" })).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: /connect your phone/i })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a locked connected owner on the workbench", async () => {
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "locked" },
+      gateways: [],
+      deviceRole: "owner",
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(bridge.enrollment_status).not.toHaveBeenCalled();
+  });
+
   it("opens owner add phone enrollment from the workbench even with a gateway", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));

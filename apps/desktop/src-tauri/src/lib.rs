@@ -27,6 +27,8 @@ mod heads;
 mod heads_runtime;
 
 #[cfg(test)]
+mod activation_session_tests;
+#[cfg(test)]
 mod draft_command_tests;
 mod hosted;
 mod lifecycle;
@@ -828,6 +830,8 @@ async fn unlock_with(
     let binding = session.binding.clone();
     state.update_config(|config| config.add_cached_epoch(&binding, epoch))?;
     session.set_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
+    // The renderer refreshes only on state events; the claim path notifies before this unlock.
+    session.notify();
     session.request_work();
     session.reconnect_wake.notify_one();
     Ok(())

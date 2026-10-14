@@ -584,7 +584,7 @@ function MessageList({
 
 /** Only an enrolled owner can add a phone; joined devices keep the normal conversation view. */
 function ownerWithoutPhone(snapshot: DesktopSnapshot) {
-  return snapshot.connection.state === "connected" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
+  return snapshot.connection.state === "connected" && snapshot.encryption.state === "unlocked" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
 }
 const phoneDeferredKey = (origin: string | undefined) => origin ? `peppy.setup.phoneDeferred:${origin}` : "";
 const phoneSetupDeferred = (origin: string | undefined) => {

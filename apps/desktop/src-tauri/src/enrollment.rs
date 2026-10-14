@@ -715,6 +715,15 @@ where
             .map_err(|_| enrollment_error())?
     };
     activate(identity, passphrase, expected_binding).await?;
+    {
+        let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+        if controller.origin.as_deref() == Some(origin.as_str()) {
+            controller.owner_passphrase = None;
+            controller.owner_resume = false;
+            controller.ready = true;
+            controller.owner = true;
+        }
+    }
     // Activation is the durable commit point. Clear recovery material before checking the UI
     // epoch so a concurrent refresh cannot leave a completed owner claim resumable.
     // The pending secret is cleared by `activate` only after the binding copy is stored.
@@ -722,14 +731,10 @@ where
     if !owner_operation_current(controller, epoch)? {
         return Ok(OwnerCreation::Activated { superseded: true });
     }
-    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
     if controller.operation_epoch != epoch {
         return Ok(OwnerCreation::Activated { superseded: true });
     }
-    controller.owner_passphrase = None;
-    controller.owner_resume = false;
-    controller.ready = true;
-    controller.owner = true;
     Ok(OwnerCreation::Activated { superseded: false })
 }
 
@@ -3265,9 +3270,9 @@ mod owner_retry_tests {
 
         assert_eq!(*posts.lock().unwrap(), 0);
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+        let controller = controller.lock().unwrap();
+        assert!(!controller.ready);
         assert!(!controller
-            .lock()
-            .unwrap()
             .client
             .as_ref()
             .unwrap()
@@ -3849,6 +3854,7 @@ mod owner_retry_tests {
         assert_eq!(completed, OwnerCreation::Cancelled);
         assert_eq!(*active_profile.lock().unwrap(), "existing-profile");
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+        assert!(!controller.lock().unwrap().ready);
     }
 
     #[tokio::test]
@@ -3881,6 +3887,77 @@ mod owner_retry_tests {
                 .map(|value| value.to_vec()),
             Some(Vec::new())
         );
+        let controller = controller.lock().unwrap();
+        assert!(controller.ready);
+        assert!(controller.owner);
+        assert_eq!(controller.view().stage, "ready");
+    }
+
+    #[tokio::test]
+    async fn superseded_activation_immediately_reports_a_ready_status_view() {
+        let controller = Arc::new(unclaimed_controller());
+        let store = MemoryStore::default();
+        let activation_controller = controller.clone();
+
+        let outcome = create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            |purpose| std::future::ready(prompt(purpose)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, request| std::future::ready(Ok(claim_response(&request, false))),
+            move |_, _, _| {
+                cancel_owner_operation(&activation_controller).unwrap();
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, OwnerCreation::Activated { superseded: true });
+        let view = controller.lock().unwrap().view();
+        assert_eq!(view.stage, "ready");
+        assert_eq!(view.owner, Some(true));
+    }
+
+    #[tokio::test]
+    async fn superseded_activation_does_not_mark_a_different_origin_ready() {
+        let controller = Arc::new(unclaimed_controller());
+        let store = MemoryStore::default();
+        let activation_controller = controller.clone();
+
+        let outcome = create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            |purpose| std::future::ready(prompt(purpose)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, request| std::future::ready(Ok(claim_response(&request, false))),
+            move |_, _, _| {
+                cancel_owner_operation(&activation_controller).unwrap();
+                let mut controller = activation_controller.lock().unwrap();
+                controller.origin = Some("https://different-origin.test".into());
+                controller.info = Some(InstanceInfo {
+                    mode: DeploymentMode::Community,
+                    claimed: false,
+                    setup_required: true,
+                    password_auth: true,
+                    qr_pairing: true,
+                    shared_secret_pairing: true,
+                });
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, OwnerCreation::Activated { superseded: true });
+        let controller = controller.lock().unwrap();
+        assert!(!controller.ready);
+        assert!(!controller.owner);
+        assert_eq!(controller.view().stage, "setup");
     }
 
     fn ready_controller() -> Controller {
