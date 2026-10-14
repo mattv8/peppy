@@ -249,14 +249,18 @@ describe("setup landing routing", () => {
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
   });
 
-  it("reconciles an offline unlocked owner claim before the session connects", async () => {
+  it.each([
+    ["native", {}, "https://127.0.0.1:7000"],
+    ["browser", { hostKind: "browser" as const, fixedOrigin: "https://community.example" }, "https://community.example"],
+  ])("waits for the host connection before showing owner recovery actions in the %s host", async (hostKind, appProps, origin) => {
     const creation = deferred<EnrollmentView>();
     const status = deferred<EnrollmentView>();
+    const invitation = deferred<EnrollmentView>();
     const initial = await fixtureBridge.load_state();
     let current: DesktopSnapshot = {
       ...initial,
       activeConversationId: undefined,
-      connection: { state: "offline", origin: "https://127.0.0.1:7000", errorCode: "server-required" },
+      connection: { state: "offline", origin, errorCode: "server-required" },
       encryption: { state: "locked" },
       gateways: [],
       deviceRole: undefined,
@@ -266,17 +270,19 @@ describe("setup landing routing", () => {
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup", origin: current.connection.origin, setupCodeRequired: false }));
     vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
     vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
-    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockReturnValue(invitation.promise);
 
-    localStorage.setItem("peppy.setup.mode", "self-hosted");
-    render(<App />);
-    fireEvent.change(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" }), { target: { value: "https://127.0.0.1:7000" } });
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    if (hostKind === "native") localStorage.setItem("peppy.setup.mode", "self-hosted");
+    render(<App {...appProps} />);
+    if (hostKind === "native") {
+      fireEvent.change(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" }), { target: { value: origin } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    }
     fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
 
     current = {
       ...current,
-      connection: { state: "offline", origin: "https://127.0.0.1:7000", errorCode: "connecting" },
+      connection: { state: "offline", origin, errorCode: "connecting" },
       encryption: { state: "unlocked" },
       deviceRole: "owner",
       gateways: [],
@@ -289,7 +295,18 @@ describe("setup landing routing", () => {
     await act(async () => status.resolve(enrollment("ready", { owner: true, hasGateway: false, origin: current.connection.origin })));
     await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
     expect(bridge.enrollment_add_phone).toHaveBeenCalledOnce();
-    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+    await act(async () => invitation.resolve(enrollment("ready", { owner: true, hasGateway: false, origin })));
+    expect(screen.queryByRole("button", { name: "Show connection code" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set up phone later" })).not.toBeInTheDocument();
+
+    current = {
+      ...current,
+      connection: { state: "connected", origin },
+    };
+    await act(async () => hint?.());
+
+    expect(await screen.findByRole("button", { name: "Show connection code" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Set up phone later" })).toBeEnabled();
   });
 
   it("rechecks a remounted connected owner until its stale status becomes ready", async () => {

@@ -119,11 +119,12 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, onExit, onDeferPhone, onJoined, fixedOrigin, accountUrl }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, fixedOrigin, accountUrl }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
   addingPhone?: boolean;
+  connectionPending?: boolean;
   onExit?(): void;
   onDeferPhone?(): void;
   onJoined(): void;
@@ -806,11 +807,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             <Heading>Connect your phone</Heading>
             <p>Connect a phone to start sending messages. Permissions are granted on the phone, not here.</p>
             <p id="enrollment-preparing-status" role="status">Preparing a connection code…</p>
-            {phoneInviteStarted.current && !mutationInFlight.current && <div className="enrollment-actions">
+            {phoneInviteStarted.current && !mutationInFlight.current && !connectionPending && !busy && <div className="enrollment-actions">
               <button id="enrollment-show-connection-code-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Show connection code</button>
               <button id="enrollment-ready-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
             </div>}
-            {!phoneInviteStarted.current && !addingPhone && view.hasGateway === undefined && onDeferPhone && <div className="enrollment-actions">
+            {!phoneInviteStarted.current && !addingPhone && view.hasGateway === undefined && onDeferPhone && !connectionPending && !busy && <div className="enrollment-actions">
               <button id="enrollment-unknown-roster-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
             </div>}
           </Stage>

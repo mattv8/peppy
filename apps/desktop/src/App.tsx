@@ -2452,6 +2452,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   onMode={setMode}
                   enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
                   addingPhone={addingPhone}
+                  connectionPending={snapshot.connection.errorCode === "connecting"}
                   onExit={() => setAddingPhone(false)}
                   onDeferPhone={() => {
                     const key = phoneDeferredKey(snapshot.connection.origin);

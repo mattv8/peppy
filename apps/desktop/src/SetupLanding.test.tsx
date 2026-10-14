@@ -1059,6 +1059,74 @@ describe("SetupLanding", () => {
       expect(screen.getByRole("button", { name: "Set up phone later" })).toBeEnabled();
     });
 
+    it("hides ready recovery actions while the host connection is pending", async () => {
+      const invitation = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
+      vi.spyOn(bridge, "enrollment_add_phone").mockReturnValue(invitation.promise);
+      const onMode = vi.fn();
+      const onJoined = vi.fn();
+      const { rerender } = render(
+        <SetupLanding
+          mode="self-hosted"
+          onMode={onMode}
+          enrolledWithoutPhone={false}
+          onJoined={onJoined}
+          fixedOrigin="https://community.example"
+          connectionPending
+        />,
+      );
+
+      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+      await act(async () => invitation.resolve(view({ stage: "ready", owner: true, hasGateway: false })));
+      expect(screen.queryByRole("button", { name: "Show connection code" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Set up phone later" })).not.toBeInTheDocument();
+
+      rerender(
+        <SetupLanding
+          mode="self-hosted"
+          onMode={onMode}
+          enrolledWithoutPhone={false}
+          onJoined={onJoined}
+          fixedOrigin="https://community.example"
+        />,
+      );
+
+      expect(await screen.findByRole("button", { name: "Show connection code" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Set up phone later" })).toBeEnabled();
+    });
+
+    it("hides the unknown-roster defer action while the host connection is pending", async () => {
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
+      const onMode = vi.fn();
+      const onJoined = vi.fn();
+      const onDeferPhone = vi.fn();
+      const { rerender } = render(
+        <SetupLanding
+          mode="self-hosted"
+          onMode={onMode}
+          enrolledWithoutPhone
+          onJoined={onJoined}
+          onDeferPhone={onDeferPhone}
+          connectionPending
+        />,
+      );
+
+      await screen.findByRole("heading", { name: "Connect your phone" });
+      expect(screen.queryByRole("button", { name: "Set up phone later" })).not.toBeInTheDocument();
+
+      rerender(
+        <SetupLanding
+          mode="self-hosted"
+          onMode={onMode}
+          enrolledWithoutPhone
+          onJoined={onJoined}
+          onDeferPhone={onDeferPhone}
+        />,
+      );
+
+      expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeEnabled();
+    });
+
     it("renders exactly one QR from the enrollment payload and offers no save action", async () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
