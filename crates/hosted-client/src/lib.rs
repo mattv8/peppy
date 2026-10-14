@@ -31,6 +31,8 @@ pub enum HostedClientError {
     InvalidRequest,
     #[error("invalid profile")]
     InvalidProfile,
+    #[error("verified handoff keys are unavailable")]
+    KeysUnavailable,
     #[error("cryptographic operation failed")]
     Crypto,
 }

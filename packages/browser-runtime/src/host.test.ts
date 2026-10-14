@@ -308,6 +308,23 @@ describe("browser host RPC", () => {
     });
   });
 
+  it("routes approval without accepting or forwarding a passphrase", async () => {
+    const session = new FakeSession();
+    const enrollmentApprove = vi.fn(async () => ({ mode: "community" as const, stage: "waiting_phone" as const }));
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentApprove } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_approve", args: { passphrase: "must-not-reach-network" } });
+
+    await eventually(() => enrollmentApprove.mock.calls.length === 1);
+    expect(enrollmentApprove).toHaveBeenCalledWith();
+  });
+
   it.each([
     ["enrollment_create_owner", { passphrase: "manual-passphrase" }],
     ["enrollment_connect_shared_secret", { passphrase: "manual-passphrase" }],

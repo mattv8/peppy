@@ -518,7 +518,7 @@ export class BrowserBridge implements DesktopBridge {
     return this.enrollmentSecretAction("enrollment_connect_shared_secret", "browser-enrollment-secret", "Enter device secret", "Enter the vault shared secret provided by an owner.", "Connect", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "one-time-code" }], input);
   }
   public async enrollment_approve(): Promise<EnrollmentView> {
-    return this.enrollmentSecretAction("enrollment_approve", "browser-enrollment-approve", "Approve phone", "Enter the vault shared secret after verifying the code on both devices.", "Approve", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "current-password" }]);
+    return this.call<EnrollmentView>("enrollment_approve");
   }
   public open_composer(): Promise<void> { return unsupported("Additional composer windows"); }
   public set_start_at_login(): Promise<void> { return unsupported("Start at login"); }

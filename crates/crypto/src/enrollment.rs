@@ -274,6 +274,16 @@ impl HandoffRootPackage {
     pub fn into_parts(self) -> (RootKey, KeyProfile, VaultCheckHeader) {
         (self.root, self.profile, self.header)
     }
+
+    /// Encrypts this verified package for a phone enrollment without exposing its root material.
+    pub fn seal(
+        &self,
+        sender: &TransferKeypair,
+        recipient_public_key: &[u8; 32],
+        context: &EnrollmentContext,
+    ) -> Result<EncryptedHandoff, CryptoError> {
+        seal_package(sender, recipient_public_key, context, self)
+    }
 }
 
 pub struct EncryptedHandoff {
@@ -309,6 +319,15 @@ pub fn seal_handoff(
     recipient_public_key: &[u8; 32],
     context: &EnrollmentContext,
     package: HandoffRootPackage,
+) -> Result<EncryptedHandoff, CryptoError> {
+    seal_package(sender, recipient_public_key, context, &package)
+}
+
+fn seal_package(
+    sender: &TransferKeypair,
+    recipient_public_key: &[u8; 32],
+    context: &EnrollmentContext,
+    package: &HandoffRootPackage,
 ) -> Result<EncryptedHandoff, CryptoError> {
     ensure_sodium()?;
     validate_phone_handoff_context(context)?;
@@ -377,14 +396,15 @@ pub fn open_handoff(
     })
 }
 
-fn encode_package(package: HandoffRootPackage) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-    let (root, profile, header) = package.into_parts();
-    let mut out = Zeroizing::new(Vec::with_capacity(128 + header.check.ciphertext.len()));
+fn encode_package(package: &HandoffRootPackage) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let mut out = Zeroizing::new(Vec::with_capacity(
+        128 + package.header.check.ciphertext.len(),
+    ));
     out.push(HANDOFF_VERSION);
-    out.extend_from_slice(&root.0);
-    encode_profile(&mut out, &profile);
-    out.extend_from_slice(&header.check.nonce);
-    framed(&mut out, &header.check.ciphertext)?;
+    out.extend_from_slice(&package.root.0);
+    encode_profile(&mut out, &package.profile);
+    out.extend_from_slice(&package.header.check.nonce);
+    framed(&mut out, &package.header.check.ciphertext)?;
     if out.len() > HANDOFF_MAX_BYTES {
         return Err(CryptoError::InvalidEnrollment);
     }
@@ -694,6 +714,20 @@ mod tests {
         assert!(
             seal_handoff(&sender, &recipient.public_key(), &manual, package(&profile)).is_err()
         );
+    }
+
+    #[test]
+    fn retained_package_seals_a_decryptable_phone_handoff() {
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let profile = KeyProfile::new(Uuid::from_u128(1), 3).unwrap();
+        let context = handoff_context(&profile, &sender, &recipient);
+
+        let sealed = package(&profile)
+            .seal(&sender, &recipient.public_key(), &context)
+            .unwrap();
+
+        assert!(open_handoff(&recipient, &sender.public_key(), &context, &sealed).is_ok());
     }
 
     #[test]

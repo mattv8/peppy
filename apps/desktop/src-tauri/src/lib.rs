@@ -599,6 +599,7 @@ async fn unlock_sync(
     else {
         return Ok(());
     };
+    let verified_passphrase = passphrase.clone();
     let result = unlock_with(
         &state,
         &session,
@@ -608,6 +609,17 @@ async fn unlock_sync(
         vault.profile_fingerprint,
     )
     .await;
+    if result.is_ok() {
+        if let Ok(current) = state.require_session().await {
+            if Arc::ptr_eq(&current, &session) && current.binding == session.binding {
+                let _ = enrollment::save_verified_vault_secret_if_empty(
+                    &*state.store,
+                    &session.binding.vault_secret_account(),
+                    &verified_passphrase,
+                );
+            }
+        }
+    }
     session.notify();
     result
 }

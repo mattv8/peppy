@@ -1002,6 +1002,56 @@ impl EnrollmentClient {
         status_json: String,
         passphrase: String,
     ) -> Result<String, HostedClientError> {
+        self.approve_phone_invitation_with_sealer(status_json, |transfer, context| {
+            let owner = self
+                .owner
+                .as_ref()
+                .ok_or(HostedClientError::InvalidRequest)?;
+            let root = derive_root_key(&passphrase, &owner.profile)
+                .map_err(|_| HostedClientError::Crypto)?;
+            let package =
+                HandoffRootPackage::new(root, owner.profile.clone(), owner.header.clone())
+                    .map_err(|_| HostedClientError::Crypto)?;
+            let encrypted = seal_handoff(
+                transfer,
+                &context.recipient_transfer_public_key,
+                &context,
+                package,
+            )
+            .map_err(|_| HostedClientError::Crypto)?;
+            Ok(encrypted)
+        })
+    }
+
+    /// Produces a phone approval from the native client's already verified root capability.
+    /// Shared-secret admission intentionally remains root-free.
+    pub fn approve_phone_invitation_with_client(
+        &self,
+        status_json: String,
+        client: &peppy_client_core::Client,
+    ) -> Result<String, HostedClientError> {
+        self.approve_phone_invitation_with_sealer(status_json, |transfer, context| {
+            client
+                .seal_phone_handoff(transfer, context)
+                .map_err(|error| match error {
+                    peppy_client_core::Error::KeysUnavailable => HostedClientError::KeysUnavailable,
+                    peppy_client_core::Error::InvalidProfile => HostedClientError::InvalidProfile,
+                    _ => HostedClientError::Crypto,
+                })
+        })
+    }
+
+    fn approve_phone_invitation_with_sealer<F>(
+        &self,
+        status_json: String,
+        seal: F,
+    ) -> Result<String, HostedClientError>
+    where
+        F: FnOnce(
+            &TransferKeypair,
+            &EnrollmentContext,
+        ) -> Result<EncryptedHandoff, HostedClientError>,
+    {
         let status: InvitationStatus = parse(&status_json)?;
         let context = self.phone_context(&status)?;
         let PhoneFlow::OwnerInvitation {
@@ -1024,22 +1074,7 @@ impl EnrollmentClient {
         let (encrypted_key_package, transfer_nonce) = match method {
             EnrollmentMethod::SharedSecret => (None, None),
             EnrollmentMethod::Transfer => {
-                let owner = self
-                    .owner
-                    .as_ref()
-                    .ok_or(HostedClientError::InvalidRequest)?;
-                let root = derive_root_key(&passphrase, &owner.profile)
-                    .map_err(|_| HostedClientError::Crypto)?;
-                let package =
-                    HandoffRootPackage::new(root, owner.profile.clone(), owner.header.clone())
-                        .map_err(|_| HostedClientError::Crypto)?;
-                let encrypted = seal_handoff(
-                    transfer,
-                    &context.recipient_transfer_public_key,
-                    &context,
-                    package,
-                )
-                .map_err(|_| HostedClientError::Crypto)?;
+                let encrypted = seal(transfer, &context)?;
                 (
                     Some(URL_SAFE_NO_PAD.encode(encrypted.ciphertext)),
                     Some(URL_SAFE_NO_PAD.encode(encrypted.nonce)),
@@ -1681,7 +1716,25 @@ mod tests {
     const ORIGIN: &str = "https://enroll.example";
     const SECRET: &str = "alpha bravo charlie delta echo foxtrot";
 
+    fn temporary_database_path(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("peppy-hosted-client-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        directory.join("owner.db")
+    }
+
     fn phone_claimed_roundtrip() -> (
+        EnrollmentClient,
+        EnrollmentClient,
+        InvitationStatus,
+        VaultMaterial,
+    ) {
+        phone_claimed_roundtrip_with(EnrollmentMethod::Transfer)
+    }
+
+    fn phone_claimed_roundtrip_with(
+        method: EnrollmentMethod,
+    ) -> (
         EnrollmentClient,
         EnrollmentClient,
         InvitationStatus,
@@ -1700,12 +1753,8 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let invitation: CreateInvitationRequest = parse(
-            &owner
-                .create_phone_invitation(EnrollmentMethod::Transfer)
-                .unwrap(),
-        )
-        .unwrap();
+        let invitation: CreateInvitationRequest =
+            parse(&owner.create_phone_invitation(method).unwrap()).unwrap();
         owner
             .consume_created_invitation(
                 serde_json::to_string(&InvitationCreated {
@@ -1736,7 +1785,7 @@ mod tests {
                     vault_id: profile.vault_id,
                     fingerprint: owner_request.material.fingerprint.clone(),
                     key_epoch: 1,
-                    method: EnrollmentMethod::Transfer,
+                    method,
                     owner_transfer_public_key: invitation.transfer_public_key.clone(),
                     expires_in_seconds: 300,
                 })
@@ -2095,6 +2144,144 @@ mod tests {
                 .approve_phone_invitation(honest_status, SECRET.into())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn client_approval_seals_a_verified_transfer_without_a_passphrase() {
+        let (owner, mut recipient, claimed, material) = phone_claimed_roundtrip();
+        let profile: KeyProfile = serde_json::from_value(material.profile.clone()).unwrap();
+        let header: VaultCheckHeader =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(material.check_header).unwrap())
+                .unwrap();
+        let database_path = temporary_database_path("transfer");
+        let client = peppy_client_core::Client::open(
+            peppy_client_core::ClientConfig {
+                database_path: database_path.clone(),
+                vault_id: peppy_client_core::VaultId(profile.vault_id),
+                device_id: peppy_client_core::DeviceId::new(),
+            },
+            peppy_client_core::DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        client.unlock(&profile, &header, SECRET).unwrap();
+
+        let approval: ApproveInvitationRequest = parse(
+            &owner
+                .approve_phone_invitation_with_client(
+                    serde_json::to_string(&claimed).unwrap(),
+                    &client,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(approval.encrypted_key_package.is_some());
+        assert!(approval.transfer_nonce.is_some());
+        let approved = InvitationStatus {
+            state: EnrollmentState::Approved,
+            encrypted_key_package: approval.encrypted_key_package,
+            transfer_nonce: approval.transfer_nonce,
+            profile: Some(material.profile),
+            ..claimed
+        };
+        assert!(
+            recipient
+                .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
+                .is_ok()
+        );
+        drop(client);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn client_approval_distinguishes_unavailable_capability_from_profile_mismatch() {
+        let (owner, _recipient, claimed, material) = phone_claimed_roundtrip();
+        let profile: KeyProfile = serde_json::from_value(material.profile.clone()).unwrap();
+        let header: VaultCheckHeader =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(material.check_header).unwrap())
+                .unwrap();
+        let database_path = temporary_database_path("error-contract");
+        let config = peppy_client_core::ClientConfig {
+            database_path: database_path.clone(),
+            vault_id: peppy_client_core::VaultId(profile.vault_id),
+            device_id: peppy_client_core::DeviceId::new(),
+        };
+        let source = peppy_client_core::Client::open(
+            config.clone(),
+            peppy_client_core::DatabaseKey::new(&[11; 32]).unwrap(),
+        )
+        .unwrap();
+        source.unlock(&profile, &header, SECRET).unwrap();
+        let cache = source.export_native_key_cache(profile.key_epoch).unwrap();
+        drop(source);
+        let cache_only = peppy_client_core::Client::open(
+            config,
+            peppy_client_core::DatabaseKey::new(&[11; 32]).unwrap(),
+        )
+        .unwrap();
+        cache_only.import_native_key_cache(&cache).unwrap();
+        assert!(matches!(
+            owner.approve_phone_invitation_with_client(
+                serde_json::to_string(&claimed).unwrap(),
+                &cache_only,
+            ),
+            Err(HostedClientError::KeysUnavailable)
+        ));
+
+        let active_database_path = temporary_database_path("profile-mismatch");
+        let active = peppy_client_core::Client::open(
+            peppy_client_core::ClientConfig {
+                database_path: active_database_path.clone(),
+                vault_id: peppy_client_core::VaultId(profile.vault_id),
+                device_id: peppy_client_core::DeviceId::new(),
+            },
+            peppy_client_core::DatabaseKey::new(&[12; 32]).unwrap(),
+        )
+        .unwrap();
+        active.unlock(&profile, &header, SECRET).unwrap();
+        let mut bad_epoch = claimed;
+        bad_epoch.transcript.as_mut().unwrap().key_epoch += 1;
+        assert!(matches!(
+            owner.approve_phone_invitation_with_client(
+                serde_json::to_string(&bad_epoch).unwrap(),
+                &active,
+            ),
+            Err(HostedClientError::InvalidProfile)
+        ));
+        drop(cache_only);
+        drop(active);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(active_database_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn client_approval_keeps_shared_secret_mode_root_free() {
+        let (owner, _recipient, claimed, material) =
+            phone_claimed_roundtrip_with(EnrollmentMethod::SharedSecret);
+        let profile: KeyProfile = serde_json::from_value(material.profile).unwrap();
+        let database_path = temporary_database_path("shared-secret");
+        let client = peppy_client_core::Client::open(
+            peppy_client_core::ClientConfig {
+                database_path: database_path.clone(),
+                vault_id: peppy_client_core::VaultId(profile.vault_id),
+                device_id: peppy_client_core::DeviceId::new(),
+            },
+            peppy_client_core::DatabaseKey::new(&[10; 32]).unwrap(),
+        )
+        .unwrap();
+
+        let approval: ApproveInvitationRequest = parse(
+            &owner
+                .approve_phone_invitation_with_client(
+                    serde_json::to_string(&claimed).unwrap(),
+                    &client,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(approval.encrypted_key_package.is_none());
+        assert!(approval.transfer_nonce.is_none());
+        drop(client);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
     }
 
     #[test]

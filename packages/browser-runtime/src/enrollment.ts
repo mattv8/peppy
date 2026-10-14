@@ -27,6 +27,7 @@ export class BrowserEnrollment {
   private viewValue: EnrollmentView = { mode: "community", stage: "server" };
   private csrf?: string;
   private invitationId?: string;
+  private invitationGeneration = 0;
   private enrollmentClient?: { origin: string; purpose: "fresh" | "owner" };
   private addPhonePending?: Promise<EnrollmentView>;
   private vaultRequestGeneration = 0;
@@ -194,28 +195,35 @@ export class BrowserEnrollment {
     return this.view();
   }
 
-  public async approve(passphrase: string): Promise<EnrollmentView> {
+  public async approve(): Promise<EnrollmentView> {
+    const invitationId = this.invitationId;
+    const invitationGeneration = this.invitationGeneration;
     try {
-      if (!this.invitationId) throw new Error("enrollment-state");
-      const status = await this.invitationStatus();
+      if (!invitationId) throw new Error("enrollment-state");
+      const status = await this.invitationStatus(invitationId);
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       if (status.state !== "claimed") throw new Error("enrollment-state");
-      const request = await this.rustRequest("_worker_enrollment_approve_phone_invitation", { statusJson: JSON.stringify(status), passphrase });
-      await this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}/approve`, "POST", request, true);
+      const request = await this.rustRequest("_worker_enrollment_approve_phone_invitation", { statusJson: JSON.stringify(status) });
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
+      await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}/approve`, "POST", request, true);
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       this.viewValue = { ...this.viewValue, stage: "waiting_phone", expiresInSeconds: safeInteger(status.expires_in_seconds) };
     } catch (error) {
-      this.fail(error);
+      if (!invitationId || this.isActiveOwnerInvitation(invitationId, invitationGeneration)) this.fail(error);
     }
     return this.view();
   }
 
   public async cancel(): Promise<void> {
+    const invitationId = this.invitationId;
+    this.invitationGeneration += 1;
     this.vaultRequestGeneration += 1;
     if (await this.pendingVaultRequest()) {
       await this.core.invoke({ command: "_worker_enrollment_clear_vault_request", args: {} });
       this.viewValue = { mode: this.viewValue.mode, stage: "signin", origin: this.origin };
       return;
     }
-    if (this.invitationId) await this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}`, "DELETE", undefined, true);
+    if (invitationId) await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}`, "DELETE", undefined, true);
     this.resetOwnerInvitation();
     this.viewValue = { ...this.viewValue, stage: "ready", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined };
   }
@@ -390,6 +398,7 @@ export class BrowserEnrollment {
   }
 
   private resetOwnerInvitation(): void {
+    this.invitationGeneration += 1;
     this.invitationId = undefined;
     if (this.enrollmentClient?.purpose === "owner") this.enrollmentClient = undefined;
   }
@@ -400,9 +409,16 @@ export class BrowserEnrollment {
     return identity;
   }
 
-  private invitationStatus(): Promise<Record<string, unknown>> {
-    if (!this.invitationId) return Promise.reject(new Error("enrollment-state"));
-    return this.request(`/v1/enrollment/invitations/${encodeURIComponent(this.invitationId)}`, "GET", undefined, true);
+  private invitationStatus(invitationId = this.invitationId): Promise<Record<string, unknown>> {
+    if (!invitationId) return Promise.reject(new Error("enrollment-state"));
+    return this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}`, "GET", undefined, true);
+  }
+
+  private isActiveOwnerInvitation(invitationId: string, invitationGeneration: number): boolean {
+    return this.invitationId === invitationId
+      && this.invitationGeneration === invitationGeneration
+      && this.session.phase === "ready"
+      && this.session.publicIdentity()?.role === "owner";
   }
 
   private async rustRequest(command: string, args: Record<string, unknown>): Promise<unknown> {

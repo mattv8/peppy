@@ -2173,9 +2173,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
 
   const setupCode = snapshot?.connection.errorCode;
+  const nativeCredentialed = snapshot?.mode === "native" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "");
   const canUnlock = snapshot?.mode === "native"
-    ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
+    ? snapshot.encryption.state !== "unlocked" && nativeCredentialed
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
+  const canRecoverNativeSync = canUnlock || nativeCredentialed;
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2599,7 +2601,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAction={runSetupAction}
               onOpenAccount={() => bridge.hosted_open_billing()}
               encryption={snapshot?.encryption.state ?? "locked"}
-              canUnlock={canUnlock}
+              canUnlock={canRecoverNativeSync}
               theme={theme}
               onTheme={setTheme}
               navigationPosition={navigationPosition}

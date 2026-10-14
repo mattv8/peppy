@@ -582,6 +582,23 @@ describe("BrowserBridge", () => {
     vi.useRealTimers();
   });
 
+  it("approves a phone without a shared-secret dialog or passphrase payload", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const approval = bridge.enrollment_approve();
+      expect(document.getElementById("browser-enrollment-approve")).toBeNull();
+      expect(port.sent).toEqual([{ id: 1, command: "enrollment_approve", args: {} }]);
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "phone_connected" } });
+      await expect(approval).resolves.toMatchObject({ stage: "phone_connected" });
+      expect(document.getElementById("browser-enrollment-approve")).toBeNull();
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
   it("submits the browser unlock dialog once with its passphrase", async () => {
     const port = new TestPort();
     const showModal = vi.fn();

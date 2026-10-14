@@ -58,7 +58,7 @@ export interface BrowserNetwork {
   enrollmentPendingVaultRequest(): Promise<{ origin: string; requestId: string; displayName: string } | null>;
   enrollmentAddPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
   enrollmentStatus(): Promise<EnrollmentView>;
-  enrollmentApprove(passphrase: string): Promise<EnrollmentView>;
+  enrollmentApprove(): Promise<EnrollmentView>;
   enrollmentCancel(): Promise<void>;
   enrollmentSignOut(): Promise<void>;
   enrollmentGenerateSecret(): Promise<string>;
@@ -537,7 +537,7 @@ export class BrowserWorkerHost {
                     : request.command === "enrollment_pending_vault_request" ? await network.enrollmentPendingVaultRequest()
               : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
                 : request.command === "enrollment_status" ? await network.enrollmentStatus()
-                  : request.command === "enrollment_approve" && passphrase ? await network.enrollmentApprove(passphrase)
+                   : request.command === "enrollment_approve" ? await network.enrollmentApprove()
                     : request.command === "enrollment_cancel" ? (await network.enrollmentCancel(), undefined)
         : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
                         : request.command === "enrollment_generate_secret" ? { passphrase: await network.enrollmentGenerateSecret() }
@@ -642,7 +642,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentPendingVaultRequest() { return enrollment?.pendingVaultRequest() ?? null; },
       async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentStatus() { return enrollment?.status() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
-      async enrollmentApprove(passphrase) { return enrollment?.approve(passphrase) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentApprove() { return enrollment?.approve() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentCancel() { await enrollment?.cancel(); },
       async enrollmentSignOut() { await enrollment?.signOut(); },
       async enrollmentGenerateSecret() { if (!enrollment) throw { code: "unavailable" }; return enrollment.generateSecret(); },

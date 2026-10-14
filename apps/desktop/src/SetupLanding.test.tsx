@@ -1099,6 +1099,19 @@ describe("SetupLanding", () => {
       expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "invalid_setup_token");
     });
 
+    it("directs a missing vault secret to the native Settings unlock before retrying", async () => {
+      await failedDiscoveryAlert({ code: "vault-secret-unavailable", message: "raw secret detail" });
+
+      const alert = document.getElementById("enrollment-error")!;
+      expect(alert).toHaveTextContent(/Settings/);
+      expect(alert).toHaveTextContent(/Sync encryption/);
+      expect(alert).toHaveTextContent(/Unlock sync natively/);
+      expect(alert).toHaveTextContent(/retry/i);
+      expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "vault-secret-unavailable");
+      expect(within(document.getElementById("enrollment-panel")!).getByRole("button", { name: "Retry" })).toBeInTheDocument();
+      expect(document.body).not.toHaveTextContent("raw secret detail");
+    });
+
     it.each([
       "credentials-required",
       "database-key-missing",

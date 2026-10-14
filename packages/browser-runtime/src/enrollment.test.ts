@@ -5,6 +5,7 @@ const origin = "https://peppy.test";
 const vaultId = "00000000-0000-0000-0000-000000000001";
 const deviceId = "00000000-0000-0000-0000-000000000002";
 const invitationId = "00000000-0000-0000-0000-000000000003";
+const replacementInvitationId = "00000000-0000-0000-0000-000000000005";
 const challengeId = "00000000-0000-0000-0000-000000000004";
 
 class TestSession implements EnrollmentSession {
@@ -316,14 +317,104 @@ describe("BrowserEnrollment", () => {
     await expect(enrollment.createOwner({ setupToken: "setup", adminPassword: "password-password", passphrase: "secret" })).resolves.toMatchObject({ stage: "ready", owner: true });
     await expect(enrollment.addPhone("transfer")).resolves.toMatchObject({ stage: "waiting_phone", qrPayload: "local-secret-qr", expiresInSeconds: 300 });
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "verify_phone", verificationCode: "123 456" });
-    await expect(enrollment.approve("secret")).resolves.toMatchObject({ stage: "waiting_phone" });
+    await expect(enrollment.approve()).resolves.toMatchObject({ stage: "waiting_phone" });
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "waiting_phone" });
     await expect(enrollment.status()).resolves.toMatchObject({ stage: "phone_connected" });
 
     expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_get_phone_qr", args: {} });
     expect(session.finishEnrollment).toHaveBeenCalledWith("_worker_enrollment_finish_owner", expect.stringContaining('"session"'), "secret");
+    expect(core.invoke).toHaveBeenCalledWith({
+      command: "_worker_enrollment_approve_phone_invitation",
+      args: expect.objectContaining({ statusJson: expect.any(String) }),
+    });
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({
+      command: "_worker_enrollment_approve_phone_invitation",
+      args: expect.objectContaining({ passphrase: expect.anything() }),
+    }));
     const invitationCall = fetcher.mock.calls.find(([input, init]) => pathOf(input) === "/v1/enrollment/invitations" && init?.method === "POST");
     expect(invitationCall?.[1]).toMatchObject({ headers: expect.objectContaining({ Authorization: "Bearer device-token", "X-Peppy-CSRF-Token": "claim-csrf" }) });
+  });
+
+  it("does not seal or approve while cancellation is waiting to delete the invitation", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>(resolve => { releaseStatus = resolve; });
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>(resolve => { releaseDelete = resolve; });
+    let signalDelete!: () => void;
+    const deleteStarted = new Promise<void>(resolve => { signalDelete = resolve; });
+    const fetcher = lifecycleFetcher();
+    fetcher.mockImplementation(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "csrf" });
+      if (path === "/v1/enrollment/invitations" && init?.method === "POST") return json({ invitation_id: invitationId, expires_in_seconds: 300 });
+      if (path === `/v1/enrollment/invitations/${invitationId}` && init?.method === "DELETE") {
+        signalDelete();
+        await deleteGate;
+        return new Response(null, { status: 204 });
+      }
+      if (path === `/v1/enrollment/invitations/${invitationId}`) {
+        await statusGate;
+        return json({ state: "claimed", expires_in_seconds: 300 });
+      }
+      if (path.endsWith("/approve")) return json({});
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.addPhone("transfer");
+    const approval = enrollment.approve();
+    const cancellation = enrollment.cancel();
+    await deleteStarted;
+    releaseStatus();
+    await approval;
+    releaseDelete();
+    await cancellation;
+
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_approve_phone_invitation" }));
+    expect(fetcher.mock.calls.some(([input]) => pathOf(input).endsWith("/approve"))).toBe(false);
+  });
+
+  it("does not replace a new invitation view with an old approval error", async () => {
+    const core = new LifecycleCore();
+    const session = new TestSession();
+    session.phase = "ready";
+    session.identity = { role: "owner" };
+    let rejectStatus!: (error: Error) => void;
+    const statusGate = new Promise<void>((_resolve, reject) => { rejectStatus = reject; });
+    let invitations = 0;
+    const fetcher = lifecycleFetcher();
+    fetcher.mockImplementation(async (input, init) => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session" && init?.method === "GET") return json({ csrf_token: "csrf" });
+      if (path === "/v1/enrollment/invitations" && init?.method === "POST") {
+        invitations += 1;
+        return json({ invitation_id: invitations === 1 ? invitationId : replacementInvitationId, expires_in_seconds: 300 });
+      }
+      if (path === `/v1/enrollment/invitations/${invitationId}` && init?.method === "DELETE") return new Response(null, { status: 204 });
+      if (path === `/v1/enrollment/invitations/${invitationId}`) return statusGate.then(() => json({}));
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.addPhone("transfer");
+    const approval = enrollment.approve();
+    await enrollment.cancel();
+    await enrollment.addPhone("transfer");
+    rejectStatus(new Error("old-status-failed"));
+    await approval;
+
+    expect(enrollment.view()).toMatchObject({ stage: "waiting_phone", qrPayload: "local-secret-qr" });
+    expect(enrollment.view()).not.toHaveProperty("errorCode");
   });
 
   it("reinitializes an owner invitation client after first-owner activation clears the fresh Rust client", async () => {

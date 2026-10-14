@@ -11,6 +11,7 @@ fn convert_error(e: hc::HostedClientError) -> MobileBindingsError {
     match e {
         hc::HostedClientError::InvalidRequest => MobileBindingsError::InvalidRequest,
         hc::HostedClientError::InvalidProfile => MobileBindingsError::InvalidProfile,
+        hc::HostedClientError::KeysUnavailable => MobileBindingsError::Crypto,
         hc::HostedClientError::Crypto => MobileBindingsError::Crypto,
     }
 }

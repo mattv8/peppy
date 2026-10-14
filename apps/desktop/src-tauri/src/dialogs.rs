@@ -18,7 +18,6 @@ pub enum PassphrasePurpose {
     Unlock,
     ResumeOwnerSecret,
     RecoverVaultSecret,
-    ApprovePhoneSecret,
     Create,
     SetupToken,
     AdminPassword,
@@ -441,12 +440,6 @@ mod windows_dialog {
                 ),
                 w!("Complete vault setup"),
             ),
-            PassphrasePurpose::ApprovePhoneSecret => (
-                w!(
-                    "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and saved in this computer's secure storage so you won't be asked again."
-                ),
-                w!("Approve phone"),
-            ),
             PassphrasePurpose::Create => (
                 w!(
                     "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered."
@@ -497,8 +490,7 @@ mod windows_dialog {
                 match purpose {
                     PassphrasePurpose::Unlock
                     | PassphrasePurpose::ResumeOwnerSecret
-                    | PassphrasePurpose::RecoverVaultSecret
-                    | PassphrasePurpose::ApprovePhoneSecret => w!("Peppy sync vault"),
+                    | PassphrasePurpose::RecoverVaultSecret => w!("Peppy sync vault"),
                     PassphrasePurpose::Create => w!("Peppy encryption passphrase"),
                     PassphrasePurpose::AppLockCreate
                     | PassphrasePurpose::AppLockConfirm
@@ -583,10 +575,6 @@ mod linux {
             PassphrasePurpose::RecoverVaultSecret => {
                 (RECOVER_VAULT_SECRET_TITLE, RECOVER_VAULT_SECRET_MESSAGE)
             }
-            PassphrasePurpose::ApprovePhoneSecret => (
-                "Approve phone",
-                "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and saved in this computer's secure storage so you won't be asked again.",
-            ),
             PassphrasePurpose::Create => (CREATE_TITLE, CREATE_MESSAGE),
             PassphrasePurpose::AppLockCreate => (
                 "Require a password to open Peppy",
@@ -873,11 +861,6 @@ mod macos {
             super::PassphrasePurpose::RecoverVaultSecret => (
                 "Complete vault setup",
                 "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.",
-                "Continue",
-            ),
-            super::PassphrasePurpose::ApprovePhoneSecret => (
-                "Approve phone",
-                "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and saved in this computer's secure storage so you won't be asked again.",
                 "Continue",
             ),
             super::PassphrasePurpose::Create => (

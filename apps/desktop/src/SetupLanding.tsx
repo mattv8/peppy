@@ -77,7 +77,7 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "vault_request_completed") return "This vault request was already completed. Contact an owner if you need access.";
   if (errorCode === "request_completed_without_material") return "This vault request was already completed. Start a new request to try again.";
   if (errorCode === "admin-password-length") return copy("admin_password_length");
-  if (errorCode === "vault-secret-unavailable") return "This device doesn't have the vault shared secret stored.";
+  if (errorCode === "vault-secret-unavailable") return "This device's vault shared secret is not stored. Open Settings, choose Unlock sync natively in Sync encryption, then retry phone approval.";
   return "Peppy could not complete this step. Your server address was kept.";
 };
 

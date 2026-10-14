@@ -259,6 +259,27 @@ describe("setup landing routing", () => {
     await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
     expect(unlock).not.toHaveBeenCalled();
   });
+
+  it("starts native phone pairing without invoking the sync unlock for an unlocked owner", async () => {
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "unlocked" },
+      gateways: [SMS_ONLY],
+      deviceRole: "owner",
+    });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    const unlock = vi.spyOn(bridge, "unlock_sync");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
+    expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("keeps SetupLanding for an unlocked native session that is offline without a selected conversation", async () => {
+    await landingSnapshot({ connection: { state: "offline" }, encryption: { state: "unlocked" } });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+  });
 });
 
 const MMS_SIM: GatewayView = { ...SMS_ONLY, simId: "sim-2", supportsMms: true, mmsContentVersion: 2 };
@@ -1566,6 +1587,38 @@ describe("host state display", () => {
     expect(alert).toHaveTextContent("Unlock rejected.");
     expect(alert.closest('[data-settings-section="sync"]')).toBeInTheDocument();
     expect(unlock).toHaveBeenCalledOnce();
+  });
+
+  it("offers native sync unlock to an unlocked native session and runs it only on click", async () => {
+    host.encryption = { state: "unlocked" };
+    const unlock = vi.spyOn(bridge, "unlock_sync").mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const unlockButton = screen.getByRole("button", { name: "Unlock sync natively" });
+    expect(unlock).not.toHaveBeenCalled();
+    fireEvent.click(unlockButton);
+    await waitFor(() => expect(unlock).toHaveBeenCalledOnce());
+  });
+
+  it.each(["credentials-required", "revoked"])("hides native sync unlock when the connection reports %s", async (errorCode) => {
+    host.encryption = { state: "unlocked" };
+    host.connection = { state: "connected", origin: "https://example.test", errorCode };
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="sync"]')).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unlock sync natively" })).not.toBeInTheDocument();
+  });
+
+  it("offers no sync unlock button to an unlocked browser session", async () => {
+    const snapshot = host.load();
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...snapshot, mode: "browser", desktop: undefined, encryption: { state: "unlocked" } });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="sync"]')).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^unlock sync/i })).not.toBeInTheDocument();
   });
 
 

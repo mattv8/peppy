@@ -1029,6 +1029,18 @@ fn stored_vault_secret(
     read_text_secret(store, binding_account)?.ok_or_else(vault_secret_unavailable)
 }
 
+/// Persists a phrase only after native unlock verification and only when this binding has none.
+pub(crate) fn save_verified_vault_secret_if_empty(
+    store: &dyn SecretStore,
+    binding_account: &str,
+    passphrase: &str,
+) -> BridgeResult<()> {
+    if read_text_secret(store, binding_account)?.is_none() {
+        store.set(binding_account, passphrase.as_bytes())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn enrollment_discover(
     window: WebviewWindow,
@@ -2292,10 +2304,14 @@ pub async fn enrollment_rotate_phone(
     .await
 }
 
+#[derive(Clone)]
 struct PhoneApprovalPreparation {
     invitation_id: uuid::Uuid,
     claim_digest: String,
-    passphrase: Zeroizing<String>,
+    method: EnrollmentMethod,
+    vault_id: uuid::Uuid,
+    key_epoch: u32,
+    fingerprint: String,
 }
 
 fn claimed_phone_invitation(controller: &Controller) -> BridgeResult<(uuid::Uuid, String)> {
@@ -2335,104 +2351,177 @@ fn invitation_is_current(
     })
 }
 
-/// Obtains and verifies the secret needed to create a phone approval. A missing binding secret
-/// may be recovered through the native prompt, but a secure-store failure is never treated as a
-/// missing value.
-async fn prepare_phone_approval<P, PF>(
+/// Captures the validated invitation identity before approval begins. Approval never collects a
+/// vault shared secret; transfer uses the active client's verified handoff capability instead.
+fn prepare_phone_approval_without_secret(
     controller: &std::sync::Mutex<Controller>,
-    store: &dyn SecretStore,
-    binding_account: &str,
-    prompt: P,
-) -> BridgeResult<Option<PhoneApprovalPreparation>>
-where
-    P: FnOnce(PassphrasePurpose) -> PF,
-    PF: std::future::Future<Output = BridgeResult<Option<Zeroizing<String>>>>,
-{
-    let (invitation_id, claim_digest, method) = {
+) -> BridgeResult<PhoneApprovalPreparation> {
+    let (invitation_id, claim_digest, method, vault_id, key_epoch, fingerprint) = {
         let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
         let (invitation_id, claim_digest) = claimed_phone_invitation(&controller)?;
+        let transcript = controller
+            .invitation
+            .as_ref()
+            .and_then(|status| status.transcript.as_ref())
+            .ok_or_else(enrollment_error)?;
         (
             invitation_id,
             claim_digest,
             controller.invitation_method.ok_or_else(enrollment_error)?,
+            transcript.vault_id,
+            transcript.key_epoch,
+            transcript.fingerprint.clone(),
         )
     };
-    let mut fallback = false;
-    let passphrase = match method {
-        EnrollmentMethod::SharedSecret => Zeroizing::new(String::new()),
-        EnrollmentMethod::Transfer => match read_text_secret(store, binding_account)? {
-            Some(secret) => secret,
-            None => {
-                let Some(secret) = prompt(PassphrasePurpose::ApprovePhoneSecret).await? else {
-                    return Ok(None);
-                };
-                let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
-                if !invitation_is_current(&controller, invitation_id, &claim_digest) {
-                    return Ok(None);
-                }
-                fallback = true;
-                secret
-            }
-        },
-    };
-    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
-    if !invitation_is_current(&controller, invitation_id, &claim_digest) {
-        return Ok(None);
-    }
-    let client = controller.client.as_ref().ok_or_else(enrollment_error)?;
-    if method == EnrollmentMethod::Transfer
-        && !client
-            .owner_passphrase_matches(&passphrase)
-            .map_err(|_| enrollment_error())?
-    {
-        return Err(if fallback {
-            wrong_owner_passphrase()
-        } else {
-            vault_secret_mismatch()
-        });
-    }
-    if fallback && matches!(read_text_secret(store, binding_account), Ok(None)) {
-        let _ = store.set(binding_account, passphrase.as_bytes());
-    }
-    Ok(Some(PhoneApprovalPreparation {
+    Ok(PhoneApprovalPreparation {
         invitation_id,
         claim_digest,
-        passphrase,
-    }))
+        method,
+        vault_id,
+        key_epoch,
+        fingerprint,
+    })
 }
 
 fn prepare_phone_approval_request(
     controller: &std::sync::Mutex<Controller>,
     preparation: &PhoneApprovalPreparation,
-) -> BridgeResult<Option<String>> {
+    session: &crate::session::Session,
+) -> BridgeResult<Result<Option<String>, peppy_hosted_client::HostedClientError>> {
     let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
     if !invitation_is_current(
         &controller,
         preparation.invitation_id,
         &preparation.claim_digest,
     ) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let status = controller
         .invitation
         .as_ref()
         .ok_or_else(enrollment_error)?;
-    controller
-        .client
-        .as_ref()
-        .ok_or_else(enrollment_error)?
-        .approve_phone_invitation(
-            serde_json::to_string(status).map_err(|_| enrollment_error())?,
-            preparation.passphrase.to_string(),
+    if controller.invitation_method != Some(preparation.method) {
+        return Ok(Ok(None));
+    }
+    let client = controller.client.as_ref().ok_or_else(enrollment_error)?;
+    let status = serde_json::to_string(status).map_err(|_| enrollment_error())?;
+    Ok(match preparation.method {
+        EnrollmentMethod::SharedSecret => client
+            .approve_phone_invitation(status, String::new())
+            .map(Some),
+        EnrollmentMethod::Transfer => client
+            .approve_phone_invitation_with_client(status, &session.client)
+            .map(Some),
+    })
+}
+
+/// Re-establishes the active client's verified handoff capability from the binding's existing
+/// secret. This is only used after the private client approval path reports unavailable key
+/// material; it never opens an approval dialog.
+async fn restore_phone_handoff_capability(
+    state: &AppState,
+    session: &std::sync::Arc<crate::session::Session>,
+    binding: &crate::credentials::Binding,
+    preparation: &PhoneApprovalPreparation,
+) -> BridgeResult<bool> {
+    let vault = crate::fetch_vault(&session.api, &binding.vault_id, &binding.device_id).await?;
+    let (profile, header) = crate::vault_header(&vault)?;
+    let current = state.require_session().await?;
+    if current.binding != *binding || !std::sync::Arc::ptr_eq(&current, session) {
+        return Ok(false);
+    }
+    if !phone_handoff_recovery_is_current(&state.enrollment, session, binding, preparation)? {
+        return Ok(false);
+    }
+    let secret = stored_vault_secret(&*state.store, &binding.vault_secret_account())?;
+    let session = session.clone();
+    let binding = binding.clone();
+    let preparation = preparation.clone();
+    crate::sync::blocking(move || {
+        recover_phone_handoff_after_fetch(
+            &session,
+            &binding,
+            &preparation,
+            &profile,
+            &header,
+            &secret,
         )
-        .map(Some)
-        .map_err(|_| enrollment_error())
+    })
+    .await
+}
+
+fn phone_handoff_recovery_is_current(
+    controller: &std::sync::Mutex<Controller>,
+    session: &crate::session::Session,
+    binding: &crate::credentials::Binding,
+    preparation: &PhoneApprovalPreparation,
+) -> BridgeResult<bool> {
+    if session.binding != *binding {
+        return Ok(false);
+    }
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    Ok(controller.invitation_method == Some(preparation.method)
+        && invitation_is_current(
+            &controller,
+            preparation.invitation_id,
+            &preparation.claim_digest,
+        ))
+}
+
+/// Restores only an already-active epoch after the caller has fetched and pinned vault material.
+/// A stale caller must return false before unlocking; malformed fetched material is an enrollment
+/// error rather than a stale invitation.
+fn recover_phone_handoff_after_fetch(
+    session: &crate::session::Session,
+    binding: &crate::credentials::Binding,
+    preparation: &PhoneApprovalPreparation,
+    profile: &KeyProfile,
+    header: &VaultCheckHeader,
+    secret: &str,
+) -> BridgeResult<bool> {
+    if session.binding != *binding {
+        return Ok(false);
+    }
+    if !phone_profile_matches(profile, preparation)? || header.profile != *profile {
+        return Err(enrollment_error());
+    }
+    if session
+        .client
+        .key_status()
+        .map_err(crate::core_error)?
+        .active_epoch
+        != Some(profile.key_epoch)
+    {
+        return Err(enrollment_error());
+    }
+    match session.client.unlock(profile, header, secret) {
+        Ok(()) => Ok(true),
+        Err(
+            peppy_client_core::Error::WrongPassphrase | peppy_client_core::Error::InvalidPassphrase,
+        ) => Err(vault_secret_mismatch()),
+        Err(error) => Err(crate::core_error(error)),
+    }
+}
+
+fn phone_profile_matches(
+    profile: &KeyProfile,
+    preparation: &PhoneApprovalPreparation,
+) -> BridgeResult<bool> {
+    Ok(profile.vault_id == preparation.vault_id
+        && profile.key_epoch == preparation.key_epoch
+        && profile.fingerprint().map_err(|_| enrollment_error())? == preparation.fingerprint)
+}
+
+fn handoff_capability_unavailable(error: &peppy_hosted_client::HostedClientError) -> bool {
+    matches!(
+        error,
+        peppy_hosted_client::HostedClientError::KeysUnavailable
+    )
 }
 
 #[tauri::command]
 pub async fn enrollment_approve(
     window: WebviewWindow,
-    app: AppHandle,
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
@@ -2440,34 +2529,51 @@ pub async fn enrollment_approve(
     refresh_invitation(&state, &hosted).await?;
     let session = state.require_session().await?;
     let binding = session.binding.clone();
-    let Some(preparation) = prepare_phone_approval(
-        &state.enrollment,
-        &*state.store,
-        &binding.vault_secret_account(),
-        |purpose| dialogs::passphrase(&app, purpose),
-    )
-    .await?
-    else {
-        return Ok(state
-            .enrollment
-            .lock()
-            .map_err(|_| BridgeError::host_state())?
-            .view());
-    };
-    let session = state.require_session().await?;
-    if session.binding != binding {
+    let preparation = prepare_phone_approval_without_secret(&state.enrollment)?;
+    if state.require_session().await?.binding != binding {
         return Ok(state
             .enrollment
             .lock()
             .map_err(|_| BridgeError::host_state())?
             .view());
     }
-    let Some(request) = prepare_phone_approval_request(&state.enrollment, &preparation)? else {
-        return Ok(state
-            .enrollment
-            .lock()
-            .map_err(|_| BridgeError::host_state())?
-            .view());
+    let request = match prepare_phone_approval_request(&state.enrollment, &preparation, &session)? {
+        Ok(Some(request)) => request,
+        Ok(None) => {
+            return Ok(state
+                .enrollment
+                .lock()
+                .map_err(|_| BridgeError::host_state())?
+                .view());
+        }
+        // The shared approval API reports only a missing verified handoff capability here.
+        // Re-unlock only with the matching binding secret, then retry the same validated claim.
+        Err(error)
+            if preparation.method == EnrollmentMethod::Transfer
+                && handoff_capability_unavailable(&error) =>
+        {
+            if !restore_phone_handoff_capability(&state, &session, &binding, &preparation).await?
+                || state.require_session().await?.binding != binding
+            {
+                return Ok(state
+                    .enrollment
+                    .lock()
+                    .map_err(|_| BridgeError::host_state())?
+                    .view());
+            }
+            match prepare_phone_approval_request(&state.enrollment, &preparation, &session)? {
+                Ok(Some(request)) => request,
+                Ok(None) => {
+                    return Ok(state
+                        .enrollment
+                        .lock()
+                        .map_err(|_| BridgeError::host_state())?
+                        .view());
+                }
+                Err(_) => return Err(enrollment_error()),
+            }
+        }
+        Err(_) => return Err(enrollment_error()),
     };
     let origin = session.api.origin().to_owned();
     let account = hosted_account_header(&state, &hosted).await?;
@@ -2650,9 +2756,8 @@ mod owner_retry_tests {
     use crate::tests::gateway;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use peppy_hosted_api::enrollment::{
-        ApproveInvitationRequest, ClaimInstanceRequest, ClaimInstanceResponse,
-        ClaimInvitationRequest, CreateInvitationRequest, EnrollmentTranscript, InstanceSession,
-        InvitationClaim,
+        ClaimInstanceRequest, ClaimInstanceResponse, ClaimInvitationRequest,
+        CreateInvitationRequest, EnrollmentTranscript, InstanceSession, InvitationClaim,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -3536,6 +3641,18 @@ mod owner_retry_tests {
     }
 
     fn claimed_phone_fixture(method: EnrollmentMethod) -> (Mutex<Controller>, EnrollmentClient) {
+        let (controller, recipient, _, _) = claimed_phone_fixture_with_material(method);
+        (controller, recipient)
+    }
+
+    fn claimed_phone_fixture_with_material(
+        method: EnrollmentMethod,
+    ) -> (
+        Mutex<Controller>,
+        EnrollmentClient,
+        KeyProfile,
+        VaultCheckHeader,
+    ) {
         let mut owner =
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
         let owner_request: ClaimInstanceRequest = serde_json::from_str(
@@ -3568,6 +3685,11 @@ mod owner_retry_tests {
             serde_json::from_str(&recipient.claim_phone_invitation(qr).unwrap()).unwrap();
         let profile: peppy_crypto::KeyProfile =
             serde_json::from_value(owner_request.material.profile.clone()).unwrap();
+        let header = peppy_crypto::create_vault_check_header(
+            &peppy_crypto::derive_root_key(RECOVERY_SECRET, &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
         recipient
             .consume_claim_response(
                 serde_json::to_string(&InvitationClaim {
@@ -3621,215 +3743,92 @@ mod owner_retry_tests {
                 ..ready_controller()
             }),
             recipient,
+            profile,
+            header,
         )
     }
 
-    #[tokio::test]
-    async fn stored_binding_secret_creates_a_decryptable_phone_handoff_without_prompting() {
-        let (controller, mut recipient) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
+    fn session_for_phone_profile(
+        profile: &KeyProfile,
+    ) -> (
+        crate::session::Session,
+        crate::credentials::Binding,
+        MemoryStore,
+        tempfile::TempDir,
+    ) {
+        let binding = crate::credentials::Binding {
+            origin: ORIGIN.into(),
+            vault_id: profile.vault_id.to_string(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+        };
         let store = MemoryStore::default();
-        store
-            .set(&binding_account, RECOVERY_SECRET.as_bytes())
+        let credential =
+            crate::credentials::parse_credential(&crate::credentials::tests::credential_json(
+                ORIGIN,
+                &binding.vault_id,
+                &binding.device_id,
+                crate::credentials::tests::TOKEN,
+            ))
             .unwrap();
-        let prepared = prepare_phone_approval(&controller, &store, &binding_account, |_| async {
-            panic!("stored secret must not prompt")
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        let request: ApproveInvitationRequest = serde_json::from_str(
-            &prepare_phone_approval_request(&controller, &prepared)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        let mut approved = controller.lock().unwrap().invitation.clone().unwrap();
-        approved.state = EnrollmentState::Approved;
-        approved.encrypted_key_package = request.encrypted_key_package;
-        approved.transfer_nonce = request.transfer_nonce;
-        let confirmation = recipient
-            .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
-            .unwrap();
-        assert!(!confirmation.is_empty());
+        crate::credentials::store_credential(&store, &credential).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session =
+            crate::session::open_session(root.path(), &store, &binding, &[], crate::tests::noop())
+                .unwrap();
+        (session, binding, store, root)
     }
 
-    #[tokio::test]
-    async fn phone_approval_uses_the_binding_secret_without_prompting() {
+    #[test]
+    fn transfer_phone_approval_preparation_never_reads_or_prompts_for_a_secret() {
         let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let store = MemoryStore::default();
-        store
-            .set(&binding_account, RECOVERY_SECRET.as_bytes())
-            .unwrap();
-        let prompts = Arc::new(AtomicUsize::new(0));
-        let seen = prompts.clone();
 
-        let prepared = prepare_phone_approval(&controller, &store, &binding_account, move |_| {
-            seen.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Ok(Some(Zeroizing::new("wrong".into()))))
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
 
-        assert_eq!(prompts.load(Ordering::SeqCst), 0);
-        assert_eq!(prepared.passphrase.as_str(), RECOVERY_SECRET);
+        assert_eq!(preparation.invitation_id, uuid::Uuid::from_u128(7));
+        assert_eq!(preparation.method, EnrollmentMethod::Transfer);
     }
 
-    #[tokio::test]
-    async fn phone_approval_prompts_only_when_the_binding_secret_is_missing() {
+    #[test]
+    fn handoff_recovery_accepts_only_the_invitation_profile_and_epoch() {
+        let profile = KeyProfile::new(uuid::Uuid::new_v4(), 1).unwrap();
+        let preparation = PhoneApprovalPreparation {
+            invitation_id: uuid::Uuid::new_v4(),
+            claim_digest: String::new(),
+            method: EnrollmentMethod::Transfer,
+            vault_id: profile.vault_id,
+            key_epoch: profile.key_epoch,
+            fingerprint: profile.fingerprint().unwrap(),
+        };
+
+        assert!(phone_profile_matches(&profile, &preparation).unwrap());
+        let wrong_epoch = KeyProfile::new(preparation.vault_id, preparation.key_epoch + 1).unwrap();
+        assert!(!phone_profile_matches(&wrong_epoch, &preparation).unwrap());
+    }
+
+    #[test]
+    fn phone_approval_refuses_a_transcript_changed_after_preparation() {
         let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let store = MemoryStore::default();
-        let prompts = Arc::new(AtomicUsize::new(0));
-        let seen = prompts.clone();
-
-        let prepared = prepare_phone_approval(&controller, &store, &binding_account, move |_| {
-            seen.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
-        })
-        .await
-        .unwrap();
-
-        assert!(prepared.is_some());
-        assert_eq!(prompts.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            stored(&store, &binding_account).as_deref(),
-            Some(RECOVERY_SECRET.as_bytes())
-        );
-        assert!(
-            prepare_phone_approval(&controller, &store, &binding_account, |_| async {
-                panic!("verified fallback secret must be saved")
-            })
-            .await
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+        controller
+            .lock()
             .unwrap()
-            .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn cancelled_phone_approval_prompt_creates_no_request() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let prepared = prepare_phone_approval(
-            &controller,
-            &MemoryStore::default(),
-            &binding_account,
-            |_| std::future::ready(Ok(None)),
-        )
-        .await
-        .unwrap();
-        assert!(prepared.is_none());
-    }
-
-    #[tokio::test]
-    async fn wrong_stored_phone_secret_is_rejected_without_prompting_or_saving() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let store = RecordingStore::default();
-        store.set(&binding_account, b"wrong secret").unwrap();
-        store.writes.lock().unwrap().clear();
-
-        let Err(error) = prepare_phone_approval(&controller, &store, &binding_account, |_| async {
-            panic!("stored secret mismatch must not prompt")
-        })
-        .await
-        else {
-            panic!("wrong stored secret must not prepare a request");
-        };
-
-        assert_eq!(error.code, "vault-secret-mismatch");
-        assert!(store.writes.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn wrong_prompted_phone_secret_is_rejected_without_saving() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let store = MemoryStore::default();
-
-        let Err(error) = prepare_phone_approval(&controller, &store, &binding_account, |_| {
-            std::future::ready(Ok(Some(Zeroizing::new("wrong secret".into()))))
-        })
-        .await
-        else {
-            panic!("wrong prompted secret must not prepare a request");
-        };
-
-        assert_eq!(error.code, "wrong-passphrase");
-        assert!(stored(&store, &binding_account).is_none());
-    }
-
-    #[tokio::test]
-    async fn phone_approval_never_uses_another_binding_secret() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let other_binding_account = active_binding().vault_secret_account();
-        let store = MemoryStore::default();
-        store
-            .set(&other_binding_account, RECOVERY_SECRET.as_bytes())
-            .unwrap();
-        store.set(&binding_account, b"").unwrap();
-        let prepared = prepare_phone_approval(&controller, &store, &binding_account, |_| {
-            std::future::ready(Ok(None))
-        })
-        .await
-        .unwrap();
-        assert!(prepared.is_none());
-        assert_eq!(
-            stored(&store, &other_binding_account).as_deref(),
-            Some(RECOVERY_SECRET.as_bytes())
-        );
-    }
-
-    #[tokio::test]
-    async fn phone_approval_ignores_a_fallback_secret_write_failure() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let binding_account = active_binding().vault_secret_account();
-        let store = BindingWriteFails {
-            inner: MemoryStore::default(),
-            binding_account: binding_account.clone(),
-        };
-        assert!(
-            prepare_phone_approval(&controller, &store, &binding_account, |_| {
-                std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
-            })
-            .await
+            .invitation
+            .as_mut()
             .unwrap()
-            .is_some()
-        );
+            .transcript
+            .as_mut()
+            .unwrap()
+            .key_epoch += 1;
+
+        assert!(!invitation_is_current(
+            &controller.lock().unwrap(),
+            preparation.invitation_id,
+            &preparation.claim_digest,
+        ));
     }
 
-    #[tokio::test]
-    async fn phone_approval_refuses_a_transcript_changed_during_the_fallback_prompt() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-        let controller = Arc::new(controller);
-        let binding_account = active_binding().vault_secret_account();
-        let store = MemoryStore::default();
-        let changed = controller.clone();
-
-        let prepared = prepare_phone_approval(&controller, &store, &binding_account, move |_| {
-            changed
-                .lock()
-                .unwrap()
-                .invitation
-                .as_mut()
-                .unwrap()
-                .transcript
-                .as_mut()
-                .unwrap()
-                .key_epoch += 1;
-            std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
-        })
-        .await
-        .unwrap();
-
-        assert!(prepared.is_none());
-    }
-
-    #[tokio::test]
-    async fn phone_approval_rejects_a_forged_claimed_status_before_prompting() {
+    #[test]
+    fn phone_approval_rejects_a_forged_claimed_status() {
         let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
         controller
             .lock()
@@ -3841,59 +3840,257 @@ mod owner_retry_tests {
             .as_mut()
             .unwrap()
             .enrollment_id = uuid::Uuid::new_v4();
-        let binding_account = active_binding().vault_secret_account();
 
-        let result = prepare_phone_approval(
-            &controller,
-            &MemoryStore::default(),
-            &binding_account,
-            |_| async { panic!("invalid claimed status must fail before prompting") },
-        )
-        .await;
-        let Err(error) = result else {
-            panic!("invalid claimed status must fail")
+        let Err(error) = prepare_phone_approval_without_secret(&controller) else {
+            panic!("forged claimed status must fail");
         };
 
         assert_eq!(error.code, "enrollment");
     }
 
-    #[tokio::test]
-    async fn shared_secret_phone_approval_neither_reads_nor_prompts() {
+    #[test]
+    fn shared_secret_phone_approval_needs_no_stored_secret() {
         let (controller, _) = claimed_phone_fixture(EnrollmentMethod::SharedSecret);
-        let binding_account = active_binding().vault_secret_account();
-        let store = CountingStore {
-            reads: AtomicUsize::new(0),
-        };
-        let prepared = prepare_phone_approval(&controller, &store, &binding_account, |_| async {
-            panic!("shared-secret approval must not prompt")
-        })
-        .await
-        .unwrap()
-        .unwrap();
 
-        assert!(prepared.passphrase.is_empty());
-        assert_eq!(store.reads.load(Ordering::SeqCst), 0);
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+
+        assert_eq!(preparation.method, EnrollmentMethod::SharedSecret);
     }
 
-    #[tokio::test]
-    async fn phone_approval_fails_closed_when_the_binding_secret_cannot_be_read() {
-        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+    #[test]
+    fn only_an_unavailable_verified_handoff_capability_can_trigger_recovery() {
+        assert!(handoff_capability_unavailable(
+            &peppy_hosted_client::HostedClientError::KeysUnavailable
+        ));
+        assert!(!handoff_capability_unavailable(
+            &peppy_hosted_client::HostedClientError::Crypto
+        ));
+        assert!(!handoff_capability_unavailable(
+            &peppy_hosted_client::HostedClientError::InvalidProfile
+        ));
+    }
+
+    #[test]
+    fn missing_binding_secret_fails_closed_for_handoff_recovery() {
         let binding_account = active_binding().vault_secret_account();
-        let prompts = Arc::new(AtomicUsize::new(0));
-        let seen = prompts.clone();
 
-        let result =
-            prepare_phone_approval(&controller, &FailingStore, &binding_account, move |_| {
-                seen.fetch_add(1, Ordering::SeqCst);
-                std::future::ready(Ok(Some(Zeroizing::new(RECOVERY_SECRET.into()))))
-            })
-            .await;
-        let Err(error) = result else {
-            panic!("a secure-store read error must fail closed");
+        let error = stored_vault_secret(&MemoryStore::default(), &binding_account).unwrap_err();
+
+        assert_eq!(error.code, "vault-secret-unavailable");
+    }
+
+    #[test]
+    fn verified_unlock_saves_a_missing_binding_secret_without_replacing_an_existing_value() {
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+
+        save_verified_vault_secret_if_empty(&store, &binding_account, RECOVERY_SECRET).unwrap();
+        assert_eq!(
+            stored(&store, &binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+
+        save_verified_vault_secret_if_empty(&store, &binding_account, "replacement").unwrap();
+        assert_eq!(
+            stored(&store, &binding_account).as_deref(),
+            Some(RECOVERY_SECRET.as_bytes())
+        );
+    }
+
+    #[test]
+    fn recovered_cached_owner_creates_a_phone_handoff_without_changing_the_active_epoch() {
+        let (controller, mut recipient, profile, header) =
+            claimed_phone_fixture_with_material(EnrollmentMethod::Transfer);
+        let (session, binding, store, root) = session_for_phone_profile(&profile);
+        session
+            .client
+            .unlock(&profile, &header, RECOVERY_SECRET)
+            .unwrap();
+        let cache = session
+            .client
+            .export_native_key_cache(profile.key_epoch)
+            .unwrap();
+        store
+            .set(
+                &binding.key_cache_account(profile.key_epoch),
+                cache.native_storage_bytes(),
+            )
+            .unwrap();
+        drop(session);
+        let session = crate::session::open_session(
+            root.path(),
+            &store,
+            &binding,
+            &[profile.key_epoch],
+            crate::tests::noop(),
+        )
+        .unwrap();
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+        assert_eq!(
+            session.client.key_status().unwrap().active_epoch,
+            Some(profile.key_epoch)
+        );
+
+        assert!(recover_phone_handoff_after_fetch(
+            &session,
+            &binding,
+            &preparation,
+            &profile,
+            &header,
+            RECOVERY_SECRET,
+        )
+        .unwrap());
+        assert_eq!(
+            session.client.key_status().unwrap().active_epoch,
+            Some(profile.key_epoch)
+        );
+        let request = prepare_phone_approval_request(&controller, &preparation, &session)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut approved = controller.lock().unwrap().invitation.clone().unwrap();
+        approved.state = EnrollmentState::Approved;
+        let request: peppy_hosted_api::enrollment::ApproveInvitationRequest =
+            serde_json::from_str(&request).unwrap();
+        approved.encrypted_key_package = request.encrypted_key_package;
+        approved.transfer_nonce = request.transfer_nonce;
+        assert!(!recipient
+            .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn recovery_with_no_secret_wrong_secret_or_stale_material_creates_no_phone_request() {
+        let (controller, _, profile, header) =
+            claimed_phone_fixture_with_material(EnrollmentMethod::Transfer);
+        let (session, binding, store, root) = session_for_phone_profile(&profile);
+        session
+            .client
+            .unlock(&profile, &header, RECOVERY_SECRET)
+            .unwrap();
+        let cache = session
+            .client
+            .export_native_key_cache(profile.key_epoch)
+            .unwrap();
+        store
+            .set(
+                &binding.key_cache_account(profile.key_epoch),
+                cache.native_storage_bytes(),
+            )
+            .unwrap();
+        drop(session);
+        let session = crate::session::open_session(
+            root.path(),
+            &store,
+            &binding,
+            &[profile.key_epoch],
+            crate::tests::noop(),
+        )
+        .unwrap();
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+
+        assert_eq!(
+            stored_vault_secret(&MemoryStore::default(), &binding.vault_secret_account())
+                .unwrap_err()
+                .code,
+            "vault-secret-unavailable"
+        );
+        assert_eq!(
+            recover_phone_handoff_after_fetch(
+                &session,
+                &binding,
+                &preparation,
+                &profile,
+                &header,
+                "wrong secret",
+            )
+            .unwrap_err()
+            .code,
+            "vault-secret-mismatch"
+        );
+        let swapped_binding = crate::credentials::Binding {
+            device_id: uuid::Uuid::new_v4().to_string(),
+            ..binding.clone()
         };
+        assert!(!phone_handoff_recovery_is_current(
+            &controller,
+            &session,
+            &swapped_binding,
+            &preparation,
+        )
+        .unwrap());
+        assert!(!recover_phone_handoff_after_fetch(
+            &session,
+            &swapped_binding,
+            &preparation,
+            &profile,
+            &header,
+            RECOVERY_SECRET,
+        )
+        .unwrap());
+        assert!(matches!(
+            prepare_phone_approval_request(&controller, &preparation, &session).unwrap(),
+            Err(peppy_hosted_client::HostedClientError::KeysUnavailable)
+        ));
+    }
 
-        assert_eq!(error.code, "secure-store-unavailable");
-        assert_eq!(prompts.load(Ordering::SeqCst), 0);
+    #[test]
+    fn changed_claim_or_fetched_header_never_creates_a_phone_request() {
+        let (controller, _, profile, _header) =
+            claimed_phone_fixture_with_material(EnrollmentMethod::Transfer);
+        let (session, binding, _, _) = session_for_phone_profile(&profile);
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+        controller
+            .lock()
+            .unwrap()
+            .invitation
+            .as_mut()
+            .unwrap()
+            .transcript
+            .as_mut()
+            .unwrap()
+            .key_epoch += 1;
+
+        assert!(
+            !phone_handoff_recovery_is_current(&controller, &session, &binding, &preparation,)
+                .unwrap()
+        );
+        assert!(
+            prepare_phone_approval_request(&controller, &preparation, &session)
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+
+        let (controller, _, profile, _) =
+            claimed_phone_fixture_with_material(EnrollmentMethod::Transfer);
+        let (session, binding, _, _) = session_for_phone_profile(&profile);
+        let preparation = prepare_phone_approval_without_secret(&controller).unwrap();
+        let other = KeyProfile::new(profile.vault_id, profile.key_epoch + 1).unwrap();
+        let bad_header = peppy_crypto::create_vault_check_header(
+            &peppy_crypto::derive_root_key(RECOVERY_SECRET, &other).unwrap(),
+            other,
+        )
+        .unwrap();
+
+        assert_eq!(
+            recover_phone_handoff_after_fetch(
+                &session,
+                &binding,
+                &preparation,
+                &profile,
+                &bad_header,
+                RECOVERY_SECRET,
+            )
+            .unwrap_err()
+            .code,
+            "enrollment"
+        );
+        assert!(matches!(
+            prepare_phone_approval_request(&controller, &preparation, &session).unwrap(),
+            Err(peppy_hosted_client::HostedClientError::KeysUnavailable)
+        ));
     }
 
     #[test]

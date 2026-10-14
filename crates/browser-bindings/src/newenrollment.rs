@@ -104,7 +104,6 @@ struct PhoneStatus {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApproveInvitation {
     status_json: String,
-    passphrase: SecretString,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -488,16 +487,13 @@ impl BrowserCore {
                 Ok(json!({"sas": sas}))
             }
             "_worker_enrollment_approve_phone_invitation" => {
-                let mut input: ApproveInvitation =
+                let input: ApproveInvitation =
                     serde_json::from_str(raw.get()).map_err(|_| invalid())?;
                 let request = self
                     .enrollment
                     .as_ref()
                     .ok_or_else(unavailable)?
-                    .approve_phone_invitation(
-                        input.status_json,
-                        std::mem::take(&mut *input.passphrase.0),
-                    )
+                    .approve_phone_invitation_with_client(input.status_json, self.client()?)
                     .map_err(|_| invalid())?;
                 Ok(json!({"request": request}))
             }
@@ -534,6 +530,10 @@ fn empty_new_enrollment(raw: &RawValue) -> Result<(), Failure> {
 mod tests {
     use super::*;
     use peppy_crypto::{create_vault_check_header, derive_root_key};
+    use peppy_hosted_api::enrollment::{
+        ClaimInvitationRequest, EnrollmentRole, EnrollmentState, EnrollmentTranscript,
+        InvitationClaim, InvitationPublicClaim, InvitationStatus, PhonePairingQr,
+    };
 
     const ORIGIN: &str = "https://peppy.test/";
 
@@ -543,7 +543,6 @@ mod tests {
     }
 
     fn value(response: &Value) -> Value {
-        eprintln!("test response: {response}");
         assert_eq!(response["ok"], true, "{response}");
         response["value"].clone()
     }
@@ -610,6 +609,175 @@ mod tests {
             serde_json::from_str(&core.dispatch(r#"{"command":"get_phone_qr","args":{}}"#))
                 .unwrap();
         assert_eq!(response["error"]["code"], "unknown-command");
+    }
+
+    #[test]
+    fn phone_approval_accepts_only_status_json_on_the_private_worker_boundary() {
+        let mut core = owner_core();
+        let status = json!({"state": "claimed"}).to_string();
+
+        let status_only = dispatch(
+            &mut core,
+            "_worker_enrollment_approve_phone_invitation",
+            &json!({"statusJson": status}).to_string(),
+        );
+        assert_eq!(status_only["ok"], false);
+
+        let with_passphrase = dispatch(
+            &mut core,
+            "_worker_enrollment_approve_phone_invitation",
+            &json!({"statusJson": "{}", "passphrase": "must-not-cross-worker-rpc"}).to_string(),
+        );
+        assert_eq!(with_passphrase["error"]["code"], "invalid-request");
+
+        let public: Value = serde_json::from_str(&core.dispatch(
+            r#"{"command":"enrollment_approve_phone_invitation","args":{"statusJson":"{}"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(public["error"]["code"], "unknown-command");
+    }
+
+    #[test]
+    fn status_only_phone_approval_seals_a_handoff_the_recipient_can_confirm() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        let origin = canonical_origin(ORIGIN).unwrap();
+        let vault = VaultId::new();
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("correct horse battery staple", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        let metadata = crate::local_identity::IdentityMetadata {
+            version: 1,
+            origin: origin.clone(),
+            vault_id: vault.0,
+            device_id: Uuid::new_v4(),
+            role: crate::local_identity::DeviceRole::Owner,
+            profile: profile.clone(),
+            header,
+        };
+        value(&dispatch(
+            &mut core,
+            "_worker_initialize",
+            &json!({"origin": metadata.origin}).to_string(),
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enroll_identity",
+            &json!({
+                "metadata": metadata,
+                "deviceToken": "a".repeat(96),
+                "passphrase": "correct horse battery staple",
+            })
+            .to_string(),
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_new_owner_from_identity",
+            r#"{"deviceName":"Owner browser"}"#,
+        ));
+
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_create_phone_invitation",
+            r#"{"method":"transfer"}"#,
+        ));
+        value(&dispatch(
+            &mut core,
+            "_worker_enrollment_consume_created_phone_invitation",
+            &json!({"createdJson": json!({
+                "invitation_id": "00000000-0000-0000-0000-000000000007",
+                "expires_in_seconds": 300,
+            }).to_string()})
+            .to_string(),
+        ));
+        let qr: PhonePairingQr = serde_json::from_str(
+            value(&dispatch(
+                &mut core,
+                "_worker_enrollment_get_phone_qr",
+                "{}",
+            ))["qr"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut recipient = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            origin.clone(),
+            ClientKind::Android,
+            "Recipient phone".into(),
+        )
+        .unwrap();
+        let claim: ClaimInvitationRequest = serde_json::from_str(
+            &recipient
+                .claim_phone_invitation(serde_json::to_string(&qr).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        recipient
+            .consume_claim_response(
+                serde_json::to_string(&InvitationClaim {
+                    invitation_id: Uuid::from_u128(7),
+                    claim_secret: URL_SAFE_NO_PAD.encode([4; 32]),
+                    origin: origin.clone(),
+                    vault_id: profile.vault_id,
+                    fingerprint: profile.fingerprint().unwrap(),
+                    key_epoch: profile.key_epoch,
+                    method: EnrollmentMethod::Transfer,
+                    owner_transfer_public_key: qr.transfer_public_key.clone(),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let claimed = InvitationStatus {
+            state: EnrollmentState::Claimed,
+            expires_in_seconds: 300,
+            claim: Some(InvitationPublicClaim {
+                device: claim.device.clone(),
+                transfer_public_key: claim.transfer_public_key.clone(),
+                credential_digest: claim.credential_digest.clone(),
+                claim_authenticator: claim.claim_authenticator,
+            }),
+            transcript: Some(EnrollmentTranscript {
+                origin,
+                vault_id: profile.vault_id,
+                fingerprint: profile.fingerprint().unwrap(),
+                key_epoch: profile.key_epoch,
+                enrollment_id: Uuid::from_u128(7),
+                nonce: claim.invitation_token_digest,
+                owner_transfer_public_key: qr.transfer_public_key,
+                recipient_transfer_public_key: claim.transfer_public_key,
+                signing_public_key: claim.device.signing_public_key,
+                device_id: claim.device.device_id,
+                credential_digest: claim.credential_digest,
+                role: EnrollmentRole::Gateway,
+            }),
+            encrypted_key_package: None,
+            transfer_nonce: None,
+            profile: None,
+        };
+        let approval = value(&dispatch(
+            &mut core,
+            "_worker_enrollment_approve_phone_invitation",
+            &json!({"statusJson": serde_json::to_string(&claimed).unwrap()}).to_string(),
+        ));
+        let request = serde_json::from_str::<Value>(approval["request"].as_str().unwrap()).unwrap();
+        let approved = InvitationStatus {
+            state: EnrollmentState::Approved,
+            encrypted_key_package: request["encrypted_key_package"].as_str().map(str::to_owned),
+            transfer_nonce: request["transfer_nonce"].as_str().map(str::to_owned),
+            profile: Some(serde_json::to_value(&profile).unwrap()),
+            ..claimed
+        };
+
+        assert!(
+            recipient
+                .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
+                .unwrap()
+                .contains("admission_signature")
+        );
     }
 
     #[test]

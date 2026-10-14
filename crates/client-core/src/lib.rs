@@ -47,7 +47,10 @@ pub use mms::{
     MmsAcquisitionPart, MmsAcquisitionState, MmsContext, MmsReplyContext, MmsSource,
 };
 use peppy_crypto::FileKey;
-use peppy_crypto::enrollment::VerifiedHandoff;
+use peppy_crypto::enrollment::{
+    EncryptedHandoff, EnrollmentContext, EnrollmentRole, HandoffRootPackage, TransferKeypair,
+    VerifiedHandoff,
+};
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
     derive_purpose_key, derive_root_key, encrypt, profile_fingerprint_bytes,
@@ -693,6 +696,9 @@ struct EpochKeys {
     /// V1 native caches did not carry this derived key. They remain decrypt-compatible,
     /// but must not produce compactable events until a V2 cache or passphrase unlock.
     compaction: Option<PurposeKey>,
+    /// Present only after a passphrase unlock or authenticated handoff import; native caches
+    /// intentionally carry purpose keys alone and cannot recreate it.
+    handoff: Option<HandoffRootPackage>,
 }
 struct Store {
     conn: Connection,
@@ -916,6 +922,10 @@ impl Client {
             command: derive(KeyPurpose::Command)?,
             event: derive(KeyPurpose::Event)?,
             compaction: Some(derive(KeyPurpose::Compaction)?),
+            handoff: Some(
+                HandoffRootPackage::new(root, profile.clone(), header.clone())
+                    .map_err(|_| Error::Crypto)?,
+            ),
         };
         let mut guard = self.lock()?;
         let s = &mut *guard;
@@ -981,12 +991,24 @@ impl Client {
         })?;
         let derive =
             |purpose| derive_purpose_key(&root, &profile, purpose).map_err(|_| Error::Crypto);
+        let command = derive(KeyPurpose::Command)?;
+        let event = derive(KeyPurpose::Event)?;
+        let compaction = derive(KeyPurpose::Compaction)?;
+        let handoff = if context.role == EnrollmentRole::Owner {
+            Some(
+                HandoffRootPackage::new(root, profile.clone(), header.clone())
+                    .map_err(|_| Error::Crypto)?,
+            )
+        } else {
+            None
+        };
         let keys = EpochKeys {
             fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
-            command: derive(KeyPurpose::Command)?,
-            event: derive(KeyPurpose::Event)?,
-            compaction: Some(derive(KeyPurpose::Compaction)?),
+            command,
+            event,
+            compaction: Some(compaction),
             profile: profile.clone(),
+            handoff,
         };
         let mut guard = self.lock()?;
         let s = &mut *guard;
@@ -1149,15 +1171,24 @@ impl Client {
         let import = |bytes: &[u8; 32], purpose| {
             PurposeKey::import_native_cache(*bytes, &profile, purpose).map_err(|_| Error::Crypto)
         };
+        let command = import(&command, KeyPurpose::Command)?;
+        let event = import(&event, KeyPurpose::Event)?;
+        let compaction = compaction
+            .as_ref()
+            .map(|key| import(key, KeyPurpose::Compaction))
+            .transpose()?;
+        let handoff = s.keys.get_mut(&epoch).and_then(|existing| {
+            (existing.profile == profile)
+                .then(|| existing.handoff.take())
+                .flatten()
+        });
         let keys = EpochKeys {
             fingerprint: fingerprint.to_owned(),
-            command: import(&command, KeyPurpose::Command)?,
-            event: import(&event, KeyPurpose::Event)?,
-            compaction: compaction
-                .as_ref()
-                .map(|key| import(key, KeyPurpose::Compaction))
-                .transpose()?,
+            command,
+            event,
+            compaction,
             profile: profile.clone(),
+            handoff,
         };
         s.keys.insert(epoch, keys);
         recover_decoder_revision(
@@ -1179,6 +1210,34 @@ impl Client {
             active_epoch: s.active_epoch,
             unlocked_epochs: s.keys.keys().copied().collect(),
         })
+    }
+
+    /// Seals a phone enrollment handoff only from the active epoch's verified root capability.
+    /// Callers must pass a context produced by authenticated local enrollment validation, never
+    /// renderer or server input directly.
+    pub fn seal_phone_handoff(
+        &self,
+        sender: &TransferKeypair,
+        context: &EnrollmentContext,
+    ) -> Result<EncryptedHandoff, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
+            return Err(Error::InvalidProfile);
+        }
+        let keys = s.keys.get(&epoch).ok_or(Error::KeysUnavailable)?;
+        if keys.profile.vault_id != context.vault_id
+            || keys.profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&keys.profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+        {
+            return Err(Error::InvalidProfile);
+        }
+        keys.handoff
+            .as_ref()
+            .ok_or(Error::KeysUnavailable)?
+            .seal(sender, &context.recipient_transfer_public_key, context)
+            .map_err(|_| Error::Crypto)
     }
 
     /// Records the server capability advertised by a trusted snapshot response. Compactable
@@ -7693,9 +7752,17 @@ mod tests {
     }
 
     fn sealed_handoff_fixture(vault_id: Uuid, device_id: Uuid, key_epoch: u32) -> HandoffFixture {
+        sealed_handoff_fixture_with_role(vault_id, device_id, key_epoch, EnrollmentRole::Gateway)
+    }
+
+    fn sealed_handoff_fixture_with_role(
+        vault_id: Uuid,
+        device_id: Uuid,
+        key_epoch: u32,
+        role: EnrollmentRole,
+    ) -> HandoffFixture {
         use peppy_crypto::enrollment::{
-            EnrollmentPurpose, EnrollmentRole, HandoffRootPackage, TransferKeypair, open_handoff,
-            seal_handoff,
+            EnrollmentPurpose, HandoffRootPackage, TransferKeypair, open_handoff, seal_handoff,
         };
         use peppy_crypto::{create_vault_check_header, derive_root_key, profile_fingerprint_bytes};
 
@@ -7717,7 +7784,7 @@ mod tests {
             recipient_signing_public_key: [3; 32],
             device_id,
             credential_digest: [4; 32],
-            role: EnrollmentRole::Gateway,
+            role,
         };
         let package = HandoffRootPackage::new(root, profile.clone(), header.clone()).unwrap();
         let encrypted = seal_handoff(&sender, &recipient.public_key(), &context, package).unwrap();
@@ -7802,8 +7869,8 @@ mod tests {
     #[test]
     fn verified_handoff_requires_the_matching_header_profile_and_epoch() {
         use peppy_crypto::derive_root_key;
-        use peppy_crypto::enrollment::derive_admission_keypair;
         use peppy_crypto::enrollment::verify_admission_signature;
+        use peppy_crypto::enrollment::{derive_admission_keypair, open_handoff};
 
         let directory = tempfile::TempDir::new().unwrap();
         let vault_id = VaultId::new();
@@ -7814,7 +7881,7 @@ mod tests {
             handoff,
             profile,
             ..
-        } = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        } = sealed_handoff_fixture_with_role(vault_id.0, device_id.0, 4, EnrollmentRole::Owner);
         let verification_root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
         let admission_public_key = derive_admission_keypair(&verification_root)
             .unwrap()
@@ -7826,6 +7893,47 @@ mod tests {
         assert!(handoff.sign_admission_context(&tampered_context).is_err());
         client.import_verified_handoff(handoff).unwrap();
         assert_eq!(client.key_status().unwrap().unlocked_epochs, vec![4]);
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let imported_context = EnrollmentContext {
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            ..context
+        };
+        let encrypted = client
+            .seal_phone_handoff(&sender, &imported_context)
+            .unwrap();
+        assert!(
+            open_handoff(
+                &recipient,
+                &sender.public_key(),
+                &imported_context,
+                &encrypted
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn gateway_verified_handoff_does_not_retain_a_sealing_capability() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "gateway-handoff.db", vault_id, device_id);
+        let fixture = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        client.import_verified_handoff(fixture.handoff).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            ..fixture.context
+        };
+
+        assert!(matches!(
+            client.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
     }
 
     #[test]
@@ -7898,5 +8006,107 @@ mod tests {
 
         assert_eq!(key_state(&client, 4), before);
         assert!(client.key_status().unwrap().unlocked_epochs.is_empty());
+    }
+
+    #[test]
+    fn verified_unlock_seals_only_matching_phone_contexts_not_cached_keys() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole, open_handoff};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "seal.db", vault_id, device_id);
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Phone,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Gateway,
+        };
+
+        let sealed = client.seal_phone_handoff(&sender, &context).unwrap();
+        assert!(open_handoff(&recipient, &sender.public_key(), &context, &sealed).is_ok());
+        let mut wrong_epoch = context.clone();
+        wrong_epoch.key_epoch += 1;
+        assert!(matches!(
+            client.seal_phone_handoff(&sender, &wrong_epoch),
+            Err(Error::InvalidProfile)
+        ));
+        let mut manual = context.clone();
+        manual.purpose = EnrollmentPurpose::Manual;
+        assert!(client.seal_phone_handoff(&sender, &manual).is_err());
+
+        let cache = client.export_native_key_cache(4).unwrap();
+        client.import_native_key_cache(&cache).unwrap();
+        assert!(client.seal_phone_handoff(&sender, &context).is_ok());
+        client.lock().unwrap().keys.clear();
+        client.import_native_key_cache(&cache).unwrap();
+        assert!(matches!(
+            client.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
+    }
+
+    #[test]
+    fn reopened_cache_only_client_cannot_seal_a_phone_handoff() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let source = handoff_test_client(&directory, "reopened-cache.db", vault_id, device_id);
+        source
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let cache = source.export_native_key_cache(4).unwrap();
+        drop(source);
+
+        let cache_only = handoff_test_client(&directory, "reopened-cache.db", vault_id, device_id);
+        cache_only.import_native_key_cache(&cache).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Phone,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Gateway,
+        };
+
+        assert!(matches!(
+            cache_only.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
     }
 }
