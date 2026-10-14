@@ -115,6 +115,7 @@ fn history_row_with_new_compose_intent_is_not_recipientless() {
     let (snapshot, _) = session
         .snapshot(
             Some(&moved.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -775,6 +776,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             Some("http://127.0.0.1:9".into()),
             crate::notifications::NotificationPreferences::default(),
@@ -846,6 +848,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -898,6 +901,7 @@ fn clearing_saved_draft_recipients_persists_and_new_draft_cannot_send() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -1576,6 +1580,7 @@ mod real_server {
         let (snapshot, _) = session
             .snapshot(
                 None,
+                None,
                 crate::head(),
                 Some(server.url.clone()),
                 crate::notifications::NotificationPreferences::default(),
@@ -1609,6 +1614,7 @@ mod real_server {
         .await;
         let (snapshot, _) = session
             .snapshot(
+                None,
                 None,
                 crate::head(),
                 None,
@@ -1727,6 +1733,7 @@ mod real_server {
         let (snapshot, _) = receiver
             .snapshot(
                 Some(&draft.conversation_id),
+                None,
                 crate::head(),
                 None,
                 crate::notifications::NotificationPreferences::default(),

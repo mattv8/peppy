@@ -76,6 +76,29 @@ class MmsProviderTest {
         assertEquals("address_overflow", reader.read(2)!!.error)
     }
 
+    @Test fun utf8BoundsRejectMultibyteValuesWhoseUtf16LengthFitsTheLimit() {
+        val subject = "é".repeat(MmsProviderReader.MAX_STRING / 2 + 1)
+        provider.messages += message(1, 128, subject = subject)
+        provider.parts[1] = listOf(part(1))
+
+        assertTrue(subject.length <= MmsProviderReader.MAX_STRING)
+        assertTrue(subject.toByteArray(Charsets.UTF_8).size > MmsProviderReader.MAX_STRING)
+        assertEquals("metadata_overflow", reader.read(1)!!.error)
+    }
+
+    @Test fun utf8BoundsRetainMalformedSurrogateReplacementAtTheBoundary() {
+        val allowed = "\uD800".repeat(MmsProviderReader.MAX_STRING)
+        val oversized = allowed + "\uD800"
+        provider.messages += message(1, 128, subject = allowed)
+        provider.messages += message(2, 128, subject = oversized)
+        provider.parts[1] = listOf(part(1))
+        provider.parts[2] = listOf(part(2))
+
+        assertEquals(MmsProviderReader.MAX_STRING, allowed.toByteArray(Charsets.UTF_8).size)
+        assertNull(reader.read(1)!!.error)
+        assertEquals("metadata_overflow", reader.read(2)!!.error)
+    }
+
     @Test fun decodesKnownCharsetsAndRejectsOversizedInlineText() {
         val utf16 = MmsProviderPart(1, null, "text/plain", null, 1015, "hello", Uri.parse("content://mms/part/1"))
         assertEquals("hello", reader.readPartText(utf16))

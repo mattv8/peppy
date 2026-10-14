@@ -92,6 +92,34 @@ fn compaction_rejects_own_current_or_future_references() {
 }
 
 #[test]
+fn compaction_rejects_duplicate_references_but_accepts_distinct_references() {
+    let mut event = envelope();
+    event.purpose = EnvelopePurpose::Event;
+    event.command_id = None;
+    event.route = None;
+    let reference = CompactionReference {
+        producer_device_id: DeviceId::new(),
+        producer_sequence: SourceSequence(1),
+    };
+    event.compaction = Some(CompactionMetadata {
+        key: vec![7; 32],
+        terminal: false,
+        supersedes: vec![reference.clone(), reference.clone()],
+        checkpoint: false,
+    });
+    assert_eq!(event.validate(), Err(EnvelopeError::InvalidCompaction));
+
+    event.compaction.as_mut().unwrap().supersedes = vec![
+        reference.clone(),
+        CompactionReference {
+            producer_device_id: reference.producer_device_id,
+            producer_sequence: SourceSequence(2),
+        },
+    ];
+    assert!(event.validate().is_ok());
+}
+
+#[test]
 fn json_keeps_64_bit_sequence_as_a_string() {
     let encoded = serde_json::to_string(&envelope()).unwrap();
     assert!(encoded.contains("\"producer_sequence\":\"18446744073709551615\""));

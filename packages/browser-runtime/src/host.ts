@@ -11,6 +11,8 @@ import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
+const MAX_PREVIEWS_PER_SNAPSHOT = 32;
+const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
 const OWNER_NAME = "peppy-browser-v1";
 
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
@@ -92,6 +94,7 @@ type Invocation = { coreCommand: string; mutation: boolean };
 
 const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   load_state: { coreCommand: "snapshot", mutation: false },
+  load_history: { coreCommand: "load_history", mutation: false },
   save_draft: { coreCommand: "save_draft", mutation: true },
   send_draft: { coreCommand: "send_draft", mutation: true },
   discard_draft: { coreCommand: "discard_draft", mutation: true },
@@ -220,14 +223,20 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
   const { id, command, args } = request;
   try {
     if (command === "load_state" && session.phase !== "ready") return { id, ok: true, value: safeSnapshot(session.phase) };
+    if (command === "load_history" && session.phase !== "ready") throw { code: "locked" };
     if (command === "load_state") {
       // Settings are restored before the Rust snapshot is presented, never as message state.
       const savedPreferences = await settings?.load();
-       const snapshot = await session.query("snapshot", args);
-       if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
-       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
-       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-        return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+      const snapshot = await session.query("snapshot", args);
+      if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
+      const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
+      if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
+      return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+    }
+    if (command === "load_history") {
+      const page = await session.query("load_history", args);
+      if (typeof page !== "object" || page === null || Array.isArray(page)) throw { code: "invalid-request" };
+      return { id, ok: true, value: await addHistoryPreviews(session, page as Record<string, unknown>) };
     }
     if (command === "unlock") {
       const passphrase = secretString(args, "passphrase");
@@ -293,15 +302,25 @@ function contactAddresses(snapshot: Record<string, unknown>): Array<{ address: s
   return [...addresses.values()];
 }
 
-async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, budget: number): Promise<Record<string, unknown>> {
   if (!session.previewAttachment || !Array.isArray(snapshot.conversations)) return snapshot;
   const activeId = typeof snapshot.activeConversationId === "string" ? snapshot.activeConversationId : undefined;
   const conversation = snapshot.conversations.find(value => typeof value === "object" && value !== null && (value as Record<string, unknown>).id === activeId);
   if (!conversation || typeof conversation !== "object" || conversation === null) return snapshot;
   const view = conversation as Record<string, unknown>;
   if (!Array.isArray(view.messages)) return snapshot;
-  let remainingPreviews = 32;
-  const messages = await Promise.all(view.messages.map(async message => {
+  const messages = await addMessagePreviews(session, view.messages, budget);
+  return { ...snapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
+}
+
+async function addHistoryPreviews(session: HostSession, page: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!Array.isArray(page.messages)) return page;
+  return { ...page, messages: await addMessagePreviews(session, page.messages, MAX_PREVIEWS_PER_HISTORY_PAGE) };
+}
+
+async function addMessagePreviews(session: HostSession, messages: unknown[], budget: number): Promise<unknown[]> {
+  let remainingPreviews = budget;
+  const previewedMessages = await Promise.all(messages.map(async message => {
     if (typeof message !== "object" || message === null) return message;
     const messageView = message as Record<string, unknown>;
     if (!Array.isArray(messageView.attachments)) return message;
@@ -312,7 +331,7 @@ async function addVisiblePreviews(session: HostSession, snapshot: Record<string,
     }));
     return { ...messageView, attachments };
   }));
-  return { ...snapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
+  return previewedMessages;
 }
 
 async function addAttachmentPreview(session: HostSession, attachment: unknown): Promise<unknown> {

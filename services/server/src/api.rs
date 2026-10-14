@@ -2027,12 +2027,22 @@ async fn ingest(
             .execute(&mut *tx)
             .await
             .map_err(|error| insert_error(error, "ingest_compaction_insert"))?;
-        for reference in &compaction.supersedes {
-            sqlx::query("INSERT INTO record_supersessions(vault_id,by_cursor,target_producer_device_id,target_producer_sequence) VALUES($1,$2,$3,$4)")
+        if !compaction.supersedes.is_empty() {
+            let target_devices: Vec<_> = compaction
+                .supersedes
+                .iter()
+                .map(|reference| reference.producer_device_id.0)
+                .collect();
+            let target_sequences: Vec<_> = compaction
+                .supersedes
+                .iter()
+                .map(|reference| reference.producer_sequence.0 as i64)
+                .collect();
+            sqlx::query("INSERT INTO record_supersessions(vault_id,by_cursor,target_producer_device_id,target_producer_sequence) SELECT $1,$2,target_device,target_sequence FROM UNNEST($3::uuid[],$4::bigint[]) AS targets(target_device,target_sequence)")
                 .bind(p.vault)
                 .bind(c)
-                .bind(reference.producer_device_id.0)
-                .bind(reference.producer_sequence.0 as i64)
+                .bind(target_devices)
+                .bind(target_sequences)
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| insert_error(error, "ingest_supersession_insert"))?;

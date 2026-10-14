@@ -1,6 +1,6 @@
 import type {
   AttachmentView, BridgeError, ContactBookView, ContactEditOutcome, ContactEditRequestInput,
-  ContactEditStatus, ContactSyncStatus, ContactView, DesktopBridge, DesktopSnapshot, Draft,
+  ContactEditStatus, ContactSyncStatus, ContactView, DesktopBridge, DesktopSnapshot, Draft, HistoryPage,
   AppLockStatus, DraftInput, NotificationPreferences, NotificationTarget, PublicCopy,
   RecipientSuggestion, RestorableContact, SendDraftInput,
 } from "../../desktop/src/bridge";
@@ -378,7 +378,8 @@ export class BrowserBridge implements DesktopBridge {
     }
     this.stop("disconnected");
   }
-  public load_state(conversationId?: string): Promise<DesktopSnapshot> { return this.call("load_state", { conversationId }); }
+  public load_state(conversationId?: string, historyFromMessageId?: string): Promise<DesktopSnapshot> { return this.call("load_state", { conversationId, historyFromMessageId }); }
+  public load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage> { return this.call("load_history", { conversationId, beforeMessageId }); }
   public save_draft(input: DraftInput): Promise<Draft> { return this.call("save_draft", { input }); }
   public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }
   public discard_draft(input: { id: string; conversationId: string; expectedRevision: string }): Promise<void> { return this.call("discard_draft", { input }); }

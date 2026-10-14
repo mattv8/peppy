@@ -3,6 +3,7 @@
 /// windows can only reach the conversation/draft/read/attachment/close commands.
 const COMMANDS: &[&str] = &[
     "load_state",
+    "load_history",
     "configure_server",
     "unlock_sync",
     "get_app_lock_status",

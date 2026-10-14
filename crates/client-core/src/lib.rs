@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 pub use snapshot_projection::{SnapshotProjectionState, SnapshotProjectionStatus};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
@@ -95,6 +95,8 @@ const SNAPSHOT_GC_BATCH: i64 = 2_000;
 pub const MAX_APPLY_BATCH: usize = 1_000;
 /// Outbox rows sealed implicitly by enqueue/unlock/import/upload; use `seal_pending_batch` for more.
 pub const MAX_SEAL_BATCH: usize = 256;
+/// Maximum messages returned by one bounded history query.
+pub const MAX_HISTORY_PAGE: usize = 500;
 
 /// Read-only scheduler readiness. Hosts use this before a checkpointed work mutation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -457,6 +459,12 @@ pub struct Message {
     pub seen: bool,
     /// `None` for messages that are not send commands.
     pub send_state: Option<SendState>,
+}
+/// A chronological, bounded conversation-history window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessagePage {
+    pub messages: Vec<Message>,
+    pub has_more: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
@@ -2329,13 +2337,7 @@ impl Client {
 
     pub fn messages(&self, conversation_id: ConversationId) -> Result<Vec<Message>, Error> {
         let s = self.lock()?;
-        let mut query = s.conn.prepare(
-            "SELECT m.payload, m.seen,
-                (SELECT st.state FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id),
-                (SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id),
-                EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id)
-             FROM messages m WHERE m.conversation_id=? ORDER BY m.local_order",
-        )?;
+        let mut query = s.conn.prepare(MESSAGE_FULL_SELECT)?;
         let rows = query
             .query_map(params![conversation_id.to_string()], |r| {
                 Ok((
@@ -2348,23 +2350,79 @@ impl Client {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(payload, seen, status, outbox, is_command)| {
-                let send_state = if !is_command {
-                    None
-                } else if let Some(status) = status {
-                    Some(decode_state(&status)?)
-                } else {
-                    Some(match outbox.as_deref() {
-                        Some("unsealed" | "queued") => SendState::QueuedLocal,
-                        _ => SendState::AcceptedServer,
-                    })
-                };
-                Ok(Message {
-                    payload: localize(&s.conn, decode(payload.as_bytes())?)?.0,
-                    seen,
-                    send_state,
-                })
-            })
+            .map(|row| message_from_row(&s.conn, row))
+            .collect()
+    }
+
+    /// The most recently arrived message in a conversation, if it has one.
+    pub fn latest_message(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<Message>, Error> {
+        let s = self.lock()?;
+        let mut query = s.conn.prepare(LATEST_MESSAGE_SELECT)?;
+        query
+            .query_row(params![conversation_id.to_string()], message_row)
+            .optional()?
+            .map(|row| message_from_row(&s.conn, row))
+            .transpose()
+    }
+
+    /// Returns up to `limit` newest messages, chronologically, before an optional durable anchor.
+    pub fn messages_page(
+        &self,
+        conversation_id: ConversationId,
+        before: Option<MessageId>,
+        limit: usize,
+    ) -> Result<MessagePage, Error> {
+        let s = self.lock()?;
+        if limit == 0 {
+            return Err(Error::InvalidRequest("history page size"));
+        }
+        let before_order = before
+            .map(|id| history_anchor_order(&s.conn, conversation_id, id))
+            .transpose()?;
+        let limit = limit.min(MAX_HISTORY_PAGE);
+        let mut query = s.conn.prepare(MESSAGE_PAGE_SELECT)?;
+        let rows = query
+            .query_map(
+                params![
+                    conversation_id.to_string(),
+                    before_order,
+                    to_i64((limit + 1) as u64)?
+                ],
+                message_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        let messages = rows
+            .into_iter()
+            .take(limit)
+            .map(|row| message_from_row(&s.conn, row))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .rev()
+            .collect();
+        Ok(MessagePage { messages, has_more })
+    }
+
+    /// Returns the scoped anchor and every newer message in chronological order.
+    pub fn messages_since(
+        &self,
+        conversation_id: ConversationId,
+        from: MessageId,
+    ) -> Result<Vec<Message>, Error> {
+        let s = self.lock()?;
+        let from_order = history_anchor_order(&s.conn, conversation_id, from)?;
+        let mut query = s.conn.prepare(MESSAGE_SINCE_SELECT)?;
+        let rows = query
+            .query_map(
+                params![conversation_id.to_string(), from_order],
+                message_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| message_from_row(&s.conn, row))
             .collect()
     }
 
@@ -3037,24 +3095,23 @@ impl Client {
         let mut overlap = 0;
         let mut valid = current.received + page.len() as i64 <= current.expected
             && current.received_bytes + page_bytes <= MAX_SNAPSHOT_BYTES as i64;
-        for (cursor, wire) in &page {
-            let cursor = i64::try_from(cursor.0).unwrap_or(i64::MAX);
-            if !valid || cursor <= last || cursor > current.high_water {
-                valid = false;
-                break;
-            }
-            last = cursor;
-            let journaled: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT wire FROM journal WHERE cursor=?",
-                    params![cursor],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match journaled {
-                Some(existing) if existing != *wire => valid = false, // hard committed conflict
-                Some(_) => overlap += 1,
-                None => {}
+        {
+            let mut journal_wire = tx.prepare("SELECT wire FROM journal WHERE cursor=?")?;
+            for (cursor, wire) in &page {
+                let cursor = i64::try_from(cursor.0).unwrap_or(i64::MAX);
+                if !valid || cursor <= last || cursor > current.high_water {
+                    valid = false;
+                    break;
+                }
+                last = cursor;
+                let journaled: Option<Vec<u8>> = journal_wire
+                    .query_row(params![cursor], |row| row.get(0))
+                    .optional()?;
+                match journaled {
+                    Some(existing) if existing != *wire => valid = false, // hard committed conflict
+                    Some(_) => overlap += 1,
+                    None => {}
+                }
             }
         }
         if !valid {
@@ -3065,11 +3122,12 @@ impl Client {
             tx.commit()?;
             return Err(Error::SnapshotMismatch);
         }
-        for (cursor, wire) in &page {
-            tx.execute(
-                "INSERT INTO snapshot_records(generation,cursor,wire) VALUES(?,?,?)",
-                params![current.number, to_i64(cursor.0)?, wire],
-            )?;
+        {
+            let mut insert =
+                tx.prepare("INSERT INTO snapshot_records(generation,cursor,wire) VALUES(?,?,?)")?;
+            for (cursor, wire) in &page {
+                insert.execute(params![current.number, to_i64(cursor.0)?, wire])?;
+            }
         }
         current.received += page.len() as i64;
         current.received_bytes += page_bytes;
@@ -3237,21 +3295,88 @@ impl Client {
 fn advance_frontier(conn: &Connection, floor: u64) -> Result<u64, Error> {
     let start = receive_cursor(conn)?;
     let mut frontier = start.max(floor);
-    while conn
-        .query_row(
-            "SELECT 1 FROM journal WHERE cursor=?",
-            params![to_i64(frontier + 1)?],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some()
-    {
-        frontier += 1;
+    let mut expected = to_i64(frontier.checked_add(1).ok_or(Error::Database)?)?;
+    let mut query = conn.prepare("SELECT cursor FROM journal WHERE cursor>? ORDER BY cursor")?;
+    let mut cursors = query.query(params![to_i64(frontier)?])?;
+    while let Some(row) = cursors.next()? {
+        let cursor: i64 = row.get(0)?;
+        if cursor != expected {
+            break;
+        }
+        frontier = u64::try_from(cursor).map_err(|_| Error::Database)?;
+        expected = to_i64(frontier.checked_add(1).ok_or(Error::Database)?)?;
     }
     if frontier != start {
         set_meta(conn, "receive_cursor", &frontier.to_string())?;
     }
     Ok(frontier)
+}
+
+macro_rules! message_select {
+    ($suffix:literal) => {
+        concat!(
+            "SELECT m.payload, m.seen, ",
+            "(SELECT st.state FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id), ",
+            "(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id), ",
+            "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) ",
+            "FROM messages m ",
+            $suffix,
+        )
+    };
+}
+const MESSAGE_FULL_SELECT: &str =
+    message_select!("WHERE m.conversation_id=? ORDER BY m.local_order");
+const LATEST_MESSAGE_SELECT: &str =
+    message_select!("WHERE m.conversation_id=? ORDER BY m.local_order DESC LIMIT 1");
+const MESSAGE_PAGE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.local_order < ?2) ORDER BY m.local_order DESC LIMIT ?3"
+);
+const MESSAGE_SINCE_SELECT: &str =
+    message_select!("WHERE m.conversation_id=?1 AND m.local_order >= ?2 ORDER BY m.local_order");
+
+type StoredMessage = (String, bool, Option<String>, Option<String>, bool);
+
+fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
+    let (payload, seen, status, outbox, is_command) = row;
+    let send_state = if !is_command {
+        None
+    } else if let Some(status) = status {
+        Some(decode_state(&status)?)
+    } else {
+        Some(match outbox.as_deref() {
+            Some("unsealed" | "queued") => SendState::QueuedLocal,
+            _ => SendState::AcceptedServer,
+        })
+    };
+    Ok(Message {
+        payload: localize(conn, decode(payload.as_bytes())?)?.0,
+        seen,
+        send_state,
+    })
+}
+
+fn history_anchor_order(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    message_id: MessageId,
+) -> Result<i64, Error> {
+    conn.query_row(
+        "SELECT local_order FROM messages WHERE id=? AND conversation_id=?",
+        params![message_id.to_string(), conversation_id.to_string()],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or(Error::InvalidRequest("history anchor"))
 }
 
 fn restore_guarded(conn: &Connection) -> Result<bool, Error> {
@@ -3331,16 +3456,18 @@ fn drain_snapshot(
         MAX_SNAPSHOT_PAGE_BYTES,
         |r| Ok((r.get(1)?, r.get(2)?)),
     )?;
+    let mut journal_exists = conn.prepare("SELECT 1 FROM journal WHERE cursor=?")?;
+    let mut insert_journal = conn.prepare(
+        "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason,historical) VALUES(?,?,?,?,?,?,1)",
+    )?;
+    let mut delete_record =
+        conn.prepare("DELETE FROM snapshot_records WHERE generation=? AND cursor=?")?;
     let mut drained = 0i64;
     // Compaction generations record every retained compactable cursor, journaled or not.
     let projected = snapshot_projection::is_draining(conn, generation.number)?;
     for (cursor, wire) in rows {
-        let journaled = conn
-            .query_row(
-                "SELECT 1 FROM journal WHERE cursor=?",
-                params![cursor],
-                |_| Ok(()),
-            )
+        let journaled = journal_exists
+            .query_row(params![cursor], |_| Ok(()))
             .optional()?
             .is_some();
         // A journaled cursor was verified equal at append, and live ingest never inserts a
@@ -3352,25 +3479,19 @@ fn drain_snapshot(
                 IngestResult::Duplicate => ("duplicate", None),
                 IngestResult::Quarantined(reason) => ("quarantined", Some(reason.code())),
             };
-            conn.execute(
-                "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason,historical) VALUES(?,?,?,?,?,?,1)",
-                params![
-                    cursor,
-                    envelope.as_ref().map(|e| e.envelope_id.to_string()),
-                    envelope.as_ref().map(|e| e.key_epoch),
-                    wire,
-                    status,
-                    reason
-                ],
-            )?;
+            insert_journal.execute(params![
+                cursor,
+                envelope.as_ref().map(|e| e.envelope_id.to_string()),
+                envelope.as_ref().map(|e| e.key_epoch),
+                wire,
+                status,
+                reason
+            ])?;
         }
         if projected {
             snapshot_projection::retain(conn, generation.number, cursor, &wire)?;
         }
-        conn.execute(
-            "DELETE FROM snapshot_records WHERE generation=? AND cursor=?",
-            params![generation.number, cursor],
-        )?;
+        delete_record.execute(params![generation.number, cursor])?;
         drained += 1;
         report.drained += 1;
     }
@@ -3961,13 +4082,14 @@ fn classify(
         )?;
         return Ok(IngestResult::Duplicate);
     }
-    let mut query = conn.prepare("SELECT wire FROM journal WHERE envelope_id=?")?;
-    let earlier = query
-        .query_map(params![id], |r| r.get::<_, Vec<u8>>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if earlier.iter().any(|earlier| earlier == wire) {
+    let (same, any): (bool, bool) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM journal WHERE envelope_id=?1 AND wire=?2), EXISTS(SELECT 1 FROM journal WHERE envelope_id=?1)",
+        params![id, wire],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if same {
         Ok(IngestResult::Duplicate)
-    } else if earlier.is_empty() {
+    } else if !any {
         Ok(IngestResult::Journaled)
     } else {
         Ok(IngestResult::Quarantined(Q::EnvelopeConflict))
@@ -4289,15 +4411,17 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         }
         Err(error) => return Err(error.into()),
     }
-    for (position, reference) in message.record.attachments.iter().enumerate() {
-        conn.execute(
+    if !message.record.attachments.is_empty() {
+        let mut insert_attachment = conn.prepare(
             "INSERT INTO message_attachments(message_id,position,attachment_id) VALUES(?,?,?)",
-            params![
+        )?;
+        for (position, reference) in message.record.attachments.iter().enumerate() {
+            insert_attachment.execute(params![
                 id,
                 to_i64(position as u64)?,
                 reference.attachment_id.to_string()
-            ],
-        )?;
+            ])?;
+        }
     }
     let address = match message.direction {
         Direction::Incoming => message.sender_address.as_ref(),
@@ -5105,6 +5229,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         return Ok(0);
     };
     let mut count = 0;
+    let mut after = 0_i64;
     type Row = (
         i64,
         String,
@@ -5114,105 +5239,120 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         Vec<u8>,
         Option<String>,
     );
-    let rows: Vec<Row> = {
-        let mut query = conn.prepare(
-            "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) ORDER BY seq",
-        )?;
-        query
-            .query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows {
-        if count >= limit {
+    while count < limit {
+        let rows: Vec<Row> = {
+            let mut query = conn.prepare(
+                "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND seq>? ORDER BY seq LIMIT 256",
+            )?;
+            query
+                .query_map(params![after], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if rows.is_empty() {
             break;
         }
-        // MMS rows are held until every object has a remote ID, then media metadata is resolved
-        // from SQLCipher at seal time. Contact photo rows are held the same way, per row.
-        let mut photo_registrations = contact_media::Registrations::new();
-        let plain = match decode::<PrivatePayload>(&plain)? {
-            PrivatePayload::MmsMessage { message, .. } => match resolve_media(conn, &message)? {
-                Some(media) => serde_json::to_vec(&PrivatePayload::MmsMessage { message, media }),
-                None => continue,
-            },
-            PrivatePayload::SendMmsCommand { message, .. } => {
-                match resolve_media(conn, &message)? {
-                    Some(media) => {
-                        serde_json::to_vec(&PrivatePayload::SendMmsCommand { message, media })
-                    }
-                    None => continue,
-                }
+        for (sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows {
+            after = sequence;
+            if count >= limit {
+                break;
             }
-            payload @ (PrivatePayload::ContactUpserted { .. }
-            | PrivatePayload::ContactRemoved { .. }
-            | PrivatePayload::ContactEditRequest { .. }) => {
-                match contact_media::resolve_for_seal(conn, sequence, payload)? {
-                    Some((payload, refs)) => {
-                        photo_registrations = refs;
-                        serde_json::to_vec(&payload)
+            // MMS rows are held until every object has a remote ID, then media metadata is resolved
+            // from SQLCipher at seal time. Contact photo rows are held the same way, per row.
+            let mut photo_registrations = contact_media::Registrations::new();
+            let plain = match decode::<PrivatePayload>(&plain)? {
+                PrivatePayload::MmsMessage { message, .. } => {
+                    match resolve_media(conn, &message)? {
+                        Some(media) => {
+                            serde_json::to_vec(&PrivatePayload::MmsMessage { message, media })
+                        }
+                        None => continue,
                     }
-                    None => continue,
                 }
+                PrivatePayload::SendMmsCommand { message, .. } => {
+                    match resolve_media(conn, &message)? {
+                        Some(media) => {
+                            serde_json::to_vec(&PrivatePayload::SendMmsCommand { message, media })
+                        }
+                        None => continue,
+                    }
+                }
+                payload @ (PrivatePayload::ContactUpserted { .. }
+                | PrivatePayload::ContactRemoved { .. }
+                | PrivatePayload::ContactEditRequest { .. }) => {
+                    match contact_media::resolve_for_seal(conn, sequence, payload)? {
+                        Some((payload, refs)) => {
+                            photo_registrations = refs;
+                            serde_json::to_vec(&payload)
+                        }
+                        None => continue,
+                    }
+                }
+                _ => Ok(plain),
             }
-            _ => Ok(plain),
+            .map_err(|_| Error::Database)?;
+            let purpose = match purpose.as_str() {
+                "command" => EnvelopePurpose::Command,
+                "event" => EnvelopePurpose::Event,
+                _ => return Err(Error::Database),
+            };
+            let mut envelope = Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                envelope_id: parse(&envelope_id)?,
+                command_id: command_id.map(|id| parse(&id)).transpose()?,
+                vault_id: ctx.vault_id,
+                producer_device_id: ctx.device_id,
+                producer_sequence: SourceSequence(
+                    u64::try_from(sequence).map_err(|_| Error::Database)?,
+                ),
+                key_epoch: epoch,
+                crypto_suite: keys.profile.crypto_suite,
+                profile_fingerprint: keys.fingerprint.clone(),
+                purpose,
+                route: route.map(|route| decode(route.as_bytes())).transpose()?,
+                compaction: None,
+                ciphertext: Vec::new(),
+            };
+            let payload: PrivatePayload = decode(&plain)?;
+            envelope.compaction = compaction
+                .map(|value| decode(value.as_bytes()))
+                .transpose()?;
+            let plain = Zeroizing::new(serialize_authenticated_payload(
+                &payload,
+                envelope.compaction.as_ref(),
+            )?);
+            let aad = envelope.aad_bytes().map_err(|_| Error::Database)?;
+            let key = match purpose {
+                EnvelopePurpose::Command => &keys.command,
+                EnvelopePurpose::Event => &keys.event,
+            };
+            let sealed = encrypt(key, &aad, &plain).map_err(|_| Error::Crypto)?;
+            envelope.ciphertext = seal_frame(&sealed);
+            envelope.validate().map_err(|_| Error::Database)?;
+            conn.execute(
+                "UPDATE outbox SET wire=?, plain=NULL, state='queued' WHERE seq=?",
+                params![
+                    serde_json::to_vec(&envelope).map_err(|_| Error::Database)?,
+                    sequence
+                ],
+            )?;
+            contact_media::record_registrations(
+                conn,
+                &envelope_id,
+                sequence,
+                &photo_registrations,
+            )?;
+            count += 1;
         }
-        .map_err(|_| Error::Database)?;
-        let purpose = match purpose.as_str() {
-            "command" => EnvelopePurpose::Command,
-            "event" => EnvelopePurpose::Event,
-            _ => return Err(Error::Database),
-        };
-        let mut envelope = Envelope {
-            protocol_version: PROTOCOL_VERSION,
-            envelope_id: parse(&envelope_id)?,
-            command_id: command_id.map(|id| parse(&id)).transpose()?,
-            vault_id: ctx.vault_id,
-            producer_device_id: ctx.device_id,
-            producer_sequence: SourceSequence(
-                u64::try_from(sequence).map_err(|_| Error::Database)?,
-            ),
-            key_epoch: epoch,
-            crypto_suite: keys.profile.crypto_suite,
-            profile_fingerprint: keys.fingerprint.clone(),
-            purpose,
-            route: route.map(|route| decode(route.as_bytes())).transpose()?,
-            compaction: None,
-            ciphertext: Vec::new(),
-        };
-        let payload: PrivatePayload = decode(&plain)?;
-        envelope.compaction = compaction
-            .map(|value| decode(value.as_bytes()))
-            .transpose()?;
-        let plain = Zeroizing::new(serialize_authenticated_payload(
-            &payload,
-            envelope.compaction.as_ref(),
-        )?);
-        let aad = envelope.aad_bytes().map_err(|_| Error::Database)?;
-        let key = match purpose {
-            EnvelopePurpose::Command => &keys.command,
-            EnvelopePurpose::Event => &keys.event,
-        };
-        let sealed = encrypt(key, &aad, &plain).map_err(|_| Error::Crypto)?;
-        envelope.ciphertext = seal_frame(&sealed);
-        envelope.validate().map_err(|_| Error::Database)?;
-        conn.execute(
-            "UPDATE outbox SET wire=?, plain=NULL, state='queued' WHERE seq=?",
-            params![
-                serde_json::to_vec(&envelope).map_err(|_| Error::Database)?,
-                sequence
-            ],
-        )?;
-        contact_media::record_registrations(conn, &envelope_id, sequence, &photo_registrations)?;
-        count += 1;
     }
     Ok(count)
 }
@@ -5460,12 +5600,22 @@ fn attachment_row(conn: &Connection, id: AttachmentId) -> Result<Option<Attachme
         Vec<u8>,
         Option<String>,
     );
-    let row: Option<Raw> = conn
-        .query_row(
-            "SELECT state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,file_key,remote_object_id FROM attachments WHERE attachment_id=?",
-            params![id.to_string()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
-        )
+    let mut statement = conn.prepare_cached(
+        "SELECT state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,file_key,remote_object_id FROM attachments WHERE attachment_id=?",
+    )?;
+    let row: Option<Raw> = statement
+        .query_row(params![id.to_string()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })
         .optional()?;
     let Some((state, media_type, display_name, plain, cipher, sha, key, remote)) = row else {
         return Ok(None);
@@ -5487,7 +5637,7 @@ fn local_references(
     conn: &Connection,
     ids: &[AttachmentId],
 ) -> Result<Vec<AttachmentReference>, Error> {
-    let mut seen = Vec::with_capacity(ids.len());
+    let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
         let prepared_here = attachment_row(conn, *id)?.is_some_and(|row| {
             matches!(
@@ -5495,17 +5645,16 @@ fn local_references(
                 AttachmentState::PendingUpload | AttachmentState::Uploaded
             )
         });
-        if !prepared_here || seen.contains(id) {
+        if !prepared_here || !seen.insert(*id) {
             return Err(Error::InvalidRequest(
                 "attachment not prepared on this device",
             ));
         }
-        seen.push(*id);
     }
-    Ok(seen
-        .into_iter()
+    Ok(ids
+        .iter()
         .map(|attachment_id| AttachmentReference {
-            attachment_id,
+            attachment_id: *attachment_id,
             pending: false,
         })
         .collect())
@@ -5879,8 +6028,9 @@ fn merge_attachment_ids(
     source: &[AttachmentId],
 ) -> Result<Vec<AttachmentId>, Error> {
     let mut merged = destination.to_vec();
+    let mut seen: HashSet<_> = destination.iter().copied().collect();
     for attachment in source {
-        if !merged.contains(attachment) {
+        if seen.insert(*attachment) {
             merged.push(*attachment);
         }
     }

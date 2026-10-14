@@ -142,6 +142,8 @@ pub struct ConversationView {
     pub unread: u64,
     pub messages: Vec<MessageView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_older_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_blocked_reason: Option<String>,
@@ -151,6 +153,14 @@ pub struct ConversationView {
     /// This row exists only for local compose state and has no established history.
     #[serde(default)]
     pub draft_only: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub conversation_id: String,
+    pub messages: Vec<MessageView>,
+    pub has_more: bool,
 }
 
 #[derive(Serialize)]

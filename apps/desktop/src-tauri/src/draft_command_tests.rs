@@ -62,6 +62,7 @@ async fn main_load_for_window_preserves_requested_second_conversation() {
         session,
         Some(second.clone()),
         None,
+        None,
         Default::default(),
     )
     .await
@@ -116,6 +117,7 @@ async fn composer_save_move_updates_scope_for_next_load_and_save() {
         &window,
         session.clone(),
         Some(target.clone()),
+        None,
         None,
         Default::default(),
     )
@@ -280,6 +282,7 @@ async fn unknown_composer_load_never_falls_back_to_known_conversation() {
         &label(&deleted),
         session,
         Some(deleted),
+        None,
         None,
         Default::default(),
     )

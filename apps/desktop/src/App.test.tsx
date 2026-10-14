@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { StrictMode } from "react";
 import {
   act,
   cleanup,
@@ -561,6 +562,250 @@ afterEach(() => {
   localStorage.removeItem("peppy.layout.v1");
   window.history.replaceState({}, "", "/");
   vi.unstubAllGlobals();
+});
+
+describe("lazy conversation history", () => {
+  it("retains only valid loaded image previews across an anchored state refresh", async () => {
+    const conversation = host.conversations[0];
+    conversation.messages[0].attachments = [
+      { ...conversation.messages[0].attachments[0], id: "kept-preview", name: "kept.png", previewUrl: "blob:kept" },
+      { ...conversation.messages[0].attachments[0], id: "not-ready-preview", name: "not-ready.png", previewUrl: "blob:not-ready" },
+      { ...conversation.messages[0].attachments[0], id: "removed-preview", name: "removed.png", previewUrl: "blob:removed" },
+    ];
+    render(<App />);
+    expect(await screen.findByRole("img", { name: "kept.png" })).toHaveAttribute("src", "blob:kept");
+
+    const refreshed = structuredClone(host.load(conversation.id));
+    refreshed.conversations[0].messages[0].attachments = [
+      { ...conversation.messages[0].attachments[0], previewUrl: undefined },
+      { ...conversation.messages[0].attachments[1], state: "failed", previewUrl: undefined },
+    ];
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+    await act(async () => hint?.());
+
+    expect(bridge.load_state).toHaveBeenLastCalledWith(conversation.id, conversation.messages[0].id);
+    expect(screen.getByRole("img", { name: "kept.png" })).toHaveAttribute("src", "blob:kept");
+    expect(screen.queryByRole("img", { name: "not-ready.png" })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-attachment-id="removed-preview"]')).not.toBeInTheDocument();
+  });
+
+  it("requests subscription refreshes from the first loaded message anchor", async () => {
+    const conversation = host.conversations[0];
+    conversation.messages.unshift({
+      ...conversation.messages[0],
+      id: "m-first-loaded",
+      body: "First loaded message",
+      attachments: [],
+    });
+    render(<App />);
+    await screen.findByText("First loaded message");
+
+    await act(async () => hint?.());
+
+    expect(bridge.load_state).toHaveBeenLastCalledWith(conversation.id, "m-first-loaded");
+  });
+
+  it("retains a prepended prefix and exhaustion when its deferred refresh resolves later", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const refresh = deferred<DesktopSnapshot>();
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.mocked(bridge.load_state).mockImplementationOnce(async (id) => host.load(id)).mockReturnValueOnce(refresh.promise);
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    await act(async () => hint?.());
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await act(async () => page.resolve({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-older-prefix", body: "Older prefix", attachments: [] }],
+      hasMore: false,
+    }));
+    expect(await screen.findByText("Older prefix")).toBeInTheDocument();
+    expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
+
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].hasOlderMessages = true;
+    refreshed.conversations[0].messages.push({
+      ...conversation.messages[0],
+      id: "m-arrived-during-refresh",
+      body: "Arrived during refresh",
+      attachments: [],
+    });
+    await act(async () => refresh.resolve(refreshed));
+
+    expect(screen.getByText("Older prefix")).toBeInTheDocument();
+    expect(screen.getByText("Arrived during refresh")).toBeInTheDocument();
+    expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  });
+
+  it("renders every arrival in an anchored refresh larger than fifty messages", async () => {
+    const conversation = host.conversations[0];
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].messages = Array.from({ length: 61 }, (_, index) => ({
+      ...conversation.messages[0],
+      id: index === 0 ? conversation.messages[0].id : `m-arrival-${index}`,
+      body: index === 0 ? conversation.messages[0].body : `Arrival ${index}`,
+      attachments: [],
+    }));
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+
+    await act(async () => hint?.());
+
+    expect(await screen.findByText("Arrival 60")).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-message-id]")).toHaveLength(61);
+    expect(screen.getByText("Arrival 1")).toBeInTheDocument();
+  });
+
+  it("clears previews and discards an older page that resolves after lock", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    conversation.messages[0].attachments[0].previewUrl = "blob:sensitive";
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    expect(await screen.findByRole("img", { name: "photo.png" })).toHaveAttribute("src", "blob:sensitive");
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+
+    const locked = host.load(conversation.id);
+    locked.connection = { state: "offline", origin: "https://example.test", errorCode: "app-locked" };
+    locked.conversations = [];
+    locked.activeConversationId = undefined;
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(locked);
+    await act(async () => hint?.());
+    expect(await screen.findByRole("heading", { name: "Peppy is locked" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "photo.png" })).not.toBeInTheDocument();
+
+    await act(async () => page.resolve({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-stale-after-lock", body: "Stale after lock", attachments: [] }],
+      hasMore: false,
+    }));
+    expect(screen.queryByText("Stale after lock")).not.toBeInTheDocument();
+  });
+
+  it("does not update state when an older page resolves after unmount", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { unmount } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    unmount();
+
+    await act(async () => page.resolve({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-stale-after-unmount", body: "Stale after unmount", attachments: [] }],
+      hasMore: false,
+    }));
+
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("shows a visible error when a history page belongs to another conversation", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: "river",
+      messages: [{ ...conversation.messages[0], id: "m-wrong-conversation", body: "Wrong conversation", attachments: [] }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry loading older messages" })).toBeInTheDocument();
+    expect(screen.getByText("Hello from Aurora")).toBeInTheDocument();
+    expect(screen.queryByText("Wrong conversation")).not.toBeInTheDocument();
+  });
+
+  it("keeps historical prepends out of the live region until the next frame", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-quiet-history", body: "Quiet history", attachments: [] }],
+      hasMore: false,
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    frames.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+
+    expect(await screen.findByText("Quiet history")).toBeInTheDocument();
+    const content = document.getElementById("message-list-content")!;
+    expect(content).toHaveAttribute("aria-live", "off");
+    await act(async () => frames.splice(0).forEach((callback) => callback(performance.now())));
+    expect(content).not.toHaveAttribute("aria-live");
+  });
+
+  it("loads the initial snapshot and an older page under StrictMode", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-strict-before", body: "Strict history" }],
+      hasMore: false,
+    });
+    render(<StrictMode><App /></StrictMode>);
+    expect(await screen.findByText("Hello from Aurora")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Strict history")).toBeInTheDocument();
+  });
+
+  it("loads an older page once from the manual fallback and retains chronological rows", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-before", body: "Older message" }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Older message")).toBeInTheDocument();
+    expect(bridge.load_history).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  });
+
+  it("keeps rendered history when an older-page retry fails", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-before", body: "Recovered history" }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByRole("button", { name: "Retry loading older messages" })).toBeInTheDocument();
+    expect(screen.getByText("Hello from Aurora")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading older messages" }));
+    expect(await screen.findByText("Recovered history")).toBeInTheDocument();
+  });
+
+  it("discards an older-page response after switching conversations", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    page.resolve({ conversationId: conversation.id, messages: [{ ...conversation.messages[0], id: "m-stale", body: "Stale history" }], hasMore: false });
+    await screen.findByText("Hello from River");
+    expect(screen.queryByText("Stale history")).not.toBeInTheDocument();
+  });
 });
 
 describe("new-recipient drafts", () => {

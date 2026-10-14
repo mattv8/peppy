@@ -3,7 +3,9 @@
 //! and are invoked from `spawn_blocking`, never directly on an async worker or the UI thread.
 use crate::{
     credentials::{ensure_database_key, prepare_data_dir, stored_credential, Binding},
-    dto::{self, AttachmentView, ConversationView, DraftView, GatewayView, Head, Snapshot},
+    dto::{
+        self, AttachmentView, ConversationView, DraftView, GatewayView, Head, HistoryPage, Snapshot,
+    },
     error::{core_error, BridgeError, BridgeResult},
     media,
     net::Api,
@@ -30,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
-const MAX_ACTIVE_MESSAGES: usize = 500;
+const INITIAL_HISTORY_MESSAGES: usize = 50;
 const MAX_PREVIEWS_PER_SNAPSHOT: usize = 12;
 const MAX_PREVIEW_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
@@ -437,6 +439,7 @@ impl Session {
         message: &Message,
         budget: &mut usize,
         deferred: &mut bool,
+        eligible: Option<&HashSet<AttachmentId>>,
     ) -> Vec<AttachmentView> {
         let errors = self
             .transfer_errors
@@ -473,7 +476,7 @@ impl Session {
                         .cloned();
                     preview = match cached {
                         Some(value) => value,
-                        None if *budget > 0 => {
+                        None if eligible.is_none_or(|ids| ids.contains(&id)) && *budget > 0 => {
                             *budget -= 1;
                             let value = self
                                 .client
@@ -485,7 +488,9 @@ impl Session {
                             value
                         }
                         None => {
-                            *deferred = true;
+                            if eligible.is_none_or(|ids| ids.contains(&id)) {
+                                *deferred = true;
+                            }
                             None
                         }
                     };
@@ -495,17 +500,62 @@ impl Session {
             .collect()
     }
 
+    fn message_views(
+        &self,
+        messages: Vec<Message>,
+        budget: &mut usize,
+        deferred: &mut bool,
+        eligible: Option<&HashSet<AttachmentId>>,
+    ) -> Vec<dto::MessageView> {
+        messages
+            .iter()
+            .map(|message| {
+                dto::message_view(
+                    message,
+                    self.attachment_views(message, budget, deferred, eligible),
+                )
+            })
+            .collect()
+    }
+
+    pub fn history_page(
+        &self,
+        conversation_id: &str,
+        before_message_id: &str,
+    ) -> BridgeResult<HistoryPage> {
+        let conversation = ConversationId::from_str(conversation_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+        let anchor = MessageId::from_str(before_message_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The message ID is invalid."))?;
+        let page = self
+            .client
+            .messages_page(conversation, Some(anchor), INITIAL_HISTORY_MESSAGES)
+            .map_err(core_error)?;
+        let (mut budget, mut deferred) = (MAX_PREVIEWS_PER_SNAPSHOT, false);
+        let messages = self.message_views(page.messages, &mut budget, &mut deferred, None);
+        Ok(HistoryPage {
+            conversation_id: conversation.to_string(),
+            messages,
+            has_more: page.has_more,
+        })
+    }
+
     /// Builds the sanitized UI snapshot from core state. Returns whether previews were deferred
     /// (the caller then emits another state hint).
     pub fn snapshot(
         &self,
         requested: Option<&str>,
+        history_from_message_id: Option<&str>,
         head: Head,
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
     ) -> BridgeResult<(Snapshot, bool)> {
         let conversations = self.client.list_conversations().map_err(core_error)?;
         let drafts = self.client.compose_drafts().map_err(core_error)?;
+        let drafts_by_conversation: HashMap<ConversationId, _> = drafts
+            .iter()
+            .map(|draft| (draft.conversation_id, draft))
+            .collect();
         let known: HashSet<ConversationId> = conversations
             .iter()
             .map(|c| c.conversation_id)
@@ -520,14 +570,14 @@ impl Session {
         let (mut budget, mut deferred) = (MAX_PREVIEWS_PER_SNAPSHOT, false);
         let mut views = Vec::new();
         for conversation in &conversations {
-            let messages = self
+            let latest = self
                 .client
-                .messages(conversation.conversation_id)
+                .latest_message(conversation.conversation_id)
                 .map_err(core_error)?;
-            let last = messages.last();
-            let draft = drafts
-                .iter()
-                .find(|d| d.conversation_id == conversation.conversation_id);
+            let last = latest.as_ref();
+            let draft = drafts_by_conversation
+                .get(&conversation.conversation_id)
+                .copied();
             let draft_only = draft
                 .map(|draft| self.client.compose_draft_is_new(draft.draft_id))
                 .transpose()
@@ -547,16 +597,41 @@ impl Session {
                     }
                 })
                 .unwrap_or_default();
-            let message_views = if Some(conversation.conversation_id) == active {
-                let start = messages.len().saturating_sub(MAX_ACTIVE_MESSAGES);
-                messages[start..]
-                    .iter()
-                    .map(|m| {
-                        dto::message_view(m, self.attachment_views(m, &mut budget, &mut deferred))
-                    })
-                    .collect()
+            let (message_views, has_older_messages) = if Some(conversation.conversation_id)
+                == active
+            {
+                let history_from_message_id = (requested.is_some()
+                    && Some(conversation.conversation_id) == active)
+                    .then_some(history_from_message_id)
+                    .flatten();
+                let (messages, has_more) = match history_from_message_id {
+                    Some(anchor) => {
+                        let anchor = MessageId::from_str(anchor).map_err(|_| {
+                            BridgeError::new("invalid-request", "The message ID is invalid.")
+                        })?;
+                        let has_more = !self
+                            .client
+                            .messages_page(conversation.conversation_id, Some(anchor), 1)
+                            .map_err(core_error)?
+                            .messages
+                            .is_empty();
+                        self.client
+                            .messages_since(conversation.conversation_id, anchor)
+                            .map(|messages| (messages, has_more))
+                    }
+                    None => self
+                        .client
+                        .messages_page(conversation.conversation_id, None, INITIAL_HISTORY_MESSAGES)
+                        .map(|page| (page.messages, page.has_more)),
+                }
+                .map_err(core_error)?;
+                let eligible = snapshot_preview_ids(&messages);
+                (
+                    self.message_views(messages, &mut budget, &mut deferred, Some(&eligible)),
+                    Some(has_more),
+                )
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let reply_context = self
                 .client
@@ -568,6 +643,7 @@ impl Session {
                 preview,
                 unread: conversation.unread_count,
                 messages: message_views,
+                has_older_messages,
                 participants: reply_context
                     .as_ref()
                     .map(|context| context.recipients.clone()),
@@ -596,6 +672,7 @@ impl Session {
                 },
                 unread: 0,
                 messages: Vec::new(),
+                has_older_messages: None,
                 participants: None,
                 reply_blocked_reason: None,
                 recipientless_draft: draft.recipients.is_empty(),
@@ -603,7 +680,7 @@ impl Session {
             });
         }
         let draft = active
-            .and_then(|id| drafts.iter().find(|d| d.conversation_id == id))
+            .and_then(|id| drafts_by_conversation.get(&id).copied())
             .map(dto::draft_view);
         let pending = self
             .client
@@ -715,11 +792,18 @@ impl Session {
     pub fn snapshot_scoped(
         &self,
         requested: &str,
+        history_from_message_id: Option<&str>,
         head: Head,
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
     ) -> BridgeResult<(Snapshot, bool)> {
-        let snapshot = self.snapshot(Some(requested), head, origin, notification_preferences)?;
+        let snapshot = self.snapshot(
+            Some(requested),
+            history_from_message_id,
+            head,
+            origin,
+            notification_preferences,
+        )?;
         if snapshot.0.active_conversation_id.as_deref() != Some(requested) {
             return Err(BridgeError::new(
                 "not-found",
@@ -744,6 +828,34 @@ impl Session {
                 .unwrap_or_else(|poison| poison.into_inner()),
         );
     }
+}
+
+fn snapshot_preview_ids(messages: &[Message]) -> HashSet<AttachmentId> {
+    bounded_preview_ids(
+        messages
+            .iter()
+            .rev()
+            .take(INITIAL_HISTORY_MESSAGES)
+            .flat_map(|message| {
+                message
+                    .payload
+                    .record
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.attachment_id)
+            }),
+    )
+}
+
+fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<AttachmentId> {
+    let mut eligible = HashSet::with_capacity(MAX_PREVIEW_CACHE);
+    for id in ids {
+        eligible.insert(id);
+        if eligible.len() == MAX_PREVIEW_CACHE {
+            break;
+        }
+    }
+    eligible
 }
 
 #[cfg(test)]
@@ -802,5 +914,115 @@ mod tests {
 
         session.mark_seen_scoped(&[id], Some(conversation)).unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn snapshots_and_pages_keep_history_continuous_beyond_the_initial_window() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let conversation = session
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "0".into(),
+                provider_message_id: Some("history-0".into()),
+                imported: false,
+            })
+            .unwrap()
+            .conversation_id;
+        for index in 1..52 {
+            session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation),
+                    sender_address: "+15555550100".into(),
+                    body: index.to_string(),
+                    provider_message_id: Some(format!("history-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        let initial = session
+            .snapshot(
+                Some(&conversation.to_string()),
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0;
+        let view = initial
+            .conversations
+            .iter()
+            .find(|view| view.id == conversation.to_string())
+            .unwrap();
+        assert_eq!(view.messages.len(), INITIAL_HISTORY_MESSAGES);
+        assert_eq!(view.has_older_messages, Some(true));
+        let anchor = view.messages[0].id.clone();
+        let page = session
+            .history_page(&conversation.to_string(), &anchor)
+            .unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert!(!page.has_more);
+        let refreshed = session
+            .snapshot(
+                Some(&conversation.to_string()),
+                Some(&anchor),
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0;
+        assert_eq!(refreshed.conversations[0].has_older_messages, Some(true));
+        assert!(session
+            .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
+            .is_err());
+        let other = session
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "other".into(),
+                provider_message_id: Some("history-other".into()),
+                imported: false,
+            })
+            .unwrap();
+        let other_id = session.client.messages(other.conversation_id).unwrap()[0]
+            .payload
+            .record
+            .message_id
+            .to_string();
+        assert!(session
+            .history_page(&conversation.to_string(), &other_id)
+            .is_err());
+    }
+
+    #[test]
+    fn snapshot_preview_ids_bound_auto_hydration_to_the_newest_window() {
+        let ids = (0..300)
+            .map(|_| AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap())
+            .collect::<Vec<_>>();
+        let eligible = bounded_preview_ids(ids.iter().copied());
+        assert_eq!(eligible.len(), MAX_PREVIEW_CACHE);
+        assert!(ids[..MAX_PREVIEW_CACHE]
+            .iter()
+            .all(|id| eligible.contains(id)));
+        assert!(ids[MAX_PREVIEW_CACHE..]
+            .iter()
+            .all(|id| !eligible.contains(id)));
     }
 }

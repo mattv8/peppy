@@ -551,9 +551,11 @@ pub fn list_patches(
         }
     };
     let mut old_wire = Vec::with_capacity(old.len());
+    let mut old_ids = HashSet::with_capacity(old.len());
     let mut read_only = HashSet::new();
     for item in old {
         let id = item_id(item)?.ok_or_else(|| invalid("An original contact field has no ID."))?;
+        old_ids.insert(id.clone());
         if item.get("readOnly").and_then(Value::as_bool) == Some(true) {
             read_only.insert(id.clone());
         }
@@ -565,7 +567,7 @@ pub fn list_patches(
     for item in ui_items(next)? {
         match item_id(item)? {
             Some(id) => {
-                if !old_wire.iter().any(|(old_id, _)| *old_id == id) {
+                if !old_ids.contains(&id) {
                     return Err(invalid(
                         "A contact field ID does not belong to this contact.",
                     ));
@@ -1061,6 +1063,32 @@ mod tests {
             request["expected_old"]["phones"],
             json!([{"id":"p1","label":"mobile","value":"1"}])
         );
+    }
+
+    #[test]
+    fn update_rejects_a_foreign_contact_field_id_with_the_exact_error() {
+        let input = json!({
+            "targetBookId":"book", "kind":"update", "contactId":"c1", "baseRevision":"1",
+            "patches":[{"field":"phones", "expectedOld":[{"id":"p1","label":"mobile","number":"1","readOnly":false}], "value":[{"id":"foreign","label":"mobile","number":"2","readOnly":false}]}]
+        });
+        let error = update_patches(
+            &input,
+            &Capabilities {
+                can_write: true,
+                supports_notes: true,
+                supports_photo: true,
+                supports_birthday: true,
+                can_restore: true,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ContactError::Ui {
+                code: "invalid-contact-edit",
+                message: "A contact field ID does not belong to this contact.",
+            }
+        ));
     }
 }
 

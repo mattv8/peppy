@@ -195,7 +195,8 @@ struct ContactsCheckpoint: Equatable {
     }
 
     mutating func addPhotoKeys(_ keys: [String]) {
-        for key in keys where !pendingPhotoKeys.contains(key) { pendingPhotoKeys.append(key) }
+        var known = Set(pendingPhotoKeys)
+        for key in keys where known.insert(key).inserted { pendingPhotoKeys.append(key) }
         if pendingPhotoKeys.count > Self.maxPendingPhotoKeys {
             // Overflow: a full sweep covers everything instead.
             pendingPhotoKeys.removeAll()
@@ -502,12 +503,24 @@ struct NativeContactsCoordinator {
     ) async throws {
         var reads = 0
         var examined = 0
-        while let key = checkpoint.pendingPhotoKeys.first, reads < budget.reads, !isCancelled() {
-            try await checkPhoto(sourceKey: key, core: nil, book: book, bookId: bookId, reads: &reads, report: &report)
-            checkpoint.pendingPhotoKeys.removeFirst()
-            if examined % 20 == 0 { try writeCheckpoint(bookId, checkpoint) }
-            examined += 1
+        var consumed = 0
+        do {
+            while consumed < checkpoint.pendingPhotoKeys.count, reads < budget.reads, !isCancelled() {
+                let key = checkpoint.pendingPhotoKeys[consumed]
+                try await checkPhoto(sourceKey: key, core: nil, book: book, bookId: bookId, reads: &reads, report: &report)
+                consumed += 1
+                if examined % 20 == 0 {
+                    checkpoint.pendingPhotoKeys.removeFirst(consumed)
+                    consumed = 0
+                    try writeCheckpoint(bookId, checkpoint)
+                }
+                examined += 1
+            }
+        } catch {
+            if consumed > 0 { checkpoint.pendingPhotoKeys.removeFirst(consumed) }
+            throw error
         }
+        if consumed > 0 { checkpoint.pendingPhotoKeys.removeFirst(consumed) }
         while checkpoint.sweepActive, reads < budget.reads, examined < budget.sweep, !isCancelled() {
             let page = try Self.object(client.contactBookView(inputJson: Self.json([
                 "book_id": bookId, "offset": checkpoint.sweepOffset, "limit": 50,

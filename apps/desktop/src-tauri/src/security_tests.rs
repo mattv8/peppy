@@ -173,6 +173,13 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
 
     let composer = permissions(include_str!("../capabilities/composer.json"));
     let main = permissions(include_str!("../capabilities/default.json"));
+    assert!(commands.contains(&"load_history".to_owned()));
+    assert!(registered.contains("fn load_history("));
+    let handler = &registered[registered.find("tauri::generate_handler![").unwrap()..];
+    assert!(handler.contains("\n        load_history,"));
+    assert!(crate::COMPOSER_COMMANDS.contains(&"load_history"));
+    assert!(main.contains("allow-load-history"));
+    assert!(composer.contains("allow-load-history"));
     for command in [
         "enrollment_begin_vault_request",
         "enrollment_vault_request_status",

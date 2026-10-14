@@ -14,6 +14,7 @@ use peppy_desktop_api::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
 use std::{
+    collections::HashMap,
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::{Mutex, OnceLock},
@@ -33,6 +34,7 @@ mod notifications;
 mod sync;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const HISTORY_PAGE_SIZE: usize = 50;
 
 #[derive(Deserialize)]
 struct Request<'a> {
@@ -271,6 +273,7 @@ impl BrowserCore {
             "_worker_apply_server_context" => self.context_command(command, args_value(raw_args)?),
             "set_host_context" => self.set_host_context(args_value(raw_args)?),
             "snapshot" => self.snapshot(args_value(raw_args)?),
+            "load_history" => self.load_history(args_value(raw_args)?),
             "save_draft" => self.save_draft(args_value(raw_args)?),
             "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
@@ -389,28 +392,40 @@ impl BrowserCore {
         let client = self.client()?;
         let conversations = client.list_conversations().map_err(core)?;
         let drafts = client.compose_drafts().map_err(core)?;
+        let drafts_by_conversation: HashMap<ConversationId, _> = drafts
+            .iter()
+            .map(|draft| (draft.conversation_id, draft))
+            .collect();
         let requested = requested.filter(|id| {
             conversations.iter().any(|item| item.conversation_id == *id)
                 || drafts.iter().any(|draft| draft.conversation_id == *id)
         });
+        let history_from_message_id = if requested.is_some() {
+            args.get("historyFromMessageId")
+                .and_then(Value::as_str)
+                .map(|id| MessageId::from_str(id).map_err(|_| invalid()))
+                .transpose()?
+        } else {
+            None
+        };
         let active = requested
             .or_else(|| conversations.first().map(|c| c.conversation_id))
             .or_else(|| drafts.first().map(|d| d.conversation_id));
         let mut views = Vec::new();
         for conversation in &conversations {
-            let history = client
-                .messages(conversation.conversation_id)
+            let latest = client
+                .latest_message(conversation.conversation_id)
                 .map_err(core)?;
-            let latest = history.last();
-            let draft = drafts
-                .iter()
-                .find(|draft| draft.conversation_id == conversation.conversation_id);
+            let draft = drafts_by_conversation
+                .get(&conversation.conversation_id)
+                .copied();
             let draft_only = draft
                 .map(|draft| client.compose_draft_is_new(draft.draft_id))
                 .transpose()
                 .map_err(core)?
                 .unwrap_or(false);
             let name = latest
+                .as_ref()
                 .map(dto::counterpart)
                 .or_else(|| draft.map(|draft| draft.recipients.join(", ")))
                 .filter(|name| !name.is_empty())
@@ -426,10 +441,25 @@ impl BrowserCore {
                     }
                 })
                 .unwrap_or_default();
-            let messages = if Some(conversation.conversation_id) == active {
-                history
+            let (messages, has_older_messages) = if Some(conversation.conversation_id) == active {
+                let (history, has_more) = match history_from_message_id {
+                    Some(anchor) => {
+                        let has_more = !client
+                            .messages_page(conversation.conversation_id, Some(anchor), 1)
+                            .map_err(core)?
+                            .messages
+                            .is_empty();
+                        client
+                            .messages_since(conversation.conversation_id, anchor)
+                            .map(|messages| (messages, has_more))
+                    }
+                    None => client
+                        .messages_page(conversation.conversation_id, None, HISTORY_PAGE_SIZE)
+                        .map(|page| (page.messages, page.has_more)),
+                }
+                .map_err(core)?;
+                let messages = history
                     .iter()
-                    .skip(history.len().saturating_sub(500))
                     .map(|message| {
                         let attachments = message
                             .payload
@@ -445,9 +475,10 @@ impl BrowserCore {
                             .collect();
                         dto::message_view(message, attachments)
                     })
-                    .collect()
+                    .collect();
+                (messages, Some(has_more))
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let reply_context = client.mms_reply_context(conversation.conversation_id).ok();
             views.push(dto::ConversationView {
@@ -456,6 +487,7 @@ impl BrowserCore {
                 preview,
                 unread: conversation.unread_count,
                 messages,
+                has_older_messages,
                 participants: reply_context
                     .as_ref()
                     .map(|context| context.recipients.clone()),
@@ -483,6 +515,7 @@ impl BrowserCore {
                 },
                 unread: 0,
                 messages: Vec::new(),
+                has_older_messages: None,
                 participants: None,
                 reply_blocked_reason: None,
                 // Old recipientless compose rows predate the persisted intent bit. A row that
@@ -519,7 +552,7 @@ impl BrowserCore {
             notification_preferences: self.preferences.clone(),
             active_conversation_id: active.map(|id| id.to_string()),
             draft: active
-                .and_then(|id| drafts.iter().find(|d| d.conversation_id == id))
+                .and_then(|id| drafts_by_conversation.get(&id).copied())
                 .map(dto::draft_view),
             head: dto::Head {
                 enabled: false,
@@ -541,6 +574,48 @@ impl BrowserCore {
             contact_books: None,
             contacts_pending_count: None,
             contact_sync: None,
+        })
+        .map_err(|_| core(CoreError::Database))
+    }
+    fn load_history(&self, args: Value) -> Result<Value, Failure> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct HistoryRequest {
+            conversation_id: String,
+            before_message_id: String,
+        }
+        let request: HistoryRequest = serde_json::from_value(args).map_err(|_| invalid())?;
+        let conversation =
+            ConversationId::from_str(&request.conversation_id).map_err(|_| invalid())?;
+        let before = MessageId::from_str(&request.before_message_id).map_err(|_| invalid())?;
+        let page = self
+            .client()?
+            .messages_page(conversation, Some(before), HISTORY_PAGE_SIZE)
+            .map_err(core)?;
+        let client = self.client()?;
+        let messages = page
+            .messages
+            .iter()
+            .map(|message| {
+                let attachments = message
+                    .payload
+                    .record
+                    .attachments
+                    .iter()
+                    .filter_map(|reference| {
+                        client
+                            .attachment_info(reference.attachment_id)
+                            .ok()
+                            .map(|info| dto::attachment_view(&info, None, None))
+                    })
+                    .collect();
+                dto::message_view(message, attachments)
+            })
+            .collect();
+        serde_json::to_value(dto::HistoryPage {
+            conversation_id: conversation.to_string(),
+            messages,
+            has_more: page.has_more,
         })
         .map_err(|_| core(CoreError::Database))
     }
@@ -835,6 +910,65 @@ mod tests {
         let sent = value(&core.dispatch(&json!({"command":"send_draft","args":{"id":draft["id"],"conversationId":draft["conversationId"],"text":draft["text"],"recipientIds":draft["recipientIds"],"attachmentIds":draft["attachmentIds"],"gatewayId":device,"simId":"sim-1","expectedRevision":draft["revision"]}}).to_string()));
         assert_eq!(sent["status"], "queued-local");
         assert_eq!(core.client().unwrap().pending_outbox().unwrap().len(), 1);
+        let conversation = core
+            .client()
+            .unwrap()
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "0".into(),
+                provider_message_id: Some("history-0".into()),
+                imported: false,
+            })
+            .unwrap()
+            .conversation_id;
+        for index in 1..52 {
+            core.client()
+                .unwrap()
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation),
+                    sender_address: "+15555550101".into(),
+                    body: index.to_string(),
+                    provider_message_id: Some(format!("history-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        let initial = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+        ));
+        let view = initial["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["id"] == conversation.to_string())
+            .unwrap();
+        assert_eq!(
+            view["messages"].as_array().unwrap().len(),
+            HISTORY_PAGE_SIZE
+        );
+        assert_eq!(view["hasOlderMessages"], true);
+        let anchor = view["messages"][0]["id"].as_str().unwrap();
+        let page = value(&core.dispatch(
+            &json!({"command":"load_history","args":{"conversationId":conversation,"beforeMessageId":anchor}}).to_string(),
+        ));
+        assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(page["hasMore"], false);
+        let refreshed = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation,"historyFromMessageId":anchor}}).to_string(),
+        ));
+        let refreshed_view = refreshed["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["id"] == conversation.to_string())
+            .unwrap();
+        assert_eq!(refreshed_view["hasOlderMessages"], true);
+        let missing: Value = serde_json::from_str(&core.dispatch(
+            &json!({"command":"load_history","args":{"conversationId":conversation,"beforeMessageId":Uuid::new_v4()}}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(missing["ok"], false);
         value(&core.dispatch(r#"{"command":"close"}"#));
         assert!(core.dispatch(&json!({"command":"open","args":{"vaultId":vault,"deviceId":device,"databaseKey":vec![8; 32],"origin":"https://peppy.test/","deviceRole":"device"}}).to_string()).contains("database-key-mismatch"));
     }

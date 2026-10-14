@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "allow-load-state",
+    "allow-load-history",
     "allow-configure-server",
     "allow-unlock-sync",
     "allow-get-app-lock-status",

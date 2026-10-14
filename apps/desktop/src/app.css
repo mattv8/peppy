@@ -229,6 +229,18 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   padding: 16px 16px calc(var(--composer-overlay-height, 120px) + 16px);
   background: var(--peppy-surface-editor);
 }
+#history-page-sentinel { height: 0; overflow: hidden; pointer-events: none; }
+#history-load-band {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  color: var(--peppy-text-muted);
+}
+#history-load-band[data-history-state="loading"],
+#history-load-band[data-history-state="error"] { min-height: 40px; padding-block: 8px; border-bottom: 1px solid var(--peppy-border); }
 #no-selection-state {
   height: 100%;
   display: grid;

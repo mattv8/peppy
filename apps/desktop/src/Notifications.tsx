@@ -12,6 +12,9 @@ type SeenResult = Promise<void>;
 export const notificationTuple = (...parts: string[]) =>
   encodeURIComponent(JSON.stringify(parts));
 
+export const notificationMuteKey = (sourceDeviceId: string, packageName: string) =>
+  notificationTuple(sourceDeviceId, packageName);
+
 export function notificationSourceName(id: string, sources: Source[], knownIds: string[]) {
   return sources.find(source => source.id === id)?.name ??
     `Phone ${[...new Set(knownIds)].sort().indexOf(id) + 1}`;
@@ -63,13 +66,8 @@ export function NotificationsView({
   const inFlight = useRef(new Set<string>());
   const onSeenRef = useRef(onSeen);
   onSeenRef.current = onSeen;
-  const isMuted = (notification: MirroredNotification) =>
-    filters.some(
-      (filter) =>
-        filter.sourceDeviceId === notification.target.sourceDeviceId &&
-        filter.packageName === notification.packageName &&
-        filter.muted,
-    );
+  const mutedFilters = new Set(filters.filter((filter) => filter.muted).map((filter) => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
+  const isMuted = (notification: MirroredNotification) => mutedFilters.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName));
   const shown = notifications.filter((notification) => !isMuted(notification));
   const shownKey = shown
     .map((notification) =>

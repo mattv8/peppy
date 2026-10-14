@@ -9,7 +9,8 @@ export type AttachmentView = { id: string; name: string; mediaType: string; byte
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; body: string; timestamp: string; status?: MessageStatus; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
+export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
+export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
@@ -76,7 +77,8 @@ export type HostedPreviewView = {
 export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
 
 export interface DesktopBridge {
-  load_state(conversationId?: string): Promise<DesktopSnapshot>;
+  load_state(conversationId?: string, historyFromMessageId?: string): Promise<DesktopSnapshot>;
+  load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage>;
   configure_server(origin: string): Promise<void>;
   unlock_sync(): Promise<void>;
   get_app_lock_status(): Promise<AppLockStatus>;

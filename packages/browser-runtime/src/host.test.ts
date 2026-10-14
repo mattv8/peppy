@@ -26,6 +26,7 @@ class FakeSession implements HostSession {
   public phase: "unenrolled" | "locked" | "ready" | "closed" = "ready";
   public readonly calls: Array<{ command: string; args: Record<string, unknown>; mutation: boolean }> = [];
   public snapshot: Record<string, unknown> = {};
+  public previewAttachment?: (id: string) => Promise<string | undefined>;
   public async query(command: string, args: Record<string, unknown>) {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
@@ -100,6 +101,31 @@ describe("browser host RPC", () => {
     ]);
   });
 
+  it("forwards history pages as a read-only core request", async () => {
+    const session = new FakeSession();
+    await expect(dispatchBrowserRpc(session, {
+      id: 1,
+      command: "load_history",
+      args: { conversationId: "conversation", beforeMessageId: "message" },
+    })).resolves.toMatchObject({ id: 1, ok: true });
+    expect(session.calls).toEqual([{
+      command: "load_history",
+      args: { conversationId: "conversation", beforeMessageId: "message" },
+      mutation: false,
+    }]);
+  });
+
+  it("does not query history from a locked browser session", async () => {
+    const session = new FakeSession();
+    session.phase = "locked";
+    await expect(dispatchBrowserRpc(session, {
+      id: 1,
+      command: "load_history",
+      args: { conversationId: "conversation", beforeMessageId: "message" },
+    })).resolves.toMatchObject({ ok: false, error: { code: "locked" } });
+    expect(session.calls).toEqual([]);
+  });
+
   it("uses the Rust contact_snapshot address contract after loading the snapshot", async () => {
     const session = new FakeSession();
     session.snapshot = {
@@ -152,6 +178,19 @@ describe("browser host RPC", () => {
     expect(value.conversations[0].messages).toHaveLength(33);
     expect(value.conversations[0].messages.every(message => message.attachments)).toBe(true);
     expect(previews).toBe(32);
+  });
+
+  it("uses the smaller preview budget for an older history page", async () => {
+    const session = new FakeSession();
+    const attachments = Array.from({ length: 13 }, (_, index) => ({ id: `image-${index}`, mediaType: "image/png", state: "ready" }));
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "load_history" ? { messages: attachments.map((attachment, index) => ({ id: `message-${index}`, attachments: [attachment] })) } : { command };
+    };
+    let previews = 0;
+    session.previewAttachment = async () => { previews += 1; return "data:image/png;base64,cHJldmlldw=="; };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "load_history", args: { conversationId: "conversation", beforeMessageId: "message" } })).resolves.toMatchObject({ ok: true });
+    expect(previews).toBe(12);
   });
 
   it("attaches two ports to one session and broadcasts only after a mutation", async () => {

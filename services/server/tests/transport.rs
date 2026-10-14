@@ -1781,6 +1781,16 @@ async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_re
             &f,
         ))
         .await; // c6
+    let supersessions: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT target_producer_device_id,target_producer_sequence FROM record_supersessions WHERE vault_id=$1 AND by_cursor=6 ORDER BY target_producer_device_id,target_producer_sequence",
+    )
+    .bind(v)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    let mut expected_supersessions = vec![(gateway.id, 1), (o, 4)];
+    expected_supersessions.sort_unstable();
+    assert_eq!(supersessions, expected_supersessions);
     // Young terminal 7 superseded by 8: kept for the terminal window.
     server
         .commit(&marked_event(v, o, 7, 7, true, vec![], &f))

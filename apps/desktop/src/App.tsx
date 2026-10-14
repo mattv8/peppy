@@ -5,9 +5,11 @@ import {
   useRef,
   useState,
   useCallback,
+  useMemo,
   type CSSProperties,
   type RefCallback,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   AppTitlebar,
   Check,
@@ -62,13 +64,15 @@ import {
   type DraftInput,
   type GatewayView,
   type MessageStatus,
+  type MessageView,
+  type HistoryPage,
   type AppFilter,
   type NotificationPreferences,
   type PublicCopy,
   type ContactResolutionMap,
   type AppLockStatus,
 } from "./bridge";
-import { NotificationsView } from "./Notifications";
+import { notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
@@ -134,6 +138,43 @@ const PANE_MIN_WIDTH = 360;
 const LIST_COLLAPSE_THRESHOLD = 120;
 const TEXTAREA_LINE_HEIGHT = 22;
 const TEXTAREA_MAX_HEIGHT = 176;
+
+function mergeMessages(existing: MessageView[], refreshed: MessageView[]): MessageView[] {
+  const refreshedById = new Map(refreshed.map((message) => [message.id, message]));
+  const merged = existing.map((message) => {
+    const replacement = refreshedById.get(message.id);
+    return replacement ? retainAttachmentPreviews(message, replacement) : message;
+  });
+  const existingIds = new Set(existing.map((message) => message.id));
+  refreshed.forEach((message) => {
+    if (!existingIds.has(message.id)) merged.push(message);
+  });
+  return merged;
+}
+
+function retainAttachmentPreviews(previous: MessageView, refreshed: MessageView): MessageView {
+  const previews = new Map(previous.attachments.map((attachment) => [attachment.id, attachment.previewUrl]));
+  return {
+    ...refreshed,
+    attachments: refreshed.attachments.map((attachment) =>
+      attachment.previewUrl || attachment.state !== "ready" || !attachment.mediaType.startsWith("image/") || !previews.get(attachment.id)
+        ? attachment
+        : { ...attachment, previewUrl: previews.get(attachment.id) },
+    ),
+  };
+}
+
+function mergeAnchoredMessages(existing: MessageView[], refreshed: MessageView[]): MessageView[] {
+  const existingById = new Map(existing.map((message) => [message.id, message]));
+  const anchor = refreshed[0]?.id;
+  const prefixEnd = anchor ? existing.findIndex((message) => message.id === anchor) : -1;
+  const prefix = prefixEnd > 0 ? existing.slice(0, prefixEnd) : [];
+  const authoritativeRows = refreshed.map((message) => {
+    const previous = existingById.get(message.id);
+    return previous ? retainAttachmentPreviews(previous, message) : message;
+  });
+  return mergeMessages(prefix, authoritativeRows);
+}
 
 export const errorText = (error: unknown): string =>
   typeof error === "object" &&
@@ -652,6 +693,11 @@ function GatewaySelector({
   onSelect(gateway: GatewayView): void;
 }) {
   const route = resolveRoute(content, gateways);
+  const simLabels = new Map<string, string>();
+  gateways.forEach((gateway, index) => {
+    const key = routeKey(gateway.id, gateway.simId);
+    if (!simLabels.has(key)) simLabels.set(key, `SIM ${index + 1}`);
+  });
   const value =
     route.kind === "route"
       ? routeKey(route.gateway.id, route.gateway.simId)
@@ -664,10 +710,7 @@ function GatewaySelector({
     );
     if (gateway) onSelect(gateway);
   };
-  const simLabel = (gateway: GatewayView) => {
-    const index = gateways.findIndex((item) => item.id === gateway.id && item.simId === gateway.simId);
-    return index >= 0 ? `SIM ${index + 1}` : gateway.simId;
-  };
+  const simLabel = (gateway: GatewayView) => simLabels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId;
   return (
     <section id="gateway-selector" aria-label="Phone and SIM" data-route-state={problem ? "blocked" : "ready"}>
         <select
@@ -735,6 +778,12 @@ function MessageList({
   onSaveAttachment,
   listRef,
   onScroll,
+  hasOlderMessages,
+  historyLoading,
+  historyError,
+  onLoadOlder,
+  suppressHistoryAnnouncements,
+  historyExhausted,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -745,6 +794,12 @@ function MessageList({
   onSaveAttachment(attachment: AttachmentView): void;
   listRef: RefCallback<HTMLDivElement>;
   onScroll(): void;
+  hasOlderMessages: boolean;
+  historyLoading: boolean;
+  historyError: string | null;
+  onLoadOlder(): void;
+  suppressHistoryAnnouncements: boolean;
+  historyExhausted: boolean;
 }) {
   if (loading)
     return (
@@ -782,7 +837,14 @@ function MessageList({
       aria-label="Messages"
       onScroll={onScroll}
     >
-      <div id="message-list-content">
+      {hasOlderMessages && <div id="history-page-sentinel" aria-hidden="true" />}
+      {(historyLoading || historyError || hasOlderMessages) && <div id="history-load-band" aria-busy={historyLoading || undefined} data-history-state={historyLoading ? "loading" : historyError ? "error" : "idle"}>
+        {historyLoading && !historyError && <span id="history-load-indicator" role="status">Loading older messages…</span>}
+        {historyError && <div id="history-load-error" role="alert">Couldn&apos;t load older messages. <button id="history-retry-button" className="secondary-button" type="button" aria-label="Retry loading older messages" disabled={historyLoading} onClick={onLoadOlder}>Retry</button></div>}
+        {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="secondary-button" type="button" onClick={onLoadOlder}>Load older messages</button>}
+      </div>}
+      <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
+        {historyExhausted && <p id="history-beginning-marker">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
         {conversation.messages.map((message) => (
           <article
@@ -1253,6 +1315,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [suppressHistoryAnnouncements, setSuppressHistoryAnnouncements] = useState(false);
+  const [historyExhausted, setHistoryExhausted] = useState(false);
   const [appLock, setAppLock] = useState<AppLockStatus | null>(null);
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
@@ -1309,7 +1376,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);
   const [lifecyclePending, setLifecyclePending] = useState<string | null>(null);
-  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  const [draftsVersion, rerender] = useReducer((count: number) => count + 1, 0);
   const defaultListWidth = typeof window !== "undefined" && window.innerWidth < 900 ? 240 : 280;
   const [listWidth, setListWidth] = useState(defaultListWidth);
   const [listCollapsed, setListCollapsed] = useState(false);
@@ -1347,6 +1414,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const sendingRef = useRef(false);
   const closingRef = useRef(false);
   const loadSequence = useRef(0);
+  const historySequence = useRef(0);
+  const historyLoadingRef = useRef(false);
+  const historySentinelArmed = useRef(true);
+  const historyUserScrolled = useRef(false);
+  const hasOlderMessagesRef = useRef(false);
+  const mountedRef = useRef(true);
+  const overlayHeightRef = useRef(overlayHeight);
+  overlayHeightRef.current = overlayHeight;
+  const historyAnchorRef = useRef<{ row: HTMLElement; top: number } | null>(null);
   const messageRows = useRef(new Map<string, HTMLElement>());
   const handlers = useRef({
     rekeyed: (_from: string, _to: string) => {},
@@ -1558,6 +1634,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const choose = (key: string) => {
+    loadSequence.current += 1;
+    historySequence.current += 1;
+    historyLoadingRef.current = false;
+    setHistoryLoading(false);
+    setHistoryError(null);
+    setHasOlderMessages(false);
+    setHistoryExhausted(false);
+    hasOlderMessagesRef.current = false;
+    historySentinelArmed.current = true;
+    historyUserScrolled.current = false;
+    historyAnchorRef.current = null;
     selectedRef.current = key;
     setSelected(key);
   };
@@ -1567,13 +1654,31 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   /** Loads host state for one conversation; responses superseded by a newer request are dropped. */
   const refresh = async (conversationId = selectedRef.current) => {
     const sequence = ++loadSequence.current;
-    const state = await bridge.load_state(
-      conversationId && !isLocalDraftKey(conversationId)
-        ? conversationId
-        : undefined,
-    );
-    if (sequence !== loadSequence.current) return;
-    setSnapshot(state);
+    const loadedConversation = snapshotRef.current?.activeConversationId === conversationId
+      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)
+      : undefined;
+    const historyFromMessageId = loadedConversation?.messages[0]?.id;
+    const requestedConversationId = conversationId && !isLocalDraftKey(conversationId)
+      ? conversationId
+      : undefined;
+    const state = historyFromMessageId
+      ? await bridge.load_state(requestedConversationId, historyFromMessageId)
+      : await bridge.load_state(requestedConversationId);
+    if (!mountedRef.current || sequence !== loadSequence.current) return;
+    setSnapshot((current) => {
+      const previous = historyFromMessageId && current && current.activeConversationId === state.activeConversationId
+        ? current.conversations.find((item) => item.id === state.activeConversationId)
+        : undefined;
+      const refreshed = state.conversations.find((item) => item.id === state.activeConversationId);
+      if (!previous || !refreshed) return state;
+      return {
+        ...state,
+        conversations: state.conversations.map((item) => item.id === refreshed.id
+          ? { ...item, messages: mergeAnchoredMessages(previous.messages, refreshed.messages) }
+          : item),
+      };
+    });
+    const activeConversation = state.conversations.find((item) => item.id === state.activeConversationId);
     if (state.activeConversationId)
       store.adopt(state.activeConversationId, state.draft);
     if (
@@ -1582,6 +1687,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       state.activeConversationId
     )
       choose(state.activeConversationId);
+    const responseHasOlder = activeConversation?.hasOlderMessages ?? false;
+    const currentAnchor = snapshotRef.current?.activeConversationId === conversationId
+      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)?.messages[0]?.id
+      : undefined;
+    if (currentAnchor === historyFromMessageId || !currentAnchor) {
+      hasOlderMessagesRef.current = responseHasOlder;
+      setHasOlderMessages(responseHasOlder);
+    }
   };
 
   const select = (key: string) => {
@@ -1607,11 +1720,30 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     void refresh(composerConversation ?? undefined)
       .catch(report(""))
       .finally(() => setLoading(false));
-    return bridge.subscribe(() => void refresh().catch(report("")));
+    const unsubscribe = bridge.subscribe(() => void refresh().catch(report("")));
+    return () => {
+      mountedRef.current = false;
+      loadSequence.current += 1;
+      historySequence.current += 1;
+      historyAnchorRef.current = null;
+      unsubscribe();
+    };
   }, []);
+  useEffect(() => {
+    if (snapshot?.encryption.state !== "locked" && !appLock?.locked) return;
+    historySequence.current += 1;
+    historyLoadingRef.current = false;
+    historyAnchorRef.current = null;
+    hasOlderMessagesRef.current = false;
+    setHistoryLoading(false);
+    setHistoryError(null);
+    setHasOlderMessages(false);
+    setHistoryExhausted(false);
+  }, [appLock?.locked, snapshot?.encryption.state]);
   useEffect(() => {
     if (browserHost) return;
     void bridge.get_app_lock_status().then(setAppLock).catch(() => setAppLock(null));
@@ -1658,9 +1790,84 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const onMessageScroll = () => {
     const element = messageListRef.current;
     if (!element) return;
+    if (!element.hasAttribute("data-scroll-programmatic")) historyUserScrolled.current = true;
     nearBottom.current =
       element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
   };
+  const loadOlderMessages = useCallback(async () => {
+    const conversationId = selectedRef.current;
+    const current = snapshotRef.current?.conversations.find((item) => item.id === conversationId);
+    const beforeMessageId = current?.messages[0]?.id;
+    if (!conversationId || isLocalDraftKey(conversationId) || !beforeMessageId || !hasOlderMessagesRef.current || historyLoadingRef.current) return;
+    const sequence = ++historySequence.current;
+    historySentinelArmed.current = false;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const page: HistoryPage = await bridge.load_history(conversationId, beforeMessageId);
+      if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId) return;
+      if (page.conversationId !== conversationId) {
+        setHistoryError("Conversation changed while loading older messages. Reload and try again.");
+        return;
+      }
+      const list = messageListRef.current;
+      const listBounds = list?.getBoundingClientRect();
+      const unobscuredBottom = (listBounds?.bottom ?? 0) - (overlayHeightRef.current ?? 0);
+      const visibleRow = listBounds
+        ? [...messageRows.current.values()]
+            .map((row) => ({ row, bounds: row.getBoundingClientRect() }))
+            .filter(({ bounds }) => bounds.bottom > listBounds.top && bounds.top < unobscuredBottom)
+            .sort((left, right) => left.bounds.top - right.bounds.top)[0]?.row
+        : undefined;
+      const anchorRow = visibleRow ?? messageRows.current.get(beforeMessageId) ?? null;
+      historyAnchorRef.current = anchorRow ? { row: anchorRow, top: anchorRow.getBoundingClientRect().top } : null;
+      nearBottom.current = false;
+      flushSync(() => {
+        setSuppressHistoryAnnouncements(true);
+        setSnapshot((previous) => {
+        if (!previous || previous.activeConversationId !== conversationId) return previous;
+        return { ...previous, conversations: previous.conversations.map((item) => item.id === conversationId
+          ? { ...item, messages: mergeMessages(page.messages, item.messages) }
+          : item) };
+        });
+      });
+      const anchor = historyAnchorRef.current;
+      if (list && anchor) {
+        list.setAttribute("data-scroll-programmatic", "");
+        list.scrollTop += anchor.row.getBoundingClientRect().top - anchor.top;
+        if (typeof requestAnimationFrame === "undefined") list.removeAttribute("data-scroll-programmatic");
+        else requestAnimationFrame(() => list.removeAttribute("data-scroll-programmatic"));
+      }
+      hasOlderMessagesRef.current = page.hasMore;
+      setHasOlderMessages(page.hasMore);
+      historyUserScrolled.current = false;
+      if (!page.hasMore) setHistoryExhausted(true);
+      if (typeof requestAnimationFrame === "undefined") setSuppressHistoryAnnouncements(false);
+      else requestAnimationFrame(() => mountedRef.current && setSuppressHistoryAnnouncements(false));
+    } catch (error) {
+      if (sequence === historySequence.current) setHistoryError(errorText(error));
+    } finally {
+      if (sequence === historySequence.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    const list = messageListRef.current;
+    const sentinel = document.getElementById("history-page-sentinel");
+    if (!list || !sentinel || !hasOlderMessages || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) {
+        historySentinelArmed.current = true;
+        return;
+      }
+      if (historyUserScrolled.current && historySentinelArmed.current) void loadOlderMessages();
+    }, { root: list, rootMargin: "200px 0px 0px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasOlderMessages, loadOlderMessages, messageIds]);
   useLayoutEffect(() => {
     if (!conversationLoaded) return;
     stickToBottom();
@@ -2121,6 +2328,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return;
     }
     try {
+      historySequence.current += 1;
+      historyLoadingRef.current = false;
+      historyAnchorRef.current = null;
+      hasOlderMessagesRef.current = false;
+      setHistoryLoading(false);
+      setHistoryError(null);
+      setHasOlderMessages(false);
       await lock();
       await refresh();
     } catch (error) {
@@ -2138,8 +2352,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const resolution: ContactResolutionMap = { ...(snapshot?.contactResolution ?? {}), ...chosenContacts };
-  const conversations: Conversation[] = [
+  const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
+  const conversations = useMemo<Conversation[]>(() => [
     ...store.localDrafts().map((local) => ({
       id: local.key,
       name: local.content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
@@ -2156,7 +2370,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       recipientlessDraft,
       draftOnly,
     })),
-  ];
+  ], [draftsVersion, resolution, snapshot?.conversations, store]);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   const lockCode = snapshot?.connection.errorCode;
@@ -2341,6 +2555,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onSaveAttachment={(file) => void saveAttachment(file)}
       listRef={setMessageListNode}
       onScroll={onMessageScroll}
+      hasOlderMessages={hasOlderMessages}
+      historyLoading={historyLoading}
+      historyError={historyError}
+      onLoadOlder={() => void loadOlderMessages()}
+      suppressHistoryAnnouncements={suppressHistoryAnnouncements}
+      historyExhausted={historyExhausted}
     />
   );
   const panelStatus = snapshot
@@ -2354,7 +2574,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         summary: "Loading status",
         details: <StatusDetails />,
       };
-  const notificationUnread = snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0;
+  const mutedNotificationKeys = new Set((snapshot?.appFilters ?? []).filter((filter) => filter.muted).map((filter) => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
+  const notificationUnread = snapshot?.notifications.filter((notification) => !notification.seen && !notification.dismissalPending && !mutedNotificationKeys.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName))).length ?? 0;
   const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
   const composerConnectionDot = snapshot
     ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />

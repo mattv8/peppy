@@ -277,6 +277,7 @@ export function RecipientPanel({
   const searchSeqRef = useRef(0);
   const suggestionListId = useId();
   const recipientIds = recipients.map((recipient) => recipient.id).join("\n");
+  const chosenRecipientIds = new Set(recipients.map((recipient) => recipient.id));
   // Latest callback without re-running the search on every parent render.
   const searchRef = useRef(searchContacts);
   searchRef.current = searchContacts;
@@ -307,7 +308,7 @@ export function RecipientPanel({
     searchSeqRef.current += 1;
     setSuggestions([]);
     onSuggestionChosen?.(suggestion);
-    if (!recipients.some((recipient) => recipient.id === suggestion.id)) {
+    if (!chosenRecipientIds.has(suggestion.id)) {
       onCommit([...recipients.map((recipient) => recipient.id), suggestion.id]);
     }
     setError(null);
