@@ -633,10 +633,14 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
     )
     .await
     .unwrap();
-    assert_eq!(
-        desktop.messages(draft.conversation_id).unwrap()[0].send_state,
-        Some(SendState::Sent)
-    );
+    // The draft joined the conversation that already holds the incoming MMS, so select by id.
+    let sent = desktop
+        .messages(draft.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.record.message_id == queued.message_id)
+        .unwrap();
+    assert_eq!(sent.send_state, Some(SendState::Sent));
 
     // Public sharing is a distinct explicit plaintext derivative. The original endpoint still
     // rejects unauthenticated reads; the token works once and revocation removes only the copy.
