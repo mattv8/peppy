@@ -13,6 +13,14 @@ HELPER = ROOT / "infra/dev/dev_tls.py"
 
 
 class DevelopmentTlsTests(unittest.TestCase):
+    def setUp(self):
+        # A developer .env loaded by just must not override the dotenv each test writes.
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("API_HOST_PORT", "PUBLIC_API_URL", "PUBLIC_ATTACHMENT_URL"):
+            os.environ.pop(name, None)
+
     def run_helper(self, *arguments, **environment):
         env = os.environ.copy()
         env.pop("DEBUG", None)
