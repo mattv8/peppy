@@ -36,8 +36,11 @@ reviews use `pnpm --dir packages/mobile-design check` for drift.
   compare. A transfer pairing confirms automatically after owner approval and
   advances only after verified native installation; a shared-secret pairing
   still requires the secret and an explicit submit.
-  Camera permission is requested only when the user starts scanning. Do not add
-  automatic OS-permission requests, default-SMS role requests, or RCS claims.
+  Camera permission is requested only when the user starts scanning. Contacts
+  permission comes from an explicit foreground opt-in, not app startup or a
+  background pass. Other OS-permission prompts also follow explicit foreground
+  actions; do not add automatic requests, default-SMS role requests, or general
+  RCS claims.
   See [Android enrollment UI](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentScreen.kt)
   and [iOS enrollment UI](../apps/ios/PeppyMobile/PhoneEnrollmentView.swift).
 - Owner phones offer **Add phone** on the main screen, never in Settings, and
@@ -64,10 +67,12 @@ reviews use `pnpm --dir packages/mobile-design check` for drift.
   policy conservatively for older servers, and do not offer destructive recovery
   or reset controls in the app.
 
-Use native typography and touch targets with a 4px spacing rhythm; do not copy
-desktop control dimensions. Use the coral graphic brand and semantic coral accents; coral is not normal-size text, follow the
-system light/dark appearance, and retain opaque readable content when reduced
-transparency or motion is enabled. Use stable semantic native test identifiers.
+## Native presentation
+
+The mobile design uses native typography and touch targets with a 4px rhythm,
+not desktop control dimensions. Use the coral graphic brand and semantic coral
+accents; coral is not normal-size text. Follow system light/dark appearance and
+retain opaque readable content when reduced transparency or motion is enabled.
 
 For a changed shared mobile behavior, update and test Rust, bindings, Android,
 and iOS when they are affected. State platform capability exceptions explicitly;
