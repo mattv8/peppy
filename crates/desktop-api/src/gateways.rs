@@ -20,6 +20,8 @@ pub struct DeviceRow {
     pub device_id: String,
     pub role: String,
     pub revoked: bool,
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 #[derive(Deserialize)]
 pub struct CapabilitiesResponse {
@@ -178,7 +180,9 @@ pub fn gateway_views(
         .filter(|device| {
             !device.revoked
                 && (device.role == "gateway"
-                    || device.role == "owner" && capable.contains(device.device_id.as_str()))
+                    || device.role == "owner"
+                        && (capable.contains(device.device_id.as_str())
+                            || matches!(device.kind.as_deref(), Some("android" | "ios"))))
         })
         .take(MAX_GATEWAYS)
     {
@@ -261,5 +265,54 @@ mod tests {
         let caps: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[{"device_id":id,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"available","mms_content_version":"2"}]}}]})).unwrap();
         assert!(gateway_views(&devices, &caps).is_empty());
         assert_eq!(extract_device_role(&devices, &id), None);
+    }
+
+    #[test]
+    fn mobile_owners_without_capabilities_are_unavailable_gateways() {
+        let android = uuid::Uuid::new_v4().to_string();
+        let ios = uuid::Uuid::new_v4().to_string();
+        let enabled = uuid::Uuid::new_v4().to_string();
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":android,"role":"owner","kind":"android","revoked":false},
+            {"device_id":ios,"role":"owner","kind":"ios","revoked":false},
+            {"device_id":enabled,"role":"owner","kind":"android","revoked":false}
+        ]}))
+        .unwrap();
+        let caps: CapabilitiesResponse = serde_json::from_value(serde_json::json!({"capabilities":[{
+            "device_id":enabled,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim","sms":"available","mms":"available","mms_content_version":2}]}
+        }]}))
+        .unwrap();
+
+        let views = gateway_views(&devices, &caps);
+
+        assert_eq!(views.len(), 3);
+        let enabled_views = views
+            .iter()
+            .filter(|view| view.id == enabled)
+            .collect::<Vec<_>>();
+        assert_eq!(enabled_views.len(), 1);
+        assert!(enabled_views[0].supports_sms && enabled_views[0].supports_mms);
+        for id in [&android, &ios] {
+            let view = views.iter().find(|view| view.id == *id).unwrap();
+            assert!(!view.supports_sms && !view.supports_mms);
+            assert_eq!(view.sim_id, "");
+        }
+    }
+
+    #[test]
+    fn non_mobile_or_revoked_owners_without_capabilities_are_excluded() {
+        let devices: DevicesResponse = serde_json::from_value(serde_json::json!({"devices":[
+            {"device_id":uuid::Uuid::new_v4(),"role":"owner","revoked":false},
+            {"device_id":uuid::Uuid::new_v4(),"role":"owner","kind":null,"revoked":false},
+            {"device_id":uuid::Uuid::new_v4(),"role":"owner","kind":"desktop","revoked":false},
+            {"device_id":uuid::Uuid::new_v4(),"role":"owner","kind":"browser","revoked":false},
+            {"device_id":uuid::Uuid::new_v4(),"role":"owner","kind":"future-phone","revoked":false},
+            {"device_id":uuid::Uuid::new_v4(),"role":"owner","kind":"android","revoked":true}
+        ]}))
+        .unwrap();
+        let caps: CapabilitiesResponse =
+            serde_json::from_value(serde_json::json!({"capabilities":[]})).unwrap();
+
+        assert!(gateway_views(&devices, &caps).is_empty());
     }
 }

@@ -1911,6 +1911,26 @@
         }
       }
     },
+    "peppy.enrollment_admin_password_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm admin password"
+          }
+        }
+      }
+    },
+    "peppy.admin_password_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The passwords do not match."
+          }
+        }
+      }
+    },
     "peppy.enrollment_allow_camera": {
       "localizations": {
         "en": {

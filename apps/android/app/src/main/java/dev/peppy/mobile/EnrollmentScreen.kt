@@ -56,6 +56,16 @@ private enum class EnrollmentStage {
 
 /** Fixed mask so the hidden generated secret's length is not revealed. */
 private const val MASKED_SECRET = "••••••••"
+private const val MIN_ADMIN_PASSWORD_BYTES = 12
+private const val MAX_ADMIN_PASSWORD_BYTES = 1024
+
+internal fun hasValidAdminPasswordLength(password: String): Boolean =
+    password.toByteArray(Charsets.UTF_8).size in MIN_ADMIN_PASSWORD_BYTES..MAX_ADMIN_PASSWORD_BYTES
+
+internal data class AdminPasswordInputs(
+    val password: String = "",
+    val confirmation: String = "",
+)
 
 internal class EnrollmentScanGate {
     private var active = true
@@ -118,12 +128,14 @@ internal fun canClaimOwner(
     setupToken: String,
     setupCodeRequired: Boolean,
     adminPassword: String,
+    adminPasswordConfirm: String,
     secret: String,
     busy: Boolean,
 ): Boolean =
     (secret.isNotBlank() || (ownerResume && ownerSecretStored)) &&
         (!setupCodeRequired || setupToken.isNotBlank()) &&
-        adminPassword.length >= 12 &&
+        adminPassword == adminPasswordConfirm &&
+        hasValidAdminPasswordLength(adminPassword) &&
         !busy
 
 /** The entered secret is asked for only when a resumed checkpoint has no stored pending secret (legacy). */
@@ -136,12 +148,14 @@ internal fun recoverySecretFieldVisible(state: EnrollmentHost.ResumeSecret): Boo
 internal fun canCreateVault(
     username: String,
     adminPassword: String,
+    adminPasswordConfirm: String,
     secret: String,
     state: EnrollmentHost.ResumeSecret,
     busy: Boolean,
 ): Boolean =
     username.isNotBlank() &&
-        adminPassword.length >= 12 &&
+        adminPassword == adminPasswordConfirm &&
+        hasValidAdminPasswordLength(adminPassword) &&
         (secret.isNotBlank() || state == EnrollmentHost.ResumeSecret.STORED) &&
         state != EnrollmentHost.ResumeSecret.UNAVAILABLE &&
         !busy
@@ -205,7 +219,7 @@ internal fun EnrollmentScreen(
     var enrollmentForeground by remember { mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
     var inviteState by remember { mutableStateOf(EnrollmentHost.VaultRequestState.PENDING) }
     var inviteGeneration by remember { mutableStateOf(0) }
-    var adminPassword by remember { mutableStateOf("") }
+    var adminPasswordInputs by remember(stage) { mutableStateOf(AdminPasswordInputs()) }
     var secret by remember { mutableStateOf("") }
     var phoneSecret by remember { mutableStateOf("") }
     var ownerResume by remember { mutableStateOf(false) }
@@ -357,7 +371,18 @@ internal fun EnrollmentScreen(
                     OutlinedTextField(setupToken, { setupToken = it }, label = { Text(stringResource(R.string.peppy_enrollment_setup_code)) }, modifier = Modifier.fillMaxWidth().testTag("setup-token"))
                 }
                 OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("enrollment-username"))
-                OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("admin-password"))
+                OutlinedTextField(adminPasswordInputs.password, { adminPasswordInputs = adminPasswordInputs.copy(password = it) }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("admin-password"))
+                OutlinedTextField(
+                    adminPasswordInputs.confirmation,
+                    { adminPasswordInputs = adminPasswordInputs.copy(confirmation = it) },
+                    label = { Text(stringResource(R.string.peppy_enrollment_admin_password_confirm)) },
+                    visualTransformation = PasswordVisualTransformation(),
+                    isError = adminPasswordInputs.confirmation.isNotEmpty() && adminPasswordInputs.password != adminPasswordInputs.confirmation,
+                    supportingText = if (adminPasswordInputs.confirmation.isNotEmpty() && adminPasswordInputs.password != adminPasswordInputs.confirmation) {
+                        { Text(stringResource(R.string.peppy_admin_password_mismatch)) }
+                    } else null,
+                    modifier = Modifier.fillMaxWidth().testTag("admin-password-confirm"),
+                )
                 if (ownerSecretFieldVisible(ownerResume, ownerSecretStored)) {
                     OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("owner-resume-secret"))
                 } else if (ownerResume) {
@@ -371,8 +396,11 @@ internal fun EnrollmentScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Button(
-                    onClick = { run { host.claimOwner(origin, username, if (setupCodeRequired) setupToken else "", adminPassword, secret) } },
-                    enabled = canClaimOwner(ownerResume, ownerSecretStored, setupToken, setupCodeRequired, adminPassword, secret, busy),
+                    onClick = {
+                        val adminPassword = adminPasswordInputs.password
+                        run { host.claimOwner(origin, username, if (setupCodeRequired) setupToken else "", adminPassword, secret) }
+                    },
+                    enabled = canClaimOwner(ownerResume, ownerSecretStored, setupToken, setupCodeRequired, adminPasswordInputs.password, adminPasswordInputs.confirmation, secret, busy),
                     modifier = Modifier.testTag("claim-owner"),
                 ) { Text(stringResource(R.string.peppy_continue)) }
             }
@@ -387,8 +415,9 @@ internal fun EnrollmentScreen(
                 Text(stringResource(R.string.peppy_enrollment_signin_password_label))
                 OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("signin-username"))
                 Text(stringResource(R.string.peppy_enrollment_signin_username_hint), style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("signin-password"))
+                OutlinedTextField(adminPasswordInputs.password, { adminPasswordInputs = adminPasswordInputs.copy(password = it) }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("signin-password"))
                 Button(onClick = {
+                    val adminPassword = adminPasswordInputs.password
                     busy = true
                     scope.launch(Dispatchers.IO) {
                         val signedIn = host.signIn(origin, username, adminPassword)
@@ -398,7 +427,7 @@ internal fun EnrollmentScreen(
                             else error = enrollmentErrorMessage(host.takeErrorCode())?.let(context::getString) ?: networkFailed
                         }
                     }
-                }, enabled = adminPassword.isNotBlank() && !busy, modifier = Modifier.testTag("signin-submit")) { Text(stringResource(R.string.peppy_enrollment_signin_cta)) }
+                }, enabled = adminPasswordInputs.password.isNotBlank() && !busy, modifier = Modifier.testTag("signin-submit")) { Text(stringResource(R.string.peppy_enrollment_signin_cta)) }
                 OutlinedButton(onClick = { stage = EnrollmentStage.CLAIMED_CHOOSER }, modifier = Modifier.testTag("signin-back")) { Text(stringResource(R.string.peppy_cancel)) }
             }
             EnrollmentStage.MANUAL -> {
@@ -458,7 +487,18 @@ internal fun EnrollmentScreen(
                 Text(stringResource(R.string.peppy_enrollment_invite_approved_body))
                 OutlinedTextField(vaultUsername, { vaultUsername = it }, label = { Text(stringResource(R.string.peppy_enrollment_username_label)) }, modifier = Modifier.fillMaxWidth().testTag("vault-username"))
                 Text(stringResource(R.string.peppy_enrollment_invite_approved_secure_hint), style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(adminPassword, { adminPassword = it }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("vault-password"))
+                OutlinedTextField(adminPasswordInputs.password, { adminPasswordInputs = adminPasswordInputs.copy(password = it) }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("vault-password"))
+                OutlinedTextField(
+                    adminPasswordInputs.confirmation,
+                    { adminPasswordInputs = adminPasswordInputs.copy(confirmation = it) },
+                    label = { Text(stringResource(R.string.peppy_enrollment_admin_password_confirm)) },
+                    visualTransformation = PasswordVisualTransformation(),
+                    isError = adminPasswordInputs.confirmation.isNotEmpty() && adminPasswordInputs.password != adminPasswordInputs.confirmation,
+                    supportingText = if (adminPasswordInputs.confirmation.isNotEmpty() && adminPasswordInputs.password != adminPasswordInputs.confirmation) {
+                        { Text(stringResource(R.string.peppy_admin_password_mismatch)) }
+                    } else null,
+                    modifier = Modifier.fillMaxWidth().testTag("vault-password-confirm"),
+                )
                 if (recoverySecretFieldVisible(recoveryState)) {
                     OutlinedTextField(secret, { secret = it }, label = { Text(stringResource(R.string.peppy_passphrase_field)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("recovery-vault-secret"))
                 } else if (recoveryState == EnrollmentHost.ResumeSecret.STORED) {
@@ -467,8 +507,11 @@ internal fun EnrollmentScreen(
                     if (secret.isEmpty()) Button(onClick = { secret = generateHostedPassphrase() }, modifier = Modifier.testTag("generate-vault-secret")) { Text(stringResource(R.string.peppy_passphrase_generate_cta)) }
                 }
                 Button(
-                    onClick = { run { host.createVault(origin, vaultUsername, adminPassword, secret) } },
-                    enabled = canCreateVault(vaultUsername, adminPassword, secret, recoveryState, busy),
+                    onClick = {
+                        val adminPassword = adminPasswordInputs.password
+                        run { host.createVault(origin, vaultUsername, adminPassword, secret) }
+                    },
+                    enabled = canCreateVault(vaultUsername, adminPasswordInputs.password, adminPasswordInputs.confirmation, secret, recoveryState, busy),
                     modifier = Modifier.testTag("create-vault-submit"),
                 ) { Text(stringResource(R.string.peppy_enrollment_create_vault_cta)) }
             }
@@ -655,6 +698,7 @@ internal fun EnrollmentScreen(
         }
         error?.let { Text(it, Modifier.testTag("enrollment-error").semantics { liveRegion = LiveRegionMode.Assertive }) }
         OutlinedButton(onClick = {
+            adminPasswordInputs = AdminPasswordInputs()
             inviteGeneration += 1
             scannerActive = false
             scanGate.cancel()

@@ -137,6 +137,16 @@ impl BrowserCore {
         raw: &RawValue,
     ) -> Result<Value, Failure> {
         match command {
+            "_worker_enrollment_gateway_presence" => {
+                empty_new_enrollment(raw)?;
+                let has_gateway = self
+                    .gateways_known
+                    .then(|| !self.context.gateways.as_deref().unwrap_or(&[]).is_empty());
+                Ok(match has_gateway {
+                    Some(has_gateway) => json!({"hasGateway": has_gateway}),
+                    None => json!({}),
+                })
+            }
             "_worker_enrollment_generate_secret" => {
                 empty_new_enrollment(raw)?;
                 // This private worker response is consumed only by the bridge-owned save dialog.

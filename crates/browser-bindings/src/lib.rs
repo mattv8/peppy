@@ -225,6 +225,7 @@ impl BrowserCore {
                 self.identity_command(command, raw_args.ok_or_else(invalid)?)
             }
             "_worker_enrollment_generate_secret"
+            | "_worker_enrollment_gateway_presence"
             | "_worker_enrollment_new"
             | "_worker_enrollment_new_owner_from_identity"
             | "_worker_enrollment_checkpoint"

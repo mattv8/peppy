@@ -17,12 +17,14 @@ export type InstanceManagement = { vault_id: string; devices: Array<{ device_id:
 export type VaultSummary = { vaultId: string; username: string; isAdmin: boolean; deviceCount: number; storageBytes: number; createdAt: string };
 export type VaultInviteView = { inviteId: string; state: "active" | "used" | "revoked" | "expired"; expiresInSeconds: number; createdAt: string };
 export type VaultRequestView = { requestId: string; displayName: string; client: "browser" | "desktop" | "android" | "ios"; state: "pending" | "approved" | "denied" | "completed" | "expired"; createdAt: string; expiresInSeconds: number };
-type EnrollmentSecretField = { name: string; label: string; autocomplete?: string };
+type EnrollmentSecretField = { name: string; label: string; autocomplete?: string; value?: string };
 type OwnerClaimDraft = { passphrase: string; setupToken?: string; adminPassword?: string };
 type VaultClaimDraft = { username: string; adminPassword: string; passphrase: string };
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
+const MIN_ADMIN_PASSWORD_BYTES = 12;
+const MAX_ADMIN_PASSWORD_BYTES = 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 let activeSecretDialog: (() => void) | undefined;
 let capturedInviteLink = captureInviteLink();
@@ -63,7 +65,7 @@ function unsupported(method: string): Promise<never> {
   return Promise.reject(new BrowserBridgeError("unsupported", `${method} is unavailable in the browser.`));
 }
 
-function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: Array<{ name: string; label: string; autocomplete?: string }>; setupMode?: "open" | "protected" }): Promise<Record<string, string> | null> {
+function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: EnrollmentSecretField[]; setupMode?: "open" | "protected"; errorMessage?: string }): Promise<Record<string, string> | null> {
   activeSecretDialog?.();
   return new Promise((resolve) => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -93,12 +95,23 @@ function secretDialog(options: { id: string; title: string; description: string;
       input.type = "password";
       input.required = true;
       input.setAttribute("autocomplete", field.autocomplete ?? "off");
+      input.value = field.value ?? "";
       label.htmlFor = input.id;
       label.textContent = field.label;
       label.append(input);
       form.append(label);
       return input;
     });
+    if (options.errorMessage) {
+      const error = document.createElement("p");
+      error.id = `${options.id}-error`;
+      error.setAttribute("role", "alert");
+      error.style.color = "var(--peppy-text-error, red)";
+      error.style.fontSize = "inherit";
+      error.textContent = options.errorMessage;
+      form.append(error);
+      dialog.setAttribute("aria-describedby", `${options.id}-description ${error.id}`);
+    }
     const cancel = document.createElement("button");
     cancel.id = `${options.id}-cancel`;
     cancel.type = "button";
@@ -436,7 +449,11 @@ export class BrowserBridge implements DesktopBridge {
   public async enrollment_create_vault(input: { username: string }): Promise<EnrollmentView> {
     let draft = this.vaultClaimDraft;
     if (!draft) {
-      const credentials = await secretDialog({ id: "browser-enrollment-vault", title: "Create your vault", description: "Set a password for this vault.", confirm: "Continue", fields: [{ name: "adminPassword", label: "Password", autocomplete: "new-password" }] });
+      const credentials = await this.collectConfirmedAdminPassword({
+        id: "browser-enrollment-vault",
+        title: "Create your vault",
+        description: "Set a password for this vault.",
+      });
       if (!credentials) return this.enrollment_status();
       const generated = await this.call<{ passphrase: string }>("enrollment_generate_secret");
       if (!await generatedSecretDialog(generated.passphrase)) return this.enrollment_status();
@@ -444,7 +461,11 @@ export class BrowserBridge implements DesktopBridge {
       this.vaultClaimDraft = draft;
     }
     if (!draft.adminPassword) {
-      const credentials = await secretDialog({ id: "browser-enrollment-vault-password", title: "Create your vault", description: "Enter a corrected password for this vault.", confirm: "Continue", fields: [{ name: "adminPassword", label: "Password", autocomplete: "new-password" }] });
+      const credentials = await this.collectConfirmedAdminPassword({
+        id: "browser-enrollment-vault-password",
+        title: "Create your vault",
+        description: "Enter a corrected password for this vault.",
+      });
       if (!credentials) return this.enrollment_status();
       draft = { ...draft, adminPassword: credentials.adminPassword };
     }
@@ -452,7 +473,7 @@ export class BrowserBridge implements DesktopBridge {
     this.vaultClaimDraft = draft;
     const view = await this.call<EnrollmentView>("enrollment_create_vault", draft);
     if (view.stage === "ready") this.vaultClaimDraft = undefined;
-    else if (view.stage === "error" && ["invalid_request", "invalid-request", "invalid_password", "invalid-password"].includes(view.errorCode ?? "")) {
+    else if (view.stage === "error" && ["invalid_request", "invalid-request", "invalid_admin_password"].includes(view.errorCode ?? "")) {
       this.vaultClaimDraft = { ...draft, adminPassword: "" };
     }
     return view;
@@ -548,24 +569,51 @@ export class BrowserBridge implements DesktopBridge {
   private async createOwnerClaimDraft(): Promise<OwnerClaimDraft | undefined> {
     const protectedSetup = this.setupCodeRequired;
     const credentials = this.enrollmentMode === "community"
-      ? await secretDialog({
+      ? await this.collectConfirmedAdminPassword({
         id: "browser-enrollment-owner",
         title: "Set up your Peppy server",
-        description: protectedSetup
-          ? peppyCopy.enrollment_setup_protected
-          : "",
-        confirm: "Continue",
-        fields: [
-          ...(protectedSetup ? [{ name: "setupToken", label: "Setup code", autocomplete: "off" }] : []),
-          { name: "adminPassword", label: "Admin password", autocomplete: "new-password" },
-        ],
+        description: protectedSetup ? peppyCopy.enrollment_setup_protected : "",
         setupMode: protectedSetup ? "protected" : "open",
+        includeSetupToken: protectedSetup,
       })
       : {};
     if (!credentials) return undefined;
     const generated = await this.call<{ passphrase: string }>("enrollment_generate_secret");
     if (!await generatedSecretDialog(generated.passphrase)) return undefined;
     return { ...credentials, passphrase: generated.passphrase };
+  }
+
+  private async collectConfirmedAdminPassword(options: { id: string; title: string; description: string; setupMode?: "open" | "protected"; includeSetupToken?: boolean }): Promise<{ adminPassword: string; setupToken?: string } | undefined> {
+    let setupToken: string | undefined;
+    let errorMessage: string | undefined;
+    while (true) {
+      const credentials = await secretDialog({
+        ...options,
+        confirm: "Continue",
+        errorMessage,
+        fields: [
+          ...(options.includeSetupToken ? [{ name: "setupToken", label: "Setup code", autocomplete: "off", value: setupToken }] : []),
+          { name: "adminPassword", label: peppyCopy.enrollment_admin_password, autocomplete: "new-password" },
+          { name: "adminPasswordConfirm", label: peppyCopy.enrollment_admin_password_confirm, autocomplete: "new-password" },
+        ],
+      });
+      if (!credentials) return undefined;
+      setupToken = credentials.setupToken;
+      if (credentials.adminPassword !== credentials.adminPasswordConfirm) {
+        errorMessage = peppyCopy.admin_password_mismatch;
+        continue;
+      }
+      if (!this.isValidAdminPassword(credentials.adminPassword)) {
+        errorMessage = peppyCopy.admin_password_length;
+        continue;
+      }
+      return { adminPassword: credentials.adminPassword, ...(setupToken ? { setupToken } : {}) };
+    }
+  }
+
+  private isValidAdminPassword(password: string): boolean {
+    const byteLength = new TextEncoder().encode(password).byteLength;
+    return byteLength >= MIN_ADMIN_PASSWORD_BYTES && byteLength <= MAX_ADMIN_PASSWORD_BYTES;
   }
 
   private finishOwnerClaim(view: EnrollmentView): EnrollmentView {

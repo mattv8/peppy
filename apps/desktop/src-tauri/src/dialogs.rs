@@ -21,6 +21,9 @@ pub enum PassphrasePurpose {
     Create,
     SetupToken,
     AdminPassword,
+    AdminPasswordCreate,
+    AdminPasswordConfirm,
+    AdminPasswordMismatch,
     AppLockCreate,
     AppLockConfirm,
     AppLockUnlock,
@@ -424,7 +427,7 @@ mod windows_dialog {
         let (message, caption) = match purpose {
             PassphrasePurpose::Unlock => (
                 w!(
-                    "Enter the vault passphrase. It is verified only on this device and is never stored."
+                    "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
                 ),
                 w!("Unlock Peppy sync"),
             ),
@@ -474,6 +477,20 @@ mod windows_dialog {
                 ),
                 w!("Peppy server administrator"),
             ),
+            PassphrasePurpose::AdminPasswordCreate => (
+                w!(
+                    "Choose the administrator password for this server. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window."
+                ),
+                w!("Set server administrator password"),
+            ),
+            PassphrasePurpose::AdminPasswordConfirm => (
+                w!("Enter the same administrator password again."),
+                w!("Confirm server administrator password"),
+            ),
+            PassphrasePurpose::AdminPasswordMismatch => (
+                w!("The administrator passwords you entered do not match. Try again."),
+                w!("Passwords do not match"),
+            ),
         };
         let info = CREDUI_INFOW {
             cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
@@ -496,7 +513,11 @@ mod windows_dialog {
                     | PassphrasePurpose::AppLockConfirm
                     | PassphrasePurpose::AppLockUnlock
                     | PassphrasePurpose::AppLockDisable => w!("Peppy app lock"),
-                    PassphrasePurpose::SetupToken | PassphrasePurpose::AdminPassword => {
+                    PassphrasePurpose::SetupToken
+                    | PassphrasePurpose::AdminPassword
+                    | PassphrasePurpose::AdminPasswordCreate
+                    | PassphrasePurpose::AdminPasswordConfirm
+                    | PassphrasePurpose::AdminPasswordMismatch => {
                         w!("Peppy server")
                     }
                 },
@@ -555,7 +576,7 @@ mod linux {
 
     const UNLOCK_TITLE: &str = "Unlock Peppy sync";
     const UNLOCK_MESSAGE: &str =
-        "Enter the vault passphrase. It is verified only on this device and is never stored.";
+        "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.";
     const RESUME_OWNER_SECRET_TITLE: &str = "Resume Peppy server setup";
     const RESUME_OWNER_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.";
     const RECOVER_VAULT_SECRET_TITLE: &str = "Complete vault setup";
@@ -595,6 +616,18 @@ mod linux {
             PassphrasePurpose::AdminPassword => (
                 "Peppy server administrator",
                 "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.",
+            ),
+            PassphrasePurpose::AdminPasswordCreate => (
+                "Set server administrator password",
+                "Choose the administrator password for this server. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.",
+            ),
+            PassphrasePurpose::AdminPasswordConfirm => (
+                "Confirm server administrator password",
+                "Enter the same administrator password again.",
+            ),
+            PassphrasePurpose::AdminPasswordMismatch => (
+                "Passwords do not match",
+                "The administrator passwords you entered do not match. Try again.",
             ),
         };
         for (program, arguments) in [
@@ -785,17 +818,27 @@ mod tests {
         let unlock = super::macos::copy(super::PassphrasePurpose::Unlock);
         let create = super::macos::copy(super::PassphrasePurpose::Create);
         let admin_password = super::macos::copy(super::PassphrasePurpose::AdminPassword);
+        let admin_password_create =
+            super::macos::copy(super::PassphrasePurpose::AdminPasswordCreate);
+        let admin_password_confirm =
+            super::macos::copy(super::PassphrasePurpose::AdminPasswordConfirm);
+        let admin_password_mismatch =
+            super::macos::copy(super::PassphrasePurpose::AdminPasswordMismatch);
         let resume = super::macos::copy(super::PassphrasePurpose::ResumeOwnerSecret);
         let recover = super::macos::copy(super::PassphrasePurpose::RecoverVaultSecret);
         assert_eq!(unlock.0, "Unlock Peppy sync");
         assert_eq!(
             unlock.1,
-            "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored."
+            "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
         );
         assert_eq!(unlock.2, "Unlock");
         assert_ne!(unlock, create);
         assert_eq!(create.2, "Create");
         assert!(admin_password.1.contains("12–1024 UTF-8 bytes"));
+        assert!(admin_password_create.1.contains("12–1024 UTF-8 bytes"));
+        assert_ne!(admin_password_create, admin_password_confirm);
+        assert_ne!(admin_password_create, admin_password);
+        assert!(admin_password_mismatch.1.contains("do not match"));
         assert_eq!(resume.0, "Resume Peppy server setup");
         assert!(resume.1.contains("earlier setup attempt"));
         assert_eq!(recover.0, "Complete vault setup");
@@ -850,7 +893,7 @@ mod macos {
         match purpose {
             super::PassphrasePurpose::Unlock => (
                 "Unlock Peppy sync",
-                "Enter the vault passphrase. It is verified on this device against the encrypted vault header and is never sent to the server or stored.",
+                "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.",
                 "Unlock",
             ),
             super::PassphrasePurpose::ResumeOwnerSecret => (
@@ -876,6 +919,21 @@ mod macos {
             super::PassphrasePurpose::AdminPassword => (
                 "Peppy server administrator",
                 "Enter the server administrator password. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AdminPasswordCreate => (
+                "Set server administrator password",
+                "Choose the administrator password for this server. It must be 12–1024 UTF-8 bytes. It is sent only to this server and is never exposed to the Peppy window.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AdminPasswordConfirm => (
+                "Confirm server administrator password",
+                "Enter the same administrator password again.",
+                "Continue",
+            ),
+            super::PassphrasePurpose::AdminPasswordMismatch => (
+                "Passwords do not match",
+                "The administrator passwords you entered do not match. Try again.",
                 "Continue",
             ),
             super::PassphrasePurpose::AppLockCreate => (

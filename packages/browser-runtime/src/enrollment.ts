@@ -56,7 +56,7 @@ export class BrowserEnrollment {
       if (this.session.phase === "ready") {
         const identity = this.requireIdentity();
         if (identity.role === "owner") await this.initializeExistingOwner(origin);
-        this.viewValue = readyView(mode, origin, identity);
+        this.viewValue = await this.readyView(mode, origin, identity);
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
@@ -99,7 +99,7 @@ export class BrowserEnrollment {
       this.captureClaimSession(response);
       await this.session.finishEnrollment("_worker_enrollment_finish_owner", JSON.stringify(response), secrets.passphrase);
       this.enrollmentClient = undefined;
-      this.viewValue = readyView(this.viewValue.mode, this.origin, this.requireIdentity());
+      this.viewValue = await this.readyView(this.viewValue.mode, this.origin, this.requireIdentity());
     } catch (error) {
       this.fail(error);
     }
@@ -122,7 +122,7 @@ export class BrowserEnrollment {
     try {
       if (this.session.phase === "locked") {
         await this.session.unlock(passphrase);
-        this.viewValue = readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
+        this.viewValue = await this.readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
         return this.view();
       }
       if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
@@ -132,7 +132,7 @@ export class BrowserEnrollment {
       const complete = await this.request(`/v1/enrollment/challenges/${encodeURIComponent(id)}/complete`, "POST", proof);
       await this.session.finishEnrollment("_worker_enrollment_finish_manual", JSON.stringify(complete), passphrase);
       this.enrollmentClient = undefined;
-      this.viewValue = readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
+      this.viewValue = await this.readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity());
     } catch (error) {
       if (error instanceof HttpStatusError && error.code === "vault_owner_required") {
         this.viewValue = { ...this.viewValue, stage: "locked", vaultOwnerRequired: true };
@@ -169,7 +169,10 @@ export class BrowserEnrollment {
   }
 
   public async status(): Promise<EnrollmentView> {
-    if (!this.invitationId) return this.view();
+    if (!this.invitationId) {
+      if (this.viewValue.stage === "ready") await this.refreshGatewayPresence();
+      return this.view();
+    }
     try {
       const status = await this.invitationStatus();
       const expiresInSeconds = safeInteger(status.expires_in_seconds);
@@ -302,7 +305,7 @@ export class BrowserEnrollment {
       this.captureClaimSession(response);
       await this.session.finishEnrollment("_worker_enrollment_finish_owner", JSON.stringify(response), secrets.passphrase);
       this.enrollmentClient = undefined;
-      this.viewValue = readyView("community", this.origin, this.requireIdentity());
+      this.viewValue = await this.readyView("community", this.origin, this.requireIdentity());
     } catch (error) {
       if (error instanceof HttpStatusError && (error.code === "username_taken" || error.code === "invalid_username")) {
         this.viewValue = { ...this.viewValue, stage: "invite_approved", errorCode: error.code };
@@ -345,7 +348,7 @@ export class BrowserEnrollment {
     const accepted = await this.core.invoke({ command: "_worker_enrollment_accept_hosted_grant", args: { grantJson: JSON.stringify(grant) } });
     const complete = await this.request("/hosted/v1/web/provisioning/complete", "POST", JSON.parse(required(accepted, "request")));
     await this.session.finishEnrollment("_worker_enrollment_finish_hosted_owner", JSON.stringify(complete), passphrase);
-    this.viewValue = readyView("hosted", this.origin, this.requireIdentity());
+    this.viewValue = await this.readyView("hosted", this.origin, this.requireIdentity());
     return this.view();
   }
 
@@ -407,6 +410,21 @@ export class BrowserEnrollment {
     const identity = this.session.publicIdentity();
     if (!identity || !["owner", "device", "gateway"].includes(identity.role)) throw new Error("enrollment-response");
     return identity;
+  }
+
+  private async readyView(mode: DeploymentMode, origin: string, identity: EnrollmentIdentity): Promise<EnrollmentView> {
+    const hasGateway = await this.gatewayPresence();
+    return { mode, stage: "ready", origin, owner: identity.role === "owner", ...(hasGateway === undefined ? {} : { hasGateway }) };
+  }
+
+  private async refreshGatewayPresence(): Promise<void> {
+    const hasGateway = await this.gatewayPresence();
+    const { hasGateway: _hasGateway, ...view } = this.viewValue;
+    this.viewValue = { ...view, ...(hasGateway === undefined ? {} : { hasGateway }) };
+  }
+
+  private async gatewayPresence(): Promise<boolean | undefined> {
+    return optionalBoolean(record(await this.core.invoke({ command: "_worker_enrollment_gateway_presence", args: {} })), "hasGateway");
   }
 
   private invitationStatus(invitationId = this.invitationId): Promise<Record<string, unknown>> {
@@ -492,9 +510,6 @@ class HttpStatusError extends Error {
   }
 }
 
-function readyView(mode: DeploymentMode, origin: string, identity: EnrollmentIdentity): EnrollmentView {
-  return { mode, stage: "ready", origin, owner: identity.role === "owner" };
-}
 function hostedStage(account: Record<string, unknown>, origin: string): EnrollmentView {
   const classification = account.classification;
   const access = account.access;
@@ -543,6 +558,11 @@ function required(value: unknown, key: string): string {
   const output = record(value)[key];
   if (typeof output !== "string" || !output) throw new Error("enrollment-response");
   return output;
+}
+function optionalBoolean(value: Record<string, unknown>, key: string): boolean | undefined {
+  if (!(key in value)) return undefined;
+  if (typeof value[key] !== "boolean") throw new Error("enrollment-response");
+  return value[key] as boolean;
 }
 function safeInteger(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
 function isDeviceId(value: string): boolean { return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(value); }

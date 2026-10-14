@@ -77,6 +77,7 @@ describe("BrowserBridge", () => {
       const createOwner = bridge.enrollment_create_owner();
       (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(2));
       expect(port.sent[1]).toEqual({ id: 2, command: "enrollment_generate_secret", args: {} });
@@ -123,6 +124,7 @@ describe("BrowserBridge", () => {
       await discover;
       const createOwner = bridge.enrollment_create_owner();
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(2));
       port.reply({ id: 2, ok: true, value: { passphrase: "synthetic generated secret" } });
@@ -244,6 +246,7 @@ describe("BrowserBridge", () => {
       expect(document.getElementById("browser-enrollment-owner-setupToken")).toBeNull();
       expect(document.getElementById("browser-enrollment-owner-form")?.getAttribute("data-setup-mode")).toBe("open");
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       (document.getElementById("browser-enrollment-owner-cancel") as HTMLButtonElement).click();
       await vi.waitFor(() => expect(port.sent).toHaveLength(2));
       port.reply({ id: 2, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: false } });
@@ -273,6 +276,7 @@ describe("BrowserBridge", () => {
       const cancelSecret = bridge.enrollment_create_owner();
       (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(3));
       port.reply({ id: 3, ok: true, value: { passphrase: "generated-vault-secret" } });
@@ -331,6 +335,7 @@ describe("BrowserBridge", () => {
       const firstAttempt = bridge.enrollment_create_owner();
       (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(2));
       port.reply({ id: 2, ok: true, value: { passphrase: "generated-vault-secret" } });
@@ -368,6 +373,7 @@ describe("BrowserBridge", () => {
       const firstAttempt = bridge.enrollment_create_owner();
       (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "wrong-code";
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(2));
       port.reply({ id: 2, ok: true, value: { passphrase: "generated-vault-secret" } });
@@ -407,6 +413,7 @@ describe("BrowserBridge", () => {
       const firstAttempt = bridge.enrollment_create_owner();
       (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "wrong-code";
       (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "admin-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "admin-password";
       document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
       await vi.waitFor(() => expect(port.sent).toHaveLength(2));
       port.reply({ id: 2, ok: true, value: { passphrase: "generated-vault-secret" } });
@@ -433,6 +440,132 @@ describe("BrowserBridge", () => {
       await vi.waitFor(() => expect(port.sent).toHaveLength(5));
       port.reply({ id: 5, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: true } });
       await secondCorrection;
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("re-collects mismatched owner passwords without generating a secret and preserves the setup code", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: true } });
+      await discover;
+
+      const createOwner = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value = "setup-token";
+      (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "matching-password";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "different-password";
+      document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => expect(document.querySelector("#browser-enrollment-owner [role=alert]")?.textContent).toBeTruthy());
+      expect(port.sent).toHaveLength(1);
+      expect((document.getElementById("browser-enrollment-owner-setupToken") as HTMLInputElement).value).toBe("setup-token");
+      expect((document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value).toBe("");
+      expect((document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value).toBe("");
+
+      (document.getElementById("browser-enrollment-owner-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      expect(port.sent[1]).toEqual({ id: 2, command: "enrollment_status", args: {} });
+      port.reply({ id: 2, ok: true, value: { mode: "community", stage: "setup" } });
+      await createOwner;
+      expect(port.sent).not.toContainEqual(expect.objectContaining({ command: "enrollment_create_owner" }));
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("rejects invalid owner-password byte lengths before generating a secret", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const discover = bridge.enrollment_discover();
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: false } });
+      await discover;
+
+      const createOwner = bridge.enrollment_create_owner();
+      (document.getElementById("browser-enrollment-owner-adminPassword") as HTMLInputElement).value = "short-pass";
+      (document.getElementById("browser-enrollment-owner-adminPasswordConfirm") as HTMLInputElement).value = "short-pass";
+      document.getElementById("browser-enrollment-owner-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => expect(document.querySelector("#browser-enrollment-owner [role=alert]")?.textContent).toBeTruthy());
+      expect(port.sent).toHaveLength(1);
+      (document.getElementById("browser-enrollment-owner-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      port.reply({ id: 2, ok: true, value: { mode: "community", stage: "setup", setupCodeRequired: false } });
+      await createOwner;
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("confirms corrected vault passwords before retrying an invalid password", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const firstAttempt = bridge.enrollment_create_vault({ username: "taylor" });
+      (document.getElementById("browser-enrollment-vault-adminPassword") as HTMLInputElement).value = "original-password";
+      (document.getElementById("browser-enrollment-vault-adminPasswordConfirm") as HTMLInputElement).value = "original-password";
+      document.getElementById("browser-enrollment-vault-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect(port.sent[0]).toEqual({ id: 1, command: "enrollment_generate_secret", args: {} });
+      port.reply({ id: 1, ok: true, value: { passphrase: "generated-vault-secret" } });
+      await vi.waitFor(() => expect(document.getElementById("browser-enrollment-owner-secret")).not.toBeNull());
+      const acknowledgement = document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement;
+      acknowledgement.checked = true;
+      acknowledgement.dispatchEvent(new Event("change"));
+      document.getElementById("browser-enrollment-owner-secret-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+      port.reply({ id: 2, ok: true, value: { mode: "community", stage: "error", errorCode: "invalid_admin_password" } });
+      await expect(firstAttempt).resolves.toMatchObject({ stage: "error" });
+
+      const cancelledCorrection = bridge.enrollment_create_vault({ username: "taylor" });
+      (document.getElementById("browser-enrollment-vault-password-cancel") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+      expect(port.sent[2]).toEqual({ id: 3, command: "enrollment_status", args: {} });
+      port.reply({ id: 3, ok: true, value: { mode: "community", stage: "invite_approved" } });
+      await expect(cancelledCorrection).resolves.toMatchObject({ stage: "invite_approved" });
+
+      const retry = bridge.enrollment_create_vault({ username: "taylor" });
+      (document.getElementById("browser-enrollment-vault-password-adminPassword") as HTMLInputElement).value = "corrected-password";
+      (document.getElementById("browser-enrollment-vault-password-adminPasswordConfirm") as HTMLInputElement).value = "different-password";
+      document.getElementById("browser-enrollment-vault-password-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(document.querySelector("#browser-enrollment-vault-password [role=alert]")?.textContent).toBeTruthy());
+      expect(port.sent).toHaveLength(3);
+
+      (document.getElementById("browser-enrollment-vault-password-adminPassword") as HTMLInputElement).value = "corrected-password";
+      (document.getElementById("browser-enrollment-vault-password-adminPasswordConfirm") as HTMLInputElement).value = "corrected-password";
+      document.getElementById("browser-enrollment-vault-password-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(4));
+      expect(port.sent[3]).toEqual({ id: 4, command: "enrollment_create_vault", args: { username: "taylor", adminPassword: "corrected-password", passphrase: "generated-vault-secret" } });
+      port.reply({ id: 4, ok: true, value: { mode: "community", stage: "ready" } });
+      await expect(retry).resolves.toMatchObject({ stage: "ready" });
+    } finally {
+      bridge.dispose();
+      restoreShowModal();
+    }
+  });
+
+  it("keeps browser sign-in as a single password entry", async () => {
+    const port = new TestPort();
+    const restoreShowModal = stubShowModal();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    try {
+      const signIn = bridge.enrollment_sign_in();
+      expect(document.getElementById("browser-enrollment-signin-adminPasswordConfirm")).toBeNull();
+      (document.getElementById("browser-enrollment-signin-adminPassword") as HTMLInputElement).value = "existing-password";
+      document.getElementById("browser-enrollment-signin-form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect(port.sent[0]).toEqual({ id: 1, command: "enrollment_sign_in", args: { adminPassword: "existing-password" } });
+      port.reply({ id: 1, ok: true, value: { mode: "community", stage: "ready" } });
+      await expect(signIn).resolves.toMatchObject({ stage: "ready" });
     } finally {
       bridge.dispose();
       restoreShowModal();

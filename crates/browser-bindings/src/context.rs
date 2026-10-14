@@ -190,6 +190,25 @@ mod tests {
     }
 
     #[test]
+    fn mobile_owner_without_capabilities_is_an_unavailable_gateway() {
+        let (_root, mut core, device) = unlocked_core();
+
+        let applied = response(
+            &mut core,
+            "_worker_apply_server_context",
+            context(
+                json!({"devices":[{"device_id":device,"role":"owner","kind":"ios","revoked":false}]}),
+                json!({"capabilities":[]}),
+            ),
+        );
+
+        assert_eq!(applied["gateways"].as_array().unwrap().len(), 1);
+        assert_eq!(applied["gateways"][0]["id"], device.to_string());
+        assert_eq!(applied["gateways"][0]["supportsSms"], false);
+        assert_eq!(applied["gateways"][0]["supportsMms"], false);
+    }
+
+    #[test]
     fn offline_context_preserves_the_last_valid_gateway_set() {
         let (_root, mut core, device) = unlocked_core();
         let gateway = DeviceId::new();
@@ -208,5 +227,64 @@ mod tests {
         );
         assert_eq!(offline["connection"], "offline");
         assert_eq!(offline["gateways"][0]["id"], gateway.to_string());
+    }
+
+    #[test]
+    fn gateway_presence_is_unknown_until_a_verified_roster_and_survives_offline() {
+        let (_root, mut core, device) = unlocked_core();
+        assert_eq!(
+            response(&mut core, "_worker_enrollment_gateway_presence", json!({})),
+            json!({})
+        );
+
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            context(
+                json!({"devices":[{"device_id":device,"role":"device","revoked":false}]}),
+                json!({"capabilities":[]}),
+            ),
+        );
+        assert_eq!(
+            response(&mut core, "_worker_enrollment_gateway_presence", json!({})),
+            json!({"hasGateway":false})
+        );
+
+        let gateway = DeviceId::new();
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            context(
+                json!({"devices":[
+                    {"device_id":device,"role":"device","revoked":false},
+                    {"device_id":gateway,"role":"gateway","revoked":false}
+                ]}),
+                json!({"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[]}}]}),
+            ),
+        );
+        assert_eq!(
+            response(&mut core, "_worker_enrollment_gateway_presence", json!({})),
+            json!({"hasGateway":true})
+        );
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            json!({"connection":"offline","devices":null,"capabilities":null}),
+        );
+        assert_eq!(
+            response(&mut core, "_worker_enrollment_gateway_presence", json!({})),
+            json!({"hasGateway":true})
+        );
+
+        let public: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"enrollment_gateway_presence","args":{}}"#),
+        )
+        .unwrap();
+        assert_eq!(public["error"]["code"], "unknown-command");
+        response(&mut core, "close", json!({}));
+        assert_eq!(
+            response(&mut core, "_worker_enrollment_gateway_presence", json!({})),
+            json!({})
+        );
     }
 }

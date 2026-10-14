@@ -165,6 +165,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const discoverStarted = useRef(false);
   const fixedStarted = useRef(false);
   const enrollEpoch = useRef(0);
+  const statusRequestEpoch = useRef(0);
+  const foregroundStatusRequest = useRef<number | null>(null);
   const mutationInFlight = useRef(false);
   const phoneInviteStarted = useRef(false);
   const rotatedInvitation = useRef<string | null>(null);
@@ -177,6 +179,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const retryRef = useRef<() => void>(() => undefined);
   const previousMode = useRef(mode);
   const previousRoute = useRef<Route | null>(null);
+  const latestRoutingState = useRef({ enrolledWithoutPhone, addingPhone });
+  latestRoutingState.current = { enrolledWithoutPhone, addingPhone };
 
   const community = Boolean(fixedOrigin) || mode === "self-hosted" || enrolledWithoutPhone || addingPhone;
   const hostedBrowser = Boolean(fixedOrigin && accountUrl);
@@ -207,7 +211,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
       if (epoch === enrollEpoch.current) {
         mutationInFlight.current = false;
         if (!background) setBusy(false);
-        if ((enrolledWithoutPhone || addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus();
+        const routing = latestRoutingState.current;
+        if ((routing.enrolledWithoutPhone || routing.addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus(true);
       }
     }
   };
@@ -218,6 +223,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const resetEnrollment = () => {
     enrollEpoch.current += 1;
+    foregroundStatusRequest.current = null;
     mutationInFlight.current = false;
     invitePollEpoch.current += 1;
     cancelActive();
@@ -308,30 +314,40 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     void refreshStatus(true);
   };
   const refreshStatus = async (foreground = false) => {
+    if (!foreground && foregroundStatusRequest.current !== null) return;
     if (mutationInFlight.current) return;
+    const statusRequest = ++statusRequestEpoch.current;
     const epoch = enrollEpoch.current;
-    if (foreground) setBusy(true);
+    if (foreground) {
+      foregroundStatusRequest.current = statusRequest;
+      setBusy(true);
+    }
     try {
       const next = await bridge.enrollment_status();
-      if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
-      if ((enrolledWithoutPhone || addingPhone) && next.stage === "server") {
+      if (statusRequest !== statusRequestEpoch.current || epoch !== enrollEpoch.current || mutationInFlight.current) return;
+      const routing = latestRoutingState.current;
+      if ((routing.enrolledWithoutPhone || routing.addingPhone) && next.stage === "server") {
         void discover();
         return;
       }
       if (next.stage === "error") retryRef.current = retryStatus;
       apply(next);
     } catch (error) {
-      if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
+      if (statusRequest !== statusRequestEpoch.current || epoch !== enrollEpoch.current || mutationInFlight.current) return;
       retryRef.current = retryStatus;
       apply({ ...failedView(), errorCode: thrownErrorCode(error) });
     } finally {
-      if (foreground && epoch === enrollEpoch.current) setBusy(false);
+      if (foreground && foregroundStatusRequest.current === statusRequest) {
+        foregroundStatusRequest.current = null;
+        if (statusRequest === statusRequestEpoch.current && epoch === enrollEpoch.current) setBusy(false);
+      }
     }
   };
   const cancelPairing = () => {
     invitePollEpoch.current += 1;
     if (addingPhone) {
       enrollEpoch.current += 1;
+      foregroundStatusRequest.current = null;
       mutationInFlight.current = false;
       enrollmentActive.current = false;
       void bridge.enrollment_cancel().catch(() => undefined).finally(onExit);
@@ -345,6 +361,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const changeServer = () => {
     enrollEpoch.current += 1;
+    foregroundStatusRequest.current = null;
     mutationInFlight.current = false;
     cancelActive();
     setBusy(false);
@@ -383,6 +400,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   useEffect(() => () => {
     invalidateAccountFlows();
     enrollEpoch.current += 1;
+    foregroundStatusRequest.current = null;
     mutationInFlight.current = false;
     cancelActive();
   }, []);
@@ -452,10 +470,24 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
 
   const stage = view?.stage ?? null;
   useEffect(() => {
-    if (stage !== "ready" || !view?.owner || (view.hasGateway && !addingPhone) || phoneInviteStarted.current || mutationInFlight.current) return;
+    if (stage !== "ready" || !view?.owner || (!addingPhone && view.hasGateway !== false) || phoneInviteStarted.current || mutationInFlight.current) return;
     phoneInviteStarted.current = true;
     addPhone("transfer");
   }, [stage, view?.owner, view?.hasGateway]);
+  useEffect(() => {
+    if (stage !== "ready" || !view?.owner || addingPhone || view.hasGateway !== undefined) return;
+    let active = true;
+    let timer: number | undefined;
+    const pollGatewayStatus = async () => {
+      await refreshStatus();
+      if (active) timer = window.setTimeout(() => void pollGatewayStatus(), pollIntervalMs);
+    };
+    timer = window.setTimeout(() => void pollGatewayStatus(), pollIntervalMs);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [addingPhone, stage, view?.hasGateway, view?.owner]);
   useEffect(() => {
     if (stage !== "locked") setVaultOwner("");
     if (stage !== "signin") setSigninPath("chooser");
@@ -751,6 +783,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             {phoneInviteStarted.current && !mutationInFlight.current && <div className="enrollment-actions">
               <button id="enrollment-show-connection-code-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Show connection code</button>
               <button id="enrollment-ready-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
+            </div>}
+            {!phoneInviteStarted.current && !addingPhone && view.hasGateway === undefined && onDeferPhone && <div className="enrollment-actions">
+              <button id="enrollment-unknown-roster-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
             </div>}
           </Stage>
         );

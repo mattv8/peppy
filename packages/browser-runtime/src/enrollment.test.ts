@@ -236,6 +236,63 @@ describe("BrowserEnrollment", () => {
     expect(core.invoke.mock.calls.filter(([request]) => request.command === "_worker_enrollment_create_owner")).toHaveLength(2);
   });
 
+  it("reports verified gateway presence only after the private worker knows the roster", async () => {
+    let hasGateway: boolean | undefined;
+    const core = { invoke: vi.fn(async ({ command }: { command: string }): Promise<unknown> => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_create_owner") return { request: JSON.stringify({ operation_id: vaultId }) };
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_gateway_presence") {
+        return hasGateway === undefined ? {} : { hasGateway };
+      }
+      return {};
+    }) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(false));
+      if (path === "/v1/instance/claim") return json({ vault_id: vaultId, device_id: deviceId, role: "owner", session: {} });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.createOwner({ setupToken: "setup", adminPassword: "password-password", passphrase: "secret" })).resolves.not.toHaveProperty("hasGateway");
+    await expect(enrollment.status()).resolves.not.toHaveProperty("hasGateway");
+
+    hasGateway = false;
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "ready", hasGateway: false });
+    hasGateway = true;
+    await expect(enrollment.status()).resolves.toMatchObject({ stage: "ready", hasGateway: true });
+    expect(fetcher.mock.calls.filter(([input]) => pathOf(input) === "/v1/enrollment/invitations")).toHaveLength(0);
+  });
+
+  it("keeps locked and non-owner gateway presence reads non-mutating", async () => {
+    const lockedCore = { invoke: vi.fn(async () => ({ hasGateway: true })) };
+    const lockedSession = new TestSession();
+    lockedSession.phase = "locked";
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const locked = new BrowserEnrollment(lockedCore, lockedSession, origin, fetcher);
+    await expect(locked.discover()).resolves.toMatchObject({ stage: "locked" });
+    expect(lockedCore.invoke).not.toHaveBeenCalledWith({ command: "_worker_enrollment_gateway_presence", args: {} });
+
+    const nonOwnerCore = { invoke: vi.fn(async ({ command }: { command: string }) => command === "_worker_enrollment_gateway_presence" ? { hasGateway: true } : {}) };
+    const nonOwnerSession = new TestSession();
+    nonOwnerSession.phase = "ready";
+    nonOwnerSession.identity = { role: "device" };
+    const nonOwner = new BrowserEnrollment(nonOwnerCore, nonOwnerSession, origin, fetcher);
+    await expect(nonOwner.discover()).resolves.toMatchObject({ stage: "ready", owner: false, hasGateway: true });
+    await expect(nonOwner.addPhone("transfer")).resolves.toMatchObject({ stage: "error", errorCode: "enrollment-state" });
+    expect(fetcher.mock.calls.some(([input]) => pathOf(input) === "/v1/enrollment/invitations")).toBe(false);
+  });
+
   it("rejects malformed discovery instead of treating it as an open server", async () => {
     const core = new LifecycleCore();
     const session = new TestSession();

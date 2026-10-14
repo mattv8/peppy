@@ -1828,6 +1828,7 @@ struct DeviceView {
     device_id: Uuid,
     role: String,
     revoked: bool,
+    kind: Option<String>,
     profile_fingerprint: String,
     key_epoch: u32,
 }
@@ -1836,7 +1837,7 @@ async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Valu
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "devices_begin"))?;
-    let rows = sqlx::query("SELECT device_id,role,revoked_at IS NOT NULL revoked,profile_fingerprint,key_epoch FROM devices WHERE vault_id=$1 ORDER BY created_at")
+    let rows = sqlx::query("SELECT device_id,role,revoked_at IS NOT NULL revoked,kind,profile_fingerprint,key_epoch FROM devices WHERE vault_id=$1 ORDER BY created_at")
         .bind(p.vault).fetch_all(&mut *tx).await.map_err(|error| database_unavailable(&error, "api_query"))?;
     let devices = rows
         .into_iter()
@@ -1844,6 +1845,7 @@ async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Valu
             device_id: row.get("device_id"),
             role: row.get("role"),
             revoked: row.get("revoked"),
+            kind: row.get("kind"),
             profile_fingerprint: row.get("profile_fingerprint"),
             key_epoch: row.get::<i32, _>("key_epoch") as u32,
         })

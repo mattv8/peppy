@@ -516,6 +516,49 @@ fn owner_operation_current(
         == epoch)
 }
 
+async fn collect_new_admin_password<P, PF>(
+    controller: &std::sync::Mutex<Controller>,
+    epoch: u64,
+    mut prompt: P,
+) -> BridgeResult<Option<Zeroizing<String>>>
+where
+    P: FnMut(PassphrasePurpose) -> PF,
+    PF: std::future::Future<Output = BridgeResult<Option<Zeroizing<String>>>>,
+{
+    let Some(mut password) = prompt(PassphrasePurpose::AdminPasswordCreate).await? else {
+        return Ok(None);
+    };
+    if !owner_operation_current(controller, epoch)? {
+        return Ok(None);
+    }
+
+    loop {
+        if !(12..=1024).contains(&password.len()) {
+            return Err(BridgeError::new(
+                "admin-password-length",
+                "Administrator password must be between 12 and 1024 bytes.",
+            ));
+        }
+        let Some(confirm) = prompt(PassphrasePurpose::AdminPasswordConfirm).await? else {
+            return Ok(None);
+        };
+        if !owner_operation_current(controller, epoch)? {
+            return Ok(None);
+        }
+        if password == confirm {
+            return Ok(Some(password));
+        }
+
+        let Some(replacement) = prompt(PassphrasePurpose::AdminPasswordMismatch).await? else {
+            return Ok(None);
+        };
+        if !owner_operation_current(controller, epoch)? {
+            return Ok(None);
+        }
+        password = replacement;
+    }
+}
+
 fn wrong_owner_passphrase() -> BridgeError {
     BridgeError::new(
         "wrong-passphrase",
@@ -576,18 +619,10 @@ where
     if !owner_operation_current(controller, epoch)? {
         return Ok(false);
     }
-    let Some(admin_password) = prompt(PassphrasePurpose::AdminPassword).await? else {
+    let Some(admin_password) = collect_new_admin_password(controller, epoch, &mut prompt).await?
+    else {
         return Ok(false);
     };
-    if !owner_operation_current(controller, epoch)? {
-        return Ok(false);
-    }
-    if !(12..=1024).contains(&admin_password.len()) {
-        return Err(BridgeError::new(
-            "admin-password-length",
-            "Administrator password must be between 12 and 1024 bytes.",
-        ));
-    }
 
     let (retained, resume, origin_for_secret) = {
         let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
@@ -1776,20 +1811,17 @@ pub async fn enrollment_create_vault(
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
     let epoch = begin_owner_operation(&state.enrollment)?;
-    let Some(password) = dialogs::passphrase(&app, PassphrasePurpose::AdminPassword).await? else {
+    let Some(password) = collect_new_admin_password(&state.enrollment, epoch, |purpose| {
+        dialogs::passphrase(&app, purpose)
+    })
+    .await?
+    else {
         return Ok(state
             .enrollment
             .lock()
             .map_err(|_| BridgeError::host_state())?
             .view());
     };
-    if !owner_operation_current(&state.enrollment, epoch)? {
-        return Ok(state
-            .enrollment
-            .lock()
-            .map_err(|_| BridgeError::host_state())?
-            .view());
-    }
     let retained = state
         .enrollment
         .lock()
@@ -1827,6 +1859,13 @@ pub async fn enrollment_create_vault(
                     .map_err(|_| BridgeError::host_state())?
                     .view());
             };
+            if !owner_operation_current(&state.enrollment, epoch)? {
+                return Ok(state
+                    .enrollment
+                    .lock()
+                    .map_err(|_| BridgeError::host_state())?
+                    .view());
+            }
             passphrase
         } else {
             generated_secret = true;
@@ -2908,7 +2947,9 @@ mod owner_retry_tests {
     fn prompt(purpose: PassphrasePurpose) -> BridgeResult<Option<Zeroizing<String>>> {
         let value = match purpose {
             PassphrasePurpose::SetupToken => "setup-token",
-            PassphrasePurpose::AdminPassword => "password long enough",
+            PassphrasePurpose::AdminPasswordCreate | PassphrasePurpose::AdminPasswordConfirm => {
+                "password long enough"
+            }
             PassphrasePurpose::Unlock => RECOVERY_SECRET,
             _ => panic!("unexpected prompt: {purpose:?}"),
         };
@@ -2952,7 +2993,10 @@ mod owner_retry_tests {
 
         assert_eq!(
             *prompted.lock().unwrap(),
-            vec![PassphrasePurpose::AdminPassword]
+            vec![
+                PassphrasePurpose::AdminPasswordCreate,
+                PassphrasePurpose::AdminPasswordConfirm,
+            ]
         );
         let request: ClaimInstanceRequest =
             serde_json::from_str(request.lock().unwrap().as_ref().unwrap()).unwrap();
@@ -2961,19 +3005,27 @@ mod owner_retry_tests {
 
     #[tokio::test]
     async fn invalid_admin_password_lengths_stop_before_generating_or_persisting_owner_material() {
-        for password in ["a".repeat(11), "é".repeat(5) + "a", "a".repeat(1025)] {
+        for password in [
+            String::new(),
+            "a".repeat(11),
+            "é".repeat(5) + "a",
+            "a".repeat(1025),
+        ] {
             let controller = unclaimed_controller();
             let store = MemoryStore::default();
+            let prompted = Arc::new(Mutex::new(Vec::new()));
+            let prompted_by_test = prompted.clone();
 
             let error = create_owner_core(
                 &controller,
                 &store,
                 None,
                 String::new(),
-                |purpose| {
+                move |purpose| {
+                    prompted_by_test.lock().unwrap().push(purpose);
                     let value = match purpose {
                         PassphrasePurpose::SetupToken => "setup-token",
-                        PassphrasePurpose::AdminPassword => &password,
+                        PassphrasePurpose::AdminPasswordCreate => &password,
                         _ => panic!("invalid password must stop before another prompt"),
                     };
                     std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
@@ -2995,6 +3047,13 @@ mod owner_retry_tests {
 
             assert_eq!(error.code, "admin-password-length");
             assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+            assert_eq!(
+                *prompted.lock().unwrap(),
+                vec![
+                    PassphrasePurpose::SetupToken,
+                    PassphrasePurpose::AdminPasswordCreate,
+                ]
+            );
             assert!(!controller
                 .lock()
                 .unwrap()
@@ -3003,6 +3062,190 @@ mod owner_retry_tests {
                 .unwrap()
                 .has_prepared_owner_material());
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_replacement_password_stops_before_confirmation_or_owner_mutation() {
+        let controller = unclaimed_controller();
+        let store = MemoryStore::default();
+        let prompted = Arc::new(Mutex::new(Vec::new()));
+        let prompted_by_test = prompted.clone();
+        let responses = Arc::new(Mutex::new(vec![
+            "setup-token",
+            "first password long enough",
+            "different password long enough",
+            "short",
+        ]));
+        let responses_by_test = responses.clone();
+
+        let error = create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            move |purpose| {
+                prompted_by_test.lock().unwrap().push(purpose);
+                let value = responses_by_test.lock().unwrap().remove(0);
+                std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
+            },
+            || panic!("an invalid replacement password must not generate a secret"),
+            |_, _| async move {
+                panic!("an invalid replacement password must not post a claim");
+                #[allow(unreachable_code)]
+                Ok(String::new())
+            },
+            |_, _, _| async move {
+                panic!("an invalid replacement password must not activate an identity");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, "admin-password-length");
+        assert_eq!(
+            *prompted.lock().unwrap(),
+            vec![
+                PassphrasePurpose::SetupToken,
+                PassphrasePurpose::AdminPasswordCreate,
+                PassphrasePurpose::AdminPasswordConfirm,
+                PassphrasePurpose::AdminPasswordMismatch,
+            ]
+        );
+        assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+        assert!(!controller
+            .lock()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .has_prepared_owner_material());
+    }
+
+    #[tokio::test]
+    async fn owner_password_mismatch_recollects_and_confirms_before_creating_material() {
+        let controller = unclaimed_controller();
+        let store = MemoryStore::default();
+        let prompted = Arc::new(Mutex::new(Vec::new()));
+        let prompted_by_test = prompted.clone();
+        let responses = Arc::new(Mutex::new(vec![
+            Some("setup-token"),
+            Some("first password long enough"),
+            Some("different password long enough"),
+            Some("correct password long enough"),
+            Some("correct password long enough"),
+        ]));
+        let responses_by_test = responses.clone();
+
+        assert!(create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            move |purpose| {
+                prompted_by_test.lock().unwrap().push(purpose);
+                let value = responses_by_test.lock().unwrap().remove(0);
+                std::future::ready(Ok(value.map(|value| Zeroizing::new(value.into()))))
+            },
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, request| std::future::ready(Ok(claim_response(&request, false))),
+            |_, _, _| std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(
+            *prompted.lock().unwrap(),
+            vec![
+                PassphrasePurpose::SetupToken,
+                PassphrasePurpose::AdminPasswordCreate,
+                PassphrasePurpose::AdminPasswordConfirm,
+                PassphrasePurpose::AdminPasswordMismatch,
+                PassphrasePurpose::AdminPasswordConfirm,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_mismatch_cannot_create_owner_material() {
+        let controller = unclaimed_controller();
+        let store = MemoryStore::default();
+        let responses = Arc::new(Mutex::new(vec![
+            Some("setup-token"),
+            Some("first password long enough"),
+            Some("different password long enough"),
+            None,
+        ]));
+        let responses_by_test = responses.clone();
+
+        assert!(!create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            move |_| {
+                let value = responses_by_test.lock().unwrap().remove(0);
+                std::future::ready(Ok(value.map(|value| Zeroizing::new(value.into()))))
+            },
+            || panic!("a cancelled password confirmation must not generate a secret"),
+            |_, _| async move {
+                panic!("a cancelled password confirmation must not post a claim");
+                #[allow(unreachable_code)]
+                Ok(String::new())
+            },
+            |_, _, _| async move {
+                panic!("a cancelled password confirmation must not activate an identity");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+        )
+        .await
+        .unwrap());
+
+        assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+        assert!(!controller
+            .lock()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .has_prepared_owner_material());
+    }
+
+    #[tokio::test]
+    async fn stale_operation_while_confirming_a_new_password_stops_before_secret_generation() {
+        let controller = Arc::new(unclaimed_controller());
+        let store = MemoryStore::default();
+        let prompt_controller = controller.clone();
+
+        assert!(!create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            move |purpose| {
+                if purpose == PassphrasePurpose::AdminPasswordConfirm {
+                    cancel_owner_operation(&prompt_controller).unwrap();
+                }
+                std::future::ready(prompt(purpose))
+            },
+            || panic!("a stale confirmation must not generate a secret"),
+            |_, _| async move {
+                panic!("a stale confirmation must not post a claim");
+                #[allow(unreachable_code)]
+                Ok(String::new())
+            },
+            |_, _, _| async move {
+                panic!("a stale confirmation must not activate an identity");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+        )
+        .await
+        .unwrap());
+
+        assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -3023,7 +3266,8 @@ mod owner_retry_tests {
                     seen.lock().unwrap().push(purpose);
                     let value = match purpose {
                         PassphrasePurpose::SetupToken => "setup-token",
-                        PassphrasePurpose::AdminPassword => &password,
+                        PassphrasePurpose::AdminPasswordCreate
+                        | PassphrasePurpose::AdminPasswordConfirm => &password,
                         _ => panic!("fresh owner creation must not re-prompt for a secret"),
                     };
                     std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
@@ -3039,7 +3283,8 @@ mod owner_retry_tests {
                 *prompted.lock().unwrap(),
                 vec![
                     PassphrasePurpose::SetupToken,
-                    PassphrasePurpose::AdminPassword
+                    PassphrasePurpose::AdminPasswordCreate,
+                    PassphrasePurpose::AdminPasswordConfirm,
                 ]
             );
         }
@@ -3290,7 +3535,8 @@ mod owner_retry_tests {
             *prompted.lock().unwrap(),
             vec![
                 PassphrasePurpose::SetupToken,
-                PassphrasePurpose::AdminPassword,
+                PassphrasePurpose::AdminPasswordCreate,
+                PassphrasePurpose::AdminPasswordConfirm,
                 PassphrasePurpose::ResumeOwnerSecret,
             ]
         );

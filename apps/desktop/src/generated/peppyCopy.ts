@@ -203,6 +203,8 @@ export const peppyCopy = {
   production_pairing_camera_owner_hint: "Point your camera at a code from an enrolled owner device.",
   enrollment_setup_code: "Setup code",
   enrollment_admin_password: "Admin password",
+  enrollment_admin_password_confirm: "Confirm admin password",
+  admin_password_mismatch: "The passwords do not match.",
   enrollment_allow_camera: "Allow camera access",
   enrollment_setup_open: "No setup code is required.",
   enrollment_setup_protected: "This server's operator requires a setup code configured with PEPPY_SETUP_TOKEN.",

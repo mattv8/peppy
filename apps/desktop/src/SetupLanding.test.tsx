@@ -58,14 +58,14 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_sign_out").mockResolvedValue();
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
     vi.spyOn(bridge, "enrollment_start_over").mockResolvedValue(view({ stage: "setup" }));
-    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
     vi.spyOn(bridge, "enrollment_cancel").mockResolvedValue();
-    vi.spyOn(bridge, "enrollment_create_owner").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
     vi.spyOn(bridge, "enrollment_sign_in").mockResolvedValue(view({ stage: "locked" }));
-    vi.spyOn(bridge, "enrollment_connect_shared_secret").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_connect_shared_secret").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
     vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(waitingView());
     vi.spyOn(bridge, "enrollment_rotate_phone").mockResolvedValue(waitingView());
-    vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
     vi.spyOn(bridge, "reveal_vault_secret").mockResolvedValue();
     vi.spyOn(bridge, "enrollment_approve").mockResolvedValue(view({ stage: "phone_connected", owner: true }));
   });
@@ -400,26 +400,152 @@ describe("SetupLanding", () => {
 
   it("discovers before adding a phone when status starts at server", async () => {
     vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "server" }));
-    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
     renderLanding({ enrolledWithoutPhone: true });
 
     await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
     await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
   });
 
-  it("keeps a create-owner result when owner-without-phone status refreshes stale setup", async () => {
+  it("reconciles a stale claim result after the latest route becomes owner without a phone", async () => {
     const creation = deferred<EnrollmentView>();
+    const status = deferred<EnrollmentView>();
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
     vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
-    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
     const rendered = renderLanding({ mode: "self-hosted" });
     fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
     rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone onJoined={vi.fn()} />);
-    await act(async () => creation.resolve(view({ stage: "ready", owner: true })));
+    expect(bridge.enrollment_status).not.toHaveBeenCalled();
+    await act(async () => creation.resolve(view({ stage: "setup" })));
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Create server" })).toBeDisabled();
+    await act(async () => status.resolve(view({ stage: "ready", owner: true, hasGateway: false })));
     await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+  });
+
+  it("keeps a stale claim result busy until status confirms a connected gateway", async () => {
+    const creation = deferred<EnrollmentView>();
+    const status = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
+    const rendered = renderLanding({ mode: "self-hosted" });
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone onJoined={vi.fn()} />);
+    await act(async () => creation.resolve(view({ stage: "setup" })));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Create server" })).toBeDisabled();
+    await act(async () => status.resolve(view({ stage: "ready", owner: true, hasGateway: true })));
+    expect(await screen.findByText("Phone connected.")).toBeInTheDocument();
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("keeps foreground claim reconciliation responsible when route status refreshes", async () => {
+    const creation = deferred<EnrollmentView>();
+    const status = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
+    const onDeferPhone = vi.fn();
+    const rendered = renderLanding({ mode: "self-hosted", onDeferPhone });
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone onDeferPhone={onDeferPhone} onJoined={vi.fn()} />);
+    await act(async () => creation.resolve(view({ stage: "setup" })));
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onDeferPhone={onDeferPhone} onJoined={vi.fn()} />);
+    rendered.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone onDeferPhone={onDeferPhone} onJoined={vi.fn()} />);
+
+    expect(bridge.enrollment_status).toHaveBeenCalledOnce();
+    await act(async () => status.resolve(view({ stage: "ready", owner: true })));
+    expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeEnabled();
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("retries unknown gateway status until known absence before automatically creating a phone invitation", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true, hasGateway: false }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await act(async () => undefined);
+    expect(bridge.enrollment_status).toHaveBeenCalledOnce();
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTime(4_000));
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(2);
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTime(4_000));
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(3);
+    expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer");
+    expect(bridge.enrollment_add_phone).toHaveBeenCalledOnce();
+  });
+
+  it("skips automatic phone setup when status reports a connected gateway", async () => {
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: true }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("retries unknown gateway status until a connected gateway is known", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true, hasGateway: true }));
+    renderLanding({ enrolledWithoutPhone: true });
+
+    await act(async () => undefined);
+    await act(async () => vi.advanceTimersByTime(4_000));
+    await act(async () => vi.advanceTimersByTime(4_000));
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(3);
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("ignores an older absent-gateway status after newer status finds a connected phone", async () => {
+    vi.useFakeTimers();
+    const olderStatus = deferred<EnrollmentView>();
+    const newerStatus = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(view({ stage: "ready", owner: true }))
+      .mockReturnValueOnce(olderStatus.promise)
+      .mockReturnValueOnce(newerStatus.promise);
+    const rendered = renderLanding({ enrolledWithoutPhone: true });
+
+    await act(async () => undefined);
+    await act(async () => vi.advanceTimersByTime(4_000));
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(2);
+    rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
+    rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone onJoined={vi.fn()} />);
+    await act(async () => undefined);
+    expect(bridge.enrollment_status).toHaveBeenCalledTimes(3);
+
+    await act(async () => newerStatus.resolve(view({ stage: "ready", owner: true, hasGateway: true })));
+    await act(async () => olderStatus.resolve(view({ stage: "ready", owner: true, hasGateway: false })));
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("lets an owner defer phone setup while gateway status is unknown", async () => {
+    const onDeferPhone = vi.fn();
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(view({ stage: "ready", owner: true }));
+    renderLanding({ enrolledWithoutPhone: true, onDeferPhone });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    await waitFor(() => expect(bridge.enrollment_cancel_phone).toHaveBeenCalledOnce());
+    expect(onDeferPhone).toHaveBeenCalledOnce();
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
   });
 
   it("reconciles a remounted owner setup through status before adding a phone", async () => {
@@ -431,7 +557,7 @@ describe("SetupLanding", () => {
     fireEvent.click(screen.getByRole("button", { name: "Connect" }));
     fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
     rendered.unmount();
-    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true }));
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
     renderLanding({ enrolledWithoutPhone: true });
 
     await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
@@ -818,7 +944,7 @@ describe("SetupLanding", () => {
     });
 
     it("rotates to the shared-secret phone method", async () => {
-      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
@@ -852,8 +978,8 @@ describe("SetupLanding", () => {
     });
 
     it("keeps owner actions available when automatic invitation creation returns ready", async () => {
-      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true }));
-      vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(view({ stage: "ready", owner: true }));
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
+      vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));

@@ -192,6 +192,8 @@
     <string name="peppy_production_pairing_camera_owner_hint">Point your camera at a code from an enrolled owner device.</string>
     <string name="peppy_enrollment_setup_code">Setup code</string>
     <string name="peppy_enrollment_admin_password">Admin password</string>
+    <string name="peppy_enrollment_admin_password_confirm">Confirm admin password</string>
+    <string name="peppy_admin_password_mismatch">The passwords do not match.</string>
     <string name="peppy_enrollment_allow_camera">Allow camera access</string>
     <string name="peppy_enrollment_setup_open">No setup code is required.</string>
     <string name="peppy_enrollment_setup_protected">This server\'s operator requires a setup code configured with PEPPY_SETUP_TOKEN.</string>
