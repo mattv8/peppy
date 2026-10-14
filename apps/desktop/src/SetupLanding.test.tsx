@@ -427,6 +427,35 @@ describe("SetupLanding", () => {
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
   });
 
+  it("reconciles a stale create-owner result without an enrolled-without-phone route", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockResolvedValue(view({ stage: "setup" }));
+    renderLanding({ mode: "self-hosted" });
+
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+  });
+
+  it("restores Create server when a cancelled native prompt reconciles to setup", async () => {
+    const status = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockResolvedValue(view({ stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
+    renderLanding({ mode: "self-hosted" });
+
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Create server" })).toBeDisabled();
+    await act(async () => status.resolve(view({ stage: "setup" })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create server" })).toBeEnabled());
+  });
+
   it("keeps a stale claim result busy until status confirms a connected gateway", async () => {
     const creation = deferred<EnrollmentView>();
     const status = deferred<EnrollmentView>();

@@ -192,7 +192,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     setView(next);
   };
   const failedView = (): EnrollmentView => ({ mode: mode === "hosted" ? "hosted" : "community", stage: "error", origin: connectedOrigin ?? undefined, errorCode: "unavailable" });
-  const runEnrollment = async (action: () => Promise<EnrollmentView>, retry: () => void, isStartOver = false, background = false): Promise<EnrollmentView | null> => {
+  const runEnrollment = async (action: () => Promise<EnrollmentView>, retry: () => void, isStartOver = false, background = false, reconcileCreateOwner = false): Promise<EnrollmentView | null> => {
     const epoch = ++enrollEpoch.current;
     let result: EnrollmentView | null = null;
     retryRef.current = retry;
@@ -212,7 +212,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
         mutationInFlight.current = false;
         if (!background) setBusy(false);
         const routing = latestRoutingState.current;
-        if ((routing.enrolledWithoutPhone || routing.addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus(true);
+        if ((reconcileCreateOwner || routing.enrolledWithoutPhone || routing.addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus(true);
       }
     }
   };
@@ -254,7 +254,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
 
   const discover = (origin?: string) => runEnrollment(() => bridge.enrollment_discover(origin), () => discover(origin));
-  const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner({ username }), createOwner);
+  const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner({ username }), createOwner, false, false, true);
   const startOver = () => runEnrollment(
     async () => {
       const next = await bridge.enrollment_start_over();

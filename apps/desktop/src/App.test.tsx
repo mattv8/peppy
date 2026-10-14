@@ -249,6 +249,49 @@ describe("setup landing routing", () => {
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
   });
 
+  it("reconciles an offline unlocked owner claim before the session connects", async () => {
+    const creation = deferred<EnrollmentView>();
+    const status = deferred<EnrollmentView>();
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline", origin: "https://127.0.0.1:7000", errorCode: "server-required" },
+      encryption: { state: "locked" },
+      gateways: [],
+      deviceRole: undefined,
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup", origin: current.connection.origin, setupCodeRequired: false }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+
+    localStorage.setItem("peppy.setup.mode", "self-hosted");
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" }), { target: { value: "https://127.0.0.1:7000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+    current = {
+      ...current,
+      connection: { state: "offline", origin: "https://127.0.0.1:7000", errorCode: "connecting" },
+      encryption: { state: "unlocked" },
+      deviceRole: "owner",
+      gateways: [],
+    };
+    await act(async () => hint?.());
+    await act(async () => creation.resolve(enrollment("server", { stage: "setup", origin: current.connection.origin, setupCodeRequired: false })));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Create server" })).toBeDisabled();
+    await act(async () => status.resolve(enrollment("ready", { owner: true, hasGateway: false, origin: current.connection.origin })));
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    expect(bridge.enrollment_add_phone).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+  });
+
   it("opens owner add phone enrollment from the workbench even with a gateway", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));

@@ -583,6 +583,12 @@ impl Drop for OwnerClaimGuard<'_> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OwnerCreation {
+    Cancelled,
+    Activated { superseded: bool },
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn create_owner_core<P, PF, G, H, HF, A, AF>(
     controller: &std::sync::Mutex<Controller>,
@@ -593,7 +599,7 @@ async fn create_owner_core<P, PF, G, H, HF, A, AF>(
     generate: G,
     post_claim: H,
     activate: A,
-) -> BridgeResult<bool>
+) -> BridgeResult<OwnerCreation>
 where
     P: FnMut(PassphrasePurpose) -> PF,
     PF: std::future::Future<Output = BridgeResult<Option<Zeroizing<String>>>>,
@@ -610,18 +616,18 @@ where
     let epoch = begin_owner_operation(controller)?;
     let setup_token = if setup_code_required(controller)? {
         let Some(setup_token) = prompt(PassphrasePurpose::SetupToken).await? else {
-            return Ok(false);
+            return Ok(OwnerCreation::Cancelled);
         };
         setup_token
     } else {
         Zeroizing::new(String::new())
     };
     if !owner_operation_current(controller, epoch)? {
-        return Ok(false);
+        return Ok(OwnerCreation::Cancelled);
     }
     let Some(admin_password) = collect_new_admin_password(controller, epoch, &mut prompt).await?
     else {
-        return Ok(false);
+        return Ok(OwnerCreation::Cancelled);
     };
 
     let (retained, resume, origin_for_secret) = {
@@ -640,7 +646,7 @@ where
         passphrase
     } else if resume {
         let Some(passphrase) = prompt(PassphrasePurpose::ResumeOwnerSecret).await? else {
-            return Ok(false);
+            return Ok(OwnerCreation::Cancelled);
         };
         passphrase
     } else {
@@ -648,13 +654,13 @@ where
         generate()
     };
     if !owner_operation_current(controller, epoch)? {
-        return Ok(false);
+        return Ok(OwnerCreation::Cancelled);
     }
 
     let (origin, request, checkpoint) = {
         let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
         if controller.operation_epoch != epoch {
-            return Ok(false);
+            return Ok(OwnerCreation::Cancelled);
         }
         let origin = controller.origin()?.to_owned();
         let client = controller.client.as_mut().ok_or_else(enrollment_error)?;
@@ -683,13 +689,13 @@ where
     }
     store.set(&owner_checkpoint_key(&origin), &checkpoint)?;
     if !owner_operation_current(controller, epoch)? {
-        return Ok(false);
+        return Ok(OwnerCreation::Cancelled);
     }
 
     let claim_guard = {
         let mut state = controller.lock().map_err(|_| BridgeError::host_state())?;
         if state.operation_epoch != epoch {
-            return Ok(false);
+            return Ok(OwnerCreation::Cancelled);
         }
         state.owner_claim_in_flight += 1;
         OwnerClaimGuard(controller)
@@ -699,7 +705,7 @@ where
     let identity = {
         let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
         if controller.operation_epoch != epoch {
-            return Ok(false);
+            return Ok(OwnerCreation::Cancelled);
         }
         controller
             .client
@@ -714,17 +720,17 @@ where
     // The pending secret is cleared by `activate` only after the binding copy is stored.
     tombstone_owner_checkpoint(store, &origin)?;
     if !owner_operation_current(controller, epoch)? {
-        return Ok(false);
+        return Ok(OwnerCreation::Activated { superseded: true });
     }
     let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
     if controller.operation_epoch != epoch {
-        return Ok(false);
+        return Ok(OwnerCreation::Activated { superseded: true });
     }
     controller.owner_passphrase = None;
     controller.owner_resume = false;
     controller.ready = true;
     controller.owner = true;
-    Ok(true)
+    Ok(OwnerCreation::Activated { superseded: false })
 }
 
 fn enrollment_error() -> BridgeError {
@@ -1354,8 +1360,8 @@ pub async fn enrollment_create_owner(
         },
     )
     .await;
-    let completed = match completed {
-        Ok(completed) => completed,
+    let outcome = match completed {
+        Ok(outcome) => outcome,
         Err(error)
             if matches!(
                 error.code,
@@ -1374,16 +1380,15 @@ pub async fn enrollment_create_owner(
         Err(error) => return Err(error),
     };
 
-    let has_gateway = if completed {
-        refresh_gateway_presence(&state).await?
-    } else {
-        None
+    let has_gateway = match &outcome {
+        OwnerCreation::Activated { .. } => refresh_gateway_presence(&state).await?,
+        OwnerCreation::Cancelled => None,
     };
     let mut controller = state
         .enrollment
         .lock()
         .map_err(|_| BridgeError::host_state())?;
-    if completed {
+    if matches!(outcome, OwnerCreation::Activated { .. }) {
         controller.has_gateway = has_gateway;
         Ok(EnrollmentView {
             stage: "ready",
@@ -2972,24 +2977,27 @@ mod owner_retry_tests {
         let request = Arc::new(Mutex::new(None));
         let request_by_test = request.clone();
 
-        assert!(create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            move |purpose| {
-                prompted_by_test.lock().unwrap().push(purpose);
-                std::future::ready(prompt(purpose))
-            },
-            || Zeroizing::new(RECOVERY_SECRET.into()),
-            move |_, serialized| {
-                *request_by_test.lock().unwrap() = Some(serialized.clone());
-                std::future::ready(Ok(claim_response(&serialized, false)))
-            },
-            |_, _, _| std::future::ready(Ok(())),
-        )
-        .await
-        .unwrap());
+        assert_eq!(
+            create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                move |purpose| {
+                    prompted_by_test.lock().unwrap().push(purpose);
+                    std::future::ready(prompt(purpose))
+                },
+                || Zeroizing::new(RECOVERY_SECRET.into()),
+                move |_, serialized| {
+                    *request_by_test.lock().unwrap() = Some(serialized.clone());
+                    std::future::ready(Ok(claim_response(&serialized, false)))
+                },
+                |_, _, _| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap(),
+            OwnerCreation::Activated { superseded: false }
+        );
 
         assert_eq!(
             *prompted.lock().unwrap(),
@@ -3138,22 +3146,25 @@ mod owner_retry_tests {
         ]));
         let responses_by_test = responses.clone();
 
-        assert!(create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            move |purpose| {
-                prompted_by_test.lock().unwrap().push(purpose);
-                let value = responses_by_test.lock().unwrap().remove(0);
-                std::future::ready(Ok(value.map(|value| Zeroizing::new(value.into()))))
-            },
-            || Zeroizing::new(RECOVERY_SECRET.into()),
-            |_, request| std::future::ready(Ok(claim_response(&request, false))),
-            |_, _, _| std::future::ready(Ok(())),
-        )
-        .await
-        .unwrap());
+        assert_eq!(
+            create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                move |purpose| {
+                    prompted_by_test.lock().unwrap().push(purpose);
+                    let value = responses_by_test.lock().unwrap().remove(0);
+                    std::future::ready(Ok(value.map(|value| Zeroizing::new(value.into()))))
+                },
+                || Zeroizing::new(RECOVERY_SECRET.into()),
+                |_, request| std::future::ready(Ok(claim_response(&request, false))),
+                |_, _, _| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap(),
+            OwnerCreation::Activated { superseded: false }
+        );
 
         assert_eq!(
             *prompted.lock().unwrap(),
@@ -3179,29 +3190,32 @@ mod owner_retry_tests {
         ]));
         let responses_by_test = responses.clone();
 
-        assert!(!create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            move |_| {
-                let value = responses_by_test.lock().unwrap().remove(0);
-                std::future::ready(Ok(value.map(|value| Zeroizing::new(value.into()))))
-            },
-            || panic!("a cancelled password confirmation must not generate a secret"),
-            |_, _| async move {
-                panic!("a cancelled password confirmation must not post a claim");
-                #[allow(unreachable_code)]
-                Ok(String::new())
-            },
-            |_, _, _| async move {
-                panic!("a cancelled password confirmation must not activate an identity");
-                #[allow(unreachable_code)]
-                Ok(())
-            },
-        )
-        .await
-        .unwrap());
+        assert_eq!(
+            create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                move |_| {
+                    let value = responses_by_test.lock().unwrap().remove(0);
+                    std::future::ready(Ok(value.map(|value| Zeroizing::new(value.into()))))
+                },
+                || panic!("a cancelled password confirmation must not generate a secret"),
+                |_, _| async move {
+                    panic!("a cancelled password confirmation must not post a claim");
+                    #[allow(unreachable_code)]
+                    Ok(String::new())
+                },
+                |_, _, _| async move {
+                    panic!("a cancelled password confirmation must not activate an identity");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap(),
+            OwnerCreation::Cancelled
+        );
 
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
         assert!(!controller
@@ -3218,34 +3232,46 @@ mod owner_retry_tests {
         let controller = Arc::new(unclaimed_controller());
         let store = MemoryStore::default();
         let prompt_controller = controller.clone();
+        let posts = Arc::new(Mutex::new(0));
+        let posts_by_test = posts.clone();
 
-        assert!(!create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            move |purpose| {
-                if purpose == PassphrasePurpose::AdminPasswordConfirm {
-                    cancel_owner_operation(&prompt_controller).unwrap();
-                }
-                std::future::ready(prompt(purpose))
-            },
-            || panic!("a stale confirmation must not generate a secret"),
-            |_, _| async move {
-                panic!("a stale confirmation must not post a claim");
-                #[allow(unreachable_code)]
-                Ok(String::new())
-            },
-            |_, _, _| async move {
-                panic!("a stale confirmation must not activate an identity");
-                #[allow(unreachable_code)]
-                Ok(())
-            },
-        )
-        .await
-        .unwrap());
+        assert_eq!(
+            create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                move |purpose| {
+                    if purpose == PassphrasePurpose::AdminPasswordConfirm {
+                        cancel_owner_operation(&prompt_controller).unwrap();
+                    }
+                    std::future::ready(prompt(purpose))
+                },
+                || panic!("a stale confirmation must not generate a secret"),
+                move |_, _| {
+                    *posts_by_test.lock().unwrap() += 1;
+                    std::future::ready(Ok(String::new()))
+                },
+                |_, _, _| async move {
+                    panic!("a stale confirmation must not activate an identity");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap(),
+            OwnerCreation::Cancelled
+        );
 
+        assert_eq!(*posts.lock().unwrap(), 0);
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+        assert!(!controller
+            .lock()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .has_prepared_owner_material());
     }
 
     #[tokio::test]
@@ -3257,27 +3283,30 @@ mod owner_retry_tests {
             let prompted = Arc::new(Mutex::new(Vec::new()));
             let seen = prompted.clone();
 
-            assert!(create_owner_core(
-                &controller,
-                &store,
-                None,
-                String::new(),
-                move |purpose| {
-                    seen.lock().unwrap().push(purpose);
-                    let value = match purpose {
-                        PassphrasePurpose::SetupToken => "setup-token",
-                        PassphrasePurpose::AdminPasswordCreate
-                        | PassphrasePurpose::AdminPasswordConfirm => &password,
-                        _ => panic!("fresh owner creation must not re-prompt for a secret"),
-                    };
-                    std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
-                },
-                || Zeroizing::new(RECOVERY_SECRET.into()),
-                |_, request| std::future::ready(Ok(claim_response(&request, false))),
-                |_, _, _| std::future::ready(Ok(())),
-            )
-            .await
-            .unwrap());
+            assert_eq!(
+                create_owner_core(
+                    &controller,
+                    &store,
+                    None,
+                    String::new(),
+                    move |purpose| {
+                        seen.lock().unwrap().push(purpose);
+                        let value = match purpose {
+                            PassphrasePurpose::SetupToken => "setup-token",
+                            PassphrasePurpose::AdminPasswordCreate
+                            | PassphrasePurpose::AdminPasswordConfirm => &password,
+                            _ => panic!("fresh owner creation must not re-prompt for a secret"),
+                        };
+                        std::future::ready(Ok(Some(Zeroizing::new(value.into()))))
+                    },
+                    || Zeroizing::new(RECOVERY_SECRET.into()),
+                    |_, request| std::future::ready(Ok(claim_response(&request, false))),
+                    |_, _, _| std::future::ready(Ok(())),
+                )
+                .await
+                .unwrap(),
+                OwnerCreation::Activated { superseded: false }
+            );
 
             assert_eq!(
                 *prompted.lock().unwrap(),
@@ -3362,34 +3391,37 @@ mod owner_retry_tests {
         let second_accepted_claim = accepted_claim.clone();
         let activated = Arc::new(Mutex::new(None));
         let activated_result = activated.clone();
-        assert!(create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            |purpose| std::future::ready(prompt(purpose)),
-            || panic!("an immediate retry must retain the generated secret"),
-            move |_, request| {
-                second_requests.lock().unwrap().push(request.clone());
-                assert_eq!(
-                    second_accepted_claim.lock().unwrap().as_deref(),
-                    Some(request.as_str()),
-                    "the server only replays an exactly matching first claim",
-                );
-                std::future::ready(Ok(claim_response(&request, true)))
-            },
-            move |identity, _, expected_binding| {
-                *activated_result.lock().unwrap() = Some((
-                    identity.metadata().vault_id,
-                    identity.metadata().device_id,
-                    identity.device_credential_for_native_secure_store(),
-                    expected_binding,
-                ));
-                std::future::ready(Ok(()))
-            },
-        )
-        .await
-        .unwrap());
+        assert_eq!(
+            create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                |purpose| std::future::ready(prompt(purpose)),
+                || panic!("an immediate retry must retain the generated secret"),
+                move |_, request| {
+                    second_requests.lock().unwrap().push(request.clone());
+                    assert_eq!(
+                        second_accepted_claim.lock().unwrap().as_deref(),
+                        Some(request.as_str()),
+                        "the server only replays an exactly matching first claim",
+                    );
+                    std::future::ready(Ok(claim_response(&request, true)))
+                },
+                move |identity, _, expected_binding| {
+                    *activated_result.lock().unwrap() = Some((
+                        identity.metadata().vault_id,
+                        identity.metadata().device_id,
+                        identity.device_credential_for_native_secure_store(),
+                        expected_binding,
+                    ));
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+            .unwrap(),
+            OwnerCreation::Activated { superseded: false }
+        );
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -3814,9 +3846,41 @@ mod owner_retry_tests {
         .await
         .unwrap();
 
-        assert!(!completed);
+        assert_eq!(completed, OwnerCreation::Cancelled);
         assert_eq!(*active_profile.lock().unwrap(), "existing-profile");
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn activated_owner_creation_reports_supersession_after_tombstoning_the_checkpoint() {
+        let controller = Arc::new(unclaimed_controller());
+        let store = MemoryStore::default();
+        let activation_controller = controller.clone();
+
+        let outcome = create_owner_core(
+            &controller,
+            &store,
+            None,
+            String::new(),
+            |purpose| std::future::ready(prompt(purpose)),
+            || Zeroizing::new(RECOVERY_SECRET.into()),
+            |_, request| std::future::ready(Ok(claim_response(&request, false))),
+            move |_, _, _| {
+                cancel_owner_operation(&activation_controller).unwrap();
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, OwnerCreation::Activated { superseded: true });
+        assert_eq!(
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .map(|value| value.to_vec()),
+            Some(Vec::new())
+        );
     }
 
     fn ready_controller() -> Controller {
@@ -4870,18 +4934,21 @@ mod owner_retry_tests {
         let controller = unclaimed_controller();
         let store = MemoryStore::default();
 
-        assert!(create_owner_core(
-            &controller,
-            &store,
-            None,
-            String::new(),
-            |purpose| std::future::ready(prompt(purpose)),
-            || Zeroizing::new(RECOVERY_SECRET.into()),
-            |_, request| std::future::ready(Ok(claim_response(&request, false))),
-            |_, _, _| std::future::ready(Ok(())),
-        )
-        .await
-        .unwrap());
+        assert_eq!(
+            create_owner_core(
+                &controller,
+                &store,
+                None,
+                String::new(),
+                |purpose| std::future::ready(prompt(purpose)),
+                || Zeroizing::new(RECOVERY_SECRET.into()),
+                |_, request| std::future::ready(Ok(claim_response(&request, false))),
+                |_, _, _| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap(),
+            OwnerCreation::Activated { superseded: false }
+        );
 
         assert_eq!(
             stored(&store, &owner_secret_key(ORIGIN)).as_deref(),
