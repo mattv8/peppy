@@ -178,7 +178,6 @@ select:focus-visible {
 }
 #titlebar-navigation button[aria-current] {
   background: color-mix(in srgb, var(--peppy-accent) 14%, transparent);
-  box-shadow: inset 0 -2px 0 var(--peppy-accent);
   color: var(--peppy-accent);
 }
 #titlebar-navigation button:focus-visible {
