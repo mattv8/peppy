@@ -53,6 +53,20 @@ struct ContactSnapshot {
     sync: Value,
 }
 
+fn projection_state_display(
+    state: peppy_client_core::SnapshotProjectionState,
+    reason: Option<String>,
+) -> (&'static str, Option<String>) {
+    use peppy_client_core::SnapshotProjectionState as State;
+
+    let display = match state {
+        State::Draining | State::Staging => "rebuilding",
+        State::Promoted => "current",
+        State::Failed => "failed",
+    };
+    (display, reason)
+}
+
 impl BrowserCore {
     pub(super) fn contacts_command(&self, command: &str, args: Value) -> Result<Value, Failure> {
         match command {
@@ -153,15 +167,7 @@ impl BrowserCore {
             .snapshot_projection_status()
             .ok()
             .flatten()
-            .map(|status| {
-                use peppy_client_core::SnapshotProjectionState as State;
-                let state = match status.state {
-                    State::Draining | State::Staging => "rebuilding",
-                    State::Promoted => "current",
-                    State::Failed => "failed",
-                };
-                (state, status.reason)
-            });
+            .map(|status| projection_state_display(status.state, status.reason));
         let sync = shared::sync_status(
             self.client()?.contact_repair_required().unwrap_or(false),
             readiness,
@@ -424,15 +430,7 @@ impl BrowserCore {
             .snapshot_projection_status()
             .ok()
             .flatten()
-            .map(|status| {
-                let state = match status.state {
-                    peppy_client_core::SnapshotProjectionState::Draining
-                    | peppy_client_core::SnapshotProjectionState::Staging => "rebuilding",
-                    peppy_client_core::SnapshotProjectionState::Promoted => "current",
-                    peppy_client_core::SnapshotProjectionState::Failed => "failed",
-                };
-                (state, status.reason)
-            });
+            .map(|status| projection_state_display(status.state, status.reason));
         Ok(shared::sync_status(
             client.contact_repair_required().unwrap_or(true),
             readiness,
@@ -666,6 +664,34 @@ mod tests {
         let path = fixture.browser.root.join("contact-photo-staging");
         if path.exists() {
             assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn projection_state_display_preserves_each_reason() {
+        use peppy_client_core::SnapshotProjectionState as State;
+
+        for (state, reason, expected_state, expected_reason) in [
+            (State::Draining, None, "rebuilding", None),
+            (State::Staging, Some("staged"), "rebuilding", Some("staged")),
+            (
+                State::Promoted,
+                Some("retained"),
+                "current",
+                Some("retained"),
+            ),
+            (
+                State::Failed,
+                Some("missing_record"),
+                "failed",
+                Some("missing_record"),
+            ),
+        ] {
+            let (display_state, display_reason) =
+                projection_state_display(state, reason.map(str::to_owned));
+
+            assert_eq!(display_state, expected_state);
+            assert_eq!(display_reason.as_deref(), expected_reason);
         }
     }
 

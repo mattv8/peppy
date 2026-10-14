@@ -54,8 +54,6 @@ import {
   type AttachmentView,
   type ConversationView,
   type DesktopSnapshot,
-  type Draft,
-  type DraftInput,
   type GatewayView,
   type MessageStatus,
   type AppFilter,
@@ -69,6 +67,22 @@ import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
+import { errorText } from "./bridgeErrors";
+import {
+  DraftStore,
+  blankContent,
+  isLocalDraftKey,
+  type DraftContent,
+  type DraftSlot,
+  type SaveOutcome,
+} from "./drafts/DraftStore";
+
+export { errorText } from "./bridgeErrors";
+export {
+  DraftStore,
+  type DraftSlot,
+  type SaveOutcome,
+} from "./drafts/DraftStore";
 
 /**
  * Display-only names for phone addresses. Stored conversation names, addresses and draft
@@ -117,8 +131,6 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   unknown: "Unknown delivery state — not retried",
 };
 
-const FALLBACK_ERROR =
-  "The native operation failed. Your edits remain in this window.";
 const COMPOSER_MIN_HEIGHT = 96;
 const COMPOSER_ATTACHMENT_MIN_HEIGHT = 132;
 const RAIL_WIDTH = 48;
@@ -128,23 +140,6 @@ const PANE_MIN_WIDTH = 360;
 const LIST_COLLAPSE_THRESHOLD = 120;
 const TEXTAREA_LINE_HEIGHT = 22;
 const TEXTAREA_MAX_HEIGHT = 176;
-
-export const errorText = (error: unknown): string =>
-  typeof error === "object" &&
-  error !== null &&
-  "message" in error &&
-  typeof error.message === "string" &&
-  error.message
-    ? error.message
-    : FALLBACK_ERROR;
-
-const errorCode = (error: unknown): string | undefined =>
-  typeof error === "object" &&
-  error !== null &&
-  "code" in error &&
-  typeof error.code === "string"
-    ? error.code
-    : undefined;
 
 function expiryText(seconds: number): string {
   if (seconds <= 0)
@@ -182,11 +177,6 @@ export function readComposerConversation(search: string): string | null {
 }
 
 /* ------------------------------------------------------------------ gateway routes */
-
-type DraftContent = Pick<
-  Draft,
-  "text" | "recipientIds" | "attachmentIds" | "gatewayId" | "simId"
->;
 
 /** Gateway and SIM together identify a route; one device can expose several SIMs. */
 const routeKey = (gatewayId: string, simId: string) =>
@@ -256,259 +246,6 @@ const recipientCount = (content: DraftContent, conversation?: ConversationView) 
   content.recipientIds.length || conversation?.participants?.length || 1;
 const draftEstimateBytes = (content: DraftContent, attachments: Record<string, AttachmentView>) =>
   new TextEncoder().encode(content.text).length + content.attachmentIds.reduce((total, id) => total + (attachments[id]?.byteSize ?? 0), 0);
-
-/* ------------------------------------------------------------------ draft store */
-
-/** Local key for a new-recipient draft that has no native draft/conversation ID yet. */
-const NEW_DRAFT_PREFIX = "new:";
-const isLocalDraftKey = (key: string) => key.startsWith(NEW_DRAFT_PREFIX);
-
-export type DraftSlot = {
-  /** Conversation ID once known, otherwise a `new:` local key. */
-  key: string;
-  /** Native identity; empty strings ask the host to create the draft (and conversation). */
-  id: string;
-  conversationId: string;
-  /** Last revision acknowledged by the host; used as the CAS `expectedRevision`. */
-  revision: string;
-  content: DraftContent;
-  /** Local edit counter, and the newest edit the host has acknowledged. */
-  generation: number;
-  savedGeneration: number;
-  error?: { message: string; code?: string };
-  /** While a send is in flight, saves are deferred so they cannot race the atomic send/clear. */
-  held: boolean;
-  queue: Promise<unknown>;
-};
-
-export type SaveOutcome = { ok: true } | { ok: false; error: string };
-
-const blankContent = (): DraftContent => ({
-  text: "",
-  recipientIds: [],
-  attachmentIds: [],
-});
-const contentOf = (draft: Draft): DraftContent => ({
-  text: draft.text,
-  recipientIds: draft.recipientIds,
-  attachmentIds: draft.attachmentIds,
-  gatewayId: draft.gatewayId,
-  simId: draft.simId,
-});
-const isDirty = (slot: DraftSlot) => slot.generation > slot.savedGeneration;
-
-type DraftStoreEvents = {
-  changed(): void;
-  rekeyed(from: string, to: string): void;
-};
-
-/**
- * Per-conversation draft state with serialized CAS saves. A failed save keeps the local edits
- * dirty with an error; callers that must not lose content (send, close) flush and check the
- * outcome. Host snapshots never overwrite dirty or held drafts.
- */
-export class DraftStore {
-  private slots = new Map<string, DraftSlot>();
-  private aliases = new Map<string, string>();
-  private newCount = 0;
-
-  constructor(
-    private readonly persist: (input: DraftInput) => Promise<Draft>,
-    private readonly events: DraftStoreEvents,
-  ) {}
-
-  /** Follows `new:` keys to the conversation ID the host assigned. */
-  resolve(key: string): string {
-    let current = key;
-    for (
-      let next = this.aliases.get(current);
-      next !== undefined;
-      next = this.aliases.get(current)
-    )
-      current = next;
-    return current;
-  }
-
-  get(key: string): DraftSlot | undefined {
-    return this.slots.get(this.resolve(key));
-  }
-
-  localDrafts(): DraftSlot[] {
-    return [...this.slots.values()].filter((slot) => isLocalDraftKey(slot.key));
-  }
-
-  /** Starts a draft; the host assigns both IDs on save. */
-  createNew(recipient?: string): { key: string; saved: Promise<SaveOutcome> } {
-    const key = `${NEW_DRAFT_PREFIX}${++this.newCount}`;
-    return { key, saved: this.edit(key, { recipientIds: recipient ? [recipient] : [] }) };
-  }
-
-  edit(key: string, patch: Partial<DraftContent>): Promise<SaveOutcome> {
-    const slot = this.ensure(key);
-    slot.content = { ...slot.content, ...patch };
-    slot.generation += 1;
-    this.events.changed();
-    return this.enqueue(slot);
-  }
-
-  /** Applies the host's view of a conversation's draft unless local edits are pending. */
-  adopt(conversationId: string, draft: Draft | undefined) {
-    const slot = this.get(conversationId);
-    if (slot && (isDirty(slot) || slot.held)) return;
-    if (draft) {
-      const target = slot ?? this.ensure(conversationId);
-      Object.assign(target, {
-        id: draft.id,
-        conversationId: draft.conversationId,
-        revision: draft.revision,
-        content: contentOf(draft),
-        error: undefined,
-      });
-    } else if (slot) {
-      Object.assign(slot, {
-        id: "",
-        revision: "0",
-        content: blankContent(),
-        error: undefined,
-      });
-    } else return;
-    this.events.changed();
-  }
-
-  /** Waits for queued saves and retries once if edits are still unacknowledged. */
-  async flush(key: string): Promise<SaveOutcome> {
-    const slot = this.get(key);
-    if (!slot) return { ok: true };
-    await slot.queue;
-    return isDirty(slot) ? this.enqueue(slot) : { ok: true };
-  }
-
-  /** Flush all live draft slots and report the first failure after every attempt. */
-  async flushAll(): Promise<SaveOutcome> {
-    let firstFailure: SaveOutcome | undefined;
-    for (const key of [...this.slots.keys()]) {
-      const outcome = await this.flush(key);
-      if (!outcome.ok && !firstFailure) firstFailure = outcome;
-    }
-    return firstFailure ?? { ok: true };
-  }
-
-  /** After a stale-revision conflict the person may keep this window's text over the stored one. */
-  rebase(key: string, stored: Draft | undefined) {
-    const slot = this.get(key);
-    if (!slot) return;
-    if (stored)
-      Object.assign(slot, { id: stored.id, revision: stored.revision });
-    else Object.assign(slot, { id: "", revision: "0" });
-  }
-
-  hold(key: string) {
-    const slot = this.get(key);
-    if (slot) slot.held = true;
-  }
-
-  release(key: string) {
-    const slot = this.get(key);
-    if (!slot) return;
-    slot.held = false;
-    if (isDirty(slot)) void this.enqueue(slot);
-  }
-
-  /** The host cleared the sent draft; edits typed during the send start a fresh draft. */
-  markSent(key: string, sentGeneration: number) {
-    const slot = this.get(key);
-    if (!slot) return;
-    Object.assign(slot, {
-      id: "",
-      revision: "0",
-      held: false,
-      error: undefined,
-    });
-    if (slot.generation > sentGeneration) {
-      void this.enqueue(slot);
-    } else {
-      slot.content = blankContent();
-      slot.savedGeneration = slot.generation;
-    }
-    this.events.changed();
-  }
-
-  private ensure(key: string): DraftSlot {
-    const resolved = this.resolve(key);
-    let slot = this.slots.get(resolved);
-    if (!slot) {
-      slot = {
-        key: resolved,
-        id: "",
-        conversationId: isLocalDraftKey(resolved) ? "" : resolved,
-        revision: "0",
-        content: blankContent(),
-        generation: 0,
-        savedGeneration: 0,
-        held: false,
-        queue: Promise.resolve(),
-      };
-      this.slots.set(resolved, slot);
-    }
-    return slot;
-  }
-
-  private enqueue(slot: DraftSlot): Promise<SaveOutcome> {
-    const run = slot.queue.then(() => this.save(slot));
-    slot.queue = run;
-    return run;
-  }
-
-  private async save(slot: DraftSlot): Promise<SaveOutcome> {
-    if (slot.held)
-      return {
-        ok: false,
-        error:
-          "A send is in progress; your edits are kept and saved afterwards.",
-      };
-    if (!isDirty(slot))
-      return slot.error
-        ? { ok: false, error: slot.error.message }
-        : { ok: true };
-    const generation = slot.generation;
-    const input: DraftInput = {
-      id: slot.id,
-      conversationId: slot.conversationId,
-      ...slot.content,
-      expectedRevision: slot.revision,
-    };
-    let saved: Draft;
-    try {
-      saved = await this.persist(input);
-    } catch (error) {
-      slot.error = { message: errorText(error), code: errorCode(error) };
-      this.events.changed();
-      return { ok: false, error: slot.error.message };
-    }
-    Object.assign(slot, {
-      id: saved.id,
-      revision: saved.revision,
-      savedGeneration: Math.max(slot.savedGeneration, generation),
-      error: undefined,
-    });
-    if (slot.generation === generation) slot.content = contentOf(saved);
-    if (saved.conversationId && saved.conversationId !== slot.conversationId)
-      this.rekey(slot, saved.conversationId);
-    this.events.changed();
-    return { ok: true };
-  }
-
-  private rekey(slot: DraftSlot, conversationId: string) {
-    const from = slot.key;
-    slot.conversationId = conversationId;
-    if (from === conversationId) return;
-    this.slots.delete(from);
-    this.aliases.set(from, conversationId);
-    slot.key = conversationId;
-    this.slots.set(conversationId, slot);
-    this.events.rekeyed(from, conversationId);
-  }
-}
 
 /* ------------------------------------------------------------------ presentational pieces */
 

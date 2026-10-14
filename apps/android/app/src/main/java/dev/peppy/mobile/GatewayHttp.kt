@@ -79,13 +79,7 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
         requireV1JsonPath(path)
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
-            connection.instanceFollowRedirects = false
-            connection.useCaches = false
-            connection.requestMethod = method
-            connection.connectTimeout = TIMEOUT_MS
-            connection.readTimeout = TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
-            connection.setRequestProperty("Accept", "application/json")
+            configureConnection(connection, method)
             if (body != null) {
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 connection.doOutput = true
@@ -112,13 +106,7 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
     private fun binaryConnection(method: String, path: String, transfer: (HttpURLConnection) -> Unit): HttpResult {
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
-            connection.instanceFollowRedirects = false
-            connection.useCaches = false
-            connection.requestMethod = method
-            connection.connectTimeout = TIMEOUT_MS
-            connection.readTimeout = TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
-            connection.setRequestProperty("Accept", "application/json")
+            configureConnection(connection, method)
             if (method == "PUT") {
                 connection.setRequestProperty("Content-Type", "application/octet-stream")
                 transfer(connection)
@@ -136,6 +124,16 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
             if (code > 0 && code !in 200..299) return result(connection, code)
             throw GatewayTransportException("transport failure")
         } finally { connection.disconnect() }
+    }
+
+    private fun configureConnection(connection: HttpURLConnection, method: String) {
+        connection.instanceFollowRedirects = false
+        connection.useCaches = false
+        connection.requestMethod = method
+        connection.connectTimeout = TIMEOUT_MS
+        connection.readTimeout = TIMEOUT_MS
+        connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+        connection.setRequestProperty("Accept", "application/json")
     }
 
     private fun result(connection: HttpURLConnection, code: Int): HttpResult =
