@@ -523,6 +523,13 @@ fn wrong_owner_passphrase() -> BridgeError {
     )
 }
 
+fn vault_secret_mismatch() -> BridgeError {
+    BridgeError::new(
+        "vault-secret-mismatch",
+        "The stored vault shared secret does not match the pending vault.",
+    )
+}
+
 struct OwnerClaimGuard<'a>(&'a std::sync::Mutex<Controller>);
 
 impl Drop for OwnerClaimGuard<'_> {
@@ -2105,30 +2112,45 @@ async fn cancel_phone_invitation(
         .lock()
         .map_err(|_| BridgeError::host_state())?
         .invitation_id;
-    if let Some(id) = id {
-        let session = state.require_session().await?;
-        let origin = session.api.origin().to_owned();
-        let account = hosted_account_header(state, hosted).await?;
-        body(
-            device_request(
-                &session,
-                &origin,
-                http(&origin)?.delete(format!(
-                    "{origin}{}/{id}",
-                    enrollment::routes::ENROLLMENT_INVITATIONS
-                )),
-                account.as_ref().map(|value| value.as_str()),
-            )?
-            .send()
-            .await
-            .map_err(|_| NetError::Offline)?,
-        )
-        .await?;
+    let Some(id) = id else {
+        return Ok(());
+    };
+    let session = state.require_session().await?;
+    let origin = session.api.origin().to_owned();
+    let account = hosted_account_header(state, hosted).await?;
+    body(
+        device_request(
+            &session,
+            &origin,
+            http(&origin)?.delete(format!(
+                "{origin}{}/{id}",
+                enrollment::routes::ENROLLMENT_INVITATIONS
+            )),
+            account.as_ref().map(|value| value.as_str()),
+        )?
+        .send()
+        .await
+        .map_err(|_| NetError::Offline)?,
+    )
+    .await?;
+    clear_confirmed_phone_cancellation(&state.enrollment, id)
+}
+
+/// Clears local invitation state only after the matching server cancellation succeeded.
+fn clear_confirmed_phone_cancellation(
+    controller: &std::sync::Mutex<Controller>,
+    expected_id: uuid::Uuid,
+) -> BridgeResult<()> {
+    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.invitation_id != Some(expected_id) {
+        return Ok(());
     }
-    let mut controller = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?;
+    controller
+        .client
+        .as_mut()
+        .ok_or_else(enrollment_error)?
+        .clear_cancelled_owner_invitation(expected_id)
+        .map_err(|_| enrollment_error())?;
     controller.invitation_id = None;
     controller.invitation = None;
     controller.invitation_method = None;
@@ -2363,7 +2385,11 @@ where
             .owner_passphrase_matches(&passphrase)
             .map_err(|_| enrollment_error())?
     {
-        return Err(wrong_owner_passphrase());
+        return Err(if fallback {
+            wrong_owner_passphrase()
+        } else {
+            vault_secret_mismatch()
+        });
     }
     if fallback && matches!(read_text_secret(store, binding_account), Ok(None)) {
         let _ = store.set(binding_account, passphrase.as_bytes());
@@ -3469,6 +3495,46 @@ mod owner_retry_tests {
         }
     }
 
+    fn waiting_phone_controller(
+        invitation_id: uuid::Uuid,
+        expires_in_seconds: u32,
+    ) -> Mutex<Controller> {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        owner
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                RECOVERY_SECRET.into(),
+            )
+            .unwrap();
+        owner
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        owner
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id,
+                    expires_in_seconds,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        Mutex::new(Controller {
+            client: Some(owner),
+            invitation_id: Some(invitation_id),
+            invitation: Some(invitation_status(
+                EnrollmentState::Waiting,
+                expires_in_seconds,
+            )),
+            invitation_method: Some(EnrollmentMethod::Transfer),
+            ready: true,
+            owner: true,
+            ..ready_controller()
+        })
+    }
+
     fn claimed_phone_fixture(method: EnrollmentMethod) -> (Mutex<Controller>, EnrollmentClient) {
         let mut owner =
             EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
@@ -3658,26 +3724,41 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
-    async fn wrong_stored_or_fallback_phone_secret_is_rejected_before_a_request() {
-        for secret_was_stored in [true, false] {
-            let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
-            let binding_account = active_binding().vault_secret_account();
-            let store = MemoryStore::default();
-            if secret_was_stored {
-                store.set(&binding_account, b"wrong secret").unwrap();
-            }
-            let result = prepare_phone_approval(&controller, &store, &binding_account, |_| {
-                std::future::ready(Ok(Some(Zeroizing::new("wrong secret".into()))))
-            })
-            .await;
-            let Err(error) = result else {
-                panic!("wrong secret must not prepare a request");
-            };
-            assert_eq!(error.code, "wrong-passphrase");
-            if !secret_was_stored {
-                assert!(stored(&store, &binding_account).is_none());
-            }
-        }
+    async fn wrong_stored_phone_secret_is_rejected_without_prompting_or_saving() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let store = RecordingStore::default();
+        store.set(&binding_account, b"wrong secret").unwrap();
+        store.writes.lock().unwrap().clear();
+
+        let Err(error) = prepare_phone_approval(&controller, &store, &binding_account, |_| async {
+            panic!("stored secret mismatch must not prompt")
+        })
+        .await
+        else {
+            panic!("wrong stored secret must not prepare a request");
+        };
+
+        assert_eq!(error.code, "vault-secret-mismatch");
+        assert!(store.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wrong_prompted_phone_secret_is_rejected_without_saving() {
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        let binding_account = active_binding().vault_secret_account();
+        let store = MemoryStore::default();
+
+        let Err(error) = prepare_phone_approval(&controller, &store, &binding_account, |_| {
+            std::future::ready(Ok(Some(Zeroizing::new("wrong secret".into()))))
+        })
+        .await
+        else {
+            panic!("wrong prompted secret must not prepare a request");
+        };
+
+        assert_eq!(error.code, "wrong-passphrase");
+        assert!(stored(&store, &binding_account).is_none());
     }
 
     #[tokio::test]
@@ -4105,6 +4186,218 @@ mod owner_retry_tests {
 
         assert_eq!(view.stage, "verify_phone");
         assert_eq!(cancellations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirmed_cancellation_clears_the_real_owner_client_for_a_new_qr() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+
+        cancel_phone_core(
+            &controller,
+            || std::future::ready(Ok(())),
+            || {
+                std::future::ready(clear_confirmed_phone_cancellation(
+                    &controller,
+                    invitation_id,
+                ))
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut controller = controller.lock().unwrap();
+        assert!(controller.invitation_id.is_none());
+        let client = controller.client.as_mut().unwrap();
+        client
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        client
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id: uuid::Uuid::from_u128(8),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(client.get_qr_payload().is_ok());
+    }
+
+    #[tokio::test]
+    async fn repeated_confirmed_cancellation_is_harmless() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+
+        for _ in 0..2 {
+            cancel_phone_core(
+                &controller,
+                || std::future::ready(Ok(())),
+                || {
+                    std::future::ready(clear_confirmed_phone_cancellation(
+                        &controller,
+                        invitation_id,
+                    ))
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(controller.lock().unwrap().invitation_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_phone_cancellation_preserves_the_real_owner_qr() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+        let qr = controller
+            .lock()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .get_qr_payload()
+            .unwrap();
+
+        assert!(cancel_phone_core(
+            &controller,
+            || std::future::ready(Ok(())),
+            || std::future::ready(Err(BridgeError::new("offline", "offline"))),
+        )
+        .await
+        .is_err());
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.invitation_id, Some(invitation_id));
+        assert_eq!(
+            controller
+                .client
+                .as_ref()
+                .unwrap()
+                .get_qr_payload()
+                .unwrap(),
+            qr
+        );
+    }
+
+    #[test]
+    fn stale_confirmed_cancellation_preserves_a_newer_invitation() {
+        let old_id = uuid::Uuid::from_u128(7);
+        let new_id = uuid::Uuid::from_u128(8);
+        let controller = waiting_phone_controller(old_id, 300);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .clear_cancelled_owner_invitation(old_id)
+                .unwrap();
+            let client = controller.client.as_mut().unwrap();
+            client
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .unwrap();
+            client
+                .consume_created_invitation(
+                    serde_json::to_string(&InvitationCreated {
+                        invitation_id: new_id,
+                        expires_in_seconds: 300,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            controller.invitation_id = Some(new_id);
+        }
+
+        clear_confirmed_phone_cancellation(&controller, old_id).unwrap();
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.invitation_id, Some(new_id));
+        assert!(controller.client.as_ref().unwrap().get_qr_payload().is_ok());
+    }
+
+    #[tokio::test]
+    async fn no_id_cancellation_preserves_an_owner_draft() {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        owner
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                RECOVERY_SECRET.into(),
+            )
+            .unwrap();
+        owner
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        let controller = Mutex::new(Controller {
+            client: Some(owner),
+            ready: true,
+            owner: true,
+            ..ready_controller()
+        });
+
+        cancel_phone_core(
+            &controller,
+            || std::future::ready(Ok(())),
+            || std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap();
+
+        let mut client = controller.lock().unwrap().client.take().unwrap();
+        assert!(client.owner_invitation_id().is_none());
+        client
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id: uuid::Uuid::from_u128(7),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(client.get_qr_payload().is_ok());
+    }
+
+    #[tokio::test]
+    async fn near_expiry_rotation_replaces_the_real_owner_invitation() {
+        let old_id = uuid::Uuid::from_u128(7);
+        let new_id = uuid::Uuid::from_u128(8);
+        let controller = waiting_phone_controller(old_id, 15);
+
+        rotate_phone_core(
+            &controller,
+            EnrollmentMethod::Transfer,
+            || std::future::ready(Ok(())),
+            || std::future::ready(clear_confirmed_phone_cancellation(&controller, old_id)),
+            || {
+                let mut controller = controller.lock().unwrap();
+                let client = controller.client.as_mut().unwrap();
+                client
+                    .create_phone_invitation(EnrollmentMethod::Transfer)
+                    .unwrap();
+                client
+                    .consume_created_invitation(
+                        serde_json::to_string(&InvitationCreated {
+                            invitation_id: new_id,
+                            expires_in_seconds: 300,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                controller.invitation_id = Some(new_id);
+                controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 300));
+                std::future::ready(Ok(controller.view()))
+            },
+        )
+        .await
+        .unwrap();
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.invitation_id, Some(new_id));
+        assert!(controller.client.as_ref().unwrap().get_qr_payload().is_ok());
     }
 
     struct BindingWriteFails {

@@ -37,7 +37,7 @@ const diagnosticErrorCodes = new Set<string>([
   "offline", "network", "local-tls-config", "secure-store-unavailable", "enrollment", "server-rejected",
   "response-too-large", "host-state", "invalid-origin",
   "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
-  "host-config", "server-response", "revoked", "wrong-passphrase", "credential-changed", "enrollment-state", "database-key-conflict",
+  "host-config", "server-response", "revoked", "wrong-passphrase", "vault-secret-mismatch", "credential-changed", "enrollment-state", "database-key-conflict",
   "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
   "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable",
   "vault_not_found", "request_not_found", "request_not_approved", "operation_conflict", "admin-password-length",
@@ -58,6 +58,7 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "server-response") return "The server's response could not be read or verified by this device. Check the server and this Peppy build, then try again.";
   if (errorCode === "revoked") return "The server no longer accepts this device's saved credential. It was revoked or is invalid.";
   if (errorCode === "wrong-passphrase") return "That vault shared secret does not match the pending vault. Check it and try again.";
+  if (errorCode === "vault-secret-mismatch") return "The vault shared secret saved on this computer does not match this vault, so the phone was not approved. The saved secret was not changed.";
   if (errorCode === "credential-changed") return "The saved credential changed while setup was running. Try again.";
   if (errorCode === "enrollment-state") return "The phone has not finished its connection request yet. Wait for it to finish, then try again.";
   if (errorCode === "database-key-conflict") return "A protected database key already exists on this device and was not replaced. Try again.";

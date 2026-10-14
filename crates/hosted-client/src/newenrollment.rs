@@ -330,6 +330,24 @@ impl EnrollmentClient {
         }
     }
 
+    /// Clears an owner invitation only after its id-addressed server cancellation succeeded.
+    pub fn clear_cancelled_owner_invitation(
+        &mut self,
+        invitation_id: Uuid,
+    ) -> Result<(), HostedClientError> {
+        match self.phone.as_ref() {
+            None => Ok(()),
+            Some(PhoneFlow::OwnerInvitation {
+                invitation_id: active_id,
+                ..
+            }) if *active_id == invitation_id => {
+                self.phone = None;
+                Ok(())
+            }
+            _ => Err(HostedClientError::InvalidRequest),
+        }
+    }
+
     /// Parses an owner invitation status. Claim-less terminal status is trusted only because the
     /// native host fetched it from the active invitation's id-addressed endpoint.
     pub fn owner_phone_view(
@@ -1779,6 +1797,139 @@ mod tests {
             ..claimed
         };
         (recipient, approved, material)
+    }
+
+    #[test]
+    fn confirmed_owner_cancellation_allows_a_new_phone_invitation() {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
+        owner
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                SECRET.into(),
+            )
+            .unwrap();
+        let invitation_id = Uuid::from_u128(7);
+        owner
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        owner
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id,
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        owner
+            .clear_cancelled_owner_invitation(invitation_id)
+            .unwrap();
+
+        owner
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        owner
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id: Uuid::from_u128(8),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(owner.get_qr_payload().is_ok());
+    }
+
+    #[test]
+    fn cancelled_owner_invitation_rejects_a_different_id_without_losing_its_qr() {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
+        owner
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                SECRET.into(),
+            )
+            .unwrap();
+        owner
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+        owner
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id: Uuid::from_u128(7),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let qr = owner.get_qr_payload().unwrap();
+
+        assert!(
+            owner
+                .clear_cancelled_owner_invitation(Uuid::from_u128(8))
+                .is_err()
+        );
+        assert_eq!(owner.get_qr_payload().unwrap(), qr);
+    }
+
+    #[test]
+    fn cancelled_owner_draft_is_rejected_without_losing_its_keys() {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
+        owner
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                SECRET.into(),
+            )
+            .unwrap();
+        owner
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+
+        assert!(
+            owner
+                .clear_cancelled_owner_invitation(Uuid::from_u128(7))
+                .is_err()
+        );
+        owner
+            .consume_created_invitation(
+                serde_json::to_string(&InvitationCreated {
+                    invitation_id: Uuid::from_u128(7),
+                    expires_in_seconds: 300,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(owner.get_qr_payload().is_ok());
+    }
+
+    #[test]
+    fn cancelling_without_a_phone_flow_is_idempotent() {
+        let mut owner =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, "owner".into()).unwrap();
+        owner
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                SECRET.into(),
+            )
+            .unwrap();
+
+        owner
+            .clear_cancelled_owner_invitation(Uuid::from_u128(7))
+            .unwrap();
+        owner
+            .clear_cancelled_owner_invitation(Uuid::from_u128(7))
+            .unwrap();
     }
 
     #[test]
