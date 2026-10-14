@@ -118,8 +118,9 @@ dialog[data-browser-screen] form { gap: 16px; }
 #family-vaults-invite-list { display: grid; gap: 12px; padding: 0; margin: 0; list-style: none; }
 #family-vaults-invite-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .family-vaults-invite-meta { flex: 1; color: var(--peppy-text-secondary, #aaa); }
-#family-vaults-requests-live { display: grid; gap: 12px; }
-#family-vaults-requests-live article { padding: 16px; border: 1px solid var(--peppy-border, #555); border-radius: var(--peppy-radius-md, 4px); }
+#family-vaults-requests-live { display: grid; }
+/* Requests are rows within their card, divided like the vault table rather than boxed. */
+#family-vaults-requests-live article { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--peppy-border, #555); }
 .family-vaults-request-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
 .family-vaults-request-meta dt { color: var(--peppy-text-secondary, #aaa); }
 .family-vaults-request-meta dd { margin: 4px 0 0; }

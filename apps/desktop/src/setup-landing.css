@@ -49,14 +49,10 @@
   min-width: 0;
 }
 
-#setup-landing-body > section,
-#hosted-signin-panel,
-#enrollment-panel {
-  padding: 16px;
-  border: 1px solid var(--peppy-border);
-  border-radius: var(--peppy-radius-md, 8px);
-  background: var(--peppy-surface-panel);
-  box-shadow: var(--peppy-shadow-2, none);
+/* The wizard sits flat on the landing background: steps are separated by a rule, never nested cards. */
+#self-hosted-panel > #enrollment-panel:not(:first-child) {
+  padding-top: 16px;
+  border-top: 1px solid var(--peppy-border);
 }
 
 #setup-landing-body > section > h2 {
@@ -183,7 +179,8 @@
 }
 
 #enrollment-countdown {
-  padding: 4px 8px;
+  padding: 3px 8px;
+  border: 1px solid var(--peppy-border);
   border-radius: var(--peppy-radius-pill, var(--peppy-control-radius));
   background: var(--peppy-surface-widget);
   color: var(--peppy-text-secondary);
