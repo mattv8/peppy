@@ -64,17 +64,18 @@ test("CSS and generated tokens retain coral action foreground contrast", () => {
 });
 
 test("android resources preserve canonical mark geometry within the safe zone", () => {
-  const mark = readFileSync(path("packages/mobile-design/assets/peppy-mark.svg"), "utf8");
-  const sourcePath = mark.match(/\bd="\s*([\s\S]*?)"\s*\/>/)?.[1].replace(/\s+/g, " ").trim();
+  const mark = readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8");
+  const sourcePath = mark.match(/<path[^>]*\bd="([^"]+)"/)?.[1].replace(/\s+/g, " ").trim();
   const foreground = readFileSync(path("apps/android/app/src/main/res/drawable/ic_launcher_foreground.xml"), "utf8");
   const logo = readFileSync(path("apps/android/app/src/main/res/drawable/peppy_logo.xml"), "utf8");
   assert.equal(sourcePath, foreground.match(/android:pathData="([^"]+)"/)?.[1]);
   assert.equal(sourcePath, logo.match(/android:pathData="([^"]+)"/)?.[1]);
-  assert.match(logo, /android:scaleY="0.92"/);
   const attribute = name => Number(foreground.match(new RegExp(`android:${name}="([0-9.]+)"`))[1]);
   const sx = attribute("scaleX"), sy = attribute("scaleY");
   const tx = attribute("translateX"), ty = attribute("translateY");
-  assert.equal(sy / sx, 0.92, "canonical aspect must be retained");
+  assert.equal(sy, sx, "canonical aspect must be retained");
+  const [, , markWidth, markHeight] = mark.match(/viewBox="([^"]+)"/)[1].split(/\s+/).map(Number);
+  assert.ok(Math.abs(tx + markWidth * sx / 2 - 54) < 0.01 && Math.abs(ty + markHeight * sy / 2 - 54) < 0.01, "launcher mark is centered");
   // Sample this canonical M/H/V/L/C path's curves, not merely the bounding rectangle.
   const tokens = sourcePath.match(/[A-Z]|-?\d+(?:\.\d+)?/g);
   let i = 0, x = 0, y = 0;
@@ -237,10 +238,13 @@ test("generated icons include default, dark, and tinted variants", () => {
   assert.deepEqual([...new Set(variants.map(image => image.appearances[0].value))].sort(), ["dark", "tinted"]);
 });
 
-test("desktop logo and favicon are direct generated copies of the canonical mark", () => {
-  const mark = readFileSync(path("packages/mobile-design/assets/peppy-mark.svg"), "utf8");
-  assert.equal(readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8"), mark);
+test("favicon, iOS logo, and coral logo are generated from the canonical mark", () => {
+  const mark = readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8");
   assert.equal(readFileSync(path("apps/desktop/public/favicon.svg"), "utf8"), mark);
+  assert.equal(readFileSync(path("apps/ios/PeppyMobile/Assets.xcassets/PeppyLogo.imageset/peppy-logo.svg"), "utf8"), mark);
+  const coral = readFileSync(path("packages/desktop-ui/src/assets/peppy-logo-coral.svg"), "utf8");
+  const fill = mark.match(/<path[^>]*\bfill="(#[0-9A-Fa-f]{6})"/)[1];
+  assert.equal(coral, mark.replace(fill, "#FF6B57"));
 });
 
 test("android strings properly escape apostrophes and special characters", () => {

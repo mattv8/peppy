@@ -27,7 +27,7 @@ semantic Kotlin and Swift names.
   `nativeCatalog`; desktop uses `desktopCatalog`. A key present in the shared
   source is not necessarily shipped on mobile: preview/store-only keys are
   intentionally excluded.
-- [The canonical mark](../packages/mobile-design/assets/peppy-mark.svg) owns
+- [The canonical mark](../apps/desktop/public/peppy-logo.svg) owns
   Peppy's brand geometry. Do not hand-edit generated logo, launcher, or asset
   output. Binary icons use `pnpm --dir packages/mobile-design icons`, which
   requires desktop Tauri tooling and macOS `sips`.

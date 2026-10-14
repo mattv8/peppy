@@ -10,7 +10,7 @@ import { kotlinNames, semanticTokens, swiftNames } from "../src/tokens.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const paths = {
   css: resolve(root, "packages/desktop-ui/src/peppy-tokens.css"),
-  mark: resolve(root, "packages/mobile-design/assets/peppy-mark.svg"),
+  mark: resolve(root, "apps/desktop/public/peppy-logo.svg"),
   appIcon: resolve(root, "packages/mobile-design/assets/peppy-app-icon.svg"),
   darkAppIcon: resolve(root, "packages/mobile-design/assets/peppy-app-icon-dark.svg"),
   tintedAppIcon: resolve(root, "packages/mobile-design/assets/peppy-app-icon-tinted.svg"),
@@ -29,10 +29,15 @@ const paths = {
   iosLogo: resolve(root, "apps/ios/PeppyMobile/Assets.xcassets/PeppyLogo.imageset/peppy-logo.svg"),
   iosLogoContents: resolve(root, "apps/ios/PeppyMobile/Assets.xcassets/PeppyLogo.imageset/Contents.json"),
   iosIconContents: resolve(root, "apps/ios/PeppyMobile/Assets.xcassets/AppIcon.appiconset/Contents.json"),
-  desktopLogo: resolve(root, "apps/desktop/public/peppy-logo.svg"),
   favicon: resolve(root, "apps/desktop/public/favicon.svg"),
+  coralLogo: resolve(root, "packages/desktop-ui/src/assets/peppy-logo-coral.svg"),
 };
-const staticOutputs = Object.values(paths).filter(path => ![paths.css, paths.mark].includes(path));
+const coralFill = "#FF6B57";
+const dpPerViewUnit = 160 / 512;
+const iconCanvas = 1024;
+const iconMarkScale = 1.6;
+const launcherViewport = 108;
+const launcherMarkScale = 0.125;
 const iconDir = resolve(root, "apps/desktop/src-tauri/icons");
 const iosIconDir = resolve(root, "apps/ios/PeppyMobile/Assets.xcassets/AppIcon.appiconset");
 const defaultIconFiles = ["128x128.png", "128x128@2x.png", "icon.png", "icon.ico", "icon.icns"];
@@ -140,29 +145,28 @@ export type PeppyCopyKey = keyof typeof peppyCopy;
 }
 function parseMark(mark) {
   const viewBox = mark.match(/viewBox="([^"]+)"/)?.[1];
-  const transform = mark.match(/<path[^>]*transform="([^"]+)"/)?.[1];
-  const pathData = mark.match(/<path[^>]*\bd="\s*([\s\S]*?)"\s*\/>/)?.[1].replace(/\s+/g, " ").trim();
+  const [minX, minY, width, height] = viewBox?.trim().split(/\s+/).map(Number) ?? [];
+  const pathData = mark.match(/<path[^>]*\bd="([^"]+)"/)?.[1].replace(/\s+/g, " ").trim();
   const fill = mark.match(/<path[^>]*\bfill="(#[0-9A-Fa-f]{6})"/)?.[1];
-  if (viewBox !== "0 0 512 472" || !transform || !pathData || !fill) throw new Error("Canonical mark is missing its geometry or fill");
-  const scale = transform.match(/^scale\(\s*([\d.]+)[ ,]+([\d.]+)\s*\)$/);
-  if (!scale) throw new Error("Canonical mark needs a supported two-axis scale transform");
-  return { fill, pathData, transform, viewBox, scaleX: Number(scale[1]), scaleY: Number(scale[2]) };
+  if (minX !== 0 || minY !== 0 || !(width > 0) || !(height > 0) || !pathData || !fill) throw new Error("Canonical mark is missing its geometry or fill");
+  if ((mark.match(/<path\b/g) ?? []).length !== 1 || /\btransform=/.test(mark)) throw new Error("Canonical mark must be one untransformed path");
+  return { fill, pathData, viewBox, width, height };
 }
+function round(value) { return Number(value.toFixed(6)); }
 function androidVector(mark, tint = mark.fill) {
   return `<?xml version="1.0" encoding="utf-8"?>
-<!-- Generated from packages/mobile-design/assets/peppy-mark.svg. -->
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="160dp" android:height="148dp" android:viewportWidth="512" android:viewportHeight="472">
-    <group android:scaleX="${mark.scaleX}" android:scaleY="${mark.scaleY}">
-        <path android:fillColor="${tint}" android:pathData="${mark.pathData}"/>
-    </group>
+<!-- Generated from apps/desktop/public/peppy-logo.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="${round(mark.width * dpPerViewUnit)}dp" android:height="${round(mark.height * dpPerViewUnit)}dp" android:viewportWidth="${mark.width}" android:viewportHeight="${mark.height}">
+    <path android:fillColor="${tint}" android:pathData="${mark.pathData}"/>
 </vector>
 `;
 }
 function launcherForeground(mark, tint = mark.fill) {
+  const center = launcherViewport / 2;
   return `<?xml version="1.0" encoding="utf-8"?>
 <!-- Generated from the canonical mark inside Android's 66dp circular safe zone. -->
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <group android:translateX="22" android:translateY="24.5" android:scaleX="${Number((0.125 * mark.scaleX).toFixed(6))}" android:scaleY="${Number((0.125 * mark.scaleY).toFixed(6))}">
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="${launcherViewport}dp" android:height="${launcherViewport}dp" android:viewportWidth="${launcherViewport}" android:viewportHeight="${launcherViewport}">
+    <group android:translateX="${round(center - mark.width * launcherMarkScale / 2)}" android:translateY="${round(center - mark.height * launcherMarkScale / 2)}" android:scaleX="${launcherMarkScale}" android:scaleY="${launcherMarkScale}">
         <path android:fillColor="${tint}" android:pathData="${mark.pathData}"/>
     </group>
 </vector>
@@ -179,10 +183,12 @@ function adaptive() {
 `;
 }
 function squareIcon(mark, background, foreground) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" fill="${background}"/>
-  <g transform="translate(102 140) scale(1.6 1.6)">
-    <path fill="${foreground}" transform="${mark.transform}" d="${mark.pathData}"/>
+  const x = round((iconCanvas - mark.width * iconMarkScale) / 2);
+  const y = round((iconCanvas - mark.height * iconMarkScale) / 2);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${iconCanvas}" height="${iconCanvas}" viewBox="0 0 ${iconCanvas} ${iconCanvas}">
+  <rect width="${iconCanvas}" height="${iconCanvas}" fill="${background}"/>
+  <g transform="translate(${x} ${y}) scale(${iconMarkScale})">
+    <path fill="${foreground}" d="${mark.pathData}"/>
   </g>
 </svg>
 `;
@@ -219,7 +225,7 @@ async function outputs() {
     [paths.androidMonochrome, launcherForeground(mark, "#FF000000")], [paths.androidIcon, adaptive()], [paths.androidRoundIcon, adaptive()],
     [paths.iosRoot, iosRootContents()], [paths.iosTokens, swift(theme)], [paths.iosStrings, iosCopy()], [paths.iosLogo, sourceMark], [paths.iosLogoContents, iosLogoContents()], [paths.iosIconContents, iosIconContents()],
     [paths.desktopCopy, desktopCopy()],
-    [paths.desktopLogo, sourceMark], [paths.favicon, sourceMark],
+    [paths.favicon, sourceMark], [paths.coralLogo, sourceMark.replace(mark.fill, coralFill)],
   ]);
 }
 async function writeOutputs(output) { await Promise.all([...output].map(async ([path, content]) => { await mkdir(dirname(path), { recursive: true }); await writeFile(path, content, "utf8"); })); }
