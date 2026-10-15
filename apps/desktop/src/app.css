@@ -182,6 +182,20 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   background: var(--peppy-surface-chrome);
   overflow: hidden;
 }
+.server-offline-banner {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--peppy-warning-border);
+  background: var(--peppy-warning-surface);
+  color: var(--peppy-warning-text);
+  font-size: 12px;
+}
+.server-offline-banner > svg { flex: 0 0 auto; }
+.server-offline-banner div { display: flex; min-width: 0; gap: 4px; flex-wrap: wrap; }
+.server-offline-banner strong { color: var(--peppy-text-strong); }
 .header-copy {
   display: grid;
   min-width: 0;

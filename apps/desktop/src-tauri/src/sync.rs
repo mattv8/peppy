@@ -39,6 +39,16 @@ const APPLY_STEPS: usize = 8;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
 
+/// Sync records gateway HTTP outages as reachability failures without changing other API clients.
+fn sync_net_error(error: NetError) -> BridgeError {
+    match error {
+        NetError::Status {
+            status: 502..=504, ..
+        } => BridgeError::new("server-unavailable", "The configured server is temporarily unavailable."),
+        error => error.into(),
+    }
+}
+
 /// Runs client-core work off the async workers.
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> BridgeResult<T> + Send + 'static,
@@ -67,7 +77,10 @@ pub async fn fetch_vault(
     vault_id: &str,
     device_id: &str,
 ) -> BridgeResult<VaultResponse> {
-    let vault: VaultResponse = api.get_json("/v1/vault", MAX_JSON_BYTES).await?;
+    let vault: VaultResponse = api
+        .get_json("/v1/vault", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let same = |a: &str, b: &str| {
         uuid::Uuid::parse_str(a)
             .ok()
@@ -114,11 +127,16 @@ async fn refresh_vault(session: &Arc<Session>) -> BridgeResult<()> {
 }
 
 pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
-    let devices: DevicesResponse = session.api.get_json("/v1/devices", MAX_JSON_BYTES).await?;
+    let devices: DevicesResponse = session
+        .api
+        .get_json("/v1/devices", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let capabilities: CapabilitiesResponse = session
         .api
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
-        .await?;
+        .await
+        .map_err(sync_net_error)?;
     let views = gateway_views(&devices, &capabilities);
     let device_role = extract_device_role(&devices, &session.binding.device_id);
     let changed = {
@@ -300,7 +318,11 @@ async fn start_or_resume(
             return Ok(progress);
         }
     }
-    let start: SnapshotStart = session.api.get_json("/v1/snapshot", MAX_JSON_BYTES).await?;
+    let start: SnapshotStart = session
+        .api
+        .get_json("/v1/snapshot", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let invalid = || BridgeError::from(NetError::Invalid);
     let high_water = start
         .high_water_cursor
@@ -398,7 +420,7 @@ async fn import_cut(
             Err(NetError::Status {
                 status: 409 | 400, ..
             }) => return Err(CutError::Impossible),
-            Err(error) => return Err(CutError::Other(error.into())),
+            Err(error) => return Err(CutError::Other(sync_net_error(error))),
         };
         if page.records.is_empty() {
             return Err(CutError::Impossible);
@@ -1308,6 +1330,29 @@ async fn live(session: Arc<Session>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_status_tests {
+    use super::*;
+
+    #[test]
+    fn gateway_statuses_map_to_server_unavailable_only_in_sync() {
+        for status in [502, 503, 504] {
+            assert_eq!(
+                sync_net_error(NetError::Status { status, code: None }).code,
+                "server-unavailable"
+            );
+        }
+        assert_eq!(
+            sync_net_error(NetError::Status {
+                status: 500,
+                code: None,
+            })
+            .code,
+            "server-rejected"
+        );
     }
 }
 

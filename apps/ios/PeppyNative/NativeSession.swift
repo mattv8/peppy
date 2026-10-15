@@ -71,6 +71,7 @@ public actor NativeSession {
     private var client: NativeClient?
     private var record: EnrollmentRecord?
     private var status = SessionStatus()
+    private var reachability = ServerReachability()
     private var syncing = false
     private var changingEnrollment = false
     private struct PhoneClaimContext: Sendable {
@@ -708,6 +709,7 @@ public actor NativeSession {
             try store.saveKeyCache(nativeClient.exportNativeKeyCacheForNativeStorage(epoch: epoch), epoch: epoch, for: identity)
             client = nativeClient
             self.record = record
+            reachability.bind(identity)
             status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
             refreshCount()
             if let bindingSecret {
@@ -763,6 +765,7 @@ public actor NativeSession {
                 }
             }
             self.record = record
+            reachability.bind(identity)
             status.role = record.role
             status.keyEpoch = record.keyEpoch
             refreshCount()
@@ -802,11 +805,7 @@ public actor NativeSession {
         defer { syncing = false }
         let identity = record.identity
         do {
-            let server = ServerClient(
-                origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
-                token: try store.token(identity),
-                transport: transport
-            )
+            let server = try observedServer(identity)
             let report = try await ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget).run()
             refreshCount()
             return report
@@ -814,6 +813,19 @@ public actor NativeSession {
             throw ClientError.wrap(error)
         }
     }
+
+    /// Observes the enrolled server even while vault keys are locked. It does not open a socket or
+    /// mutate local state, and shares the sync guard with full foreground passes.
+    public func probeServerReachability() async throws {
+        guard let record else { throw ClientError.notEnrolled }
+        guard !syncing else { throw ClientError.syncInProgress }
+        syncing = true
+        defer { syncing = false }
+        var meter = RequestMeter(limit: 1)
+        try await observedServer(record.identity).probe(meter: &meter)
+    }
+
+    public func serverReachability() -> ServerReachabilityState { reachability.state }
 
     // MARK: Contacts
 
@@ -843,12 +855,7 @@ public actor NativeSession {
         defer { syncing = false }
         let identity = record.identity
         do {
-            let server = ServerClient(
-                origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
-                token: try store.token(identity),
-                transport: transport
-            )
-            let sync = ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget)
+            let sync = ForegroundSync(client: client, server: try observedServer(identity), vaultId: identity.vaultId, budget: budget)
             var syncError: ClientError?
             // Incoming records (requests, approvals, a repair snapshot) are applied before any permit.
             do {
@@ -875,7 +882,7 @@ public actor NativeSession {
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
             try Self.protectUntilFirstUnlock(scratch)
             let media = syncError == nil ? ContactsMediaSession(
-                transfer: ContactMediaTransfer(client: client, server: server, scratch: scratch),
+                transfer: ContactMediaTransfer(client: client, server: try authenticatedServer(identity), scratch: scratch),
                 meter: RequestMeter(limit: budget.maxRequests)
             ) : nil
             var coordinator = NativeContactsCoordinator(
@@ -1001,12 +1008,26 @@ public actor NativeSession {
         )
     }
 
+    private func observedServer(_ identity: EnrollmentIdentity) throws -> ServerClient {
+        let binding = ServerReachabilityBinding(identity: identity)
+        let generation = reachability.generation
+        let reachability = reachability
+        return ServerClient(
+            origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
+            token: try store.token(identity), transport: transport,
+            observeResponse: { state in
+                reachability.record(state, binding: binding, generation: generation)
+            }
+        )
+    }
+
     /// Releases the client. Nothing on disk or in the Keychain changes.
     public func close() {
         try? client?.dispose()
         client = nil
         record = nil
         status = SessionStatus()
+        reachability.bind(nil)
     }
 
     private func refreshCount() {

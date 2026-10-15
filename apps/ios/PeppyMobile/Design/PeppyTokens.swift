@@ -24,6 +24,8 @@ struct PeppyColorScheme {
     let Error: Color
     let ErrorText: Color
     let WarningText: Color
+    let WarningSurface: Color
+    let WarningBorder: Color
     let Focus: Color
     let FocusRing: Color
     let Primary: Color
@@ -54,6 +56,8 @@ enum PeppyTokens {
       Error: Color(argb: 0xFFF48771),
       ErrorText: Color(argb: 0xFFF48771),
       WarningText: Color(argb: 0xFFF2CC60),
+      WarningSurface: Color(argb: 0xFF322E21),
+      WarningBorder: Color(argb: 0xFF4E4311),
       Focus: Color(argb: 0xFFFF8A73),
       FocusRing: Color(argb: 0xFFFF8A73),
       Primary: Color(argb: 0xFFFF8A73),
@@ -82,6 +86,8 @@ enum PeppyTokens {
       Error: Color(argb: 0xFFC72E0F),
       ErrorText: Color(argb: 0xFFC72E0F),
       WarningText: Color(argb: 0xFF7A5200),
+      WarningSurface: Color(argb: 0xFFEBE7DF),
+      WarningBorder: Color(argb: 0xFFE2D6BC),
       Focus: Color(argb: 0xFFC9422D),
       FocusRing: Color(argb: 0xFFC9422D),
       Primary: Color(argb: 0xFFC9422D),

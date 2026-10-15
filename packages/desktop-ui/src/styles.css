@@ -250,6 +250,9 @@ select:focus-visible {
 [data-connection-state="missing-native-host"] .connection-dot {
   background: var(--peppy-error);
 }
+[data-server-unreachable] .connection-dot {
+  background: var(--peppy-warning-text);
+}
 [data-status-popover] {
   position: relative;
   display: flex;

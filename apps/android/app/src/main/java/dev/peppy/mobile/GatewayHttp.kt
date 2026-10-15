@@ -29,7 +29,11 @@ class GatewayTransportException(message: String) : IOException(message)
  * Authenticated HTTP to the credential's canonical origin. Redirects are disabled so the bearer
  * token can never be forwarded elsewhere; response bodies are bounded like the Rust simulator's.
  */
-class GatewayHttp(private val origin: String, private val bearerToken: String) {
+class GatewayHttp(
+    private val origin: String,
+    private val bearerToken: String,
+    private val observeResponse: ((HttpResult) -> Unit)? = null,
+) {
     fun get(path: String): HttpResult = request("GET", path, null)
 
     fun postJson(path: String, body: String): HttpResult = request("POST", path, body)
@@ -95,9 +99,9 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
                 } catch (_: IOException) {
                     null
                 }
-                return HttpResult(code, error)
+                return observed(HttpResult(code, error))
             }
-            return HttpResult(code, connection.inputStream.use { readBounded(it) })
+            return observed(HttpResult(code, connection.inputStream.use { readBounded(it) }))
         } finally {
             connection.disconnect()
         }
@@ -110,18 +114,18 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
             if (method == "PUT") {
                 connection.setRequestProperty("Content-Type", "application/octet-stream")
                 transfer(connection)
-                return result(connection, connection.responseCode)
+                return observed(result(connection, connection.responseCode))
             }
             val code = connection.responseCode
-            if (code !in 200..299) return result(connection, code)
+            if (code !in 200..299) return observed(result(connection, code))
             transfer(connection)
-            return HttpResult(code, null)
+            return observed(HttpResult(code, null))
         } catch (error: GatewayTransportException) {
             throw error
         } catch (error: IOException) {
             // A server can reject before consuming a streaming body; only recover a real rejection.
             val code = try { connection.responseCode } catch (_: IOException) { -1 }
-            if (code > 0 && code !in 200..299) return result(connection, code)
+            if (code > 0 && code !in 200..299) return observed(result(connection, code))
             throw GatewayTransportException("transport failure")
         } finally { connection.disconnect() }
     }
@@ -140,6 +144,11 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
         if (code in 200..299) HttpResult(code, null) else HttpResult(code, try {
             connection.errorStream?.use { readBounded(it, MAX_ERROR_BYTES) }
         } catch (_: IOException) { null })
+
+    private fun observed(result: HttpResult): HttpResult {
+        observeResponse?.invoke(result)
+        return result
+    }
 
     private fun requireV1JsonPath(path: String) {
         require(!path.contains("#"))

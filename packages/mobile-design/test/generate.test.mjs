@@ -63,6 +63,20 @@ test("CSS and generated tokens retain coral action foreground contrast", () => {
   assert.match(swift, /static let light = PeppyColorScheme\([\s\S]*AccentText: Color\(argb: 0xFFFFFFFF\),[\s\S]*PrimaryText: Color\(argb: 0xFFFFFFFF\)/);
 });
 
+test("native warning tokens composite translucent CSS values over the panel surface", () => {
+  const android = readFileSync(path("apps/android/app/src/main/java/dev/peppy/mobile/ui/theme/PeppyTokens.kt"), "utf8");
+  const swift = readFileSync(path("apps/ios/PeppyMobile/Design/PeppyTokens.swift"), "utf8");
+
+  for (const [name, dark, light] of [
+    ["warningSurface", "FF322E21", "FFEBE7DF"],
+    ["warningBorder", "FF4E4311", "FFE2D6BC"],
+  ]) {
+    const swiftName = name[0].toUpperCase() + name.slice(1);
+    assert.match(android, new RegExp(`val ${name}: Color,[\\s\\S]*val Dark = PeppyColorScheme\\([\\s\\S]*${name} = Color\\(0x${dark}\\),[\\s\\S]*val Light = PeppyColorScheme\\([\\s\\S]*${name} = Color\\(0x${light}\\)`));
+    assert.match(swift, new RegExp(`let ${swiftName}: Color[\\s\\S]*static let dark = PeppyColorScheme\\([\\s\\S]*${swiftName}: Color\\(argb: 0x${dark}\\),[\\s\\S]*static let light = PeppyColorScheme\\([\\s\\S]*${swiftName}: Color\\(argb: 0x${light}\\)`));
+  }
+});
+
 test("android resources preserve canonical mark geometry within the safe zone", () => {
   const mark = readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8");
   const sourcePath = mark.match(/<path[^>]*\bd="([^"]+)"/)?.[1].replace(/\s+/g, " ").trim();
@@ -102,6 +116,24 @@ test("generated copy has both native catalog formats", () => {
   assert.match(readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8"), /peppy_onboarding_headline/);
   const strings = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
   assert.equal(strings.strings["peppy.locked"].localizations.en.stringUnit.value, "Locked");
+});
+
+test("server offline copy is generated for desktop and native clients", () => {
+  const copy = {
+    server_offline_title: "Server offline",
+    server_offline_body: "Peppy will reconnect automatically.",
+  };
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(catalog[key], value);
+    assert.equal(nativeCatalog[key], value);
+    assert.match(android, new RegExp(`<string name="peppy_${key}">${value}</string>`));
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(value)},`));
+  }
 });
 
 test("onboarding server mode copy maps to each generated platform format", () => {

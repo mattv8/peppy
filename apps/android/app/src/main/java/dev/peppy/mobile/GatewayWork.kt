@@ -450,9 +450,12 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         val mmsReceiveGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) ==
             PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECEIVE_MMS) ==
             PackageManager.PERMISSION_GRANTED
+        val binding = NativeGateway.reachabilityBinding(applicationContext)
         val sync = GatewaySync(
             client = session.client,
-            http = GatewayHttp(session.origin, session.bearerToken),
+            http = GatewayHttp(session.origin, session.bearerToken) { response ->
+                binding?.let { ServerReachabilityState.recordResponse(it, response) }
+            },
             state = GatewayStateStore(applicationContext),
             deviceId = session.deviceId,
             dispatch = {
@@ -490,6 +493,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         } catch (_: GatewayAuthException) {
             return Result.failure()
         }
+        result.failure?.let { failure -> binding?.let { ServerReachabilityState.recordFailure(it, failure) } }
         return when {
             result.failure != null -> if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
             else -> {

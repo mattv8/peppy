@@ -77,7 +77,8 @@ import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { DevicesSettings } from "./DevicesSettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
-import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
+import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
+import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
 import { peppyCopy } from "./generated/peppyCopy";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
@@ -914,9 +915,11 @@ function SettingsView({
 function StatusDetails({
   connection,
   encryption,
+  serverUnreachable = false,
 }: {
   connection?: DesktopSnapshot["connection"];
   encryption?: DesktopSnapshot["encryption"]["state"];
+  serverUnreachable?: boolean;
 }) {
   if (!connection || !encryption)
     return <div className="status-details" data-status-details><div className="status-details-row">Loading status…</div></div>;
@@ -936,7 +939,7 @@ function StatusDetails({
         <ShieldAlert size={14} aria-hidden />
         <span>Carrier SMS/MMS not end-to-end encrypted</span>
       </div>
-      <div id="connection-status" className="status-details-row" data-connection-state={connection.state} data-error-code={connection.errorCode} title={label}>
+      <div id="connection-status" className="status-details-row" data-connection-state={connection.state} data-error-code={connection.errorCode} data-server-unreachable={serverUnreachable || undefined} title={label}>
         <span className="connection-dot" aria-hidden />
         <span>{label}</span>
       </div>
@@ -1004,7 +1007,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationSettingsRequested = useRef(false);
   const [notice, setNotice] = useState("");
   const [addingPhone, setAddingPhone] = useState(false);
+  const [initialEnrollmentActive, setInitialEnrollmentActive] = useState(false);
   const [phoneDeferredOrigin, setPhoneDeferredOrigin] = useState<string | null>(null);
+  useEffect(() => {
+    if (snapshot?.connection.state === "connected") setInitialEnrollmentActive(false);
+  }, [snapshot?.connection.state]);
   // Names of contacts picked from search, shown on chips until the next native snapshot
   // resolves the same addresses. Display only; recipient IDs stay phone addresses.
   const [chosenContacts, setChosenContacts] = useState<ContactResolutionMap>({});
@@ -2005,8 +2012,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     ? snapshot.encryption.state !== "unlocked" && nativeCredentialed
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
   const canRecoverNativeSync = canUnlock || nativeCredentialed;
-  const needsServerSetup = snapshot?.connection.errorCode === "server-required" || (snapshot?.connection.state !== "connected" && !canUnlock);
-  const showSetup = Boolean(snapshot && (addingPhone || (!selected && (needsServerSetup || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
+  const needsServerSetup = snapshot?.connection.errorCode === "server-required" || snapshot?.connection.errorCode === "credentials-required";
+  const showSetup = Boolean(snapshot && (addingPhone || initialEnrollmentActive || (!selected && (needsServerSetup || setupCode === "revoked" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
+  const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
+  const serverOffline = Boolean(snapshot && enrolled && isServerUnreachable(snapshot.connection));
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2189,9 +2198,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   );
   const panelStatus = snapshot
     ? {
-        tone: statusTone(snapshot.connection, snapshot.encryption.state),
+        tone: statusTone(snapshot.connection, snapshot.encryption.state, serverOffline),
         summary: statusSummary(snapshot.connection, snapshot.encryption.state),
-        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} />,
+        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} serverUnreachable={serverOffline} />,
       }
     : {
         tone: "neutral" as const,
@@ -2202,7 +2211,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationUnread = snapshot?.notifications.filter((notification) => !notification.seen && !notification.dismissalPending && !mutedNotificationKeys.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName))).length ?? 0;
   const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
   const composerConnectionDot = snapshot
-    ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />
+    ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} serverUnreachable={serverOffline} />
     : null;
   if (composerConversation) {
     return (
@@ -2435,6 +2444,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               </button>}
             </div>
           </header>
+          <ServerOfflineAnnouncement offline={serverOffline} />
+          {serverOffline && <ServerOfflineBanner />}
           {settingsOpen ? (
             <SettingsView
               mode={mode}
@@ -2493,15 +2504,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   enrollmentEstablished={snapshot.deviceRole === "owner" && snapshot.encryption.state === "unlocked"}
                   addingPhone={addingPhone}
                   connectionPending={snapshot.connection.errorCode === "connecting"}
-                  onExit={() => setAddingPhone(false)}
+                  onExit={() => { setAddingPhone(false); setInitialEnrollmentActive(false); }}
                   onDeferPhone={async () => {
                     const key = phoneDeferredKey(snapshot.connection.origin);
                     if (key) localStorage.setItem(key, "1");
-                    setPhoneDeferredOrigin(snapshot.connection.origin ?? null);
-                    await refresh();
+                     setPhoneDeferredOrigin(snapshot.connection.origin ?? null);
+                     setInitialEnrollmentActive(false);
+                     await refresh();
                     if (addingPhone) setAddingPhone(false);
                   }}
-                  onJoined={async () => { await refresh(); setAddingPhone(false); }}
+                  onJoined={async () => { await refresh(); setAddingPhone(false); setInitialEnrollmentActive(false); }}
+                  onInitialEnrollmentStart={() => setInitialEnrollmentActive(true)}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
                 />

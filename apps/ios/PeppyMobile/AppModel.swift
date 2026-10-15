@@ -21,6 +21,7 @@ final class AppModel {
     private(set) var lastError: String?
     private(set) var lastSync: SyncReport?
     private(set) var lastSyncDate: Date?
+    private(set) var serverReachability: ServerReachabilityState = .unknown
     private(set) var devices: [DeviceRosterItem] = []
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
@@ -44,6 +45,9 @@ final class AppModel {
     @ObservationIgnored var contactsObserver: (any NSObjectProtocol)?
     /// Limits a newly received remote scan request to one extra bounded local pass.
     @ObservationIgnored var remoteScanFollowUpQueued = false
+    @ObservationIgnored private var foregroundReachabilityTask: Task<Void, Never>?
+    @ObservationIgnored private let foregroundReachabilityOwnership = ForegroundReachabilityLoopOwnership()
+    @ObservationIgnored private var foregroundActive = false
 
     init() {
         #if DEBUG
@@ -97,6 +101,7 @@ final class AppModel {
 
     func load() async {
         await run(.idle) { try await $0.open() }
+        if status.identity == nil { serverReachability = .unknown }
     }
 
     func importCredential(from result: Result<URL, any Error>) async {
@@ -115,6 +120,7 @@ final class AppModel {
 
     /// Non-destructive: the encrypted database, keys and queued work stay archived on this device.
     func disconnect() async {
+        stopForegroundReachability()
         await run(.disconnecting) { try await $0.disconnect() }
         if status.identity == nil {
             await relay?.revoke()
@@ -123,15 +129,18 @@ final class AppModel {
         }
         lastSync = nil
         lastSyncDate = nil
+        if status.identity == nil { serverReachability = .unknown }
     }
 
     func disconnectLocalOnly() async {
+        stopForegroundReachability()
         await run(.disconnecting) { try await $0.disconnectLocalOnly() }
         if status.identity == nil {
             await relay?.revoke()
             relay = nil
             UserDefaults.standard.set(false, forKey: "peppy.relay-opted-in")
             lastError = "Signed out locally only. This device credential may remain active on the server until it can be revoked."
+            serverReachability = .unknown
         }
     }
 
@@ -376,7 +385,14 @@ final class AppModel {
     func wakeSync() async -> Bool {
         // A background APNs launch has no SwiftUI `.task` to open the session first.
         guard let opened = try? await session.open(), opened.databaseOpen, opened.keysUnlocked else { return false }
-        do { _ = try await session.syncOnce(); return true } catch { return false }
+        do {
+            _ = try await session.syncOnce()
+            await publishServerReachability()
+            return true
+        } catch {
+            await publishServerReachability()
+            return false
+        }
     }
 
     func wakeContacts() async -> Bool {
@@ -410,14 +426,69 @@ final class AppModel {
             lastError = (error as? ClientError)?.userMessage ?? "Sync failed."
         }
         status = (try? await session.open()) ?? status
+        await publishServerReachability()
         await runContactsPass(.foreground)
+    }
+
+    /// Starts foreground-only observation for the current enrollment. A full sync supplies the
+    /// observation when unlocked; locked vaults use one bounded authenticated probe instead.
+    func setForegroundActive(_ active: Bool) {
+        foregroundActive = active
+        guard active else { stopForegroundReachability(); return }
+        startForegroundReachabilityIfNeeded()
+    }
+
+    private func startForegroundReachabilityIfNeeded() {
+        guard foregroundActive, foregroundReachabilityTask == nil, status.identity != nil else { return }
+        let token = foregroundReachabilityOwnership.start()
+        foregroundReachabilityTask = Task { [weak self] in
+            await self?.foregroundReachabilityLoop(token: token)
+        }
+    }
+
+    private func stopForegroundReachability() {
+        foregroundReachabilityTask?.cancel()
+        foregroundReachabilityTask = nil
+        foregroundReachabilityOwnership.stop()
+    }
+
+    private func foregroundReachabilityLoop(token: Int) async {
+        defer {
+            let ownsCurrentTask = foregroundReachabilityOwnership.isCurrent(token)
+            foregroundReachabilityOwnership.finish(token)
+            if ownsCurrentTask { foregroundReachabilityTask = nil }
+        }
+        var delay: UInt64 = 30
+        while !Task.isCancelled, status.identity != nil {
+            if status.keysUnlocked {
+                await syncInForeground()
+            } else {
+                do { try await session.probeServerReachability() }
+                catch ClientError.syncInProgress, ClientError.canceled {}
+                catch is CancellationError {}
+                catch {}
+            }
+            await publishServerReachability()
+            guard serverReachability != .available else { return }
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch { return }
+            delay = min(delay * 2, 300)
+        }
+    }
+
+    func publishServerReachability() async {
+        serverReachability = await session.serverReachability()
+        if serverReachability == .unavailable { startForegroundReachabilityIfNeeded() }
     }
 
     private func run(_ activity: Activity, _ body: (NativeSession) async throws -> SessionStatus) async {
         self.activity = activity
         defer { self.activity = .idle }
         do {
+            let previousIdentity = status.identity
             status = try await body(session)
+            if status.identity != previousIdentity { serverReachability = .unknown }
             lastError = nil
             enrollmentBlocked = false
         } catch {

@@ -58,6 +58,16 @@ data class GatewayStatus(
 
 /** Only produced when the database is open and the shared vault purpose keys are installed. */
 class GatewaySession(val client: NativeClient, val origin: String, val deviceId: String, internal val bearerToken: String)
+/** Credential-only binding used for authenticated reachability checks while vault keys are locked. */
+internal class GatewayReachabilityBinding(
+    val origin: String,
+    val vaultId: String,
+    val deviceId: String,
+    val bearerToken: String,
+    val generation: Long,
+) {
+    override fun toString() = "GatewayReachabilityBinding(redacted)"
+}
 /** Bearer credentials must not gain a generated `toString`, `copy`, or component API. */
 internal class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String) {
     override fun toString() = "GatewayAccountCredential(redacted)"
@@ -172,6 +182,21 @@ object NativeGateway {
         }
     }
 
+    /**
+     * Returns the active enrolled binding without opening or exposing vault keys. The generation
+     * fences asynchronous probe and worker results from a replaced binding.
+     */
+    internal fun reachabilityBinding(context: Context): GatewayReachabilityBinding? = synchronized(lock) {
+        val prefs = prefs(context)
+        val identity = identity(prefs) ?: return null
+        val token = prefs.getString(P_TOKEN, null)?.let { secretBox.open(P_TOKEN, it) } ?: return null
+        try {
+            GatewayReachabilityBinding(identity.origin, identity.vaultId, identity.deviceId, String(token, Charsets.UTF_8), generation)
+        } finally {
+            token.fill(0)
+        }
+    }
+
     /** Account HTTP may run while keys are locked; it never opens or exports vault key material. */
     internal fun accountCredential(context: Context): GatewayAccountCredential? = synchronized(lock) {
         val prefs = prefs(context); val identity = identity(prefs) ?: return null
@@ -226,6 +251,7 @@ object NativeGateway {
             // far as each durable store permits.  No old credential remains usable by new work.
             if (!prefs.edit().clear().commit()) return false
             GatewayStateStore(context).resetForNewEnrollment()
+            ServerReachabilityState.clear()
             true
         } catch (_: IOException) {
             false

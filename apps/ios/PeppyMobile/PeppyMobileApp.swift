@@ -63,11 +63,12 @@ struct DeviceView: View {
         }
         .tint(colors.Accent)
         .task { await model.load(); enrollmentLoaded = true }
-        .task(id: scenePhase == .active && model.status.keysUnlocked) {
-            if scenePhase == .active { await model.syncInForeground() }
+        .task(id: "\(scenePhase == .active)-\(model.status.identity != nil)-\(model.status.keysUnlocked)") {
+            model.setForegroundActive(scenePhase == .active)
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.observeContactChanges(phase == .active)
+            model.setForegroundActive(phase == .active)
             if phase == .background { model.scheduleContactsBackgroundWork() }
         }
         .fullScreenCover(isPresented: $showingHostedEnrollment) {
@@ -216,6 +217,11 @@ struct DeviceView: View {
                 .accessibilityIdentifier("tab-account")
         }
         .sheet(isPresented: $showingSettings) { SettingsView(model: model) }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.serverReachability == .unavailable {
+                ServerOfflineBanner(colors: colors)
+            }
+        }
     }
 
     private var mirroringTab: some View {
@@ -419,6 +425,7 @@ struct DeviceView: View {
 struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationStack {
@@ -451,5 +458,41 @@ struct SettingsView: View {
             }.formStyle(.grouped).navigationTitle(Text("peppy.settings", tableName: "Peppy"))
                 .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } } }
         }.accessibilityIdentifier("settings-screen")
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.serverReachability == .unavailable {
+                    ServerOfflineBanner(colors: PeppyTokens.colors(for: colorScheme), announcesTransition: false)
+                }
+            }
+    }
+}
+
+struct ServerOfflineBanner: View {
+    let colors: PeppyColorScheme
+    var announcesTransition = true
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(colors.WarningText)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("peppy.server_offline_title", tableName: "Peppy").font(.subheadline.weight(.semibold))
+                Text("peppy.server_offline_body", tableName: "Peppy").font(.footnote)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(colors.WarningSurface)
+        .overlay(alignment: .bottom) { colors.WarningBorder.frame(height: 1) }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("server-offline-banner")
+        .onAppear {
+            guard announcesTransition else { return }
+            #if canImport(UIKit)
+            let title = String(localized: "peppy.server_offline_title", table: "Peppy")
+            let body = String(localized: "peppy.server_offline_body", table: "Peppy")
+            UIAccessibility.post(notification: .announcement, argument: "\(title). \(body)")
+            #endif
+        }
     }
 }

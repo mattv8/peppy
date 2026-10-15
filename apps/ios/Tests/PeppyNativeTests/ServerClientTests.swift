@@ -119,6 +119,33 @@ private struct CancellationProbe: Sendable {
         #expect(request.headers["Content-Type"] == nil)
     }
 
+    @Test func probeUsesBoundedCapabilitiesRequestAndPublishesBeforeReturning() async throws {
+        let identity = EnrollmentIdentity(origin: "https://push.example.test", vaultId: "vault", deviceId: "device")
+        let reachability = ServerReachability()
+        reachability.bind(identity)
+        let binding = ServerReachabilityBinding(identity: identity)
+        let generation = reachability.generation
+        let transport = RecordingTransport { request in HTTPResponse(status: 503, url: request.url, body: Data("{}".utf8)) }
+        let client = ServerClient(
+            origin: try ServerOrigin(canonical: "https://push.example.test", allowLoopbackHTTP: false),
+            token: token,
+            transport: transport,
+            observeResponse: { reachability.record($0, binding: binding, generation: generation) }
+        )
+        var meter = RequestMeter(limit: 1)
+
+        await #expect(throws: ClientError.server(status: 503, code: nil)) {
+            try await client.probe(meter: &meter)
+        }
+
+        let request = try #require(transport.requests.first)
+        #expect(request.url.path == "/v1/capabilities")
+        #expect(request.url.query == nil)
+        #expect(request.maxResponseBytes == ServerClient.maxSmallBytes)
+        #expect(meter.used == 1)
+        #expect(reachability.state == .unavailable)
+    }
+
     @Test func getDistinguishesResyncFallbackMalformedBodyAndForeignOrigin() async throws {
         let resync = RecordingTransport { request in
             HTTPResponse(status: 409, url: request.url, body: Data("{\"code\":\"resync_required\"}".utf8))

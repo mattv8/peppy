@@ -88,6 +88,7 @@ extension AppModel {
     }
 
     func contactsPassFinished(_ report: ContactsSyncReport) async {
+        await publishServerReachability()
         contacts.lastReport = report
         if report.outcome != .busy && report.outcome != .disabled { contacts.lastPassDate = Date() }
         contacts.error = report.syncError

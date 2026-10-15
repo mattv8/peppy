@@ -239,6 +239,7 @@ private fun CompanionScreen() {
         CircularProgressIndicator(Modifier.padding(24.dp))
         return
     }
+    ObserveServerReachability(status?.enrolled == true, refresh)
     if (welcomeDestination == WelcomeDestination.HOSTED_ENROLLMENT && status?.enrolled == false) {
         HostedEnrollmentScreen(
             onDismiss = { welcomeDestination = WelcomeDestination.HOSTED },
@@ -256,10 +257,13 @@ private fun CompanionScreen() {
     }
 
     if (appFiltersOpen && !settingsOpen && status?.enrolled == true) {
-        NotificationAppFiltersScreen(onBack = {
-            appFiltersOpen = false
-            refresh++
-        })
+        Column(Modifier.fillMaxSize()) {
+            if (status?.sharedKeysReady == true) ServerOfflineBanner()
+            NotificationAppFiltersScreen(onBack = {
+                appFiltersOpen = false
+                refresh++
+            })
+        }
         return
     }
 
@@ -287,11 +291,14 @@ private fun CompanionScreen() {
                 }
             }
         },
-    ) { innerPadding -> Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(innerPadding).padding(24.dp)
-            .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
+    ) { innerPadding ->
+        Column(Modifier.fillMaxSize().padding(innerPadding)) {
+            if (status?.enrolled == true && status?.sharedKeysReady == true) ServerOfflineBanner()
+            Column(
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)
+                    .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
         if (status?.enrolled != true && !settingsOpen) {
             when (welcomeDestination) {
                 WelcomeDestination.HOSTED -> WelcomeScreen(
@@ -444,7 +451,9 @@ private fun CompanionScreen() {
                 }
             }
         }
-    } }
+            }
+        }
+    }
 }
 
 

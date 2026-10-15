@@ -194,8 +194,8 @@ export function StatusPopover({ tone, summary, children }: { tone: StatusTone; s
   </div>;
 }
 
-export function ConnectionDot({ state, label }: { state: string; label: string }): ReactElement {
-  return <span role="status" aria-label={label} title={label} data-connection-state={state}>
+export function ConnectionDot({ state, label, serverUnreachable = false }: { state: string; label: string; serverUnreachable?: boolean }): ReactElement {
+  return <span role="status" aria-label={label} title={label} data-connection-state={state} data-server-unreachable={serverUnreachable || undefined}>
     <span className="connection-dot" aria-hidden />
   </span>;
 }

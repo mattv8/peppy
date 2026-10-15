@@ -715,7 +715,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     terminate,
     network: {
       async start() { if (polling || !scheduler) return; polling = true; schedulePoll(); },
-      wake() { void scheduler?.poll(); },
+      wake() { void scheduler?.poll().catch(() => undefined); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },

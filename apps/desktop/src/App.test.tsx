@@ -435,10 +435,57 @@ describe("setup landing routing", () => {
     expect(unlock).not.toHaveBeenCalled();
   });
 
-  it("keeps SetupLanding for an unlocked native session that is offline without a selected conversation", async () => {
-    await landingSnapshot({ connection: { state: "offline" }, encryption: { state: "unlocked" } });
+  it("keeps an unlocked native session that is offline without a selected conversation on the workbench", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "offline" }, encryption: { state: "unlocked" } });
     render(<App />);
-    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Server offline");
+    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Peppy will reconnect automatically.");
+    expect(document.querySelector("[data-status-trigger]")).toHaveAttribute("data-status-tone", "warning");
+    expect(document.getElementById("connection-status")).toHaveAttribute("data-server-unreachable");
+  });
+
+  it("retains initial setup through a credentialed outage and clears it after reconnecting", async () => {
+    const creation = deferred<EnrollmentView>();
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline", origin: "https://example.test", errorCode: "server-required" },
+      encryption: { state: "locked" },
+      gateways: [],
+      deviceRole: undefined,
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+
+    render(<App hostKind="browser" fixedOrigin="https://example.test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    current = {
+      ...current,
+      connection: { state: "offline", origin: "https://example.test", errorCode: "server-unavailable" },
+      encryption: { state: "unlocked" },
+      deviceRole: "owner",
+      gateways: [SMS_ONLY],
+    };
+    await act(async () => hint?.());
+
+    expect(document.getElementById("setup-landing")).toBeInTheDocument();
+    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Server offline");
+    current = { ...current, connection: { state: "connected", origin: "https://example.test" } };
+    await act(async () => hint?.());
+    await waitFor(() => expect(document.getElementById("setup-landing")).not.toBeInTheDocument());
+  });
+
+  it("does not present an offline banner while a connection is unknown", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "connecting" }, encryption: { state: "unlocked" } });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("server-offline-banner")).not.toBeInTheDocument();
+    expect(document.getElementById("server-offline-announcement")).toHaveTextContent("");
   });
 
   it("keeps the onboarding header when SetupLanding is displayed", async () => {

@@ -11,6 +11,26 @@
         }
       }
     },
+    "peppy.server_offline_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server offline"
+          }
+        }
+      }
+    },
+    "peppy.server_offline_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy will reconnect automatically."
+          }
+        }
+      }
+    },
     "peppy.sms": {
       "localizations": {
         "en": {

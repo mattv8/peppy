@@ -123,7 +123,7 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, fixedOrigin, accountUrl }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
@@ -133,6 +133,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   enrollmentEstablished?: boolean;
   onDeferPhone?(): void | Promise<void>;
   onJoined(): void | Promise<void>;
+  onInitialEnrollmentStart?(): void;
   fixedOrigin?: string;
   accountUrl?: string;
 }) {
@@ -307,7 +308,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   };
 
   const discover = (origin?: string) => runEnrollment({ action: () => bridge.enrollment_discover(origin), retry: () => discover(origin), label: "production_pairing_connecting" });
-  const createOwner = () => runEnrollment({ action: () => bridge.enrollment_create_owner({ username }), retry: createOwner, label: "production_pairing_connecting", reconcileCreateOwner: true });
+  const createOwner = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_create_owner({ username }), retry: createOwner, label: "production_pairing_connecting", reconcileCreateOwner: true });
+  };
   const startOver = () => runEnrollment({
     action: async () => {
       const next = await bridge.enrollment_start_over();
@@ -315,20 +319,32 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       return next;
     }, retry: () => discover(view?.origin ?? connectedOrigin ?? undefined), label: "production_pairing_connecting", startOver: true,
   });
-  const signInEnrollment = () => runEnrollment({ action: () => bridge.enrollment_sign_in({ username }), retry: signInEnrollment, label: "production_pairing_connecting" });
-  const connectSharedSecret = () => runEnrollment({ action: () => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), retry: connectSharedSecret, label: "production_pairing_connecting" });
-  const beginVaultRequest = () => runEnrollment({ action: async () => {
-    setInviteError(null);
-    try { return await bridge.enrollment_begin_vault_request({ inviteLink, displayName }); }
-    catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "invite_invalid") {
-        setInviteError(copy("enrollment_error_invite_invalid"));
-        return { mode: "community", stage: "invite_request" };
+  const signInEnrollment = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_sign_in({ username }), retry: signInEnrollment, label: "production_pairing_connecting" });
+  };
+  const connectSharedSecret = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), retry: connectSharedSecret, label: "production_pairing_connecting" });
+  };
+  const beginVaultRequest = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: async () => {
+      setInviteError(null);
+      try { return await bridge.enrollment_begin_vault_request({ inviteLink, displayName }); }
+      catch (error) {
+        if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "invite_invalid") {
+          setInviteError(copy("enrollment_error_invite_invalid"));
+          return { mode: "community", stage: "invite_request" };
+        }
+        throw error;
       }
-      throw error;
-    }
-  }, retry: beginVaultRequest, label: "production_pairing_connecting" });
-  const createVault = () => runEnrollment({ action: () => bridge.enrollment_create_vault({ username: vaultUsername }), retry: createVault, label: "production_pairing_connecting" });
+    }, retry: beginVaultRequest, label: "production_pairing_connecting" });
+  };
+  const createVault = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_create_vault({ username: vaultUsername }), retry: createVault, label: "production_pairing_connecting" });
+  };
   const addPhone = (next: Method, automatic = false) => {
     if (invitationAttemptRef.current === "stopped" && automatic) return;
     setMethod(next);

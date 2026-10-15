@@ -50,16 +50,24 @@ function extractTheme(css, selector) {
   const body = css.slice(start, css.indexOf("}", start));
   return Object.fromEntries([...body.matchAll(/--peppy-([\w-]+):\s*([^;]+);/g)].map(([, key, value]) => [key, value.trim()]));
 }
-function color(value) {
+function parseColor(value) {
   const hex = value.replace(/^#/, "");
-  if (/^[0-9a-f]{6}$/i.test(hex)) return `FF${hex.toUpperCase()}`;
-  if (/^[0-9a-f]{3}$/i.test(hex)) return `FF${[...hex].map(char => char + char).join("").toUpperCase()}`;
-  throw new Error(`Expected hex token, received ${value}`);
+  if (/^[0-9a-f]{6}$/i.test(hex)) return [...hex.matchAll(/[0-9a-f]{2}/gi)].map(([channel]) => parseInt(channel, 16));
+  if (/^[0-9a-f]{3}$/i.test(hex)) return [...hex].map(channel => parseInt(channel + channel, 16));
+  const rgba = value.match(/^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\)$/);
+  if (rgba) return rgba.slice(1, 4).map(Number).concat(Number(rgba[4]));
+  throw new Error(`Expected hex or rgba token, received ${value}`);
+}
+function color(value, background) {
+  const [red, green, blue, alpha = 1] = parseColor(value);
+  const [backgroundRed, backgroundGreen, backgroundBlue] = parseColor(background);
+  const channels = [red, green, blue].map((channel, index) => Math.round(channel * alpha + [backgroundRed, backgroundGreen, backgroundBlue][index] * (1 - alpha)));
+  return `FF${channels.map(channel => channel.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 }
 function selected(theme) {
   return Object.fromEntries(semanticTokens.map(key => {
     if (!theme[key]) throw new Error(`Missing --peppy-${key}`);
-    return [key, color(theme[key])];
+    return [key, color(theme[key], theme["surface-panel"])];
   }));
 }
 function kotlin(theme) {

@@ -181,6 +181,17 @@ struct HostContext {
     revoked_device_ids: std::collections::HashSet<String>,
 }
 
+fn connection_snapshot(context: &HostContext) -> (&'static str, Option<&'static str>) {
+    match context.connection.as_deref() {
+        Some("connected") => ("connected", None),
+        Some("offline") => ("offline", Some("offline")),
+        Some("revoked") => ("error", Some("revoked")),
+        Some("key-mismatch") => ("error", Some("key-mismatch")),
+        Some("error") => ("error", None),
+        _ => ("offline", Some("connecting")),
+    }
+}
+
 impl BrowserCore {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -352,7 +363,7 @@ impl BrowserCore {
     fn set_host_context(&mut self, args: Value) -> Result<Value, Failure> {
         let update: HostContext = serde_json::from_value(args).map_err(|_| invalid())?;
         if let Some(connection) = update.connection {
-            if !matches!(connection.as_str(), "connected" | "offline" | "error") {
+            if !matches!(connection.as_str(), "connected" | "offline" | "revoked" | "key-mismatch" | "error") {
                 return Err(invalid());
             }
             self.context.connection = Some(connection);
@@ -532,17 +543,14 @@ impl BrowserCore {
             .active_epoch
             .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch));
         let notices = client.notification_snapshot().map_err(core)?;
+        let (connection_state, connection_error_code) = connection_snapshot(&self.context);
         serde_json::to_value(dto::Snapshot {
             version: "1",
             mode: "browser",
             connection: dto::Connection {
-                state: match self.context.connection.as_deref() {
-                    Some("connected") => "connected",
-                    Some("error") => "error",
-                    _ => "offline",
-                },
+                state: connection_state,
                 origin: self.context.origin.clone(),
-                error_code: None,
+                error_code: connection_error_code,
             },
             encryption: dto::Encryption {
                 state: if unlocked { "unlocked" } else { "locked" },
@@ -836,6 +844,16 @@ mod tests {
             core.dispatch(r#"{"command":"pairing"}"#)
                 .contains("unknown-command")
         );
+    }
+
+    #[test]
+    fn host_context_accepts_all_scheduler_connection_classifications() {
+        let mut core = BrowserCore::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        for connection in ["connected", "offline", "revoked", "key-mismatch", "error"] {
+            value(&core.dispatch(
+                &json!({"command":"set_host_context","args":{"connection":connection}}).to_string(),
+            ));
+        }
     }
 
     #[test]

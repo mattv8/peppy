@@ -33,7 +33,7 @@ impl BrowserCore {
         {
             return Err(invalid());
         }
-        if matches!(input.connection.as_str(), "offline" | "error") {
+        if matches!(input.connection.as_str(), "offline" | "revoked" | "key-mismatch" | "error") {
             if input.devices.is_some() || input.capabilities.is_some() {
                 return Err(invalid());
             }
@@ -233,6 +233,62 @@ mod tests {
         );
         assert_eq!(offline["connection"], "offline");
         assert_eq!(offline["gateways"][0]["id"], gateway.to_string());
+    }
+
+    #[test]
+    fn unavailable_contexts_preserve_gateways_without_revalidating_the_roster() {
+        let (_root, mut core, device) = unlocked_core();
+        let gateway = DeviceId::new();
+        response(
+            &mut core,
+            "_worker_apply_server_context",
+            context(
+                json!({"devices":[
+                    {"device_id":device,"role":"device","revoked":false},
+                    {"device_id":gateway,"role":"gateway","revoked":false}
+                ]}),
+                json!({"capabilities":[{"device_id":gateway,"simulator":false,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}]}),
+            ),
+        );
+
+        for connection in ["offline", "revoked", "key-mismatch", "error"] {
+            let applied = response(
+                &mut core,
+                "_worker_apply_server_context",
+                json!({"connection":connection,"devices":null,"capabilities":null}),
+            );
+            assert_eq!(applied["connection"], connection);
+            assert_eq!(applied["gateways"][0]["id"], gateway.to_string());
+        }
+    }
+
+    #[test]
+    fn snapshots_expose_the_exact_connection_state_and_error_code() {
+        let (_root, mut core, _device) = unlocked_core();
+        let snapshot = |core: &mut BrowserCore| response(core, "snapshot", json!({}));
+        assert_eq!(
+            snapshot(&mut core)["connection"],
+            json!({"state":"offline", "origin":"https://peppy.test", "errorCode":"connecting"})
+        );
+
+        for (context, expected) in [
+            ("offline", json!({"state":"offline", "errorCode":"offline"})),
+            ("revoked", json!({"state":"error", "errorCode":"revoked"})),
+            (
+                "key-mismatch",
+                json!({"state":"error", "errorCode":"key-mismatch"}),
+            ),
+            ("error", json!({"state":"error", "errorCode":null})),
+        ] {
+            response(
+                &mut core,
+                "_worker_apply_server_context",
+                json!({"connection":context,"devices":null,"capabilities":null}),
+            );
+            let connection = snapshot(&mut core)["connection"].clone();
+            assert_eq!(connection["state"], expected["state"]);
+            assert_eq!(connection["errorCode"], expected["errorCode"]);
+        }
     }
 
     #[test]

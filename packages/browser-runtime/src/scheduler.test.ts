@@ -104,6 +104,57 @@ describe("BrowserScheduler", () => {
     expect(contexts).toEqual([{ devices, capabilities, connection: "connected" }]);
   });
 
+  it("reports gateway HTTP failures as offline server context", async () => {
+    const contexts: unknown[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string, args: Record<string, unknown>) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_apply_server_context") { contexts.push(args); return {}; }
+        return { uploads: [] };
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    const { TransportError } = await import("./transport.js");
+    const scheduler = new BrowserScheduler(session, {
+      json: async (path: string) => {
+        if (path.startsWith("/v1/events")) throw new TransportError("status", 503, "busy");
+        return {};
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "offline" });
+    expect(contexts).toEqual([{ devices: null, capabilities: null, connection: "offline" }]);
+  });
+
+  it("preserves the prior connection status when a stopped poll is cancelled", async () => {
+    let started!: () => void;
+    const requested = new Promise<void>(resolve => { started = resolve; });
+    const scheduler = new BrowserScheduler({
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [] } : command === "pending_uploads" || command === "pending_downloads" ? [] : command === "contact_photo_transfer_state" ? { uploads: [] } : { cursor: "0" },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    }, {
+      json: async (_path, request) => {
+        started();
+        await new Promise<void>(resolve => request.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        throw new (await import("./transport.js")).TransportError("cancelled");
+      },
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    });
+
+    const polling = scheduler.poll();
+    await requested;
+    scheduler.stop();
+    const cancelled = expect(polling).rejects.toMatchObject({ kind: "cancelled" });
+    await cancelled;
+    expect(scheduler.status).toEqual({ connection: "offline" });
+  });
+
   it("stages only exact-size downloaded ciphertext before checkpointed install", async () => {
     const mutations: unknown[] = [];
     const session = {

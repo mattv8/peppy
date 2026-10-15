@@ -1,6 +1,8 @@
 /** Shared native copy. Keys become Android `peppy_*` resources and iOS keys. */
 export const catalog = Object.freeze({
   app_name: "Peppy",
+  server_offline_title: "Server offline",
+  server_offline_body: "Peppy will reconnect automatically.",
   sms: "SMS",
   cancel: "Cancel",
   mirroring: "Mirroring",
