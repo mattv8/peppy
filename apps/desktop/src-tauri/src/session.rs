@@ -168,12 +168,7 @@ pub fn open_session(
         .ok()
         .filter(|b| b.len() <= 256 * 1024)
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .map(|mut gateways: Vec<GatewayView>| {
-            for gateway in &mut gateways {
-                gateway.supports_mms &= gateway.mms_content_version.unwrap_or(0) >= 2;
-            }
-            gateways
-        });
+        .map(sanitize_cached_gateways);
     let status = NetStatus {
         gateways_known: gateways.is_some(),
         gateways: gateways.unwrap_or_default(),
@@ -197,6 +192,18 @@ pub fn open_session(
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
     })
+}
+
+fn sanitize_cached_gateways(mut gateways: Vec<GatewayView>) -> Vec<GatewayView> {
+    for gateway in &mut gateways {
+        gateway.supports_mms &= gateway.mms_content_version.unwrap_or(0) >= 2;
+        gateway.availability = peppy_desktop_api::GatewayAvailability::Unknown;
+        gateway.last_seen_age_seconds = None;
+        gateway.presence = None;
+        gateway.wake_route = false;
+        gateway.online = false;
+    }
+    gateways
 }
 
 pub use peppy_desktop_api::compose::DraftInput;
@@ -869,6 +876,22 @@ mod tests {
     use crate::tests::{fixture_at, PHRASE};
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn cached_gateways_never_restore_live_presence() {
+        let gateway: GatewayView = serde_json::from_value(serde_json::json!({
+            "id": "phone", "name": "Pixel", "simId": "sim", "online": true,
+            "simulated": false, "supportsSms": true, "supportsMms": true,
+            "availability": "offline", "lastSeenAgeSeconds": 12,
+            "presence": { "state": "connected", "last_seen_age_seconds": 12 },
+            "wakeRoute": true
+        })).unwrap();
+        let cached = sanitize_cached_gateways(vec![gateway]);
+        assert_eq!(cached[0].availability, peppy_desktop_api::GatewayAvailability::Unknown);
+        assert_eq!(cached[0].last_seen_age_seconds, None);
+        assert_eq!(cached[0].presence, None);
+        assert!(!cached[0].online);
+    }
 
     #[test]
     fn mark_seen_scoped_notifies_once_when_messages_change() {

@@ -6,6 +6,15 @@ import "./device-settings.css";
 const deviceKind = (kind: string | null) => ({ android: "Android", ios: "iPhone or iPad", desktop: "Desktop", browser: "Browser" }[kind ?? ""] ?? "Unknown platform");
 const deviceRole = (role: string) => ({ owner: "Owner", gateway: "Phone gateway", device: "Device" }[role] ?? "Unknown role");
 const deviceName = (device: ManagedDeviceView) => device.name.trim() || "Unnamed device";
+const presenceLabel = (device: ManagedDeviceView) => {
+  if (!device.presence) return "Status unknown";
+  if (device.presence.state === "connected") return "Connected";
+  if (device.presence.state === "never") return "Never connected";
+  const seconds = device.presence.last_seen_age_seconds;
+  if (seconds === null) return "Status unknown";
+  return `Last seen ${seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`} ago`;
+};
+const presenceState = (device: ManagedDeviceView) => !device.presence ? "unknown" : device.presence.state === "never" ? "never" : device.presence.state === "connected" ? "connected" : "delayed";
 const revokeError = (error: unknown) => {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
   if (code === "owner_required") return "Only an owner can remove another device.";
@@ -125,7 +134,7 @@ export function DevicesSettings() {
   };
   const rows = (revoked: boolean) => roster?.devices.filter(device => device.revoked === revoked) ?? [];
   const row = (device: ManagedDeviceView) => <li key={device.id} data-device-id={device.id}>
-    <div><strong>{deviceName(device)}</strong><span>{deviceKind(device.kind)} · {deviceRole(device.role)} · {device.revoked ? "Removed" : "Active"}{device.id === roster?.currentDeviceId ? " · This device" : ""}</span></div>
+    <div><strong>{deviceName(device)}</strong><span data-presence-state={device.revoked ? undefined : presenceState(device)}>{deviceKind(device.kind)} · {deviceRole(device.role)} · {device.revoked ? "Removed" : "Active"}{device.id === roster?.currentDeviceId ? " · This device" : ""}{!device.revoked && ` · ${presenceLabel(device)}`}</span>{device.kind === "ios" && !device.revoked && <small data-ios-sms-note>Can't send SMS through Peppy on iPhone</small>}</div>
     {canRemove(device) ? <button className="secondary-button" type="button" aria-label={`Remove ${deviceName(device)}`} disabled={pending} onClick={event => { invoker.current = event.currentTarget; setTarget(device); }}>Remove</button> : !device.revoked && <small>{restriction(device)}</small>}
   </li>;
 
@@ -136,8 +145,9 @@ export function DevicesSettings() {
     {loading && <p role="status">Loading devices…</p>}
     {!loading && !roster && <button className="secondary-button" type="button" onClick={() => void load()}>Retry loading devices</button>}
     {roster && <div aria-hidden={target ? "true" : undefined} inert={target ? true : undefined}>
-      <ul id="devices-active-list">{rows(false).map(row)}</ul>
-      {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure"><summary>Previously removed</summary><ul>{rows(true).map(row)}</ul></details>}
+      {!rows(false).length && !rows(true).length && <p>No devices enrolled.</p>}
+      <ul id="devices-active-list" aria-label="Active devices">{rows(false).map(row)}</ul>
+      {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure"><summary>Previously removed</summary><ul aria-label="Previously removed devices">{rows(true).map(row)}</ul></details>}
     </div>}
     {target && createPortal(<dialog id="device-revoke-dialog" ref={dialog} aria-labelledby="device-revoke-title" onCancel={event => { event.preventDefault(); close(); }}>
       <h3 id="device-revoke-title" tabIndex={-1} ref={dialogHeading}>Remove {deviceName(target)}?</h3>

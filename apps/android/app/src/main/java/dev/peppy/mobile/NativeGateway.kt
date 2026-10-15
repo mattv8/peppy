@@ -252,6 +252,7 @@ object NativeGateway {
             if (!prefs.edit().clear().commit()) return false
             GatewayStateStore(context).resetForNewEnrollment()
             ServerReachabilityState.clear()
+            RemoteMessagingService.stop(context)
             true
         } catch (_: IOException) {
             false

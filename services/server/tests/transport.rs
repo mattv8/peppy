@@ -9,10 +9,12 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt};
 use peppy_crypto::{KeyProfile, derive_root_key, enrollment::derive_admission_keypair};
+use peppy_hosted_api::PresenceState;
 use peppy_server::api::{
     TransportOptions, compact_records, create_owner, prune_replay_log, router_with_options,
     router_with_options_and_relay,
 };
+use peppy_server::{presence, scope};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -23,6 +25,117 @@ use url::Url;
 use uuid::Uuid;
 
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let connection = Uuid::new_v4();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    presence::open(&mut tx, server.vault, server.owner_device, connection)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let responsive: bool = sqlx::query_scalar(
+        "SELECT responsive FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND connection_id=$3",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .bind(connection)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(!responsive);
+
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    assert!(
+        presence::renew(&mut tx, server.vault, server.owner_device, connection)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let touched: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM device_presence WHERE vault_id=$1 AND device_id=$2)",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(touched);
+    assert!(
+        presence::close(&server.pool, server.vault, connection)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn presence_caps_sockets_and_revocation_invalidates_renewal() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let mut connections = Vec::new();
+    for _ in 0..32 {
+        let connection = Uuid::new_v4();
+        let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+        presence::open(&mut tx, server.vault, server.owner_device, connection)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        connections.push(connection);
+    }
+    let overflow = Uuid::new_v4();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    presence::open(&mut tx, server.vault, server.owner_device, overflow)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM device_sockets WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 32);
+
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    assert!(
+        !presence::renew(&mut tx, server.vault, server.owner_device, connections[0])
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn presence_batch_and_direct_lookup_keep_never_seen_devices_never() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let batch = presence::lookup_many_best_effort(
+        &server.pool,
+        server.vault,
+        &[(server.owner_device, false)],
+    )
+    .await;
+    assert_eq!(batch[&server.owner_device].state, PresenceState::Never);
+    assert_eq!(batch[&server.owner_device].last_seen_age_seconds, None);
+
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    let direct = presence::lookup(&mut tx, server.vault, server.owner_device, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(direct.state, PresenceState::Never);
+    assert_eq!(direct.last_seen_age_seconds, None);
+}
 
 struct TestServer {
     pool: PgPool,
@@ -1149,6 +1262,77 @@ async fn concurrent_commits_have_gapless_high_water_and_ordered_replay() {
 }
 
 #[tokio::test]
+async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+
+    let foreign_vault = Uuid::new_v4();
+    let (foreign_profile, foreign_fingerprint) = profile(foreign_vault, 1);
+    let foreign = create_owner(
+        &server.pool,
+        foreign_profile,
+        vec![1],
+        foreign_fingerprint,
+        1,
+    )
+    .await
+    .unwrap();
+
+    let mut observer = server.connect_ws(&server.owner_token).await;
+    send_hello(&mut observer, "0").await;
+    assert_eq!(next_json(&mut observer, 3).await["type"], "ready");
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+
+    let mut foreign_observer = server.connect_ws(&foreign.device_token).await;
+    send_hello(&mut foreign_observer, "0").await;
+    assert_eq!(next_json(&mut foreign_observer, 3).await["type"], "ready");
+    assert_eq!(
+        next_json(&mut foreign_observer, 3).await["type"],
+        "presence_changed"
+    );
+
+    let mut subject = server.connect_ws(&device.token).await;
+    send_hello(&mut subject, "0").await;
+    assert_eq!(next_json(&mut subject, 3).await["type"], "ready");
+    assert_eq!(next_json(&mut subject, 3).await["type"], "presence_changed");
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+    assert_no_text_frame(&mut foreign_observer, Duration::from_millis(500)).await;
+
+    let (_, connected_roster) = server.get(&device.token, "/v1/devices").await;
+    let connected = connected_roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["device_id"] == device.id.to_string())
+        .unwrap();
+    assert_eq!(connected["presence"]["state"], "connected");
+
+    subject.close(None).await.unwrap();
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+    assert_no_text_frame(&mut foreign_observer, Duration::from_millis(500)).await;
+
+    let (_, seen_roster) = server.get(&device.token, "/v1/devices").await;
+    let seen = seen_roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["device_id"] == device.id.to_string())
+        .unwrap();
+    assert_eq!(seen["presence"]["state"], "seen");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
@@ -1195,12 +1379,7 @@ async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
         .execute(&server.pool)
         .await
         .unwrap();
-    let replayed = tokio::time::timeout(Duration::from_secs(7), ws.next())
-        .await
-        .expect("durable replay timer did not deliver a no-notice commit")
-        .unwrap()
-        .unwrap();
-    let replayed: Value = serde_json::from_str(replayed.to_text().unwrap()).unwrap();
+    let replayed = next_durable_event(&mut ws, 7).await;
     assert_eq!(replayed["cursor"], "2");
 
     let revoked = server
@@ -1307,21 +1486,68 @@ async fn send_hello(ws: &mut Ws, resume_cursor: &str) {
     .unwrap();
 }
 
-/// Next text frame as JSON, skipping control frames.
+/// Reads the next text frame as JSON, responding to control pings.
+async fn next_json_frame(ws: &mut Ws) -> Value {
+    loop {
+        match ws.next().await {
+            Some(Ok(tungstenite::Message::Text(text))) => {
+                return serde_json::from_str::<Value>(&text).unwrap();
+            }
+            Some(Ok(tungstenite::Message::Ping(payload))) => {
+                ws.send(tungstenite::Message::Pong(payload)).await.unwrap();
+            }
+            Some(Ok(tungstenite::Message::Pong(_))) => {}
+            other => panic!("expected a text frame, got {other:?}"),
+        }
+    }
+}
+
 async fn next_json(ws: &mut Ws, seconds: u64) -> Value {
+    tokio::time::timeout(Duration::from_secs(seconds), next_json_frame(ws))
+        .await
+        .expect("timed out waiting for a websocket frame")
+}
+
+/// Waits for a durable event while allowing the advertised non-durable presence hint.
+async fn next_durable_event(ws: &mut Ws, seconds: u64) -> Value {
     tokio::time::timeout(Duration::from_secs(seconds), async {
         loop {
-            match ws.next().await {
-                Some(Ok(tungstenite::Message::Text(text))) => {
-                    return serde_json::from_str::<Value>(&text).unwrap();
-                }
-                Some(Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) => {}
-                other => panic!("expected a text frame, got {other:?}"),
+            let frame = next_json_frame(ws).await;
+            match frame["type"].as_str() {
+                Some("event") => return frame,
+                Some("presence_changed") => {}
+                other => panic!("expected an event or presence hint, got {other:?}: {frame}"),
             }
         }
     })
     .await
-    .expect("timed out waiting for a websocket frame")
+    .expect("timed out waiting for a durable websocket event")
+}
+
+async fn assert_no_text_frame(ws: &mut Ws, duration: Duration) {
+    let received = tokio::time::timeout(duration, next_json_frame(ws)).await;
+    assert!(
+        received.is_err(),
+        "unexpected websocket frame: {received:?}"
+    );
+}
+
+async fn assert_no_durable_event(ws: &mut Ws, duration: Duration) {
+    let received = tokio::time::timeout(duration, async {
+        loop {
+            let frame = next_json_frame(ws).await;
+            match frame["type"].as_str() {
+                Some("presence_changed") => {}
+                Some("event") => return frame,
+                other => panic!("unexpected websocket frame {other:?}: {frame}"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "unexpected duplicate event: {received:?}"
+    );
 }
 
 /// Waits for the server close frame and returns its code. Text frames that
@@ -2094,7 +2320,7 @@ async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
     assert_eq!(next_json(&mut ws, 3).await["type"], "ready");
 
     assert_eq!(server.commit(&server.owner_event(1)).await, "1");
-    assert_eq!(next_json(&mut ws, 3).await["cursor"], "1");
+    assert_eq!(next_durable_event(&mut ws, 3).await["cursor"], "1");
     let payload_is_null: bool = sqlx::query_scalar(
         "SELECT payload IS NULL FROM outbox_jobs WHERE vault_id=$1 AND cursor=1",
     )
@@ -2143,7 +2369,7 @@ async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
         .execute(&server.pool)
         .await
         .unwrap();
-    assert_eq!(next_json(&mut ws, 3).await["cursor"], "2");
+    assert_eq!(next_durable_event(&mut ws, 3).await["cursor"], "2");
     wait_until(3, "first delivery to be recorded", || async {
         outbox_state(2).await.is_none_or(|(delivered, _)| delivered)
     })
@@ -2165,12 +2391,7 @@ async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
             .is_none_or(|(delivered, attempts)| delivered && attempts == 1)
     })
     .await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1_500), ws.next())
-            .await
-            .is_err(),
-        "a repeated hint must not emit a duplicate frame"
-    );
+    assert_no_durable_event(&mut ws, Duration::from_millis(1_500)).await;
     server.shutdown().await;
 }
 

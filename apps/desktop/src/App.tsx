@@ -11,6 +11,7 @@ import {
   type RefCallback,
 } from "react";
 import { flushSync } from "react-dom";
+import type { GatewayAvailability } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   Check,
@@ -241,6 +242,34 @@ type RouteChoice =
   | { kind: "stale"; gatewayId: string; simId: string }
   | { kind: "none" };
 
+function gatewayAvailability(gateway: GatewayView): GatewayAvailability { return gateway.availability ?? "unknown"; }
+function formatAge(seconds: number): string { return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`; }
+function availabilityLabel(gateway: GatewayView): string {
+  switch (gatewayAvailability(gateway)) {
+    case "delayed": return gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
+    case "offline": return "Not responding";
+    case "never_connected": return "Never connected";
+    case "no_sms_sim": return "No SMS SIM";
+    case "sms_permission_needed": return "Permission needed";
+    case "sms_unavailable": return "SMS unavailable";
+    case "unsupported_platform": return "Can't send SMS";
+    case "capabilities_unknown": case "unknown": return "Status unknown";
+    default: return "";
+  }
+}
+function availabilityProblem(gateway: GatewayView): string | undefined {
+  switch (gatewayAvailability(gateway)) {
+    case "offline": return `${gateway.name} isn't responding. Sending is paused until it reconnects.`;
+    case "never_connected": return `${gateway.name} has never connected. Finish setup on the phone to enable sending.`;
+    case "no_sms_sim": return `No default SMS SIM is set on ${gateway.name}. Open the phone's SIM settings to fix this.`;
+    case "sms_permission_needed": return `Peppy needs SMS permission on ${gateway.name}. Open Peppy on the phone to grant it.`;
+    case "sms_unavailable": return `SMS is unavailable on ${gateway.name}. Check carrier settings on the phone.`;
+    case "unsupported_platform": return "Can't send SMS through Peppy on this iPhone. Select an Android phone to send.";
+    case "capabilities_unknown": return `${gateway.name}'s capabilities are unknown. Sending is paused until the phone reports in.`;
+    default: return undefined;
+  }
+}
+
 /**
  * The stored route must match a reported gateway+SIM exactly; a vanished route is reported as
  * stale and never replaced. Only a draft without any stored route on a single-route setup uses
@@ -276,6 +305,8 @@ function routeProblem(
       : "no phone is configured";
   if (route.kind === "stale")
     return "the selected phone/SIM is no longer reported; choose another route";
+  const availability = availabilityProblem(route.gateway);
+  if (availability) return availability;
   if (!requiresMms && !route.gateway.supportsSms)
     return "this phone/SIM does not support SMS";
   if (requiresMms && !route.gateway.supportsMms)
@@ -318,7 +349,7 @@ function GatewaySelector({
 }) {
   const route = resolveRoute(content, gateways);
   const simLabels = new Map<string, string>();
-  gateways.forEach((gateway, index) => {
+  gateways.filter(gateway => gateway.simId).forEach((gateway, index) => {
     const key = routeKey(gateway.id, gateway.simId);
     if (!simLabels.has(key)) simLabels.set(key, `SIM ${index + 1}`);
   });
@@ -334,9 +365,13 @@ function GatewaySelector({
     );
     if (gateway) onSelect(gateway);
   };
-  const simLabel = (gateway: GatewayView) => simLabels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId;
+  const simLabel = (gateway: GatewayView) => gateway.simId ? (simLabels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : "No SMS SIM";
+  const selectedGateway = route.kind === "route" ? route.gateway : undefined;
+  const selectedAvailability = selectedGateway && gatewayAvailability(selectedGateway);
+  const statusHint = selectedGateway && selectedAvailability === "delayed" ? `${selectedGateway.name} last synced ${selectedGateway.lastSeenAgeSeconds !== undefined ? formatAge(selectedGateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.` : undefined;
+  const presenceHint = statusHint ?? (selectedGateway && (availabilityProblem(selectedGateway) ?? (selectedAvailability === "unknown" ? `${selectedGateway.name}'s status is unknown.` : undefined)));
   return (
-    <section id="gateway-selector" aria-label="Phone and SIM" data-route-state={problem ? "blocked" : "ready"}>
+    <section id="gateway-selector" aria-label="Phone and SIM" aria-describedby={statusHint || presenceHint ? "gateway-presence-hint" : undefined} data-route-state={problem ? "blocked" : selectedAvailability === "delayed" ? "delayed" : "ready"}>
         <select
           aria-label="Phone"
           value={value}
@@ -361,8 +396,10 @@ function GatewaySelector({
                 value={key}
                 data-gateway-id={item.id}
                 data-sim-id={item.simId}
+                data-gateway-availability={gatewayAvailability(item)}
+                disabled={gatewayAvailability(item) === "unsupported_platform"}
               >
-                {item.name} · {simLabel(item)}{item.simulated ? " · Simulated" : ""}
+                {item.name}{item.simId ? ` · ${simLabel(item)}` : ""}{item.simulated ? " · Simulated" : ""}{availabilityLabel(item) ? ` · ${availabilityLabel(item)}` : ""}
               </option>
             );
           })}
@@ -370,10 +407,15 @@ function GatewaySelector({
       <span className="route-status-icon" aria-hidden>
         {problem ? (
           <TriangleAlert size={14} aria-hidden />
-        ) : (
+        ) : selectedAvailability === "delayed" ? (
+          <Clock size={14} aria-hidden />
+        ) : selectedAvailability === "connected" ? (
           <Radio size={14} aria-hidden />
+        ) : (
+          <span />
         )}
       </span>
+      <span id="gateway-presence-hint" className="visually-hidden" role="status" aria-live="polite">{statusHint ?? presenceHint}</span>
     </section>
   );
 }
@@ -2039,7 +2081,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
   const blockedReason = active?.replyBlockedReason ?? (effectivePendingRecipient ? pendingRecipientReason : problem);
-  const statusActive = Boolean(blockedReason || mmsLimitShown || notice);
+  const delayedStatus = route.kind === "route" && gatewayAvailability(route.gateway) === "delayed"
+    ? `${route.gateway.name} last synced ${route.gateway.lastSeenAgeSeconds !== undefined ? formatAge(route.gateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.`
+    : undefined;
+  const statusActive = Boolean(blockedReason || delayedStatus || mmsLimitShown || notice);
   const composerResizeHandle = (
     <ResizeHandle
       id="handle-h2"
@@ -2134,6 +2179,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <span id="unavailable-hint" hidden={!blockedReason}>
               Sending unavailable: {blockedReason}
             </span>
+            <p id="gateway-status-hint" role="status" hidden={!delayedStatus}>{delayedStatus}</p>
             {mmsLimitShown && route.kind === "route" && (
               <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients

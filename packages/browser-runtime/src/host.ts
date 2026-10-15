@@ -629,15 +629,33 @@ function deviceRoster(value: unknown, currentDeviceId: string): Record<string, u
     const row = object(device);
     const id = requiredDeviceId(row.device_id);
     if (typeof row.role !== "string" || typeof row.revoked !== "boolean") throw new TransportError("invalid");
+    const presence = optionalPresence(row.presence);
+    const wakeRoute = optionalBoolean(row.wake_route);
     return {
       id,
       name: typeof row.name === "string" && row.name.length > 0 ? row.name : "Unnamed device",
       kind: typeof row.kind === "string" ? row.kind : null,
       role: row.role,
       revoked: row.revoked,
+      ...(presence ? { presence } : {}),
+      ...(wakeRoute === undefined ? {} : { wakeRoute }),
     };
   });
   return { currentDeviceId, devices };
+}
+
+function optionalPresence(value: unknown): { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null } | undefined {
+  if (value === undefined) return undefined;
+  const presence = object(value);
+  if (presence.state !== "connected" && presence.state !== "seen" && presence.state !== "never") return undefined;
+  if (presence.last_seen_age_seconds !== null && (!Number.isSafeInteger(presence.last_seen_age_seconds) || (presence.last_seen_age_seconds as number) < 0)) throw new TransportError("invalid");
+  return { state: presence.state, last_seen_age_seconds: presence.last_seen_age_seconds as number | null };
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new TransportError("invalid");
+  return value;
 }
 
 function object(value: unknown): Record<string, unknown> {

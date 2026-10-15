@@ -3,6 +3,7 @@ pub mod config;
 pub mod enrollment;
 pub mod health;
 pub mod instance;
+pub mod presence;
 pub mod scope;
 pub mod storage;
 pub mod web_client;

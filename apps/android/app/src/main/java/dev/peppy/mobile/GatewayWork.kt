@@ -3,6 +3,7 @@ package dev.peppy.mobile
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -11,6 +12,7 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -34,16 +36,49 @@ object GatewayWork {
 
     private fun constraints() = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
-    /** Unique, network-constrained. APPEND_OR_REPLACE keeps a follow-up when a run is active. */
+    private const val COALESCE = "peppy-gateway-sync-coalesce"
+    private const val DIRTY = "dirty.v1"
+    private val coalescer = GatewaySyncCoalescer()
+
+    /** Unique, network-constrained work; hints set a durable dirty bit while a pass is running. */
     fun enqueue(context: Context) {
+        request(context, urgent = false)
+    }
+
+    /** Wake hints are latency-sensitive, but quota exhaustion must still retain bounded sync work. */
+    fun enqueueUrgent(context: Context) {
+        request(context, urgent = true)
+    }
+
+    private fun request(context: Context, urgent: Boolean) {
+        val appendToActivePass = coalescer.request()
+        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, true).commit()
         WorkManager.getInstance(context).enqueueUniqueWork(
             NAME,
-            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            if (appendToActivePass) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<GatewaySyncWorker>()
                 .setConstraints(constraints())
+                // Pre-S emulates expedited work with a foreground service. This bounded worker
+                // remains ordinary there instead of claiming a foreground notification state.
+                .apply {
+                    if (urgent && Build.VERSION.SDK_INT >= 31) {
+                        setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    }
+                }
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build(),
         )
+    }
+
+    /** Called only under [GatewaySyncWorker]'s process-wide pass mutex. */
+    internal fun beginPass(context: Context) {
+        coalescer.begin()
+        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, false).commit()
+    }
+
+    /** Preserves the finishing fence so a concurrent wake appends one bounded successor. */
+    internal fun finishPass() {
+        coalescer.finish()
     }
 
     /**
@@ -56,6 +91,29 @@ object GatewayWork {
             ExistingPeriodicWorkPolicy.KEEP,
             PeriodicWorkRequestBuilder<GatewaySyncWorker>(15, TimeUnit.MINUTES).setConstraints(constraints()).build(),
         )
+    }
+}
+
+/** In-process companion to the durable dirty bit; it proves one active pass gets one successor. */
+internal class GatewaySyncCoalescer {
+    private var running = false
+    private var successorQueued = false
+
+    /** True means this request must append exactly one successor to the current unique chain. */
+    @Synchronized fun request(): Boolean {
+        if (!running || successorQueued) return false
+        successorQueued = true
+        return true
+    }
+
+    @Synchronized fun begin() {
+        running = true
+        successorQueued = false
+    }
+
+    /** Keep the finishing fence until the next pass begins, closing WorkManager's success race. */
+    @Synchronized fun finish() {
+        // A request after this point still appends to this pass rather than being swallowed by KEEP.
     }
 }
 
@@ -427,7 +485,14 @@ class GatewaySync(
 
 class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     /** One-time and periodic passes share the core; never run two passes concurrently. */
-    override suspend fun doWork(): Result = PASS.withLock { withContext(Dispatchers.IO) { pass() } }
+    override suspend fun doWork(): Result = PASS.withLock {
+        withContext(Dispatchers.IO) {
+            GatewayWork.beginPass(applicationContext)
+            val result = pass()
+            if (result == Result.success()) GatewayWork.finishPass()
+            result
+        }
+    }
 
     private fun pass(): Result {
         val callbacks = SmsCallbackStore(applicationContext)

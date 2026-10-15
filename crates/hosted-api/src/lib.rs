@@ -862,5 +862,7 @@ pub mod auth_web;
 pub mod billing_web;
 pub mod devices;
 pub mod enrollment;
+pub mod presence;
 
 pub use devices::{DeviceRosterDevice, DeviceRosterResponse};
+pub use presence::{DevicePresence, PresenceState};

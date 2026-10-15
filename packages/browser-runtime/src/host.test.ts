@@ -544,6 +544,29 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([{ command: "_worker_identity_metadata", args: {}, mutation: false }]);
   });
 
+  it("forwards optional raw roster presence without requiring older servers to provide it", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, listDevices: async () => ({ devices: [{ device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wake_route: true }] }) } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { currentDeviceId: "00000000-0000-0000-0000-000000000001", devices: [{ id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wakeRoute: true }] } });
+  });
+
+  it("drops an unrecognized optional presence state while retaining the roster", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => undefined, stop: async () => undefined, listDevices: async () => ({ devices: [{ device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "future", last_seen_age_seconds: 1 } }] }) } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { currentDeviceId: "00000000-0000-0000-0000-000000000001", devices: [{ id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false }] } });
+  });
+
   it("preserves device-management server codes without changing unrelated transport failures", async () => {
     const session = new FakeSession();
     const host = new BrowserWorkerHost({

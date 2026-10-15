@@ -138,6 +138,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   .notif-dismiss-btn { opacity: 1; pointer-events: auto; }
 }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+#gateway-selector[data-route-state="delayed"] .route-status-icon { color: var(--peppy-text-secondary); }
 #notifications-empty-state, #notifications-locked-state { display: grid; height: 100%; place-content: center; justify-items: center; gap: 12px; padding: 32px; color: var(--peppy-text-secondary); text-align: center; }
 #notifications-empty-state p, #notifications-locked-state p { margin: 0; }
 .setup-hint, .settings-note { color: var(--peppy-text-muted); font-size: 12px; }
@@ -466,6 +467,8 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #unavailable-hint { color: var(--peppy-warning-text); }
 #unavailable-hint { margin: 0; color: var(--peppy-warning-text); font-size: 11px; }
 #unavailable-hint[hidden] { display: none; }
+#gateway-status-hint { margin: 0; color: var(--peppy-text-secondary); font-size: 11px; }
+#gateway-status-hint[hidden] { display: none; }
 #reply-blocked-reason[hidden] { display: none; }
 #draft-recovery {
   display: flex;

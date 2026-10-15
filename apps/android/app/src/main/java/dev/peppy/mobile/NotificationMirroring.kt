@@ -194,7 +194,7 @@ class NotificationMirrorService : NotificationListenerService() {
         // No plaintext removal backlog is retained when the vault is locked.
         val session = NativeGateway.session(applicationContext) ?: return
         try { session.client.removeNotification(key, instance) } catch (_: MobileBindingsException) { return }
-        GatewayWork.enqueue(applicationContext)
+        GatewayWork.enqueueUrgent(applicationContext)
     }
 
     private fun capturePending(key: String, instance: String) {
@@ -209,7 +209,7 @@ class NotificationMirrorService : NotificationListenerService() {
                 capture.key, capture.instance, capture.packageName, capture.appName, capture.title, capture.text,
                 capture.category, capture.postedAt, capture.dismissible,
             ))
-            if (outcome == NativeNotificationCaptureOutcome.CAPTURED) GatewayWork.enqueue(applicationContext)
+            if (outcome == NativeNotificationCaptureOutcome.CAPTURED) GatewayWork.enqueueUrgent(applicationContext)
         } catch (_: MobileBindingsException) {
             // Core rejects duplicates/locked/filtered input without a host-side plaintext retry queue.
         }
@@ -258,7 +258,7 @@ class NotificationMirrorService : NotificationListenerService() {
             return NotificationTestCapture.capture(
                 client = NativeGateway.session(context)?.client,
                 permitted = permitted,
-                enqueue = { GatewayWork.enqueue(context) },
+                enqueue = { GatewayWork.enqueueUrgent(context) },
             )
         }
     }
@@ -283,7 +283,7 @@ class NotificationMirrorService : NotificationListenerService() {
                         NotificationReconciliation.shouldRemoveAbsentSnapshot(it.target.notificationKey)
                 }
                 absent.forEach { session.client.removeNotification(it.target.notificationKey, "reconcile") }
-                if (absent.isNotEmpty()) GatewayWork.enqueue(applicationContext)
+                if (absent.isNotEmpty()) GatewayWork.enqueueUrgent(applicationContext)
             } catch (_: MobileBindingsException) { return@post }
             active.forEach { capturePosted(it, rankings) }
         }

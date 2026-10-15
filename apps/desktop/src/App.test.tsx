@@ -2090,6 +2090,40 @@ describe("gateway routes", () => {
     expect(bridge.send_draft).not.toHaveBeenCalled();
     expect(bridge.save_draft).not.toHaveBeenCalled();
   });
+
+  it("blocks an offline route without discarding its draft", async () => {
+    host.gateways = [{ ...SMS_ONLY, availability: "offline" }];
+    host.drafts.set("aurora", storedDraft({ simId: "sim-1", text: "Keep this draft" }));
+    render(<App />);
+
+    await screen.findByDisplayValue("Keep this draft");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(document.getElementById("gateway-presence-hint")).toHaveTextContent("isn't responding");
+    expect(host.drafts.get("aurora")?.text).toBe("Keep this draft");
+  });
+
+  it("allows delayed and legacy SMS routes while labeling legacy status as unknown", async () => {
+    host.gateways = [{ ...SMS_ONLY, availability: "delayed" }];
+    host.drafts.set("aurora", storedDraft({ simId: "sim-1" }));
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Send" })).toBeEnabled();
+    expect(document.getElementById("gateway-selector")).toHaveAttribute("data-route-state", "delayed");
+    expect(document.getElementById("gateway-status-hint")).toBeVisible();
+
+    cleanup();
+    host.gateways = [{ ...SMS_ONLY, availability: "unknown" }];
+    render(<App />);
+    expect(await screen.findByText(/Status unknown/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+  });
+
+  it("keeps an unsupported iPhone route visible but disabled", async () => {
+    host.gateways = [{ ...SMS_ONLY, name: "My iPhone", availability: "unsupported_platform" }];
+    render(<App />);
+    const option = await screen.findByRole("option", { name: /My iPhone/ });
+    expect(option).toBeDisabled();
+    expect(option).toHaveAttribute("data-gateway-availability", "unsupported_platform");
+  });
 });
 
 describe("host state display", () => {

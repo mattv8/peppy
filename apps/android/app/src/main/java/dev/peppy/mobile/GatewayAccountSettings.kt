@@ -1,6 +1,12 @@
 package dev.peppy.mobile
 
 import android.content.Intent
+import android.content.Context
+import android.content.ContextWrapper
+import android.Manifest
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -31,6 +38,7 @@ import kotlinx.coroutines.withContext
 internal fun GatewayAccountSettings(onChanged: () -> Unit) {
     val context = LocalContext.current
     var state by remember { mutableStateOf<GatewayAccountState?>(null) }
+    var gatewayStatus by remember { mutableStateOf<GatewayStatus?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var deleteOpen by remember { mutableStateOf(false) }
     var erase by remember { mutableStateOf("") }
@@ -38,16 +46,30 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
     val relayPrefs = remember { context.getSharedPreferences("peppy-relay", 0) }
     var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
     var relayOrigin by remember { mutableStateOf(relayPrefs.getString("relay-origin.v1", "") ?: "") }
+    var remoteMessagingEnabled by remember { mutableStateOf(RemoteMessagingPreferences.enabled(context)) }
     val scope = rememberCoroutineScope()
-    suspend fun refresh() { state = withContext(Dispatchers.IO) { GatewayAccountHost.load(context) }; if (state == null) failure = "Could not load devices. Unlock or check the server connection." }
+    suspend fun refresh() {
+        val loaded = withContext(Dispatchers.IO) { GatewayAccountHost.load(context) }
+        gatewayStatus = withContext(Dispatchers.IO) { NativeGateway.status(context) }
+        state = loaded
+        if (state == null) failure = "Could not load devices. Unlock or check the server connection."
+    }
     LaunchedEffect(Unit) { refresh() }
+    // Lock and recovery may change while this screen remains open. This is local state only; the
+    // explicit Refresh button remains the only roster/server request.
+    LaunchedEffect(Unit) {
+        while (true) {
+            gatewayStatus = withContext(Dispatchers.IO) { NativeGateway.status(context) }
+            delay(1_000)
+        }
+    }
     Column(Modifier.fillMaxWidth().testTag("account-tab-screen")) {
         val account = state
         if (account == null) Text(failure ?: "Loading account…", Modifier.testTag("devices-loading")) else {
             Section("identity-section", stringResource(R.string.peppy_account), showDivider = false) {
                 StatusRow("identity-role", "Role", account.self.role)
                 StatusRow("identity-device-id", "This device", account.self.id)
-                if (NativeGateway.status(context).origin == "https://peppy.pro") {
+                if (gatewayStatus?.origin == "https://peppy.pro") {
                     OutlinedButton(onClick = {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account")))
                     }, modifier = Modifier.testTag("hosted-manage-account-button")) {
@@ -64,6 +86,41 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                             onClick = { revokeTarget = device },
                             modifier = Modifier.testTag("device-remove-${device.id}"),
                         ) { Text(if (device.id == account.self.id) "Disconnect" else "Remove") }
+                    }
+                }
+            }
+            if (account.self.role == "owner" || account.self.role == "gateway") {
+                Section("remote-messaging-section", "Remote messaging") {
+                    Row(Modifier.fillMaxWidth().testTag("remote-messaging-toggle-row")) {
+                        Column(Modifier.weight(1f)) {
+                            Text(stringResource(R.string.peppy_remote_messaging_label))
+                            Text(stringResource(R.string.peppy_remote_messaging_hint))
+                        }
+                        Switch(
+                            checked = remoteMessagingEnabled,
+                            enabled = gatewayStatus?.sharedKeysReady == true && gatewayStatus?.syncPhase != SyncPhase.RECOVERY_REQUIRED,
+                            onCheckedChange = { enabled ->
+                                remoteMessagingEnabled = enabled
+                                RemoteMessagingPreferences.setEnabled(context, enabled)
+                                if (enabled) RemoteMessagingService.resumeOrEnqueue(context) else RemoteMessagingService.stop(context)
+                            },
+                            modifier = Modifier.testTag("remote-messaging-toggle"),
+                        )
+                    }
+                    val statusRes = when (RemoteMessagingRuntime.status()) {
+                        RemoteMessagingStatus.CONNECTED -> R.string.peppy_remote_messaging_status_connected
+                        RemoteMessagingStatus.RECONNECTING -> R.string.peppy_remote_messaging_status_reconnecting
+                        RemoteMessagingStatus.LOCKED -> R.string.peppy_remote_messaging_status_locked
+                    }
+                    if (remoteMessagingEnabled) StatusRow("remote-messaging-status", stringResource(R.string.peppy_remote_messaging_status_label), stringResource(statusRes))
+                    if (gatewayStatus?.syncPhase == SyncPhase.RECOVERY_REQUIRED) Text(stringResource(R.string.peppy_remote_messaging_recovery_required))
+                    else if (gatewayStatus?.sharedKeysReady != true) Text(stringResource(R.string.peppy_remote_messaging_status_locked))
+                    if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                        Text(stringResource(R.string.peppy_remote_messaging_notifications_disabled))
+                        OutlinedButton(
+                            onClick = { context.findActivity()?.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0) },
+                            modifier = Modifier.testTag("remote-messaging-notification-permission"),
+                        ) { Text(stringResource(R.string.peppy_remote_messaging_allow_notifications)) }
                     }
                 }
             }
@@ -115,4 +172,10 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
             dismissButton = { OutlinedButton(onClick = { revokeTarget = null }) { Text("Cancel") } },
         )
     }
+}
+
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

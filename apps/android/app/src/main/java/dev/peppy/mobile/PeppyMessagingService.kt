@@ -14,7 +14,7 @@ class PeppyMessagingService : FirebaseMessagingService() {
         RelayWakeRuntime.initialize(applicationContext)
         if (!RelayWakeRuntime.enabled) return
         when (message.data["kind"]) {
-            "wake" -> GatewayWork.enqueue(applicationContext)
+            "wake" -> RemoteMessagingService.resumeOrEnqueue(applicationContext)
             "challenge" -> {
                 val value = message.data["value"] ?: return
                 RelayWakeRuntime.client?.confirm(value)

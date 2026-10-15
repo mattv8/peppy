@@ -363,7 +363,10 @@ impl BrowserCore {
     fn set_host_context(&mut self, args: Value) -> Result<Value, Failure> {
         let update: HostContext = serde_json::from_value(args).map_err(|_| invalid())?;
         if let Some(connection) = update.connection {
-            if !matches!(connection.as_str(), "connected" | "offline" | "revoked" | "key-mismatch" | "error") {
+            if !matches!(
+                connection.as_str(),
+                "connected" | "offline" | "revoked" | "key-mismatch" | "error"
+            ) {
                 return Err(invalid());
             }
             self.context.connection = Some(connection);

@@ -7,6 +7,8 @@ import androidx.work.WorkManager
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -15,7 +17,21 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class GatewayWorkTest {
-    @Test fun normalEnqueueKeepsAFollowUpAfterExistingWork() {
+    @Test fun productionCoalescerAppendsOnlyOneSuccessorForAnActivePass() {
+        val coalescer = GatewaySyncCoalescer()
+        coalescer.begin()
+
+        assertTrue(coalescer.request())
+        assertFalse(coalescer.request())
+        coalescer.finish()
+
+        // A wake between finish and WorkManager observing success must not be lost to KEEP.
+        val finishing = GatewaySyncCoalescer().apply { begin(); finish() }
+        assertTrue(finishing.request())
+        assertFalse(finishing.request())
+    }
+
+    @Test fun normalEnqueueCoalescesHintsBeforeAPassStarts() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         WorkManagerTestInitHelper.initializeTestWorkManager(
             context,
@@ -25,6 +41,6 @@ class GatewayWorkTest {
         GatewayWork.enqueue(context)
         GatewayWork.enqueue(context)
 
-        assertEquals(2, WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get().size)
+        assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get().size)
     }
 }

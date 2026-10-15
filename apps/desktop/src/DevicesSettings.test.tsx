@@ -212,4 +212,13 @@ describe("DevicesSettings", () => {
     expect(screen.queryByText("Only an owner can remove another device.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove Pixel 8" })).not.toBeInTheDocument();
   });
+
+  it("shows raw presence without treating a mobile owner as something other than a phone", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+      { id: "phone", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wakeRoute: true },
+    ] });
+    render(<DevicesSettings />);
+    expect(await screen.findByText(/Android · Owner · Active · Last seen 5m ago/)).toBeInTheDocument();
+  });
 });

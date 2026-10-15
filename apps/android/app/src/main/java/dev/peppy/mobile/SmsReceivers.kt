@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 object GatewayScheduler {
     @VisibleForTesting
     @Volatile
-    internal var schedule: (Context) -> Unit = { GatewayWork.enqueue(it) }
+    internal var schedule: (Context) -> Unit = { GatewayWork.enqueueUrgent(it) }
 }
 
 /**

@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import okhttp3.Request
 
 /** One HTTP response. For non-2xx, [body] is the bounded error body (if any). */
 class HttpResult(val code: Int, val body: String?) {
@@ -39,6 +40,23 @@ class GatewayHttp(
     fun postJson(path: String, body: String): HttpResult = request("POST", path, body)
 
     fun deleteJson(path: String, body: String): HttpResult = request("DELETE", path, body)
+
+    /** The websocket uses the same credential origin and never accepts a caller-supplied URL. */
+    fun webSocketRequest(): Request {
+        val uri = java.net.URI(origin)
+        val scheme = when (uri.scheme) {
+            "https" -> "wss"
+            "http" -> "ws"
+            else -> throw IllegalArgumentException("unsupported canonical origin")
+        }
+        require(uri.rawPath.isNullOrEmpty() || uri.rawPath == "/")
+        require(uri.rawQuery == null && uri.rawFragment == null && uri.userInfo == null)
+        return Request.Builder()
+            .url("$scheme://${uri.authority}/v1/ws")
+            .header("Authorization", "Bearer $bearerToken")
+            .header("Accept", "application/json")
+            .build()
+    }
 
     fun putFile(path: String, file: File, expectedBytes: Long): HttpResult {
         requireV1ResourcePath(path)

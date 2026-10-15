@@ -121,6 +121,15 @@ pub struct GatewayView {
     pub simulated: bool,
     pub supports_sms: bool,
     pub supports_mms: bool,
+    /// A truthful presence/capability projection. Missing from legacy cached views means unknown.
+    #[serde(default)]
+    pub availability: GatewayAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence: Option<GatewayPresence>,
+    #[serde(default)]
+    pub wake_route: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mms_content_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,6 +140,37 @@ pub struct GatewayView {
     pub mms_max_recipients: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability_note: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayAvailability {
+    #[default]
+    Unknown,
+    Connected,
+    Delayed,
+    Offline,
+    NeverConnected,
+    NoSmsSim,
+    SmsPermissionNeeded,
+    SmsUnavailable,
+    CapabilitiesUnknown,
+    UnsupportedPlatform,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GatewayPresence {
+    pub state: GatewayPresenceState,
+    pub last_seen_age_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPresenceState {
+    Connected,
+    Seen,
+    Never,
 }
 
 #[derive(Serialize)]
@@ -426,6 +466,27 @@ mod tests {
                 "mirroredBanners": true,
                 "preview": "full",
             })
+        );
+    }
+
+    #[test]
+    fn legacy_gateway_cache_defaults_new_presence_fields_to_unknown() {
+        let gateway: GatewayView = serde_json::from_value(json!({
+            "id": "gateway", "name": "Phone", "simId": "sim", "online": true,
+            "simulated": false, "supportsSms": true, "supportsMms": false,
+        }))
+        .unwrap();
+
+        assert_eq!(gateway.availability, GatewayAvailability::Unknown);
+        assert!(!gateway.wake_route);
+        assert!(gateway.presence.is_none());
+        assert_eq!(
+            serde_json::to_value(GatewayPresence {
+                state: GatewayPresenceState::Seen,
+                last_seen_age_seconds: None,
+            })
+            .unwrap(),
+            json!({"state": "seen", "last_seen_age_seconds": null})
         );
     }
 }

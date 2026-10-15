@@ -1117,6 +1117,14 @@ enum WsEnd {
     Ended { stable: bool, code: &'static str },
 }
 
+const PRESENCE_REFRESH_DELAY: Duration = Duration::from_millis(100);
+
+fn schedule_presence_refresh(due: &mut Option<Instant>, now: Instant) {
+    if due.is_none() {
+        *due = Some(now + PRESENCE_REFRESH_DELAY);
+    }
+}
+
 fn close_code(frame: Option<&tungstenite::protocol::CloseFrame>) -> Option<u16> {
     frame.map(|frame| u16::from(frame.code))
 }
@@ -1215,6 +1223,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
         code,
     };
     let mut last_frame = Instant::now();
+    let mut presence_refresh_due = None;
     let mut pinged = false;
     let mut liveness = tokio::time::interval(Duration::from_secs(15));
     loop {
@@ -1235,6 +1244,16 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                 } else if socket.flush().await.is_err() {
                     return ended("live-unavailable");
                 }
+                continue;
+            }
+            _ = async {
+                match presence_refresh_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                presence_refresh_due = None;
+                let _ = refresh_gateways(session).await;
                 continue;
             }
             next = socket.next() => next,
@@ -1262,6 +1281,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         }
                     }
                     "resync_required" => return WsEnd::Resync,
+                    "presence_changed" => schedule_presence_refresh(&mut presence_refresh_due, Instant::now()),
                     _ => {}
                 }
             }
@@ -1336,6 +1356,17 @@ async fn live(session: Arc<Session>) {
 #[cfg(test)]
 mod transport_status_tests {
     use super::*;
+
+    #[test]
+    fn presence_hints_coalesce_without_dropping_the_first_refresh() {
+        let now = Instant::now();
+        let mut due = None;
+        schedule_presence_refresh(&mut due, now);
+        let first = due.expect("the first presence hint schedules a refresh");
+        schedule_presence_refresh(&mut due, now + Duration::from_millis(10));
+        assert_eq!(due, Some(first));
+        assert_eq!(first.duration_since(now), PRESENCE_REFRESH_DELAY);
+    }
 
     #[test]
     fn gateway_statuses_map_to_server_unavailable_only_in_sync() {

@@ -31,6 +31,146 @@
         }
       }
     },
+    "peppy.remote_messaging_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live sync"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keeps this phone connected for faster message delivery. Uses a small amount of battery."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked — unlock to sync"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote messaging active"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to continue syncing"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote messaging"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_channel_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows while Peppy is keeping your phone connected for faster syncing."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notifications_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off. Live sync can still reconnect; allow notifications to show its ongoing status."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_allow_notifications": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow notifications"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_recovery_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-pair this phone to enable remote messaging."
+          }
+        }
+      }
+    },
     "peppy.sms": {
       "localizations": {
         "en": {

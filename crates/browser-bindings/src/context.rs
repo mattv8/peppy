@@ -33,7 +33,10 @@ impl BrowserCore {
         {
             return Err(invalid());
         }
-        if matches!(input.connection.as_str(), "offline" | "revoked" | "key-mismatch" | "error") {
+        if matches!(
+            input.connection.as_str(),
+            "offline" | "revoked" | "key-mismatch" | "error"
+        ) {
             if input.devices.is_some() || input.capabilities.is_some() {
                 return Err(invalid());
             }

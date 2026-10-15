@@ -77,11 +77,21 @@ describe("InstanceManagement", () => {
   });
 
   it("uses phone wording for the gateway role and health column", async () => {
-    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], role: "gateway" as const, gateway_online: true }] })) })} />);
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], kind: "android" as const, role: "gateway" as const, gateway_online: true, presence: { state: "connected" as const, last_seen_age_seconds: 0 } }] })) })} />);
     expect(await screen.findByRole("columnheader", { name: "Phone health" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "Phone" })).toBeTruthy();
-    expect(screen.getByRole("cell", { name: "Online" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Connected" })).toBeTruthy();
     expect(screen.queryByText(/gateway/i)).toBeNull();
+  });
+
+  it("does not treat legacy gateway_online as proof that a phone is connected", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], kind: "android" as const, role: "gateway" as const, gateway_online: true }] })) })} />);
+    expect(await screen.findByRole("cell", { name: "Status unknown" })).toBeTruthy();
+  });
+
+  it("shows the reported age for a seen phone", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], kind: "android" as const, presence: { state: "seen" as const, last_seen_age_seconds: 300 } }] })) })} />);
+    expect(await screen.findByRole("cell", { name: "Last seen 5m ago" })).toBeTruthy();
   });
 
   it("shows only the signed-in identity to a non-admin owner", async () => {

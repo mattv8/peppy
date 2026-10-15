@@ -7,7 +7,7 @@ type SessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 
 export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
 export type EnrollmentSecrets = { setupToken?: string; adminPassword?: string; passphrase?: string };
-export type EnrollmentDevice = { device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean };
+export type EnrollmentDevice = { device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean; presence?: { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null }; wake_route?: boolean };
 export type InstanceManagement = { vault_id: string; devices: EnrollmentDevice[]; storage_bytes: number; quota_bytes: number; replay_retention_days: number; isAdmin: boolean; username: string };
 export type VaultSummary = { vaultId: string; username: string; isAdmin: boolean; deviceCount: number; storageBytes: number; createdAt: string };
 export type VaultInviteView = { inviteId: string; state: "active" | "used" | "revoked" | "expired"; expiresInSeconds: number; createdAt: string };
@@ -652,7 +652,16 @@ function device(value: unknown): EnrollmentDevice {
   const kind = required(entry, "kind");
   const role = required(entry, "role");
   if (!isDeviceId(required(entry, "device_id")) || !["browser", "desktop", "android", "ios"].includes(kind) || !["owner", "device", "gateway"].includes(role) || typeof entry.name !== "string" || typeof entry.revoked !== "boolean" || typeof entry.gateway_online !== "boolean") throw new Error("enrollment-response");
-  return { device_id: required(entry, "device_id"), name: entry.name, kind: kind as EnrollmentDevice["kind"], role: role as EnrollmentDevice["role"], revoked: entry.revoked, gateway_online: entry.gateway_online };
+  const presence = optionalPresence(entry.presence);
+  const wakeRoute = optionalBoolean(entry, "wake_route");
+  return { device_id: required(entry, "device_id"), name: entry.name, kind: kind as EnrollmentDevice["kind"], role: role as EnrollmentDevice["role"], revoked: entry.revoked, gateway_online: entry.gateway_online, ...(presence ? { presence } : {}), ...(wakeRoute === undefined ? {} : { wake_route: wakeRoute }) };
+}
+function optionalPresence(value: unknown): EnrollmentDevice["presence"] {
+  if (value === undefined) return undefined;
+  const entry = record(value);
+  if (entry.state !== "connected" && entry.state !== "seen" && entry.state !== "never") return undefined;
+  if (entry.last_seen_age_seconds !== null && safeInteger(entry.last_seen_age_seconds) === undefined) throw new Error("enrollment-response");
+  return { state: entry.state, last_seen_age_seconds: entry.last_seen_age_seconds as number | null };
 }
 function array(value: unknown): unknown[] { if (!Array.isArray(value)) throw new Error("enrollment-response"); return value; }
 function requiredInteger(value: Record<string, unknown>, key: string): number { const output = safeInteger(value[key]); if (output === undefined) throw new Error("enrollment-response"); return output; }

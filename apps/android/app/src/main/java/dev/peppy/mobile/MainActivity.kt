@@ -181,6 +181,7 @@ private fun CompanionScreen() {
     LaunchedEffect(refresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
+        if (current.sharedKeysReady) RemoteMessagingService.resumeOrEnqueue(context)
         if (MmsPreferences(context).enabled) MmsCaptureWork.ensurePeriodic(context)
         status = current
         ownerPhoneAvailable = current.sharedKeysReady &&

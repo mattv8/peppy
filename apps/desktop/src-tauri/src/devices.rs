@@ -23,6 +23,9 @@ struct ManagedDeviceView {
     kind: Option<String>,
     role: String,
     revoked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence: Option<peppy_hosted_api::DevicePresence>,
+    wake_route: bool,
 }
 
 pub async fn list(session: &Session) -> BridgeResult<DeviceRosterView> {
@@ -42,6 +45,8 @@ pub async fn list(session: &Session) -> BridgeResult<DeviceRosterView> {
                 kind: device.kind,
                 role: device.role,
                 revoked: device.revoked,
+                presence: device.presence,
+                wake_route: device.wake_route,
             })
             .collect(),
     })
