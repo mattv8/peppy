@@ -175,6 +175,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
+      - name: Remove preinstalled package-manager shims
+        if: runner.os == 'Windows'
+        run: npm uninstall --global yarn pnpm
       - run: npm install --global corepack@0.36.0
       - run: corepack enable
       - run: pnpm install --frozen-lockfile

@@ -10,6 +10,12 @@ const RETENTION_SECONDS: i64 = 24 * 60 * 60;
 const MAX_ACTIVE_PER_BOOK_REQUESTER: i64 = 8;
 const MAX_ORPHAN_RESULTS: i64 = 256;
 const TERMINAL_STATES: &[&str] = &["completed", "blocked", "failed", "expired"];
+struct RequestIdentity<'a> {
+    request_id: &'a str,
+    book_id: &'a str,
+    generation: i64,
+    request_epoch: u32,
+}
 const REASONS: &[&str] = &[
     "permission_denied",
     "limited_access",
@@ -122,16 +128,13 @@ fn valid_reason(state: &str, reason: Option<&str>) -> bool {
 fn publish_terminal(
     conn: &Connection,
     ctx: &Ctx<'_>,
-    request_id: &str,
-    book_id: &str,
-    generation: i64,
-    request_epoch: u32,
+    identity: RequestIdentity<'_>,
     state: &str,
     reason: &str,
 ) -> Result<(), Error> {
     let changed = conn.execute(
         "UPDATE contact_scan_requests SET status=?,reason=? WHERE request_id=? AND status NOT IN ('completed','blocked','failed','expired')",
-        params![state, reason, request_id],
+        params![state, reason, identity.request_id],
     )?;
     if changed == 0 {
         return Ok(());
@@ -143,7 +146,7 @@ fn publish_terminal(
         None,
         None,
         &PrivatePayload::ContactScanResult {
-            result: json!({"schema_version":1,"request_id":request_id,"book_id":book_id,"target_owner":ctx.device_id.to_string(),"generation":generation.to_string(),"key_epoch":request_epoch,"state":state,"reason":reason}),
+            result: json!({"schema_version":1,"request_id":identity.request_id,"book_id":identity.book_id,"target_owner":ctx.device_id.to_string(),"generation":identity.generation.to_string(),"key_epoch":identity.request_epoch,"state":state,"reason":reason}),
         },
     )?;
     Ok(())
@@ -151,21 +154,18 @@ fn publish_terminal(
 
 fn apply_result(
     conn: &Connection,
-    request_id: &str,
+    identity: RequestIdentity<'_>,
     owner: &str,
-    book_id: &str,
-    generation: i64,
-    request_epoch: u32,
     producer: &str,
     envelope_epoch: u32,
     result: &Value,
 ) -> Result<bool, Error> {
     if owner != producer
         || result.get("target_owner").and_then(Value::as_str) != Some(owner)
-        || result.get("key_epoch").and_then(Value::as_u64) != Some(request_epoch as u64)
-        || result.get("book_id").and_then(Value::as_str) != Some(book_id)
-        || revision(result, "generation")? != generation
-        || envelope_epoch < request_epoch
+        || result.get("key_epoch").and_then(Value::as_u64) != Some(identity.request_epoch as u64)
+        || result.get("book_id").and_then(Value::as_str) != Some(identity.book_id)
+        || revision(result, "generation")? != identity.generation
+        || envelope_epoch < identity.request_epoch
     {
         return Ok(false);
     }
@@ -175,7 +175,7 @@ fn apply_result(
     }
     let current: (String, Option<String>) = conn.query_row(
         "SELECT status,reason FROM contact_scan_requests WHERE request_id=?",
-        [request_id],
+        [identity.request_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let placeholder = current.0 == "expired" && current.1.as_deref() == Some("historical");
@@ -192,7 +192,7 @@ fn apply_result(
             params![
                 next,
                 result.get("reason").and_then(Value::as_str),
-                request_id
+                identity.request_id
             ],
         )?;
     }
@@ -326,10 +326,12 @@ pub(crate) fn pending(conn: &mut Connection, ctx: &Ctx<'_>, input: &str) -> Resu
             publish_terminal(
                 &tx,
                 ctx,
-                &id,
-                &book_id,
-                generation,
-                request_epoch,
+                RequestIdentity {
+                    request_id: &id,
+                    book_id: &book_id,
+                    generation,
+                    request_epoch,
+                },
                 state,
                 reason,
             )?;
@@ -375,7 +377,16 @@ pub(crate) fn report_blocked(
     let ids = tx.prepare("SELECT request_id,key_epoch FROM contact_scan_requests WHERE book_id=? AND target_owner=? AND generation=? AND key_epoch=? AND status IN ('waiting','blocked')")?.query_map(params![book_id,ctx.device_id.to_string(),generation,ctx.active_epoch], |r| Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
     for (request_id, epoch) in &ids {
         publish_terminal(
-            &tx, ctx, request_id, book_id, generation, *epoch, "blocked", reason,
+            &tx,
+            ctx,
+            RequestIdentity {
+                request_id,
+                book_id,
+                generation,
+                request_epoch: *epoch,
+            },
+            "blocked",
+            reason,
         )?;
     }
     tx.commit()?;
@@ -408,10 +419,12 @@ pub(crate) fn set_capability(
             publish_terminal(
                 &tx,
                 ctx,
-                &request_id,
-                book_id,
-                generation,
-                request_epoch,
+                RequestIdentity {
+                    request_id: &request_id,
+                    book_id,
+                    generation,
+                    request_epoch,
+                },
                 "blocked",
                 "sync_disabled",
             )?;
@@ -455,10 +468,12 @@ pub(crate) fn on_scan_started(
             publish_terminal(
                 conn,
                 ctx,
-                &request_id,
-                book_id,
-                request_generation,
-                request_epoch,
+                RequestIdentity {
+                    request_id: &request_id,
+                    book_id,
+                    generation: request_generation,
+                    request_epoch,
+                },
                 if reason == "expired" {
                     "expired"
                 } else {
@@ -606,8 +621,8 @@ pub(crate) fn apply_event(
                 |row| Ok((row.get::<_,String>(0)?,row.get::<_,u32>(1)?,row.get::<_,String>(2)?)),
             ).optional()? {
                 let result: Value = serde_json::from_str(&result).map_err(|_| Error::Database)?;
-                apply_result(conn, request_id, &owner, book_id, generation, request_epoch,
-                    &result_producer, result_epoch, &result)?;
+                apply_result(conn, RequestIdentity { request_id, book_id, generation, request_epoch },
+                    &owner, &result_producer, result_epoch, &result)?;
                 conn.execute("DELETE FROM contact_scan_orphan_results WHERE request_id=?", [request_id])?;
             }
             Ok(true)
@@ -670,11 +685,13 @@ pub(crate) fn apply_event(
             }
             apply_result(
                 conn,
-                request_id,
+                RequestIdentity {
+                    request_id,
+                    book_id: &stored_book,
+                    generation: stored_generation,
+                    request_epoch: stored_epoch,
+                },
                 &owner,
-                &stored_book,
-                stored_generation,
-                stored_epoch,
                 producer,
                 envelope_epoch,
                 result,

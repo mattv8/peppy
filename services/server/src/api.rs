@@ -165,6 +165,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ipnet::IpNet;
+use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
 use peppy_hosted_api::{
     PushConfig, PushConfigAdvertisement,
     enrollment::{
@@ -173,7 +174,6 @@ use peppy_hosted_api::{
         InstanceSession, VaultMaterial,
     },
 };
-use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
 use peppy_protocol::{Envelope, EnvelopePurpose};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2578,14 +2578,13 @@ async fn ws_session(
                 Some(Ok(Message::Pong(payload))) => {
                     if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
                         challenge = None;
-                        if presence_active && let Ok(mut tx) = scope::begin(&state.db, principal.vault).await {
-                            if crate::presence::renew(&mut tx, principal.vault, principal.device, connection_id)
+                        if presence_active && let Ok(mut tx) = scope::begin(&state.db, principal.vault).await
+                            && crate::presence::renew(&mut tx, principal.vault, principal.device, connection_id)
                                 .await
                                 .unwrap_or(false)
                                 && tx.commit().await.is_ok()
-                            {
-                                let _ = state.presence_changed.send(principal.vault);
-                            }
+                        {
+                            let _ = state.presence_changed.send(principal.vault);
                         }
                     }
                     continue

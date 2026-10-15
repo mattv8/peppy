@@ -160,21 +160,11 @@ impl PushConfig {
 
 /// Operator-supplied push capability configuration. The response version is
 /// injected by the server to keep the wire contract stable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PushConfigAdvertisement {
     pub available: bool,
     pub providers: Vec<PushProvider>,
     pub apns_environment: Option<ApnsEnvironment>,
-}
-
-impl Default for PushConfigAdvertisement {
-    fn default() -> Self {
-        Self {
-            available: false,
-            providers: Vec::new(),
-            apns_environment: None,
-        }
-    }
 }
 
 impl PushConfigAdvertisement {

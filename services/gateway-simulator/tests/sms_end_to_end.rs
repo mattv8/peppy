@@ -32,6 +32,15 @@ use uuid::Uuid;
 const ROTATED_PHRASE: &str = "different manual rotation phrase";
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+enum ServerFrame {
+    Json(Value),
+    Ping(Vec<u8>),
+    Ignore,
+}
+
 async fn network<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
     common::network(phase, future).await
 }
@@ -154,6 +163,51 @@ fn route(id: DeviceId) -> GatewayRoute {
     }
 }
 
+fn classify_server_frame(frame: tungstenite::Message) -> ServerFrame {
+    match frame {
+        tungstenite::Message::Text(text) => ServerFrame::Json(serde_json::from_str(&text).unwrap()),
+        tungstenite::Message::Ping(payload) => ServerFrame::Ping(payload.to_vec()),
+        tungstenite::Message::Pong(_) => ServerFrame::Ignore,
+        other => panic!("expected a text or control frame, got {other:?}"),
+    }
+}
+
+async fn next_json_frame(socket: &mut Socket) -> Value {
+    loop {
+        let frame = socket.next().await.unwrap().unwrap();
+        match classify_server_frame(frame) {
+            ServerFrame::Json(value) => return value,
+            ServerFrame::Ping(payload) => socket
+                .send(tungstenite::Message::Pong(payload.into()))
+                .await
+                .unwrap(),
+            ServerFrame::Ignore => {}
+        }
+    }
+}
+
+async fn next_event_frame(socket: &mut Socket) -> Value {
+    loop {
+        let frame = next_json_frame(socket).await;
+        match frame["type"].as_str() {
+            Some("event") => return frame,
+            Some("presence_changed") => {}
+            other => panic!("expected an event or presence hint, got {other:?}: {frame}"),
+        }
+    }
+}
+
+#[test]
+fn websocket_control_frame_payload_is_not_decoded_as_json() {
+    let payload = vec![0, 0, 159];
+    let frame = tungstenite::Message::Ping(payload.clone().into());
+
+    match classify_server_frame(frame) {
+        ServerFrame::Ping(received) => assert_eq!(received, payload),
+        _ => panic!("non-UTF8 ping was not classified as a control frame"),
+    }
+}
+
 async fn post_event(
     phase: &'static str,
     server: &Server,
@@ -266,25 +320,9 @@ async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
         .unwrap(),
         1
     );
-    let ready: Value = serde_json::from_str(
-        &network("E03-ws-ready", socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .into_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let ready = network("E03-ws-ready", next_json_frame(&mut socket)).await;
     assert_eq!(ready["type"], "ready");
-    let frame: Value = serde_json::from_str(
-        &network("E03-ws-event", socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .into_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let frame = network("E03-ws-event", next_event_frame(&mut socket)).await;
     assert_eq!(frame["type"], "event");
     assert_eq!(frame["cursor"], "1");
     assert_eq!(
@@ -1214,15 +1252,7 @@ async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
     )
     .await
     .unwrap();
-    let ready: Value = serde_json::from_str(
-        network("EROT04-ws-ready", socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .to_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let ready = network("EROT04-ws-ready", next_json_frame(&mut socket)).await;
     assert_eq!(ready["type"], "ready");
 
     let revoked = network(

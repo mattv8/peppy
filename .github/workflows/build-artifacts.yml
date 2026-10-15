@@ -160,6 +160,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.98.1
+      - name: Remove preinstalled package-manager shims
+        if: runner.os == 'Windows'
+        run: npm uninstall --global yarn pnpm
       - run: npm install --global corepack@0.36.0
       - run: corepack enable && pnpm install --frozen-lockfile
       - if: runner.os == 'Linux'

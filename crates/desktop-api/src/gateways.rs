@@ -310,11 +310,11 @@ pub fn gateway_views(
         match &reports {
             SimReports::Valid(sims) => {
                 for sim in sims {
-                    let limits = mms_limits(&sim);
+                    let limits = mms_limits(sim);
                     let supports_sms = sim.sms == Status::Available;
                     let supports_mms = supports_sms
                         && sim.mms == Status::Available
-                        && valid_optional_mms_fields(&sim)
+                        && valid_optional_mms_fields(sim)
                         && limits.0.is_some_and(|version| version >= 2);
                     let name = clean_label(sim.label.as_deref().unwrap_or(""))
                         .unwrap_or_else(|| format!("Phone {short}"));

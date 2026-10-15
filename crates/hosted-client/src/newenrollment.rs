@@ -1015,7 +1015,7 @@ impl EnrollmentClient {
             let encrypted = seal_handoff(
                 transfer,
                 &context.recipient_transfer_public_key,
-                &context,
+                context,
                 package,
             )
             .map_err(|_| HostedClientError::Crypto)?;
