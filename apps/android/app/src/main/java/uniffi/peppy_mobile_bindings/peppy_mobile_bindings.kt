@@ -687,11 +687,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_hosted_wake_relay_url(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_login_attempt(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_push_config(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning(
     ): Int
@@ -1361,12 +1365,16 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_func_hosted_session_request(`attemptId`: RustBuffer.ByValue,`idToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_func_hosted_wake_relay_url(`origin`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_account(`json`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_login_attempt(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_push_config(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(`origin`: RustBuffer.ByValue,`accountId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`clientKind`: RustBuffer.ByValue,`deviceName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_restore_hosted_provisioning(`checkpointBytes`: RustBuffer.ByValue,`expectedOrigin`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1520,6 +1528,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request() and 0xFFFF) != 59693) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_hosted_wake_relay_url() and 0xFFFF) != 42110) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account() and 0xFFFF) != 35553) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1527,6 +1538,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() and 0xFFFF) != 62352) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() and 0xFFFF) != 51462) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() and 0xFFFF) != 3935) {
@@ -8526,6 +8540,49 @@ public object FfiConverterTypeNativePermit: FfiConverterRustBuffer<NativePermit>
 
 
 
+data class NativePushConfig (
+    var `available`: kotlin.Boolean
+    , 
+    var `providers`: List<kotlin.String>
+    , 
+    var `apnsEnvironment`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativePushConfig: FfiConverterRustBuffer<NativePushConfig> {
+    override fun read(buf: ByteBuffer): NativePushConfig {
+        return NativePushConfig(
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativePushConfig) = (
+            FfiConverterBoolean.allocationSize(value.`available`) +
+            FfiConverterSequenceString.allocationSize(value.`providers`) +
+            FfiConverterOptionalString.allocationSize(value.`apnsEnvironment`)
+    )
+
+    override fun write(value: NativePushConfig, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`available`, buf)
+            FfiConverterSequenceString.write(value.`providers`, buf)
+            FfiConverterOptionalString.write(value.`apnsEnvironment`, buf)
+    }
+}
+
+
+
 data class NativeQueuedSend (
     var `messageId`: kotlin.String
     , 
@@ -10408,6 +10465,17 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
     )
     }
     
+ fun `hostedWakeRelayUrl`(`origin`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_hosted_wake_relay_url(
+    
+        
+        FfiConverterString.lower(`origin`),_status)
+}
+    )
+    }
+    
 
     @Throws(MobileBindingsException::class) fun `parseHostedAccount`(`json`: kotlin.String, `expectedAccountId`: kotlin.String): NativeHostedAccount {
             return FfiConverterTypeNativeHostedAccount.lift(
@@ -10438,6 +10506,18 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
             return FfiConverterTypeNativeHostedSession.lift(
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(
+    
+        
+        FfiConverterString.lower(`json`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parsePushConfig`(`json`: kotlin.String): NativePushConfig {
+            return FfiConverterTypeNativePushConfig.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_push_config(
     
         
         FfiConverterString.lower(`json`),_status)

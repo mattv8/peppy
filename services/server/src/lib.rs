@@ -47,6 +47,7 @@ use crate::{
     },
     config::Config,
 };
+use peppy_hosted_api::PushConfigAdvertisement;
 use std::sync::Arc;
 
 /// Explicit server assembly. Unlike the legacy API router helpers, this does
@@ -59,6 +60,7 @@ pub struct ServerBuilder {
     enrollment_authorization: Arc<dyn EnrollmentAuthorization>,
     setup_token: Option<String>,
     row_security: bool,
+    push_config: PushConfigAdvertisement,
 }
 
 impl ServerBuilder {
@@ -81,6 +83,7 @@ impl ServerBuilder {
             enrollment_authorization,
             setup_token: None,
             row_security: false,
+            push_config: PushConfigAdvertisement::default(),
         }
     }
 
@@ -118,6 +121,12 @@ impl ServerBuilder {
         self
     }
 
+    /// Advertises hosted push capability to enrolled devices.
+    pub fn push_config(mut self, advertisement: PushConfigAdvertisement) -> Self {
+        self.push_config = advertisement;
+        self
+    }
+
     /// Initializes health/storage dependencies and assembles routes without
     /// spawning maintenance workers. Call [`Server::start_maintenance`] after
     /// the process has completed its startup sequencing.
@@ -126,6 +135,13 @@ impl ServerBuilder {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "row-security mode requires an explicit maintenance database",
+            )
+            .into());
+        }
+        if !self.push_config.validate() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "push configuration is inconsistent",
             )
             .into());
         }
@@ -148,6 +164,7 @@ impl ServerBuilder {
             health.storage(),
             options,
             None,
+            self.push_config,
             api::RouterAuthorization {
                 policy: self.access_policy,
                 enrollment: self.enrollment_authorization,

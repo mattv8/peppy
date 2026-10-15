@@ -136,6 +136,40 @@ test("server offline copy is generated for desktop and native clients", () => {
   }
 });
 
+test("wake status copy maps to both native catalog formats", () => {
+  const copy = {
+    wake_section_title: "Background updates",
+    wake_updates_toggle_label: "Allow background updates",
+    wake_status_label: "Wake registration",
+    wake_status_registered: "Registered",
+    wake_status_pending: "Setting up",
+    wake_status_retrying: "Retrying",
+    wake_status_paused: "Paused",
+    wake_status_unavailable: "Unavailable",
+    wake_footer_registered: "Registered for background updates. Delivery may be delayed by your phone.",
+    wake_footer_pending: "Setting up background updates automatically.",
+    wake_footer_retrying: "Background updates will retry when a connection is available.",
+    wake_footer_paused: "Background wake is paused. Other permitted sync may still run.",
+    wake_footer_unavailable_server: "Background wake is unavailable on this server.",
+    wake_footer_missing_app_support: "This app build does not support background push.",
+    wake_footer_os_restricted: "Your phone is limiting background activity.",
+    wake_footer_keys_locked: "Unlock Peppy to process pending updates.",
+    wake_cleanup_pending: "Background wake is paused. Server cleanup will retry when connected.",
+    wake_os_settings_cta: "Open Settings",
+    wake_community_relay_enabled: "Custom relay enabled. Background delivery may be delayed.",
+    wake_community_relay_disabled: "Custom relay is off.",
+  };
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(nativeCatalog[key], value);
+    const escapedValue = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(android, new RegExp(`<string name="peppy_${key}">${escapedValue}</string>`));
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+  }
+});
+
 test("onboarding server mode copy maps to each generated platform format", () => {
   const copy = {
     onboarding_mode_selector: "Server",

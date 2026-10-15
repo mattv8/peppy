@@ -123,6 +123,96 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// Push delivery provider advertised to enrolled devices.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum PushProvider {
+    Fcm,
+    Apns,
+}
+
+/// APNs environment accepted by the configured relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ApnsEnvironment {
+    Production,
+    Sandbox,
+}
+
+/// Versioned push capability response for enrolled devices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PushConfig {
+    pub version: u8,
+    pub available: bool,
+    pub providers: Vec<PushProvider>,
+    pub apns_environment: Option<ApnsEnvironment>,
+}
+
+impl PushConfig {
+    pub fn validate(&self) -> bool {
+        self.version == 1
+            && validate_push_configuration(self.available, &self.providers, self.apns_environment)
+    }
+}
+
+/// Operator-supplied push capability configuration. The response version is
+/// injected by the server to keep the wire contract stable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushConfigAdvertisement {
+    pub available: bool,
+    pub providers: Vec<PushProvider>,
+    pub apns_environment: Option<ApnsEnvironment>,
+}
+
+impl Default for PushConfigAdvertisement {
+    fn default() -> Self {
+        Self {
+            available: false,
+            providers: Vec::new(),
+            apns_environment: None,
+        }
+    }
+}
+
+impl PushConfigAdvertisement {
+    pub fn validate(&self) -> bool {
+        validate_push_configuration(self.available, &self.providers, self.apns_environment)
+    }
+
+    pub fn response(&self) -> Option<PushConfig> {
+        self.validate().then(|| PushConfig {
+            version: 1,
+            available: self.available,
+            providers: self.providers.clone(),
+            apns_environment: self.apns_environment,
+        })
+    }
+}
+
+fn validate_push_configuration(
+    available: bool,
+    providers: &[PushProvider],
+    apns_environment: Option<ApnsEnvironment>,
+) -> bool {
+    let has_apns = providers.contains(&PushProvider::Apns);
+    let no_duplicates = providers.len()
+        == providers
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+    no_duplicates
+        && match (available, has_apns, apns_environment) {
+            (false, false, None) => providers.is_empty(),
+            (true, true, Some(_)) => !providers.is_empty(),
+            (true, false, None) => !providers.is_empty(),
+            _ => false,
+        }
+}
+
 // ============================================================================
 // Auth DTOs
 // ============================================================================

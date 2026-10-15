@@ -49,6 +49,13 @@ pub struct NativeHostedProvisioningView {
     pub device_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativePushConfig {
+    pub available: bool,
+    pub providers: Vec<String>,
+    pub apns_environment: Option<String>,
+}
+
 #[derive(uniffi::Object)]
 pub struct NativeHostedProvisioning {
     inner: Mutex<hc::HostedProvisioning>,
@@ -126,6 +133,33 @@ pub fn hosted_passphrase_acceptable(passphrase: String) -> bool {
 #[uniffi::export]
 pub fn vault_profile_fingerprint(profile_json: String) -> Result<String, MobileBindingsError> {
     hc::vault_profile_fingerprint(profile_json).map_err(convert_error)
+}
+
+#[uniffi::export]
+pub fn hosted_wake_relay_url(origin: String) -> Option<String> {
+    hc::hosted_wake_relay_url(origin)
+}
+
+#[uniffi::export]
+pub fn parse_push_config(json: String) -> Result<NativePushConfig, MobileBindingsError> {
+    let config = hc::parse_push_config(json).map_err(convert_error)?;
+    Ok(NativePushConfig {
+        available: config.available,
+        providers: config
+            .providers
+            .into_iter()
+            .map(|provider| match provider {
+                peppy_hosted_api::PushProvider::Fcm => "fcm".into(),
+                peppy_hosted_api::PushProvider::Apns => "apns".into(),
+            })
+            .collect(),
+        apns_environment: config
+            .apns_environment
+            .map(|environment| match environment {
+                peppy_hosted_api::ApnsEnvironment::Production => "production".into(),
+                peppy_hosted_api::ApnsEnvironment::Sandbox => "sandbox".into(),
+            }),
+    })
 }
 
 // Provisioning functions

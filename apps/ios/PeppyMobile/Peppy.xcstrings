@@ -1981,6 +1981,206 @@
         }
       }
     },
+    "peppy.wake_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background updates"
+          }
+        }
+      }
+    },
+    "peppy.wake_updates_toggle_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow background updates"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wake registration"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_registered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registered"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unavailable"
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_registered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registered for background updates. Delivery may be delayed by your phone."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up background updates automatically."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background updates will retry when a connection is available."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is paused. Other permitted sync may still run."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_unavailable_server": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is unavailable on this server."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_missing_app_support": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app build does not support background push."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_os_restricted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your phone is limiting background activity."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_keys_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to process pending updates."
+          }
+        }
+      }
+    },
+    "peppy.wake_cleanup_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is paused. Server cleanup will retry when connected."
+          }
+        }
+      }
+    },
+    "peppy.wake_os_settings_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        }
+      }
+    },
+    "peppy.wake_community_relay_enabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay enabled. Background delivery may be delayed."
+          }
+        }
+      }
+    },
+    "peppy.wake_community_relay_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay is off."
+          }
+        }
+      }
+    },
     "peppy.self_hosted_headline": {
       "localizations": {
         "en": {

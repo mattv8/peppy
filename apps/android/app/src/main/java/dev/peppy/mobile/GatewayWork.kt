@@ -56,19 +56,22 @@ object GatewayWork {
         WorkManager.getInstance(context).enqueueUniqueWork(
             NAME,
             if (appendToActivePass) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP,
-            OneTimeWorkRequestBuilder<GatewaySyncWorker>()
-                .setConstraints(constraints())
-                // Pre-S emulates expedited work with a foreground service. This bounded worker
-                // remains ordinary there instead of claiming a foreground notification state.
-                .apply {
-                    if (urgent && Build.VERSION.SDK_INT >= 31) {
-                        setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                    }
-                }
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                .build(),
+            createRequest(urgent),
         )
     }
+
+    internal fun createRequest(urgent: Boolean, apiLevel: Int = Build.VERSION.SDK_INT) =
+        OneTimeWorkRequestBuilder<GatewaySyncWorker>()
+            .setConstraints(constraints())
+            // Pre-S emulates expedited work with a foreground service. This bounded worker
+            // remains ordinary there instead of claiming a foreground notification state.
+            .apply {
+                if (urgent && apiLevel >= Build.VERSION_CODES.S) {
+                    setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                }
+            }
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
 
     /** Called only under [GatewaySyncWorker]'s process-wide pass mutex. */
     internal fun beginPass(context: Context) {

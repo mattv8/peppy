@@ -25,6 +25,7 @@ pub struct ConfiguredProvider {
     client: Client,
     apns: Option<ApnsConfig>,
     fcm: Option<FcmConfig>,
+    fcm_priority: FcmPriority,
     apns_token: Arc<Mutex<Option<CachedToken>>>,
     fcm_token: Arc<Mutex<Option<CachedToken>>>,
 }
@@ -41,12 +42,40 @@ struct ApnsConfig {
     bundle_id: String,
     key: Arc<String>,
     endpoint: &'static str,
+    environment: &'static str,
 }
 #[derive(Clone)]
 struct FcmConfig {
     project_id: String,
     client_email: String,
     private_key: Arc<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FcmPriority {
+    Normal,
+    High,
+}
+
+impl FcmPriority {
+    fn from_environment() -> Result<Self, String> {
+        Self::parse(std::env::var("PEPPY_RELAY_FCM_PRIORITY").ok().as_deref())
+    }
+
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            Some("normal") => Ok(Self::Normal),
+            Some("high") | None => Ok(Self::High),
+            _ => Err("PEPPY_RELAY_FCM_PRIORITY must be normal or high".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -59,6 +88,7 @@ struct FcmSecret {
 impl ConfiguredProvider {
     /// Empty provider selections are intentionally rejected: the safe default is unconfigured.
     pub fn from_environment(selection: &str) -> Result<Self, String> {
+        let fcm_priority = FcmPriority::from_environment()?;
         let selected: Vec<_> = selection
             .split(',')
             .map(str::trim)
@@ -90,9 +120,10 @@ impl ConfiguredProvider {
                 )?;
                 let key = read("PEPPY_RELAY_APNS_PRIVATE_KEY")?.trim().to_owned();
                 EncodingKey::from_ec_pem(key.as_bytes()).map_err(|_| "invalid APNs private key")?;
-                let endpoint = match std::env::var("PEPPY_RELAY_APNS_ENV").as_deref() {
-                    Ok("sandbox") => APNS_SANDBOX_URL,
-                    Ok("production") | Err(_) => APNS_URL,
+                let (endpoint, environment) = match std::env::var("PEPPY_RELAY_APNS_ENV").as_deref()
+                {
+                    Ok("sandbox") => (APNS_SANDBOX_URL, "sandbox"),
+                    Ok("production") | Err(_) => (APNS_URL, "production"),
                     _ => return Err("PEPPY_RELAY_APNS_ENV must be sandbox or production".into()),
                 };
                 Ok::<_, String>(ApnsConfig {
@@ -101,6 +132,7 @@ impl ConfiguredProvider {
                     bundle_id,
                     key: Arc::new(key),
                     endpoint,
+                    environment,
                 })
             })
             .transpose()?;
@@ -131,6 +163,7 @@ impl ConfiguredProvider {
             client,
             apns,
             fcm,
+            fcm_priority,
             apns_token: Arc::new(Mutex::new(None)),
             fcm_token: Arc::new(Mutex::new(None)),
         })
@@ -288,7 +321,17 @@ impl ConfiguredProvider {
         kind: &str,
         value: &str,
     ) -> Result<(), ProviderError> {
-        let response = self.client.post(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", c.project_id)).bearer_auth(access.value).json(&serde_json::json!({"message":{"token":token,"android":{"priority":"high"},"data":{"kind":kind,"value":value}}})).send().await.map_err(|_| ProviderError::Retryable)?;
+        let response = self
+            .client
+            .post(format!(
+                "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+                c.project_id
+            ))
+            .bearer_auth(access.value)
+            .json(&fcm_payload(token, self.fcm_priority, kind, value))
+            .send()
+            .await
+            .map_err(|_| ProviderError::Retryable)?;
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         let result = classify_fcm(status, &body);
@@ -299,6 +342,16 @@ impl ConfiguredProvider {
         }
         result
     }
+}
+
+fn fcm_payload(token: String, priority: FcmPriority, kind: &str, value: &str) -> serde_json::Value {
+    serde_json::json!({
+        "message": {
+            "token": token,
+            "android": { "priority": priority.as_str() },
+            "data": { "kind": kind, "value": value }
+        }
+    })
 }
 
 fn identifier(value: String, name: &str) -> Result<String, String> {
@@ -362,6 +415,9 @@ impl PushProvider for ConfiguredProvider {
             _ => "unconfigured",
         }
     }
+    fn apns_environment(&self) -> Option<&'static str> {
+        self.apns.as_ref().map(|config| config.environment)
+    }
     fn send_challenge<'a>(&'a self, p: Provider, t: &'a str, c: &'a str) -> ProviderFuture<'a> {
         Box::pin(async move { self.send(p, t, "challenge", c).await })
     }
@@ -399,5 +455,18 @@ mod tests {
             ),
             Err(ProviderError::InvalidToken)
         );
+    }
+
+    #[test]
+    fn fcm_priority_preserves_high_legacy_default_and_accepts_normal() {
+        assert_eq!(FcmPriority::parse(None), Ok(FcmPriority::High));
+        assert_eq!(FcmPriority::parse(Some("normal")), Ok(FcmPriority::Normal));
+        assert!(FcmPriority::parse(Some("urgent")).is_err());
+    }
+
+    #[test]
+    fn fcm_payload_uses_configured_priority() {
+        let payload = fcm_payload("token".into(), FcmPriority::Normal, "wake", "nonce");
+        assert_eq!(payload["message"]["android"]["priority"], "normal");
     }
 }

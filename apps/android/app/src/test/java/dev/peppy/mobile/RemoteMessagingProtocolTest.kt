@@ -7,6 +7,7 @@ import androidx.work.Configuration
 import androidx.work.WorkManager
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
+import com.google.firebase.messaging.RemoteMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -88,5 +89,27 @@ class RemoteMessagingProtocolTest {
         RemoteMessagingPreferences.setEnabled(context, true)
         RemoteMessagingService.resumeOrEnqueue(context)
         assertEquals(RemoteMessagingService::class.java.name, shadow.nextStartedService.component?.className)
+    }
+
+    @Test fun acceptedFcmWakeStillQueuesSyncWhenLiveSocketIsDisabled() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            context,
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
+        val shadow = Shadows.shadowOf(context as Application)
+        val previousWakeEnabled = RelayWakeRuntime.enabled
+        try {
+            RelayWakeRuntime.enabled = true
+            RemoteMessagingPreferences.setEnabled(context, false)
+
+            org.robolectric.Robolectric.buildService(PeppyMessagingService::class.java).create().get()
+                .onMessageReceived(RemoteMessage.Builder("123456789@gcm.googleapis.com").addData("kind", "wake").build())
+
+            assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get().size)
+            assertNull(shadow.nextStartedService)
+        } finally {
+            RelayWakeRuntime.enabled = previousWakeEnabled
+        }
     }
 }

@@ -19,6 +19,18 @@ private final class RecordingTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
+private final class FailingRecordingTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedRequests: [HTTPRequest] = []
+
+    var requests: [HTTPRequest] { lock.withLock { recordedRequests } }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lock.withLock { recordedRequests.append(request) }
+        throw ClientError.network(code: URLError.notConnectedToInternet.rawValue)
+    }
+}
+
 private struct CancellationProbe: Sendable {
     let used: Int
     let threwCancellation: Bool
@@ -105,6 +117,38 @@ private struct CancellationProbe: Sendable {
         await #expect(throws: ClientError.forbidden) {
             try await client(forbidden).exchange("GET", "/v1/devices", limit: 1, meter: &forbiddenMeter)
         }
+    }
+
+    @Test func exchangePreservesQueryAndObservesTransportFailure() async throws {
+        let identity = EnrollmentIdentity(origin: "https://push.example.test", vaultId: "vault", deviceId: "device")
+        let reachability = ServerReachability()
+        reachability.bind(identity)
+        let binding = ServerReachabilityBinding(identity: identity)
+        let generation = reachability.generation
+        let transport = FailingRecordingTransport()
+        let client = ServerClient(
+            origin: try ServerOrigin(canonical: "https://push.example.test", allowLoopbackHTTP: false),
+            token: token,
+            transport: transport,
+            observeResponse: { reachability.record($0, binding: binding, generation: generation) }
+        )
+        var meter = RequestMeter(limit: 1)
+
+        await #expect(throws: ClientError.network(code: URLError.notConnectedToInternet.rawValue)) {
+            try await client.exchange(
+                "GET",
+                "/v1/attachments",
+                query: [URLQueryItem(name: "cursor", value: "7")],
+                limit: 1,
+                meter: &meter
+            )
+        }
+
+        let request = try #require(transport.requests.first)
+        #expect(URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems == [
+            URLQueryItem(name: "cursor", value: "7"),
+        ])
+        #expect(reachability.state == .unavailable)
     }
 
     @Test func postNoContentAcceptsEmptySuccessfulResponse() async throws {

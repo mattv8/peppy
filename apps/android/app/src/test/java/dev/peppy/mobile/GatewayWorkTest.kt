@@ -43,4 +43,9 @@ class GatewayWorkTest {
 
         assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork(GatewayWork.NAME).get().size)
     }
+
+    @Test fun urgentWorkUsesExpeditedFallbackOnlyOnSupportedAndroidVersions() {
+        assertFalse(GatewayWork.createRequest(urgent = true, apiLevel = 30).workSpec.expedited)
+        assertTrue(GatewayWork.createRequest(urgent = true, apiLevel = 31).workSpec.expedited)
+    }
 }

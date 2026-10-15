@@ -249,6 +249,8 @@ object NativeGateway {
             databaseFiles(context).forEach { file -> if (file.exists() && !file.delete()) return false }
             // The active binding and all state that fences its sync history disappear together as
             // far as each durable store permits.  No old credential remains usable by new work.
+            // Capture cleanup under the still-current credential before clearing the enrollment.
+            RelayWakeRuntime.archiveEnrollment(context)
             if (!prefs.edit().clear().commit()) return false
             GatewayStateStore(context).resetForNewEnrollment()
             ServerReachabilityState.clear()
@@ -401,6 +403,7 @@ object NativeGateway {
                 return ImportResult.STORAGE_ERROR
             }
             if (!editor.commit()) return ImportResult.STORAGE_ERROR
+            RelayWakeRuntime.enrollmentChanged(context)
             // A new database always bootstraps from a snapshot before any live replay or effect.
             if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()
             result

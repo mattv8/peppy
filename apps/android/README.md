@@ -42,7 +42,9 @@ Commands use the current default SMS subscription. If it changes or disappears, 
 
 ## Relay wakes and encryption boundary
 
-The optional FCM wake relay is **off by default**. An operator must configure the relay and the user must explicitly enable it; without Firebase configuration, registration waits and normal bounded sync still runs while the app is open. FCM receives only content-free `wake` or `challenge` values and a wake only schedules work—it never authorizes carrier work. This repository does not claim a live signed FCM delivery path.
+For a verified enrollment at `https://peppy.pro`, Background updates register automatically when the hosted server advertises FCM support. An existing disabled legacy relay preference remains paused; users can pause or resume the durable hosted setting from Account. Self-hosted/community relays retain their manual origin and enable controls. Firebase auto-init is disabled: the app requests an FCM token only from the eligible reconciliation worker (or for an explicitly enabled custom relay). Builds without Firebase app configuration report unavailable rather than acquiring a token.
+
+Registration and cleanup run through network-constrained WorkManager reconciliation, so they may be delayed by connectivity, process death, quota, or locked keys. The relay stores only provider token metadata and content-free `wake`/`challenge` values. A wake delegates to the optional gateway reconnect seam, then falls back to expedited bounded sync with quota fallback; it never authorizes carrier work or promises immediate delivery. This repository does not claim a live signed FCM delivery path.
 
 Vault sync envelopes and private attachment copies retain the existing encrypted body transport. Carrier SMS/MMS itself is outside that encryption boundary. The server's private attachment store is encrypted; public derivatives require a separate explicit publication action.
 
