@@ -129,6 +129,8 @@ class GatewaySync(
                 // Receive/apply precedes any OS effect and outbound upload. A disconnected listener
                 // or revoked access leaves the durable core effect pending rather than completing it.
                 phase { NotificationMirrorService.runPendingDismissals(); false }
+                // Synthetic records are core-only, so retire them without listener access.
+                phase { NotificationTestCapture.applyDismissals(client); false }
                 // Contacts follow receive/apply (incoming edit requests are journaled first) and
                 // precede media, so newly prepared photos upload in this same pass.
                 if (mayEmit() && !client.contactRepairRequired()) phase { contacts() }

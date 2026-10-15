@@ -29,8 +29,8 @@ enum class NotificationTestCaptureResult { CAPTURED, ALREADY_QUEUED, LOCKED, POL
 
 /**
  * Writes one clearly marked synthetic record directly to core. It never represents an OS
- * notification, so its key/lifetime cannot match an application notification or be dismissed by
- * a remote dismissal request.
+ * notification, so its key/lifetime cannot match an application notification. It may be dismissed
+ * remotely, which retires only the core record and never an OS notification.
  */
 internal object NotificationTestCapture {
     fun capture(
@@ -44,14 +44,16 @@ internal object NotificationTestCapture {
         return try {
             // A settings test is bounded to one durable synthetic record. Repeated taps do not
             // create an unbounded history of fake notifications.
-            if (client.notificationSnapshot().notifications.any { it.target.notificationKey == SYNTHETIC_KEY }) {
+            if (client.notificationSnapshot().notifications.any {
+                    it.target.notificationKey == SYNTHETIC_KEY && it.dismissible
+                }) {
                 return NotificationTestCaptureResult.ALREADY_QUEUED
             }
             val outcome = client.captureNotification(
                 NativeNotificationCapture(
                     SYNTHETIC_KEY, "$SYNTHETIC_KEY:$id", "dev.peppy.mobile.synthetic",
                     "Peppy test", "Peppy test notification", "This is a safe test record.", "peppy_test",
-                    System.currentTimeMillis(), false,
+                    System.currentTimeMillis(), true,
                 ),
             )
             if (outcome == NativeNotificationCaptureOutcome.CAPTURED) {
@@ -61,6 +63,22 @@ internal object NotificationTestCapture {
         } catch (_: MobileBindingsException) {
             NotificationTestCaptureResult.ERROR
         }
+    }
+
+    /** Retires dismissed synthetic records in core only; OS notifications are left to the listener. */
+    fun applyDismissals(client: NativeClientInterface): Int {
+        var completed = 0
+        try {
+            for (dismissal in client.pendingNotificationDismissals(50uL)) {
+                if (dismissal.target.notificationKey != SYNTHETIC_KEY) continue
+                client.removeNotification(SYNTHETIC_KEY, dismissal.instance)
+                client.completeNotificationDismissal(dismissal.id)
+                completed++
+            }
+        } catch (_: MobileBindingsException) {
+            // Remaining dismissals stay pending in core and retry on the next sync pass.
+        }
+        return completed
     }
 
     const val SYNTHETIC_KEY = "peppy-synthetic-test"
