@@ -804,7 +804,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   font-size: 13px;
   line-height: 26px;
 }
-.primary-button:hover {
+.primary-button:hover:not(:disabled) {
   background: var(--peppy-accent-hover);
 }
 .secondary-button {
@@ -818,8 +818,13 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   font-size: 13px;
   line-height: 26px;
 }
-.secondary-button:hover {
+.secondary-button:hover:not(:disabled) {
   background: var(--peppy-surface-hover);
+}
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 .primary-button:focus-visible,
 .secondary-button:focus-visible {
