@@ -17,11 +17,12 @@ describe("DevicesSettings", () => {
   afterEach(cleanup);
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+    vi.mocked(bridge.list_devices).mockReset().mockResolvedValue({ currentDeviceId: "self", devices: [
       { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
       { id: "phone", name: "Pixel 8", kind: "android", role: "owner", revoked: false },
       { id: "old", name: "Old phone", kind: "ios", role: "owner", revoked: true },
     ] });
+    vi.mocked(bridge.revoke_device).mockReset();
   });
 
   it("loads devices under StrictMode", async () => {
@@ -101,13 +102,13 @@ describe("DevicesSettings", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("reconciles the roster after an uncertain revoke response", async () => {
+  it("reports an offline revoke response without immediately reconciling", async () => {
     vi.mocked(bridge.revoke_device).mockRejectedValue({ code: "offline", message: "Offline" });
     render(<DevicesSettings />);
     fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
-    await waitFor(() => expect(bridge.list_devices).toHaveBeenCalledTimes(2));
-    expect(screen.getByRole("alert")).toHaveTextContent("outcome is unknown");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The device may not have been removed because the server is offline. The list refreshes when Peppy reconnects, or you can retry now.");
+    expect(bridge.list_devices).toHaveBeenCalledTimes(1);
   });
 
   it("mentions a failed roster reconciliation after an uncertain revoke response", async () => {
@@ -159,7 +160,7 @@ describe("DevicesSettings", () => {
     expect(screen.getByRole("heading", { name: "Devices" })).toHaveFocus();
   });
 
-  it("keeps the roster non-actionable when accepted removal cannot reload", async () => {
+  it("keeps the roster visible when accepted removal cannot reload", async () => {
     vi.mocked(bridge.revoke_device).mockResolvedValue(undefined);
     vi.mocked(bridge.list_devices)
       .mockResolvedValueOnce({ currentDeviceId: "self", devices: [
@@ -171,7 +172,13 @@ describe("DevicesSettings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("accepted, but the latest roster could not be loaded");
-    expect(screen.queryByRole("button", { name: "Remove Pixel 8" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove Pixel 8" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading devices" }));
+
+    await waitFor(() => expect(bridge.list_devices).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Retry loading devices" })).not.toBeInTheDocument();
   });
 
   it("keeps the dialog open and focused while a removal is pending", async () => {
@@ -220,5 +227,107 @@ describe("DevicesSettings", () => {
     ] });
     render(<DevicesSettings />);
     expect(await screen.findByText(/Android · Owner · Active · Last seen 5m ago/)).toBeInTheDocument();
+  });
+
+  it("keeps a loaded roster when a later load reports the server offline", async () => {
+    vi.mocked(bridge.list_devices)
+      .mockResolvedValueOnce({ currentDeviceId: "self", devices: [
+        { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+        { id: "phone", name: "Pixel 8", kind: "android", role: "owner", revoked: false },
+      ] })
+      .mockRejectedValueOnce({ code: "offline", message: "Could not reach the configured server." });
+    const { rerender } = render(<DevicesSettings serverOffline={false} />);
+    expect(await screen.findByText("This Mac")).toBeInTheDocument();
+    rerender(<DevicesSettings serverOffline />);
+    rerender(<DevicesSettings serverOffline={false} />);
+    await waitFor(() => expect(document.querySelector("[data-devices-offline-notice]")).toBeInTheDocument());
+    expect(document.querySelector("[data-devices-offline-notice]")).toHaveTextContent("Server offline. Showing the last loaded list; removing devices is unavailable.");
+    expect(screen.getByText("This Mac")).toBeInTheDocument();
+    expect(screen.queryByText("The device roster could not be loaded.")).not.toBeInTheDocument();
+  });
+
+  it("shows an offline empty state after the first load fails", async () => {
+    vi.mocked(bridge.list_devices).mockRejectedValue({ code: "offline", message: "Could not reach the configured server." });
+    render(<DevicesSettings />);
+    await waitFor(() => expect(document.querySelector("[data-devices-offline-notice]")).toHaveTextContent("Server offline. The device list will load when the server is back."));
+    expect(screen.getByRole("button", { name: "Retry loading devices" })).toHaveAttribute("id", "devices-retry");
+    expect(document.querySelector(".settings-error")).not.toBeInTheDocument();
+  });
+
+  it("replaces remove buttons while the server is offline", async () => {
+    render(<DevicesSettings serverOffline />);
+    expect(await screen.findByText("This Mac")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove Pixel 8" })).not.toBeInTheDocument();
+    expect(document.querySelector("[data-remove-offline]")).toHaveTextContent("Unavailable while offline");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("retains the roster after an offline revoke without reloading", async () => {
+    vi.mocked(bridge.revoke_device).mockRejectedValue({ code: "offline", message: "Could not reach the configured server." });
+    render(<DevicesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
+    await waitFor(() => expect(document.querySelector("[data-devices-remove-error]")).toHaveTextContent("The device may not have been removed because the server is offline. The list refreshes when Peppy reconnects, or you can retry now."));
+    expect(screen.getByText("This Mac")).toBeInTheDocument();
+    expect(bridge.list_devices).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a manual retry when an outage is only seen by a failed revoke", async () => {
+    vi.mocked(bridge.revoke_device).mockRejectedValue({ code: "offline", message: "Could not reach the configured server." });
+    render(<DevicesSettings serverOffline={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
+    await waitFor(() => expect(document.querySelector("[data-remove-offline]")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading devices" }));
+
+    expect(await screen.findByRole("button", { name: "Remove Pixel 8" })).toBeEnabled();
+    expect(document.querySelector("[data-devices-offline-notice]")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-devices-remove-error]")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry loading devices" })).not.toBeInTheDocument();
+  });
+
+  it("reloads once when the server returns and restores device removal", async () => {
+    const { rerender } = render(<DevicesSettings serverOffline={false} />);
+    expect(await screen.findByText("This Mac")).toBeInTheDocument();
+    expect(bridge.list_devices).toHaveBeenCalledTimes(1);
+    rerender(<DevicesSettings serverOffline />);
+    await waitFor(() => expect(document.querySelector("[data-devices-offline-notice]")).toBeInTheDocument());
+    rerender(<DevicesSettings serverOffline={false} />);
+    await waitFor(() => expect(bridge.list_devices).toHaveBeenCalledTimes(2));
+    expect(document.querySelector("[data-devices-offline-notice]")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove Pixel 8" })).toBeEnabled();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(bridge.list_devices).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a non-offline load error message and preserves the roster", async () => {
+    vi.mocked(bridge.list_devices)
+      .mockResolvedValueOnce({ currentDeviceId: "self", devices: [
+        { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+        { id: "phone", name: "Pixel 8", kind: "android", role: "owner", revoked: false },
+      ] })
+      .mockRejectedValueOnce({ code: "server-response", message: "Server returned an invalid roster." });
+    const { rerender } = render(<DevicesSettings serverOffline={false} />);
+    expect(await screen.findByText("This Mac")).toBeInTheDocument();
+    rerender(<DevicesSettings serverOffline />);
+    rerender(<DevicesSettings serverOffline={false} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Server returned an invalid roster.");
+    expect(screen.getByText("This Mac")).toBeInTheDocument();
+  });
+
+  it("uses fallback copy for a non-offline load error without a message", async () => {
+    vi.mocked(bridge.list_devices).mockRejectedValue({ code: "server-response" });
+    render(<DevicesSettings />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("The device roster could not be loaded.");
+  });
+
+  it("closes the removal dialog when the server becomes offline", async () => {
+    const { rerender } = render(<DevicesSettings serverOffline={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    rerender(<DevicesSettings serverOffline />);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });

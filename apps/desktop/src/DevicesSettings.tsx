@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { bridge, type DeviceRosterView, type ManagedDeviceView } from "./bridge";
+import { errorCode } from "./bridgeErrors";
 import "./device-settings.css";
 
 const deviceKind = (kind: string | null) => ({ android: "Android", ios: "iPhone or iPad", desktop: "Desktop", browser: "Browser" }[kind ?? ""] ?? "Unknown platform");
@@ -15,6 +16,8 @@ const presenceLabel = (device: ManagedDeviceView) => {
   return `Last seen ${seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`} ago`;
 };
 const presenceState = (device: ManagedDeviceView) => !device.presence ? "unknown" : device.presence.state === "never" ? "never" : device.presence.state === "connected" ? "connected" : "delayed";
+const OFFLINE_REMOVE_ERROR = "The device may not have been removed because the server is offline. The list refreshes when Peppy reconnects, or you can retry now.";
+const loadError = (error: unknown) => typeof error === "object" && error !== null && "message" in error && typeof error.message === "string" && error.message ? error.message : "The device roster could not be loaded.";
 const revokeError = (error: unknown) => {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
   if (code === "owner_required") return "Only an owner can remove another device.";
@@ -26,19 +29,23 @@ const revokeError = (error: unknown) => {
   return "The removal outcome is unknown. The roster was reloaded to check it.";
 };
 
-export function DevicesSettings() {
+export function DevicesSettings({ serverOffline = false }: { serverOffline?: boolean }) {
   const [roster, setRoster] = useState<DeviceRosterView | null>(null);
   const [loading, setLoading] = useState(true);
   const [target, setTarget] = useState<ManagedDeviceView | null>(null);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const [error, setError] = useState("");
+  const [offlineFromFailure, setOfflineFromFailure] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const mounted = useRef(true);
   const loadSequence = useRef(0);
   const invoker = useRef<HTMLButtonElement | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const dialogHeading = useRef<HTMLHeadingElement>(null);
   const titleHeading = useRef<HTMLHeadingElement>(null);
+  const previousServerOffline = useRef(serverOffline);
+  const offline = serverOffline || offlineFromFailure;
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -48,12 +55,17 @@ export function DevicesSettings() {
       if (mounted.current && sequence === loadSequence.current) {
         setRoster(next);
         setError("");
+        setOfflineFromFailure(false);
+        setLoadFailed(false);
       }
       return true;
     } catch (error) {
       if (mounted.current && sequence === loadSequence.current) {
-        setRoster(null);
-        setError(error instanceof Error ? error.message : "The device roster could not be loaded.");
+        setLoadFailed(true);
+        if (errorCode(error) === "offline") {
+          setOfflineFromFailure(true);
+          setError("");
+        } else setError(loadError(error));
       }
       return false;
     } finally {
@@ -66,6 +78,13 @@ export function DevicesSettings() {
     void load();
     return () => { mounted.current = false; };
   }, [load]);
+  useEffect(() => {
+    if (previousServerOffline.current && !serverOffline) void load();
+    previousServerOffline.current = serverOffline;
+  }, [load, serverOffline]);
+  useEffect(() => {
+    if (offline && target && !pending) setTarget(null);
+  }, [offline, pending, target]);
   useEffect(() => {
     if (pending && !dialog.current?.contains(document.activeElement)) dialogHeading.current?.focus();
   }, [pending]);
@@ -116,7 +135,7 @@ export function DevicesSettings() {
   };
   const close = () => { if (!pendingRef.current) setTarget(null); };
   const remove = async () => {
-    if (!target || pendingRef.current) return;
+    if (!target || pendingRef.current || offline) return;
     pendingRef.current = true;
     setPending(true);
     const selected = target;
@@ -124,6 +143,13 @@ export function DevicesSettings() {
       await bridge.revoke_device(selected.id);
       if (!await load()) setError("Removal was accepted, but the latest roster could not be loaded. Reload before managing devices again.");
     } catch (error) {
+      if (errorCode(error) === "offline") {
+        if (mounted.current) {
+          setOfflineFromFailure(true);
+          setError(OFFLINE_REMOVE_ERROR);
+        }
+        return;
+      }
       const message = revokeError(error);
       const reloaded = await load();
       if (mounted.current) setError(reloaded ? message : `${message} The latest roster could not be loaded.`);
@@ -135,15 +161,16 @@ export function DevicesSettings() {
   const rows = (revoked: boolean) => roster?.devices.filter(device => device.revoked === revoked) ?? [];
   const row = (device: ManagedDeviceView) => <li key={device.id} data-device-id={device.id}>
     <div><strong>{deviceName(device)}</strong><span data-presence-state={device.revoked ? undefined : presenceState(device)}>{deviceKind(device.kind)} · {deviceRole(device.role)} · {device.revoked ? "Removed" : "Active"}{device.id === roster?.currentDeviceId ? " · This device" : ""}{!device.revoked && ` · ${presenceLabel(device)}`}</span>{device.kind === "ios" && !device.revoked && <small data-ios-sms-note>Can't send SMS through Peppy on iPhone</small>}</div>
-    {canRemove(device) ? <button className="secondary-button" type="button" aria-label={`Remove ${deviceName(device)}`} disabled={pending} onClick={event => { invoker.current = event.currentTarget; setTarget(device); }}>Remove</button> : !device.revoked && <small>{restriction(device)}</small>}
+    {canRemove(device) ? offline ? <small data-remove-offline>Unavailable while offline</small> : <button className="secondary-button" type="button" aria-label={`Remove ${deviceName(device)}`} disabled={pending} onClick={event => { invoker.current = event.currentTarget; setTarget(device); }}>Remove</button> : !device.revoked && <small>{restriction(device)}</small>}
   </li>;
 
   return <section id="settings-devices" className="settings-card" data-settings-section="devices" aria-labelledby="settings-devices-title" aria-busy={loading}>
     <h2 id="settings-devices-title" ref={titleHeading} tabIndex={-1}>Devices</h2>
     <p>Devices can access this encrypted vault. Removing a device revokes server access; it does not erase local data or secrets.</p>
-    {error && <p role="alert" className="settings-error">{error}</p>}
+    {offline && <p id="devices-offline-notice" data-devices-offline-notice role="status" className="settings-note">{roster ? "Server offline. Showing the last loaded list; removing devices is unavailable." : "Server offline. The device list will load when the server is back."}</p>}
+    {error && <p role="alert" className="settings-error" data-devices-remove-error={error === OFFLINE_REMOVE_ERROR || undefined}>{error}</p>}
     {loading && <p role="status">Loading devices…</p>}
-    {!loading && !roster && <button className="secondary-button" type="button" onClick={() => void load()}>Retry loading devices</button>}
+    {!loading && (!roster || offline || loadFailed) && <button id="devices-retry" className="secondary-button" type="button" onClick={() => void load()}>Retry loading devices</button>}
     {roster && <div aria-hidden={target ? "true" : undefined} inert={target ? true : undefined}>
       {!rows(false).length && !rows(true).length && <p>No devices enrolled.</p>}
       <ul id="devices-active-list" aria-label="Active devices">{rows(false).map(row)}</ul>

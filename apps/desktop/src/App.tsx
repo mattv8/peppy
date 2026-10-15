@@ -690,6 +690,7 @@ function SettingsView({
   browserHost = false,
   accountUrl,
   canRevealVaultSecret = false,
+  serverOffline = false,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -718,6 +719,7 @@ function SettingsView({
   browserHost?: boolean;
   accountUrl?: string;
   canRevealVaultSecret?: boolean;
+  serverOffline?: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -880,7 +882,7 @@ function SettingsView({
           </button>
         )}
       </section>
-      <DevicesSettings />
+      <DevicesSettings serverOffline={serverOffline} />
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -2524,6 +2526,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                browserHost={browserHost}
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
+               serverOffline={serverOffline}
              />
           ) : notificationsOpen ? (
             <NotificationsView
