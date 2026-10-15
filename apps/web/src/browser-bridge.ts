@@ -2,7 +2,7 @@ import type {
   AttachmentView, BridgeError, ContactBookView, ContactEditOutcome, ContactEditRequestInput,
   ContactEditStatus, ContactSyncStatus, ContactView, DesktopBridge, DesktopSnapshot, Draft, HistoryPage,
   AppLockStatus, DraftInput, NotificationPreferences, NotificationTarget, PublicCopy,
-  RecipientSuggestion, RestorableContact, SendDraftInput,
+  RecipientSuggestion, RestorableContact, SendDraftInput, ContactScanStatus, DeviceRosterView,
 } from "../../desktop/src/bridge";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
@@ -413,6 +413,10 @@ export class BrowserBridge implements DesktopBridge {
   public list_contact_edits(bookId?: string): Promise<ContactEditStatus[]> { return this.call("list_contact_edits", { bookId }); }
   public search_contact_recipients(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]> { return this.call("search_contact_recipients", { query, sourceDeviceId }); }
   public request_contact_repair(): Promise<ContactSyncStatus> { return this.call("request_contact_repair"); }
+  public list_devices(): Promise<DeviceRosterView> { return this.call("list_devices"); }
+  public revoke_device(deviceId: string): Promise<void> { return this.call("revoke_device", { deviceId }); }
+  public request_contact_sync(bookId: string): Promise<ContactScanStatus> { return this.call("request_contact_sync", { bookId }); }
+  public get_contact_sync_request(bookId: string): Promise<ContactScanStatus | null> { return this.call("get_contact_sync_request", { bookId }); }
   public list_restorable_contacts(bookId: string): Promise<RestorableContact[]> { return this.call("list_restorable_contacts", { bookId }); }
   public restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome> { return this.call("restore_contact", { bookId, contactId }); }
   public subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }

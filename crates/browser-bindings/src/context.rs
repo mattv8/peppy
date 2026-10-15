@@ -63,6 +63,12 @@ impl BrowserCore {
         self.context.connection = Some(input.connection);
         self.context.device_role = Some(role.clone());
         self.context.gateways = Some(views.clone());
+        self.context.revoked_device_ids = devices
+            .devices
+            .iter()
+            .filter(|device| device.revoked)
+            .map(|device| device.device_id.clone())
+            .collect();
         self.gateways_known = true;
         serde_json::to_value(
             json!({"connection": self.context.connection, "deviceRole": role, "gateways": views}),

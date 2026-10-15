@@ -42,6 +42,8 @@ final class AppModel {
     @ObservationIgnored private var contactsScheduler: ContactsBackgroundScheduler?
     #endif
     @ObservationIgnored var contactsObserver: (any NSObjectProtocol)?
+    /// Limits a newly received remote scan request to one extra bounded local pass.
+    @ObservationIgnored var remoteScanFollowUpQueued = false
 
     init() {
         #if DEBUG

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ContactAvatar, Clock, Smartphone, UserPlus, X, formatPhoneNumber } from "@peppy/desktop-ui";
-import { bridge, type ContactBookView, type ContactSyncStatus, type ContactView, type RestorableContact } from "./bridge";
+import { bridge, type ContactBookView, type ContactScanStatus, type ContactSyncStatus, type ContactView, type RestorableContact } from "./bridge";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import "./contacts.css";
 
@@ -25,6 +25,11 @@ const contactErrorText = (error: unknown): string =>
       ? error.message
       : String(error);
 
+const scanReasonText = (reason?: string) => ({ permission_denied: "The phone has not allowed contact access.", limited_access: "The phone has limited contact access.", sync_disabled: "Contact sync is disabled on the phone.", source_revoked: "The source device was removed.", source_retired: "This book is retired.", needs_unlock: "Unlock sync before requesting a scan.", stale_epoch: "The phone's contact context changed before the scan. Use Sync now to request a fresh scan.", superseded_generation: "A newer contact book version replaced this scan. Use Sync now to request a fresh scan.", incomplete_scan: "The phone's scan did not finish. Use Sync now to try again.", cancelled: "The phone cancelled this scan. Use Sync now to try again." }[reason ?? ""] ?? "The phone could not complete this scan.");
+const scanStatusText = (status: ContactScanStatus) => ({
+  queued: "Scan request queued locally.", waiting: "Waiting for the phone to scan contacts.", scanning: "The phone is scanning contacts.", completed: "Scan completed.", blocked: `Scan blocked. ${scanReasonText(status.reason)}`, failed: `Scan failed. ${scanReasonText(status.reason)}`, expired: "Scan request expired. Request another scan.",
+}[status.state]);
+
 export type ContactNavigationGuard = (navigate: () => void) => void;
 
 export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard }: {
@@ -43,26 +48,35 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [error, setError] = useState("");
   const [validationError, setValidationError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmForget, setConfirmForget] = useState<string | null>(null);
-  const [forgetting, setForgetting] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [offset, setOffset] = useState(0);
-  const [repairing, setRepairing] = useState(false);
+  const [scanStatus, setScanStatus] = useState<ContactScanStatus | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<(() => void) | null>(null);
   const restoreTriggerRef = useRef<HTMLButtonElement>(null);
   // Only the newest list request may apply its result (book/search/page changes and live hints).
   const pageRequestRef = useRef(0);
+  const scanStatusRequestRef = useRef(0);
+  const syncActionRef = useRef(0);
+  const currentBookRef = useRef(bookId);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const loadBooks = useCallback(() => {
     void bridge
       .list_contact_books()
       .then(next => {
+        if (!mountedRef.current) return;
         setBooks(next);
         setBookId(current => (current && next.some(book => book.id === current) ? current : next[0]?.id ?? ""));
       })
-      .catch(e => setError(String(e?.message ?? e)));
+      .catch(e => { if (mountedRef.current) setError(String(e?.message ?? e)); });
   }, []);
 
   const loadPage = useCallback((showLoading: boolean) => {
@@ -72,39 +86,53 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     void bridge
       .list_contacts(bookId, query, offset)
       .then(results => {
-        if (request !== pageRequestRef.current) return;
+        if (!mountedRef.current || request !== pageRequestRef.current) return;
         setContacts(results);
         // Keep the open detail current; an open editor keeps its unsaved draft untouched.
         setSelected(current => (current ? results.find(item => item.id === current.id) ?? current : current));
       })
       .catch(e => {
-        if (request === pageRequestRef.current) setError(String(e?.message ?? e));
+        if (mountedRef.current && request === pageRequestRef.current) setError(String(e?.message ?? e));
       })
       .finally(() => {
-        if (request === pageRequestRef.current) setLoading(false);
+        if (mountedRef.current && request === pageRequestRef.current) setLoading(false);
       });
   }, [bookId, query, offset]);
 
   useEffect(loadBooks, [loadBooks]);
   useEffect(() => loadPage(true), [loadPage]);
-  // Native state hints (sync, owner results) refresh books, the visible page and its badges.
+  useEffect(() => setOffset(0), [bookId, query]);
+
+  const book = books.find(item => item.id === bookId);
+
+  const refreshScanStatus = useCallback(() => {
+    const requestedBook = currentBookRef.current;
+    if (!requestedBook) return setScanStatus(null);
+    const sequence = ++scanStatusRequestRef.current;
+    void bridge.get_contact_sync_request(requestedBook).then(status => {
+      if (mountedRef.current && sequence === scanStatusRequestRef.current && currentBookRef.current === requestedBook) setScanStatus(status);
+    }).catch(() => {
+      // A transient status read must not erase the last persisted pending state.
+    });
+  }, []);
+  useEffect(() => {
+    currentBookRef.current = bookId;
+    refreshScanStatus();
+  }, [bookId, refreshScanStatus]);
+  useEffect(() => {
+    if (!scanStatus || !["queued", "waiting", "scanning"].includes(scanStatus.state)) return;
+    const interval = window.setInterval(refreshScanStatus, 5_000);
+    return () => window.clearInterval(interval);
+  }, [refreshScanStatus, scanStatus]);
+  // Native state hints refresh the visible book without replacing unsaved editor state.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const dispose = bridge.subscribe(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        loadBooks();
-        loadPage(false);
-      }, 150);
+      timer = setTimeout(() => { loadBooks(); loadPage(false); refreshScanStatus(); }, 150);
     });
-    return () => {
-      clearTimeout(timer);
-      dispose();
-    };
-  }, [loadBooks, loadPage]);
-  useEffect(() => setOffset(0), [bookId, query]);
-
-  const book = books.find(item => item.id === bookId);
+    return () => { clearTimeout(timer); dispose(); };
+  }, [loadBooks, loadPage, refreshScanStatus]);
 
   const handleSave = async (draft: ContactEditDraft) => {
     if (!book || !editing) return;
@@ -271,7 +299,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
   const requestNavigation = useCallback((action: () => void) => {
     if (busy) return;
-    setConfirmForget(null);
     if (editing && dirty) {
       setPendingNavigation(() => action);
       return;
@@ -293,7 +320,12 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   };
 
   const handleSelectBook = (id: string) => requestNavigation(() => {
+    currentBookRef.current = id;
+    ++scanStatusRequestRef.current;
+    ++syncActionRef.current;
     setBookId(id);
+    setScanStatus(null);
+    setSyncing(false);
     setSelected(null);
     setEditing(null);
     setConfirmDelete(false);
@@ -323,18 +355,35 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     setValidationError("");
   });
 
-  const handleForget = (id: string) => {
-    if (forgetting) return;
-    if (confirmForget !== id) { setConfirmForget(id); return; }
-    setConfirmForget(null);
-    requestNavigation(() => {
-      setForgetting(id);
-      setError("");
-      void bridge.forget_contact_book(id)
-        .then(() => setBooks(all => all.filter(value => value.id !== id)))
-        .catch(e => setError(String(e?.message ?? e)))
-        .finally(() => setForgetting(null));
-    });
+  const syncDisabledReason = !book
+    ? "Select a contact book to request a scan."
+    : book.sourceRevoked ? "This source device was removed."
+      : book.state === "retired" ? "This book is retired."
+        : book.state === "limited" ? "This phone has limited contact access and cannot complete an authoritative scan."
+          : book.state === "unavailable" ? "This phone is unavailable for contact scans."
+          : !book.capabilities.canSync ? "This phone does not support remote contact scans."
+          : sync?.readiness?.state === "needs_unlock" ? "Unlock sync before requesting a scan."
+            : sync?.readiness?.state === "server_unsupported" ? "This server does not support remote contact scans."
+              : sync?.readiness?.state === "backfill_pending" ? "Contact sync is preparing historical records."
+            : undefined;
+  const requestSync = () => {
+    if (!book || syncDisabledReason || syncing) return;
+    setSyncing(true);
+    setError("");
+    const requestedBook = book.id;
+    const action = ++syncActionRef.current;
+    void bridge.request_contact_sync(requestedBook)
+      .then(status => {
+        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) {
+          setScanStatus(status);
+        }
+      })
+      .catch(error => {
+        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setError(contactErrorText(error));
+      })
+      .finally(() => {
+        if (mountedRef.current && action === syncActionRef.current && currentBookRef.current === requestedBook) setSyncing(false);
+      });
   };
 
   return (
@@ -342,20 +391,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       <aside id="contacts-book-list" aria-label="Contact books">
         <header id="contacts-book-list-toolbar">
           <h2>Contacts</h2>
-          <button
-            id="contacts-repair"
-            className="secondary-button"
-            data-action="repair-contacts"
-            aria-label="Repair contact cache"
-            disabled={repairing || sync?.projection?.state === "rebuilding"}
-            onClick={() => {
-              setRepairing(true);
-              void bridge.request_contact_repair()
-                .then(() => setNotice("Contact cache repair requested."))
-                .catch(e => setError(String(e?.message ?? e)))
-                .finally(() => setRepairing(false));
-            }}
-          >{repairing ? "Requesting…" : "Repair"}</button>
         </header>
         <ul id="contacts-books">
           {books.map(item => (
@@ -370,24 +405,11 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                 <span>
                   <b>{item.deviceName}</b>
                   <small data-book-state={item.state}>
-                    {item.state === "active" ? "Active" : item.state === "limited" ? "Limited access" : item.state === "retired" ? "Retired" : "Unavailable"}
+                    {item.sourceRevoked ? "Source device removed" : item.state === "active" ? "Active" : item.state === "limited" ? "Limited access" : item.state === "retired" ? "Retired" : "Unavailable"}
                     {item.state === "active" ? ` · ${item.contactCount}` : ""}
                     {item.defaultAccountLabel && ` · ${item.defaultAccountLabel}`}
                   </small>
                 </span>
-              </button>
-              <button
-                data-book-forget={item.id}
-                data-confirm-forget={confirmForget === item.id ? "pending" : undefined}
-                className="secondary-button"
-                aria-label={`${confirmForget === item.id ? "Confirm forget" : "Forget"} ${item.deviceName}`}
-                title="Permanently hide this book on this desktop. Phone contacts are not changed."
-                disabled={forgetting !== null || busy}
-                onClick={() => handleForget(item.id)}
-                onBlur={() => setConfirmForget(current => current === item.id ? null : current)}
-                onKeyDown={event => { if (event.key === "Escape") setConfirmForget(null); }}
-              >
-                {forgetting === item.id ? "Forgetting…" : confirmForget === item.id ? "Confirm forget" : "Forget"}
               </button>
             </li>
           ))}
@@ -427,6 +449,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
           </p>
         )}
         <header id="contacts-center-toolbar">
+          <button id="contacts-sync-now" className="secondary-button" data-action="request-contact-sync" aria-describedby={syncDisabledReason ? "contacts-sync-unavailable" : undefined} disabled={Boolean(syncDisabledReason) || syncing} onClick={requestSync}>{syncing ? "Requesting…" : "Sync now"}</button>
           <input
             id="contacts-search"
             aria-label="Search contacts"
@@ -462,6 +485,12 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             <Clock size={16} />
           </button>
         </header>
+        {syncDisabledReason && <p id="contacts-sync-unavailable" role="status">{syncDisabledReason}</p>}
+        {scanStatus && <p id="contacts-scan-status" role="status" data-scan-state={scanStatus.state}>
+          {scanStatus.state === "completed" && (sync?.repairRequired || sync?.projection?.state === "failed" || sync?.projection?.state === "rebuilding")
+            ? "The phone finished its scan. Contacts are still being repaired locally."
+            : scanStatusText(scanStatus)}
+        </p>}
 
         {restore ? (
           <Restore

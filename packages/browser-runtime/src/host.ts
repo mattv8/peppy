@@ -5,7 +5,7 @@ import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./o
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
 import { BrowserEnrollment, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
 import { BrowserScheduler } from "./scheduler.js";
-import { OriginTransport } from "./transport.js";
+import { OriginTransport, TransportError } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 
@@ -73,6 +73,8 @@ export interface BrowserNetwork {
   enrollmentListVaultRequests(): Promise<VaultRequestView[]>;
   enrollmentApproveVaultRequest(requestId: string): Promise<void>;
   enrollmentDenyVaultRequest(requestId: string): Promise<void>;
+  listDevices(): Promise<unknown>;
+  revokeDevice(deviceId: string): Promise<void>;
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
   wake?(): void;
@@ -111,6 +113,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   list_contact_edits: { coreCommand: "list_contact_edits", mutation: false },
   search_contact_recipients: { coreCommand: "search_contact_recipients", mutation: false },
   request_contact_repair: { coreCommand: "request_contact_repair", mutation: true },
+  request_contact_sync: { coreCommand: "request_contact_sync", mutation: true },
+  get_contact_sync_request: { coreCommand: "get_contact_sync_request", mutation: false },
   list_restorable_contacts: { coreCommand: "list_restorable_contacts", mutation: false },
   restore_contact: { coreCommand: "restore_contact", mutation: true },
   contact_snapshot: { coreCommand: "contact_snapshot", mutation: false },
@@ -161,6 +165,9 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
 }
 
 function errorFor(error: unknown): RpcError {
+  if (error instanceof TransportError) {
+    return { code: error.kind === "offline" ? "offline" : "unavailable", message: "Browser operation failed." };
+  }
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const details = errorDetails(error);
@@ -169,6 +176,18 @@ function errorFor(error: unknown): RpcError {
     return { code, message: "Browser operation failed.", ...details };
   }
   return { code: "unavailable", message: "Browser operation failed." };
+}
+
+function deviceManagementError(error: unknown): RpcError {
+  if (error instanceof TransportError) {
+    if (error.kind === "revoked") {
+      return { code: "invalid_bearer", message: "The server rejected this device credential." };
+    }
+    if (error.kind === "status" && error.code && ["owner_required", "last_active_owner", "device_already_revoked", "device_not_found", "invalid_bearer"].includes(error.code)) {
+      return { code: error.code, message: "The server rejected the device request." };
+    }
+  }
+  return errorFor(error);
 }
 
 function errorDetails(error: object): Pick<RpcError, "conversationId" | "currentRevision" | "draftId"> {
@@ -497,6 +516,12 @@ export class BrowserWorkerHost {
       if (this.owner.owner.phase === "closed") await this.stop("closed");
       return;
     }
+    if (validRequest(request) && (request.command === "list_devices" || request.command === "revoke_device")) {
+      const response = await this.deviceManagement(request);
+      port.postMessage(response);
+      if (response.ok && request.command === "revoke_device") this.changed();
+      return;
+    }
     const generation = this.owner.owner.generation;
     const command = validRequest(request) ? request.command : undefined;
     let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher);
@@ -517,7 +542,7 @@ export class BrowserWorkerHost {
       this.changed();
       if (command === "unlock") await this.dependencies.network?.start();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
-      if (command === "send_draft" || command === "retry_attachment") this.dependencies.network?.wake?.();
+      if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync") this.dependencies.network?.wake?.();
     }
   }
 
@@ -577,8 +602,52 @@ export class BrowserWorkerHost {
     } catch (error: unknown) { return { id: request.id, ok: false, error: errorFor(error) }; }
   }
 
+  private async deviceManagement(request: RpcRequest): Promise<RpcResponse> {
+    const network = this.dependencies.network;
+    if (!network) return { id: request.id, ok: false, error: { code: "unavailable", message: "Browser operation failed." } };
+    try {
+      if (request.command === "list_devices") {
+        const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
+        return { id: request.id, ok: true, value: deviceRoster(await network.listDevices(), requiredDeviceId(identity.deviceId)) };
+      }
+      const deviceId = requiredDeviceId(request.args.deviceId);
+      await network.revokeDevice(deviceId);
+      return { id: request.id, ok: true, value: undefined };
+    } catch (error: unknown) {
+      return { id: request.id, ok: false, error: deviceManagementError(error) };
+    }
+  }
+
   private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
 
+}
+
+function deviceRoster(value: unknown, currentDeviceId: string): Record<string, unknown> {
+  const roster = object(value);
+  if (!Array.isArray(roster.devices)) throw new TransportError("invalid");
+  const devices = roster.devices.map(device => {
+    const row = object(device);
+    const id = requiredDeviceId(row.device_id);
+    if (typeof row.role !== "string" || typeof row.revoked !== "boolean") throw new TransportError("invalid");
+    return {
+      id,
+      name: typeof row.name === "string" && row.name.length > 0 ? row.name : "Unnamed device",
+      kind: typeof row.kind === "string" ? row.kind : null,
+      role: row.role,
+      revoked: row.revoked,
+    };
+  });
+  return { currentDeviceId, devices };
+}
+
+function object(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TransportError("invalid");
+  return value as Record<string, unknown>;
+}
+
+function requiredDeviceId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value)) throw new TransportError("invalid");
+  return value;
 }
 
 function notificationContext(args: Record<string, unknown>): BannerContext | undefined {
@@ -675,8 +744,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentRevokeInvite(inviteId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.revokeInvite(inviteId); },
        async enrollmentListVaultRequests() { if (!enrollment) throw { code: "unavailable" }; return enrollment.listVaultRequests(); },
        async enrollmentApproveVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.approveVaultRequest(requestId); },
-       async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
-    },
+        async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
+        async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
+        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
+      },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
       const core = new BrowserCore(() => modulePromise);

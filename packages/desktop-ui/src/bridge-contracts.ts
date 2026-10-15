@@ -26,8 +26,11 @@ export type AppFilter = { sourceDeviceId: string; packageName: string; appName: 
 export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden" };
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
-export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean };
-export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number };
+export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
+export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean };
+export type ManagedDeviceView = { id: string; name: string; kind: string | null; role: string; revoked: boolean };
+export type DeviceRosterView = { currentDeviceId: string; devices: ManagedDeviceView[] };
+export type ContactScanStatus = { requestId: string; bookId: string; state: "queued" | "waiting" | "scanning" | "completed" | "blocked" | "failed" | "expired"; reason?: string; expiresAt?: number };
 /** `label` is the wire value (round-trips unchanged); `displayLabel` is for people (e.g. Apple raw labels). */
 export type ContactPhone = { id?: string; label: string; displayLabel?: string; number: string; readOnly?: boolean };
 export type ContactEmail = { id?: string; label: string; displayLabel?: string; address: string; readOnly?: boolean };
@@ -116,6 +119,8 @@ export interface DesktopBridge {
   acknowledge_lifecycle(id: string, ok: boolean): Promise<void>;
   window(action: "minimize" | "maximize" | "close"): Promise<void>;
   list_contact_books(): Promise<ContactBookView[]>;
+  list_devices(): Promise<DeviceRosterView>;
+  revoke_device(deviceId: string): Promise<void>;
   forget_contact_book(bookId: string): Promise<void>;
   /** One page of at most 200 contacts; request the next page with `offset`. */
   list_contacts(bookId: string, query?: string, offset?: number): Promise<ContactView[]>;
@@ -123,6 +128,8 @@ export interface DesktopBridge {
   list_contact_edits(bookId?: string): Promise<ContactEditStatus[]>;
   search_contact_recipients(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]>;
   request_contact_repair(): Promise<ContactSyncStatus>;
+  request_contact_sync(bookId: string): Promise<ContactScanStatus>;
+  get_contact_sync_request(bookId: string): Promise<ContactScanStatus | null>;
   pick_contact_photo(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null>;
   list_restorable_contacts(bookId: string): Promise<RestorableContact[]>;
   restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome>;

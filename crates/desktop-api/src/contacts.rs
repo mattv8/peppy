@@ -130,6 +130,8 @@ pub struct Capabilities {
     pub supports_birthday: bool,
     /// Any device holding a retained tombstone may ask the owner to recreate it.
     pub can_restore: bool,
+    /// The phone advertised encrypted support for a fresh remote full scan.
+    pub can_sync: bool,
 }
 
 pub fn capabilities(book: &Value, own_device: &str) -> Capabilities {
@@ -158,6 +160,7 @@ pub fn capabilities(book: &Value, own_device: &str) -> Capabilities {
         supports_photo: can_write && flag("photo") == Some(true),
         supports_birthday: can_write && flag("birthday") != Some(false),
         can_restore: can_write,
+        can_sync: !owned && live && flag("scan_request") == Some(true),
     }
 }
 
@@ -184,11 +187,13 @@ pub fn book_view(
     let mut view = json!({
         "id": id,
         "deviceName": device_name,
+        "ownerDeviceId": str_field(book, "owner_device_id"),
         "state": book_state(book),
         "capabilities": {
             "canWrite": caps.can_write,
             "canDelete": caps.can_write,
             "canRestore": caps.can_restore,
+            "canSync": caps.can_sync,
             "supportsNotes": caps.supports_notes,
             "supportsPhoto": caps.supports_photo,
             "supportsBirthday": caps.supports_birthday,
@@ -1114,6 +1119,7 @@ mod tests {
                 supports_photo: true,
                 supports_birthday: true,
                 can_restore: true,
+                can_sync: false,
             },
         )
         .unwrap_err();

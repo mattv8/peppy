@@ -57,6 +57,7 @@ pub struct NetStatus {
     pub gateways_known: bool,
     pub vault: Option<VaultSummary>,
     pub device_role: Option<String>,
+    pub revoked_device_ids: HashSet<String>,
 }
 
 /// Local attachment ID -> server object ID, learned when this host uploads or downloads an
@@ -230,6 +231,10 @@ impl Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         (status.gateways.clone(), status.gateways_known)
+    }
+
+    pub fn revoked_devices(&self) -> HashSet<String> {
+        self.status.lock().unwrap_or_else(|poison| poison.into_inner()).revoked_device_ids.clone()
     }
 
     /// CAS draft save. Text, recipients, attachments and route are persisted together.

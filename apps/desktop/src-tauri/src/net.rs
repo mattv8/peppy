@@ -148,14 +148,14 @@ impl Api {
         if status.is_success() {
             return Ok(response);
         }
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(NetError::Revoked);
-        }
         let code = read_bounded(response, MAX_ERROR_BODY_BYTES)
             .await
             .ok()
             .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
             .and_then(|value| sanitize_code(&value));
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(NetError::Revoked);
+        }
         Err(NetError::Status {
             status: status.as_u16(),
             code,
@@ -614,6 +614,22 @@ pub mod tests {
         let origin = serve_once(
             "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
             vec![],
+        )
+        .await;
+        let api = Api::new(&origin, "t").unwrap();
+        assert_eq!(
+            api.get_json::<serde_json::Value>("/v1/vault", 4096)
+                .await
+                .unwrap_err(),
+            NetError::Revoked
+        );
+        let body = b"{\"code\":\"invalid_bearer\"}".to_vec();
+        let origin = serve_once(
+            format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            ),
+            body,
         )
         .await;
         let api = Api::new(&origin, "t").unwrap();

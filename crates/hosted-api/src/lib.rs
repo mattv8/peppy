@@ -283,7 +283,7 @@ pub mod routes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     // ========================================================================
     // Enum Tests
@@ -832,7 +832,35 @@ mod tests {
             "/hosted/v1/provisioning/complete"
         );
     }
+
+    #[test]
+    fn device_roster_roundtrips_nullable_legacy_fields_and_unknown_kind() {
+        let device_id = Uuid::new_v4();
+        let roster: DeviceRosterResponse = serde_json::from_value(json!({
+            "devices": [{
+                "device_id": device_id,
+                "name": null,
+                "kind": "future_client",
+                "role": "device",
+                "revoked": false,
+                "profile_fingerprint": "fingerprint",
+                "key_epoch": 1
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(roster.devices[0].device_id, device_id);
+        assert_eq!(roster.devices[0].name, None);
+        assert_eq!(roster.devices[0].kind.as_deref(), Some("future_client"));
+        assert_eq!(
+            serde_json::to_value(roster).unwrap()["devices"][0]["name"],
+            Value::Null
+        );
+    }
 }
 pub mod auth_web;
 pub mod billing_web;
+pub mod devices;
 pub mod enrollment;
+
+pub use devices::{DeviceRosterDevice, DeviceRosterResponse};

@@ -128,6 +128,7 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         status.gateways = views.clone();
         status.gateways_known = true;
         status.device_role = device_role;
+        status.revoked_device_ids = devices.devices.iter().filter(|device| device.revoked).map(|device| device.device_id.clone()).collect();
         changed
     };
     if changed {

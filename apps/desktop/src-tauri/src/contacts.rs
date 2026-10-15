@@ -97,10 +97,54 @@ pub fn list_books(session: &Session) -> BridgeResult<Vec<Value>> {
         .into_iter()
         .map(|gateway| (gateway.id, gateway.name))
         .collect::<HashMap<_, _>>();
+    let revoked = session.revoked_devices();
     Ok(core_books(&session.client)?
         .iter()
-        .filter_map(|book| shared::book_view(book, own, &device_names, &pending))
+        .filter_map(|book| {
+            let mut view = shared::book_view(book, own, &device_names, &pending)?;
+            if view
+                .get("ownerDeviceId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| revoked.contains(id))
+            {
+                view["sourceRevoked"] = json!(true);
+            }
+            Some(view)
+        })
         .collect())
+}
+
+pub fn request_sync(session: &Session, book_id: &str) -> BridgeResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    let book = find_book(&session.client, book_id)?;
+    if str_field(&book, "owner_device_id").is_some_and(|id| session.revoked_devices().contains(id))
+    {
+        return Err(BridgeError::new(
+            "source_revoked",
+            "This book's source device was removed.",
+        ));
+    }
+    let status = parse_core(
+        session
+            .client
+            .request_contact_sync(&json!({"book_id": book_id}).to_string()),
+    )?;
+    session.request_work();
+    session.notify();
+    Ok(status)
+}
+
+pub fn sync_request_status(session: &Session, book_id: &str) -> BridgeResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    parse_core(
+        session
+            .client
+            .contact_sync_request_status(&json!({"book_id": book_id}).to_string()),
+    )
 }
 
 pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {

@@ -210,7 +210,8 @@ fn views_are_whitelisted_and_capabilities_follow_the_owner_book() {
         books[0]["capabilities"],
         json!({
             "canWrite": true, "canDelete": true, "canRestore": true,
-            "supportsNotes": false, "supportsPhoto": true, "supportsBirthday": true
+            "canSync": false, "supportsNotes": false, "supportsPhoto": true,
+            "supportsBirthday": true
         })
     );
     assert_eq!(books[0]["contactCount"], 1);
@@ -563,7 +564,8 @@ fn read_only_and_owned_books_refuse_writes_and_restore() {
             supports_notes: false,
             supports_photo: false,
             supports_birthday: true,
-            can_restore: true
+            can_restore: true,
+            can_sync: false,
         }
     );
     let mut retired = ios.clone();

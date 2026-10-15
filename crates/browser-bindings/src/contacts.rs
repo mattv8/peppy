@@ -20,6 +20,8 @@ pub(super) fn handles(command: &str) -> bool {
             | "request_contact_repair"
             | "contact_repair_status"
             | "contact_snapshot"
+            | "request_contact_sync"
+            | "get_contact_sync_request"
     )
 }
 
@@ -81,6 +83,8 @@ impl BrowserCore {
             "request_contact_repair" => self.request_contact_repair(),
             "contact_repair_status" => self.contact_repair_status(),
             "contact_snapshot" => self.contact_snapshot(args),
+            "request_contact_sync" => self.request_contact_sync(args),
+            "get_contact_sync_request" => self.contact_sync_request_status(args),
             _ => Err(unknown_command()),
         }
     }
@@ -113,7 +117,16 @@ impl BrowserCore {
             self.raw_books()?
                 .iter()
                 .filter_map(|book| {
-                    shared::book_view(book, &own, &std::collections::HashMap::new(), &pending)
+                    let mut view =
+                        shared::book_view(book, &own, &std::collections::HashMap::new(), &pending)?;
+                    if view
+                        .get("ownerDeviceId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| self.context.revoked_device_ids.contains(id))
+                    {
+                        view["sourceRevoked"] = json!(true);
+                    }
+                    Some(view)
                 })
                 .collect(),
         ))
@@ -215,6 +228,41 @@ impl BrowserCore {
             .into_iter()
             .find(|book| book.get("id").and_then(Value::as_str) == Some(book_id))
             .ok_or_else(|| Failure::new("not-found", "The contact book was not found."))
+    }
+
+    fn request_contact_sync(&self, args: Value) -> Result<Value, Failure> {
+        let book_id = args
+            .get("bookId")
+            .and_then(Value::as_str)
+            .filter(|id| shared::valid_id(id))
+            .ok_or_else(invalid)?;
+        let book = self.find_book(book_id)?;
+        if book
+            .get("owner_device_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| self.context.revoked_device_ids.contains(id))
+        {
+            return Err(Failure::new(
+                "source_revoked",
+                "This book's source device was removed.",
+            ));
+        }
+        parse(
+            self.client()?
+                .request_contact_sync(&json!({"book_id": book_id}).to_string()),
+        )
+    }
+
+    fn contact_sync_request_status(&self, args: Value) -> Result<Value, Failure> {
+        let book_id = args
+            .get("bookId")
+            .and_then(Value::as_str)
+            .filter(|id| shared::valid_id(id))
+            .ok_or_else(invalid)?;
+        parse(
+            self.client()?
+                .contact_sync_request_status(&json!({"book_id": book_id}).to_string()),
+        )
     }
 
     fn forget_contact_book(&self, args: Value) -> Result<Value, Failure> {
@@ -709,6 +757,11 @@ mod tests {
         assert_eq!(book["deviceName"], "Phone");
         assert_eq!(book["contactCount"], 3);
         assert_eq!(book["capabilities"]["canWrite"], true);
+        assert_eq!(book["capabilities"]["canSync"], false);
+        assert_eq!(
+            book["ownerDeviceId"],
+            fixture.owner_config.device_id.to_string()
+        );
         assert_eq!(book["capabilities"]["supportsPhoto"], true);
         assert_eq!(
             object_keys(book),
@@ -718,6 +771,7 @@ mod tests {
                 "defaultAccountLabel",
                 "deviceName",
                 "id",
+                "ownerDeviceId",
                 "pendingEditCount",
                 "state",
             ])
@@ -909,6 +963,27 @@ mod tests {
             )["code"],
             "not-found"
         );
+    }
+
+    #[test]
+    fn scan_request_and_status_use_the_encrypted_core_ledger() {
+        let mut fixture = ContactFixture::new();
+        fixture
+            .owner
+            .set_contact_scan_request_capability(
+                &json!({"book_id": BOOK_ID, "enabled": true}).to_string(),
+            )
+            .unwrap();
+        fixture.deliver_owner_to_browser();
+
+        let request = fixture.command("request_contact_sync", json!({"bookId": BOOK_ID}));
+        assert_eq!(request["bookId"], BOOK_ID);
+        assert_eq!(request["state"], "queued");
+        assert!(request["requestId"].is_string());
+        assert!(request["expiresAt"].is_u64());
+        let status = fixture.command("get_contact_sync_request", json!({"bookId": BOOK_ID}));
+        assert_eq!(status["requestId"], request["requestId"]);
+        assert_eq!(status["bookId"], BOOK_ID);
     }
 
     #[test]

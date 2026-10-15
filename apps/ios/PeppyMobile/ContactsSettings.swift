@@ -77,7 +77,7 @@ extension AppModel {
     }
 
     func runContactsPass(_ reason: ContactsPassReason) async {
-        guard contacts.enabled, status.databaseOpen else { return }
+        guard status.databaseOpen else { return }
         do {
             try await contactPasses.run(reason)
         } catch ClientError.canceled {
@@ -91,6 +91,13 @@ extension AppModel {
         contacts.lastReport = report
         if report.outcome != .busy && report.outcome != .disabled { contacts.lastPassDate = Date() }
         contacts.error = report.syncError
+        if report.remoteScanPending, contacts.enabled, !remoteScanFollowUpQueued {
+            remoteScanFollowUpQueued = true
+            scheduleContactsBackgroundWork()
+            await runContactsPass(.changeNotification)
+        } else if !report.remoteScanPending {
+            remoteScanFollowUpQueued = false
+        }
         await refreshContacts()
     }
 

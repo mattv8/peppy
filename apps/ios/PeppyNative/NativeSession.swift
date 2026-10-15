@@ -828,10 +828,16 @@ public actor NativeSession {
         budget: SyncBudget = SyncBudget(),
         isCancelled: @escaping @Sendable () -> Bool
     ) async throws -> ContactsSyncReport {
-        guard preferences.load().enabled else { return ContactsSyncReport(outcome: .disabled) }
-        if client == nil { _ = try open() }
-        guard let client, let record else { throw ClientError.notEnrolled }
-        guard status.keysUnlocked else { return ContactsSyncReport(outcome: .needsUnlock) }
+        let contactsEnabled = preferences.load().enabled
+        if client == nil {
+            if contactsEnabled { _ = try open() } else { _ = try? open() }
+        }
+        guard let client, let record else {
+            return ContactsSyncReport(outcome: contactsEnabled ? .needsUnlock : .disabled)
+        }
+        guard status.keysUnlocked else {
+            return ContactsSyncReport(outcome: contactsEnabled ? .needsUnlock : .disabled)
+        }
         guard !syncing else { return ContactsSyncReport(outcome: .busy) }
         syncing = true
         defer { syncing = false }
@@ -852,6 +858,18 @@ public actor NativeSession {
                 let wrapped = ClientError.wrap(error)
                 if wrapped == .canceled { throw wrapped }
                 syncError = wrapped // Offline is not fatal: capture stays local and uploads next time.
+            }
+            if !contactsEnabled {
+                let coordinator = NativeContactsCoordinator(
+                    client: client, deviceId: identity.deviceId, provider: provider, preferences: preferences
+                )
+                var report = try await coordinator.run(reason: reason, isCancelled: isCancelled)
+                if syncError == nil, !isCancelled(), !Task.isCancelled {
+                    do { _ = try await sync.run() } catch { syncError = ClientError.wrap(error) }
+                }
+                report.syncError = syncError?.userMessage
+                refreshCount()
+                return report
             }
             let scratch = databaseDirectory.appendingPathComponent("contact-media-tmp", isDirectory: true)
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -880,6 +898,9 @@ public actor NativeSession {
             }
             if syncError == nil, !isCancelled(), !Task.isCancelled {
                 do { _ = try await sync.run() } catch { syncError = ClientError.wrap(error) }
+            }
+            if let bookId = report.bookId {
+                report.remoteScanPending = (try? coordinator.hasPendingRemoteScan(bookId: bookId)) ?? report.remoteScanPending
             }
             report.syncError = syncError?.userMessage
             refreshCount()

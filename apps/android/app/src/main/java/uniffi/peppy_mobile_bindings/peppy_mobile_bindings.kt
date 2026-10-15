@@ -767,6 +767,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_sync_readiness_json(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_sync_request_status(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_discard_unreferenced_attachment(
@@ -839,6 +841,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_commands(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_contact_sync_scans(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_downloads(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_dismissals(
@@ -861,9 +865,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_repair(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json(
     ): Int
@@ -876,6 +884,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_server_compaction_supported(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_app_muted(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_contact_scan_request_capability(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings(
     ): Int
@@ -1077,6 +1087,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_sync_readiness_json(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_sync_request_status(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_create_compose_draft(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_discard_unreferenced_attachment(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1149,6 +1161,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_commands(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_contact_sync_scans(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_downloads(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_notification_dismissals(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1171,10 +1185,14 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_remove_notification(`ptr`: Long,`notificationKey`: RustBuffer.ByValue,`instance`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_contact_sync_blocked(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_edit(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_repair(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_restore_contact_json(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_save_compose_draft(`ptr`: Long,`draftId`: RustBuffer.ByValue,`expectedRevision`: Long,`update`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1187,6 +1205,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_app_muted(`ptr`: Long,`sourceDeviceId`: RustBuffer.ByValue,`packageName`: RustBuffer.ByValue,`appName`: RustBuffer.ByValue,`muted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_contact_scan_request_capability(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_gateway_settings(`ptr`: Long,`settings`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part(`ptr`: Long,`id`: RustBuffer.ByValue,`providerPartId`: RustBuffer.ByValue,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1620,6 +1640,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_sync_readiness_json() and 0xFFFF) != 15503) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_sync_request_status() and 0xFFFF) != 17463) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft() and 0xFFFF) != 64980) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1728,6 +1751,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_commands() and 0xFFFF) != 9321) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_contact_sync_scans() and 0xFFFF) != 56678) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_downloads() and 0xFFFF) != 40625) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1761,10 +1787,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() and 0xFFFF) != 35619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked() and 0xFFFF) != 17812) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit() and 0xFFFF) != 41512) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_repair() and 0xFFFF) != 54774) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync() and 0xFFFF) != 9333) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() and 0xFFFF) != 61758) {
@@ -1783,6 +1815,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_app_muted() and 0xFFFF) != 61094) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_contact_scan_request_capability() and 0xFFFF) != 62690) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings() and 0xFFFF) != 40564) {
@@ -2472,6 +2507,8 @@ public interface NativeClientInterface {
      */
     fun `contactSyncReadinessJson`(): kotlin.String
     
+    fun `contactSyncRequestStatus`(`inputJson`: kotlin.String): kotlin.String
+    
     fun `createComposeDraft`(`conversationId`: kotlin.String?): NativeComposeDraft
     
     fun `discardUnreferencedAttachment`(`attachmentId`: kotlin.String): kotlin.Boolean
@@ -2577,6 +2614,8 @@ public interface NativeClientInterface {
     
     fun `pendingCommands`(): List<NativeCarrierCommand>
     
+    fun `pendingContactSyncScans`(`inputJson`: kotlin.String): kotlin.String
+    
     fun `pendingDownloads`(): List<NativeCipherObject>
     
     fun `pendingNotificationDismissals`(`limit`: kotlin.ULong): List<NativeNotificationDismissal>
@@ -2613,6 +2652,8 @@ public interface NativeClientInterface {
     
     fun `removeNotification`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
     
+    fun `reportContactSyncBlocked`(`inputJson`: kotlin.String): kotlin.String
+    
     fun `requestContactEdit`(`inputJson`: kotlin.String): kotlin.String
     
     /**
@@ -2620,6 +2661,8 @@ public interface NativeClientInterface {
      * visible state; the next promoted compaction snapshot replaces it.
      */
     fun `requestContactRepair`()
+    
+    fun `requestContactSync`(`inputJson`: kotlin.String): kotlin.String
     
     fun `restoreContactJson`(`input`: kotlin.String): kotlin.String
     
@@ -2632,6 +2675,8 @@ public interface NativeClientInterface {
     fun `serverCompactionSupported`(): kotlin.Boolean
     
     fun `setAppMuted`(`sourceDeviceId`: kotlin.String, `packageName`: kotlin.String, `appName`: kotlin.String, `muted`: kotlin.Boolean)
+    
+    fun `setContactScanRequestCapability`(`inputJson`: kotlin.String): kotlin.String
     
     fun `setGatewaySettings`(`settings`: NativeGatewaySettings)
     
@@ -3225,6 +3270,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `contactSyncRequestStatus`(`inputJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_sync_request_status(
+        it,
+        
+        FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `createComposeDraft`(`conversationId`: kotlin.String?): NativeComposeDraft {
             return FfiConverterTypeNativeComposeDraft.lift(
     callWithHandle {
@@ -3791,6 +3851,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `pendingContactSyncScans`(`inputJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_contact_sync_scans(
+        it,
+        
+        FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `pendingDownloads`(): List<NativeCipherObject> {
             return FfiConverterSequenceTypeNativeCipherObject.lift(
     callWithHandle {
@@ -3969,6 +4044,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `reportContactSyncBlocked`(`inputJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_contact_sync_blocked(
+        it,
+        
+        FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `requestContactEdit`(`inputJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -3998,6 +4088,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 }
     }
     
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `requestContactSync`(`inputJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(
+        it,
+        
+        FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -4094,6 +4199,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 }
     }
     
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setContactScanRequestCapability`(`inputJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_contact_scan_request_capability(
+        it,
+        
+        FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
     
 
     

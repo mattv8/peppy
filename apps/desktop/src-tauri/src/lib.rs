@@ -18,6 +18,7 @@ mod composer_scope;
 mod contacts;
 mod credentials;
 mod dialogs;
+mod devices;
 mod dto;
 mod enrollment;
 mod error;
@@ -998,6 +999,18 @@ async fn list_contact_books(state: State<'_, AppState>) -> BridgeResult<Vec<serd
 }
 
 #[tauri::command]
+async fn list_devices(state: State<'_, AppState>) -> BridgeResult<devices::DeviceRosterView> {
+    let session = state.require_session().await?;
+    devices::list(&session).await
+}
+
+#[tauri::command]
+async fn revoke_device(state: State<'_, AppState>, device_id: String) -> BridgeResult<()> {
+    let session = state.require_session().await?;
+    devices::revoke(&session, &device_id).await
+}
+
+#[tauri::command]
 async fn list_contacts(
     state: State<'_, AppState>,
     book_id: String,
@@ -1025,6 +1038,18 @@ async fn search_contact_recipients(
 async fn request_contact_repair(state: State<'_, AppState>) -> BridgeResult<serde_json::Value> {
     let session = state.require_session().await?;
     blocking(move || contacts::request_repair(&session)).await
+}
+
+#[tauri::command]
+async fn request_contact_sync(state: State<'_, AppState>, book_id: String) -> BridgeResult<serde_json::Value> {
+    let session = state.require_session().await?;
+    blocking(move || contacts::request_sync(&session, &book_id)).await
+}
+
+#[tauri::command]
+async fn get_contact_sync_request(state: State<'_, AppState>, book_id: String) -> BridgeResult<serde_json::Value> {
+    let session = state.require_session().await?;
+    blocking(move || contacts::sync_request_status(&session, &book_id)).await
 }
 
 /// This device's contact edit requests and the owner results recorded in the local ledger.
@@ -1877,6 +1902,8 @@ pub fn run() {
         set_notification_preferences,
         set_notification_context,
         request_notification_permission,
+        list_devices,
+        revoke_device,
         list_contact_books,
         list_contacts,
         forget_contact_book,
@@ -1885,6 +1912,8 @@ pub fn run() {
         pick_contact_photo,
         search_contact_recipients,
         request_contact_repair,
+        request_contact_sync,
+        get_contact_sync_request,
         list_restorable_contacts,
         restore_contact,
         set_start_at_login,

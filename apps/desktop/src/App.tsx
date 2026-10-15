@@ -74,6 +74,7 @@ import {
 import { notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
+import { DevicesSettings } from "./DevicesSettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
@@ -707,6 +708,7 @@ function SettingsView({
   const sections = [
     { id: "server", label: "Server" },
     { id: "sync", label: "Sync encryption" },
+    { id: "devices", label: "Devices" },
     { id: "notifications", label: "Notifications" },
     { id: "theme", label: "Appearance" },
     ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
@@ -835,6 +837,7 @@ function SettingsView({
           </button>
         )}
       </section>
+      <DevicesSettings />
       <NotificationSettings
         notifications={notifications}
         filters={filters}

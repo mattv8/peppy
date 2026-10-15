@@ -177,6 +177,8 @@ struct HostContext {
     origin: Option<String>,
     device_role: Option<String>,
     gateways: Option<Vec<GatewayView>>,
+    #[serde(skip)]
+    revoked_device_ids: std::collections::HashSet<String>,
 }
 
 impl BrowserCore {

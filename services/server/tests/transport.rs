@@ -578,6 +578,62 @@ async fn device_revocation_enforces_owner_scope_last_owner_and_token_cleanup() {
 }
 
 #[tokio::test]
+async fn devices_roster_includes_nullable_names_and_revoked_devices() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+    sqlx::query("UPDATE devices SET name=$1, kind=$2 WHERE vault_id=$3 AND device_id=$4")
+        .bind("Legacy phone")
+        .bind("android")
+        .bind(server.vault)
+        .bind(device.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    let (status, roster) = server.get(&device.token, "/v1/devices").await;
+    assert_eq!(status, StatusCode::OK);
+    let devices = roster["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    let owner = devices
+        .iter()
+        .find(|candidate| candidate["device_id"] == json!(server.owner_device))
+        .unwrap();
+    assert_eq!(owner["name"], Value::Null);
+    assert_eq!(owner["kind"], Value::Null);
+    let legacy_phone = devices
+        .iter()
+        .find(|candidate| candidate["device_id"] == json!(device.id))
+        .unwrap();
+    assert_eq!(legacy_phone["name"], "Legacy phone");
+    assert_eq!(legacy_phone["kind"], "android");
+    assert_eq!(legacy_phone["role"], "device");
+    assert_eq!(legacy_phone["revoked"], false);
+    assert_eq!(legacy_phone["profile_fingerprint"], server.fingerprint);
+    assert_eq!(legacy_phone["key_epoch"], 1);
+
+    let (status, body) = server
+        .post(
+            &server.owner_token,
+            &format!("/v1/devices/{}/revoke", device.id),
+            &Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, roster) = server.get(&server.owner_token, "/v1/devices").await;
+    assert_eq!(status, StatusCode::OK);
+    let legacy_phone = roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["device_id"] == json!(device.id))
+        .unwrap();
+    assert_eq!(legacy_phone["revoked"], true);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn vault_delete_is_owner_only_requires_echo_and_queues_all_object_cleanup() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;

@@ -91,6 +91,8 @@ public struct ContactsSyncReport: Sendable, Equatable {
     /// Retention is paused until every vault device has declared compaction fencing.
     public var retentionPaused = false
     public var syncError: String?
+    /// Durable owner work still awaiting a fresh scan after this bounded pass.
+    public var remoteScanPending = false
 
     public init(outcome: Outcome) { self.outcome = outcome }
 }
@@ -259,7 +261,13 @@ struct NativeContactsCoordinator {
     var photoBudget: ContactsPhotoBudget?
 
     func run(reason: ContactsPassReason, isCancelled: @escaping @Sendable () -> Bool) async throws -> ContactsSyncReport {
-        guard preferences.load().enabled else { return ContactsSyncReport(outcome: .disabled) }
+        guard preferences.load().enabled else {
+            if let book = try ownedBook() {
+                try setScanRequestCapability(bookId: book.id, enabled: false)
+                try reportPendingScanBlocked(bookId: book.id, reason: "sync_disabled")
+            }
+            return ContactsSyncReport(outcome: .disabled)
+        }
         let readiness = try Self.object(client.contactSyncReadinessJson())
         let contactsReady = readiness["contacts_ready"] as? Bool ?? false
         let supported = readiness["server_supported"] as? Bool ?? false
@@ -296,18 +304,21 @@ struct NativeContactsCoordinator {
         guard access.mayRead else {
             // Permission loss publishes the book state only; existing contacts are never removed.
             _ = try capture(book: bookBody(id: bookId, generation: generation, access: access, containers: []), entries: [])
+            try reportPendingScanBlocked(bookId: bookId, reason: "permission_denied")
             report.outcome = .noAccess
             return report
         }
         let book = bookBody(id: bookId, generation: generation, access: access, containers: try await provider.containers())
         // Book state is republished by the core only when it changed (or on its heartbeat).
         _ = try capture(book: book, entries: [])
+        if access == .limited { try reportPendingScanBlocked(bookId: bookId, reason: "limited_access") }
+        let pendingRemoteScan = try hasPendingRemoteScan(bookId: bookId)
         var checkpoint = existing == nil ? ContactsCheckpoint() : try readCheckpoint(bookId)
         let original = checkpoint
         let budget = photoBudget ?? .for(reason)
 
         var handled = false
-        if existing != nil, checkpoint.scanId == nil, access == .full, let token = checkpoint.historyToken {
+        if existing != nil, checkpoint.scanId == nil, !pendingRemoteScan, access == .full, let token = checkpoint.historyToken {
             handled = try await incremental(since: token, book: book, checkpoint: &checkpoint, report: &report, isCancelled: isCancelled)
         }
         if !handled {
@@ -323,6 +334,7 @@ struct NativeContactsCoordinator {
                                       checkpoint: &checkpoint, report: &report, isCancelled: isCancelled)
         }
         report.photoWorkRemaining = !checkpoint.pendingPhotoKeys.isEmpty || checkpoint.sweepActive
+        report.remoteScanPending = try hasPendingRemoteScan(bookId: bookId)
         try writeCheckpoint(bookId, checkpoint)
         if let media { report.media = media.report }
         return report
@@ -398,14 +410,13 @@ struct NativeContactsCoordinator {
                 checkpoint.scanCursor = nil
                 checkpoint.scanHistoryToken = tokenBefore
                 checkpoint.scanIncomplete = false
+                // A crash after core acceptance must resume this identity, not orphan it.
+                try writeCheckpoint(bookId, checkpoint)
             }
             _ = try call(client.beginContactScan, [
                 "schema_version": 1, "scan_id": scanId, "book_id": bookId,
                 "generation": generation, "access": "full", "authoritative": true,
             ])
-            // Persist the scan identity before observing members so a process interruption
-            // resumes this membership set, rather than leaking a new scan on every restart.
-            try writeCheckpoint(bookId, checkpoint)
             if !input.authoritative && !isCancelled() { checkpoint.scanIncomplete = true }
             let ordered = input.contacts.sorted { $0.id < $1.id }
             let pending = ordered.filter { contact in
@@ -630,6 +641,23 @@ struct NativeContactsCoordinator {
         _ = try call(client.contactScanStateJson, ["schema_version": 1, "book_id": bookId, "checkpoint": checkpoint.json])
     }
 
+    // MARK: Remote scan requests
+
+    /// The core owns request identity and durable state. Native passes only report provider facts.
+    func setScanRequestCapability(bookId: String, enabled: Bool) throws {
+        _ = try call(client.setContactScanRequestCapability, ["book_id": bookId, "enabled": enabled])
+    }
+
+    func hasPendingRemoteScan(bookId: String) throws -> Bool {
+        let pending = try call(client.pendingContactSyncScans, ["book_id": bookId])
+        return !(pending["requests"] as? [[String: Any]] ?? []).isEmpty
+    }
+
+    private func reportPendingScanBlocked(bookId: String, reason: String) throws {
+        guard try hasPendingRemoteScan(bookId: bookId) else { return }
+        _ = try call(client.reportContactSyncBlocked, ["book_id": bookId, "reason": reason])
+    }
+
     // MARK: Settings and approvals (core-only, never an OS write)
 
     func overview() throws -> ContactsOverview {
@@ -717,7 +745,7 @@ struct NativeContactsCoordinator {
             "id": id, "owner_device_id": deviceId, "generation": generation,
             "state": state ?? Self.bookState(access),
             // Notes need an entitlement this app does not hold.
-            "capabilities": ["read": access.mayRead, "write": access.mayRead, "photo": true, "notes": false, "birthday": true],
+            "capabilities": ["read": access.mayRead, "write": access.mayRead, "photo": true, "notes": false, "birthday": true, "scan_request": true],
             "accounts": containers.map { ["id": $0.id, "name": $0.name, "writable": true] as [String: Any] },
         ]
         if let fallback = containers.first(where: \.isDefault)?.id { book["default_account_id"] = fallback }

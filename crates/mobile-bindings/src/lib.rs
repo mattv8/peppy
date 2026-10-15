@@ -1256,6 +1256,43 @@ impl NativeClient {
             client.finish_contact_scan(&input_json)
         })
     }
+    pub fn request_contact_sync(&self, input_json: String) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.request_contact_sync(&input_json)
+        })
+    }
+    pub fn contact_sync_request_status(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.contact_sync_request_status(&input_json)
+        })
+    }
+    pub fn pending_contact_sync_scans(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.pending_contact_sync_scans(&input_json)
+        })
+    }
+    pub fn report_contact_sync_blocked(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.report_contact_sync_blocked(&input_json)
+        })
+    }
+    pub fn set_contact_scan_request_capability(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_contact_scan_request_capability(&input_json)
+        })
+    }
     pub fn contact_book_view(&self, input_json: String) -> Result<String, MobileBindingsError> {
         with_client(&self.client, |client| client.contact_book_view(&input_json))
     }
@@ -2042,6 +2079,43 @@ mod tests {
         assert_eq!(status.state, NativeSnapshotProjectionState::Promoted);
         assert_eq!(status.reason, None);
         assert!(!client.contact_repair_required().unwrap());
+    }
+
+    #[test]
+    fn contact_sync_request_methods_forward_json_to_core() {
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "peppy-mobile-contact-sync-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id,
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![9; 32],
+        })
+        .unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+
+        for result in [
+            client.request_contact_sync("{".into()),
+            client.contact_sync_request_status("{".into()),
+            client.pending_contact_sync_scans("{".into()),
+            client.report_contact_sync_blocked("{".into()),
+            client.set_contact_scan_request_capability("{".into()),
+        ] {
+            assert!(matches!(result, Err(MobileBindingsError::InvalidRequest)));
+        }
+
+        client.dispose().unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

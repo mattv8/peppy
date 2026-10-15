@@ -662,6 +662,7 @@ async fn mobile_owner_claim_exposes_raw_kind_through_authenticated_devices() {
         devices["devices"],
         json!([{
             "device_id": claim["device"]["device_id"],
+            "name": claim["device"]["name"],
             "role": "owner",
             "revoked": false,
             "profile_fingerprint": claim["material"]["fingerprint"],

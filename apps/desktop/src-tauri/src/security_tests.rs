@@ -238,6 +238,34 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
 }
 
 #[test]
+fn device_management_commands_are_registered_for_the_main_window_only() {
+    let commands = declared_commands();
+    let registered = include_str!("lib.rs");
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    for command in [
+        "list_devices",
+        "revoke_device",
+        "request_contact_sync",
+        "get_contact_sync_request",
+    ] {
+        assert!(
+            commands.contains(&command.to_owned()),
+            "{command} is not declared"
+        );
+        assert!(
+            registered.contains(&format!("\n        {command},")),
+            "{command} is not registered"
+        );
+        assert!(main.contains(&allow(command)), "main lacks {command}");
+        assert!(
+            !composer.contains(&allow(command)),
+            "composer can call {command}"
+        );
+    }
+}
+
+#[test]
 fn runtime_window_checks_back_the_acl() {
     assert!(crate::require_main("main").is_ok());
     assert_eq!(

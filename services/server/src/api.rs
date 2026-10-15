@@ -170,6 +170,7 @@ use peppy_hosted_api::enrollment::{
     EnrollmentRole, InstanceAccount, InstanceInfo, InstanceLoginRequest, InstanceManagement,
     InstanceSession, VaultMaterial,
 };
+use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
 use peppy_protocol::{Envelope, EnvelopePurpose};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1823,26 +1824,18 @@ async fn delete_vault(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
-struct DeviceView {
-    device_id: Uuid,
-    role: String,
-    revoked: bool,
-    kind: Option<String>,
-    profile_fingerprint: String,
-    key_epoch: u32,
-}
-async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Value>> {
+async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<DeviceRosterResponse>> {
     let p = authenticated(&s, &h, Operation::Read).await?;
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "devices_begin"))?;
-    let rows = sqlx::query("SELECT device_id,role,revoked_at IS NOT NULL revoked,kind,profile_fingerprint,key_epoch FROM devices WHERE vault_id=$1 ORDER BY created_at")
+    let rows = sqlx::query("SELECT device_id,name,role,revoked_at IS NOT NULL revoked,kind,profile_fingerprint,key_epoch FROM devices WHERE vault_id=$1 ORDER BY created_at")
         .bind(p.vault).fetch_all(&mut *tx).await.map_err(|error| database_unavailable(&error, "api_query"))?;
     let devices = rows
         .into_iter()
-        .map(|row| DeviceView {
+        .map(|row| DeviceRosterDevice {
             device_id: row.get("device_id"),
+            name: row.get("name"),
             role: row.get("role"),
             revoked: row.get("revoked"),
             kind: row.get("kind"),
@@ -1850,7 +1843,7 @@ async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Valu
             key_epoch: row.get::<i32, _>("key_epoch") as u32,
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!({"devices":devices})))
+    Ok(Json(DeviceRosterResponse { devices }))
 }
 
 async fn capabilities(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Value>> {

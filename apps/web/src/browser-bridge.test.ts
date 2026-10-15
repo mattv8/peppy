@@ -55,6 +55,38 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("routes roster and revoke requests through the active browser worker", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const roster = bridge.list_devices();
+    const revoked = bridge.revoke_device("device-id");
+    expect(port.sent).toEqual([
+      { id: 1, command: "list_devices", args: {} },
+      { id: 2, command: "revoke_device", args: { deviceId: "device-id" } },
+    ]);
+    port.reply({ id: 1, ok: true, value: { currentDeviceId: "device-id", devices: [] } });
+    port.reply({ id: 2, ok: false, error: { code: "owner_required", message: "Denied" } });
+    await expect(roster).resolves.toEqual({ currentDeviceId: "device-id", devices: [] });
+    await expect(revoked).rejects.toMatchObject({ code: "owner_required" });
+    bridge.dispose();
+  });
+
+  it("routes scan request and status through the active browser worker", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const request = bridge.request_contact_sync("book-id");
+    const status = bridge.get_contact_sync_request("book-id");
+    expect(port.sent).toEqual([
+      { id: 1, command: "request_contact_sync", args: { bookId: "book-id" } },
+      { id: 2, command: "get_contact_sync_request", args: { bookId: "book-id" } },
+    ]);
+    port.reply({ id: 1, ok: true, value: { requestId: "request", bookId: "book-id", state: "queued", expiresAt: 1 } });
+    port.reply({ id: 2, ok: true, value: null });
+    await expect(request).resolves.toMatchObject({ state: "queued" });
+    await expect(status).resolves.toBeNull();
+    bridge.dispose();
+  });
+
   it("forwards management commands only to the browser worker", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

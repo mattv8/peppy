@@ -27,6 +27,7 @@ mod contact_resolution;
 mod contact_search;
 mod contact_source;
 mod contact_state;
+mod contact_sync_requests;
 mod contacts;
 mod conversation_match;
 mod gateway_settings;
@@ -309,6 +310,12 @@ pub enum PrivatePayload {
         request: serde_json::Value,
     },
     ContactEditResult {
+        result: serde_json::Value,
+    },
+    ContactScanRequest {
+        request: serde_json::Value,
+    },
+    ContactScanResult {
         result: serde_json::Value,
     },
 }
@@ -821,6 +828,35 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         contacts::finish_scan(conn, &ctx, input)
+    }
+    /// Enqueues an encrypted request for a phone to run a fresh authoritative book scan.
+    pub fn request_contact_sync(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::request(conn, &ctx, input)
+    }
+    /// Returns this caller's durable status for a requested book scan.
+    pub fn contact_sync_request_status(&self, input: &str) -> Result<String, Error> {
+        let store = self.lock()?;
+        contact_sync_requests::status(&store.conn, &store.config.device_id.to_string(), input)
+    }
+    /// Returns durable owner-local scan work. Hosts must query this before scheduling a full scan.
+    pub fn pending_contact_sync_scans(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::pending(conn, &ctx, input)
+    }
+    /// Publishes truthful blocked outcomes for pending owner work (permission, limited access, etc.).
+    pub fn report_contact_sync_blocked(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::report_blocked(conn, &ctx, input)
+    }
+    /// Records an owner phone's encrypted scan-request capability without changing book generation.
+    pub fn set_contact_scan_request_capability(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::set_capability(conn, &ctx, input)
     }
     pub fn contact_book_view(&self, input: &str) -> Result<String, Error> {
         let store = self.lock()?;
@@ -4145,26 +4181,10 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
                         .and_then(|kind| kind.as_str())
                         .map(str::to_owned)
                 });
-            let known = [
-                "message",
-                "send_command",
-                "mms_message",
-                "send_mms_command",
-                "send_status",
-                "read_state",
-                "notification_posted",
-                "notification_removed",
-                "notification_dismiss",
-                "app_filter",
-                "mms_own_address",
-                "contact_book_state",
-                "contact_upserted",
-                "contact_removed",
-                "contact_edit_request",
-                "contact_edit_result",
-            ];
             if envelope.purpose == EnvelopePurpose::Event
-                && kind.as_deref().is_some_and(|kind| !known.contains(&kind))
+                && kind
+                    .as_deref()
+                    .is_some_and(|kind| !is_known_private_payload_kind(kind))
             {
                 return Ok(Opened::UnknownEvent);
             }
@@ -4172,6 +4192,30 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
         }
     };
     Ok(Opened::Payload(payload))
+}
+
+fn is_known_private_payload_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "message"
+            | "send_command"
+            | "mms_message"
+            | "send_mms_command"
+            | "send_status"
+            | "read_state"
+            | "notification_posted"
+            | "notification_removed"
+            | "notification_dismiss"
+            | "app_filter"
+            | "mms_own_address"
+            | "contact_book_state"
+            | "contact_upserted"
+            | "contact_removed"
+            | "contact_edit_request"
+            | "contact_edit_result"
+            | "contact_scan_request"
+            | "contact_scan_result"
+    )
 }
 
 /// Applies one decrypted record. `Ok(Some(reason))` means quarantine; the caller rolls back.
@@ -4329,7 +4373,9 @@ fn apply_record(
             | PrivatePayload::ContactUpserted { .. }
             | PrivatePayload::ContactRemoved { .. }
             | PrivatePayload::ContactEditRequest { .. }
-            | PrivatePayload::ContactEditResult { .. }),
+            | PrivatePayload::ContactEditResult { .. }
+            | PrivatePayload::ContactScanRequest { .. }
+            | PrivatePayload::ContactScanResult { .. }),
         ) => {
             let Some(payload) = contact_media::ingest(conn, payload)? else {
                 return Ok(Some(Q::InvalidPayload));
@@ -4995,6 +5041,8 @@ fn is_contact_payload(payload: &PrivatePayload) -> bool {
             | PrivatePayload::ContactRemoved { .. }
             | PrivatePayload::ContactEditRequest { .. }
             | PrivatePayload::ContactEditResult { .. }
+            | PrivatePayload::ContactScanRequest { .. }
+            | PrivatePayload::ContactScanResult { .. }
     )
 }
 
@@ -5131,6 +5179,19 @@ fn compaction_group(
                 terminal,
             )
         }
+        PrivatePayload::ContactScanRequest { request } => (
+            b"contact-scan-request",
+            vec![text(request, "request_id")?],
+            true,
+        ),
+        PrivatePayload::ContactScanResult { result } => (
+            b"contact-scan-result",
+            vec![text(result, "request_id")?],
+            matches!(
+                result.get("state").and_then(serde_json::Value::as_str),
+                Some("completed" | "blocked" | "failed" | "expired")
+            ),
+        ),
         _ => return Ok(None),
     }))
 }
@@ -5175,6 +5236,14 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             .get("request_id")
             .and_then(serde_json::Value::as_str)
             .map(|id| format!("contact-edit:{id}")),
+        PrivatePayload::ContactScanRequest { request } => request
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("contact-scan:{id}")),
+        PrivatePayload::ContactScanResult { result } => result
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("contact-scan:{id}")),
         _ => None,
     }
 }
@@ -5323,6 +5392,11 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                 ciphertext: Vec::new(),
             };
             let payload: PrivatePayload = decode(&plain)?;
+            if let PrivatePayload::ContactScanResult { result } = &payload
+                && contact_scan_result_has_earlier_book_event(conn, sequence, result)?
+            {
+                continue;
+            }
             envelope.compaction = compaction
                 .map(|value| decode(value.as_bytes()))
                 .transpose()?;
@@ -5355,6 +5429,39 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         }
     }
     Ok(count)
+}
+
+/// A scan result is a book-level completion barrier. It must not overtake an earlier contact
+/// update whose photo is still held and therefore cannot yet be sealed.
+fn contact_scan_result_has_earlier_book_event(
+    conn: &Connection,
+    sequence: i64,
+    result: &serde_json::Value,
+) -> Result<bool, Error> {
+    let Some(book_id) = result.get("book_id").and_then(serde_json::Value::as_str) else {
+        return Ok(false);
+    };
+    let rows: Vec<Vec<u8>> = conn
+        .prepare("SELECT plain FROM outbox WHERE state='unsealed' AND seq<? AND plain IS NOT NULL")?
+        .query_map([sequence], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for plain in rows {
+        match decode::<PrivatePayload>(&plain)? {
+            PrivatePayload::ContactUpserted { book, .. }
+                if book.get("id").and_then(serde_json::Value::as_str) == Some(book_id) =>
+            {
+                return Ok(true);
+            }
+            PrivatePayload::ContactRemoved {
+                book_id: pending_book,
+                ..
+            } if pending_book == book_id => {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn next_source_sequence(
@@ -6069,6 +6176,13 @@ mod tests {
     use super::*;
     use peppy_crypto::enrollment::EnrollmentContext;
     use uuid::Uuid;
+
+    #[test]
+    fn malformed_scan_payload_kinds_remain_strict_known_events() {
+        assert!(is_known_private_payload_kind("contact_scan_request"));
+        assert!(is_known_private_payload_kind("contact_scan_result"));
+        assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
 
     #[test]
     fn database_key_must_be_exactly_32_bytes() {

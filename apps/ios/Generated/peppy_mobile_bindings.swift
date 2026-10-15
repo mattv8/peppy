@@ -690,6 +690,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func contactSyncReadinessJson() throws  -> String
     
+    func contactSyncRequestStatus(inputJson: String) throws  -> String
+    
     func createComposeDraft(conversationId: String?) throws  -> NativeComposeDraft
     
     func discardUnreferencedAttachment(attachmentId: String) throws  -> Bool
@@ -795,6 +797,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func pendingCommands() throws  -> [NativeCarrierCommand]
     
+    func pendingContactSyncScans(inputJson: String) throws  -> String
+    
     func pendingDownloads() throws  -> [NativeCipherObject]
     
     func pendingNotificationDismissals(limit: UInt64) throws  -> [NativeNotificationDismissal]
@@ -831,6 +835,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func removeNotification(notificationKey: String, instance: String) throws 
     
+    func reportContactSyncBlocked(inputJson: String) throws  -> String
+    
     func requestContactEdit(inputJson: String) throws  -> String
     
     /**
@@ -838,6 +844,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * visible state; the next promoted compaction snapshot replaces it.
      */
     func requestContactRepair() throws 
+    
+    func requestContactSync(inputJson: String) throws  -> String
     
     func restoreContactJson(input: String) throws  -> String
     
@@ -850,6 +858,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func serverCompactionSupported() throws  -> Bool
     
     func setAppMuted(sourceDeviceId: String, packageName: String, appName: String, muted: Bool) throws 
+    
+    func setContactScanRequestCapability(inputJson: String) throws  -> String
     
     func setGatewaySettings(settings: NativeGatewaySettings) throws 
     
@@ -1247,6 +1257,16 @@ open func contactSyncReadinessJson()throws  -> String  {
 })
 }
     
+open func contactSyncRequestStatus(inputJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_contact_sync_request_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
 open func createComposeDraft(conversationId: String?)throws  -> NativeComposeDraft  {
     return try  FfiConverterTypeNativeComposeDraft_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1633,6 +1653,16 @@ open func pendingCommands()throws  -> [NativeCarrierCommand]  {
 })
 }
     
+open func pendingContactSyncScans(inputJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_contact_sync_scans(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
 open func pendingDownloads()throws  -> [NativeCipherObject]  {
     return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1756,6 +1786,16 @@ open func removeNotification(notificationKey: String, instance: String)throws   
 }
 }
     
+open func reportContactSyncBlocked(inputJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_contact_sync_blocked(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
 open func requestContactEdit(inputJson: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1776,6 +1816,16 @@ open func requestContactRepair()throws   {try rustCallWithError(FfiConverterType
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+open func requestContactSync(inputJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_sync(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
 }
     
 open func restoreContactJson(input: String)throws  -> String  {
@@ -1842,6 +1892,16 @@ open func setAppMuted(sourceDeviceId: String, packageName: String, appName: Stri
         FfiConverterBool.lower(muted),uniffiCallStatus
     )
 }
+}
+    
+open func setContactScanRequestCapability(inputJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_contact_scan_request_capability(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
 }
     
 open func setGatewaySettings(settings: NativeGatewaySettings)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
@@ -8208,6 +8268,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_sync_readiness_json() != 15503) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_contact_sync_request_status() != 17463) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_create_compose_draft() != 64980) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8316,6 +8379,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_commands() != 9321) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_contact_sync_scans() != 56678) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_downloads() != 40625) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8349,10 +8415,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification() != 35619) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked() != 17812) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit() != 41512) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_repair() != 54774) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_sync() != 9333) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_restore_contact_json() != 61758) {
@@ -8371,6 +8443,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_app_muted() != 61094) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_contact_scan_request_capability() != 62690) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings() != 40564) {
