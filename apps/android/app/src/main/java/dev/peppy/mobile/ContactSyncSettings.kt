@@ -60,7 +60,7 @@ internal fun ContactSyncSettings(
         }
     }
 
-    Section("contact-sync-section", "Contact sync") {
+    Section("contact-sync-section", "Contact sync", showDivider = false) {
         val current = state
         val enabled = current?.enabled == true
         Row(Modifier.fillMaxWidth().testTag("contact-sync-enable-row"), horizontalArrangement = Arrangement.SpaceBetween) {
