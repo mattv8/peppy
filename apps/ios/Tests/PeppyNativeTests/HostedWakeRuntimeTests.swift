@@ -185,6 +185,94 @@ final class HostedWakeRuntimeTests: XCTestCase {
 }
 
 extension HostedWakeRuntimeTests {
+    func testCoalescedWakeWorkRunsOverlappingSameKeyOnce() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let second = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        try? await Task.sleep(for: .milliseconds(10))
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 1)
+
+        await probe.releaseAll()
+        await first.value
+        await second.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 1)
+    }
+
+    func testCoalescedWakeWorkRunsDifferentKeysConcurrently() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let second = Task { @MainActor in await coordinator.run(key: 2) { await probe.run() } }
+        await probe.waitForRuns(2)
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 2)
+
+        await probe.releaseAll()
+        await first.value
+        await second.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 2)
+    }
+
+    func testCoalescedWakeWorkCancelledWaiterReturnsWithoutCancellingWork() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+        defer { Task { await probe.releaseAll() } }
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let returned = expectation(description: "cancelled waiter returned")
+        let joiner = Task { @MainActor in
+            await coordinator.run(key: 1) { await probe.run() }
+            returned.fulfill()
+        }
+        joiner.cancel()
+        await fulfillment(of: [returned], timeout: 1)
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 1)
+
+        await probe.releaseAll()
+        await first.value
+        await joiner.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 1)
+
+        let later = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(2)
+        await probe.releaseAll()
+        await later.value
+        let totalRuns = await probe.runCount
+        XCTAssertEqual(totalRuns, 2)
+    }
+
+    func testCoalescedWakeWorkCancelledWaiterDoesNotClearRunningWork() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let cancelledJoiner = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        cancelledJoiner.cancel()
+        await cancelledJoiner.value
+        let laterJoiner = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        try? await Task.sleep(for: .milliseconds(10))
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 1)
+
+        await probe.releaseAll()
+        await first.value
+        await laterJoiner.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 1)
+    }
+
     func testWakeFenceRetiresCapturedWorkWhenPauseWins() {
         var fence = WakeWorkFence()
         let captured = fence.generation
@@ -255,6 +343,41 @@ extension HostedWakeRuntimeTests {
         try await session.open()
         let wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: "production")
         return (session, wakeIdentity, "https://relay.example.test")
+    }
+}
+
+private actor WakeWorkProbe {
+    private var runs = 0
+    private var completed = 0
+    private var runWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    var runCount: Int { runs }
+    var completedCount: Int { completed }
+
+    func run() async {
+        runs += 1
+        resumeRunWaiters()
+        await withCheckedContinuation { releaseWaiters.append($0) }
+        completed += 1
+    }
+
+    func waitForRuns(_ count: Int) async {
+        guard runs < count else { return }
+        await withCheckedContinuation { runWaiters.append($0) }
+        await waitForRuns(count)
+    }
+
+    func releaseAll() {
+        let waiters = releaseWaiters
+        releaseWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+
+    private func resumeRunWaiters() {
+        let waiters = runWaiters
+        runWaiters = []
+        waiters.forEach { $0.resume() }
     }
 }
 

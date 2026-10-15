@@ -19,6 +19,11 @@ final class AppModel {
         let target: RelayWakeRegistrationTarget
     }
 
+    private struct WakeReconcileKey: Equatable {
+        let generation: UInt
+        let identity: EnrollmentIdentity?
+    }
+
     enum Activity: Equatable { case idle, importing, unlocking, enrolling, syncing, refreshing, disconnecting }
 
     private(set) var status = SessionStatus()
@@ -38,6 +43,7 @@ final class AppModel {
     private var wakePreferenceValue = "automatic"
     @ObservationIgnored private var wakeFence = WakeWorkFence()
     @ObservationIgnored private var wakeEnrollmentBinding: WakeEnrollmentBinding?
+    @ObservationIgnored private let wakeReconcile = CoalescedWakeWork<WakeReconcileKey>()
     /// The active enrollment cannot be opened (e.g. its database is gone after a reinstall);
     /// disconnecting is the way out.
     private(set) var enrollmentBlocked = false
@@ -441,11 +447,25 @@ final class AppModel {
 
     /// APNs registration has no visible notification prompt. It occurs only for an eligible hosted
     /// enrollment and a non-paused durable preference.
+    ///
+    /// One reconcile runs per preference generation and identity. Overlapping callers (cold-start
+    /// load, the foreground task, token callbacks) join it instead of building a second relay client
+    /// and registering twice. The work is unstructured, so a joiner cancelled by a view-task restart
+    /// leaves it to finish; preference changes start a new generation, while the identity component
+    /// separates work after identity changes. Older work stops at its next fence checkpoint.
     func reconcileWakeRegistration() async {
+        if status.identity == nil { status = (try? await session.open()) ?? status }
+        let captured = wakeFence.generation
+        let key = WakeReconcileKey(generation: captured, identity: status.identity)
+        await wakeReconcile.run(key: key) { [weak self] in
+            await self?.performWakeReconcile(captured: captured)
+        }
+    }
+
+    private func performWakeReconcile(captured: UInt) async {
         wakeEnrollmentBinding = nil
         let existingRelay = relay
         relay = nil
-        if status.identity == nil { status = (try? await session.open()) ?? status }
         guard backgroundUpdatesEnabled, let identity = status.identity else {
             // Retiring contexts outlive the active enrollment and preference. Drain them before
             // returning so opting out cannot strand a server route after a cold restart.
@@ -453,7 +473,7 @@ final class AppModel {
             if !backgroundUpdatesEnabled { wakeStatus = .paused }
             return
         }
-        await registerEnabledWake(identity, captured: wakeFence.generation, existingRelay: existingRelay)
+        await registerEnabledWake(identity, captured: captured, existingRelay: existingRelay)
         // Every enabled exit sweeps retiring contexts: unavailable, failed probes, thrown errors and
         // publication. A pause that won the race already retired and drained, so it is not repeated.
         if backgroundUpdatesEnabled { await drainRetiringWakeContexts() }
@@ -471,6 +491,7 @@ final class AppModel {
         #endif
         do {
             let hosted = await session.isHostedWakeEligible(origin: identity.origin)
+            guard await wakeWorkMayContinue(captured) else { return }
             let target: RelayWakeRegistrationTarget
             let wakeIdentity: RelayWakeIdentity
             if hosted {
@@ -481,7 +502,6 @@ final class AppModel {
                 }
                 target = configuredTarget
                 wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: configuration.environment)
-                guard await wakeWorkMayContinue(captured) else { return }
             } else {
                 guard let configuredTarget = RelayWakeRegistrationTarget.custom(
                     backgroundUpdatesEnabled: backgroundUpdatesEnabled,

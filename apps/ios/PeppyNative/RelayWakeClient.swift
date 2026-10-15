@@ -433,3 +433,82 @@ public struct WakeWorkFence: Sendable {
         return captured == generation ? .proceed : .superseded
     }
 }
+
+/// Runs only one main-actor wake operation for a matching key while allowing cancelled callers to
+/// stop waiting without cancelling the shared operation.
+@MainActor public final class CoalescedWakeWork<Key: Equatable> {
+    private struct InFlight {
+        let key: Key
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+
+    private var inFlight: InFlight?
+
+    public init() {}
+
+    public func run(key: Key, _ work: @escaping @MainActor () async -> Void) async {
+        let task: Task<Void, Never>
+        if let inFlight, inFlight.key == key {
+            task = inFlight.task
+        } else {
+            let token = UUID()
+            task = Task { @MainActor [weak self] in
+                await work()
+                self?.complete(token: token)
+            }
+            inFlight = InFlight(key: key, token: token, task: task)
+        }
+        await waitForCompletion(of: task)
+    }
+
+    private func complete(token: UUID) {
+        guard inFlight?.token == token else { return }
+        inFlight = nil
+    }
+
+    private func waitForCompletion(of task: Task<Void, Never>) async {
+        let waiter = WakeWorkWaiter()
+        Task {
+            await task.value
+            waiter.resume()
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waiter.install(continuation)
+            }
+        } onCancel: {
+            waiter.resume()
+        }
+    }
+}
+
+private final class WakeWorkWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var resumed = false
+
+    func install(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if resumed {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resume() {
+        lock.lock()
+        guard !resumed else {
+            lock.unlock()
+            return
+        }
+        resumed = true
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
