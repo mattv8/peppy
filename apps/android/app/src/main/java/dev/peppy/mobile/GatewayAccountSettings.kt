@@ -44,7 +44,7 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
     Column(Modifier.fillMaxWidth().testTag("account-tab-screen")) {
         val account = state
         if (account == null) Text(failure ?: "Loading account…", Modifier.testTag("devices-loading")) else {
-            Section("identity-section", stringResource(R.string.peppy_account)) {
+            Section("identity-section", stringResource(R.string.peppy_account), showDivider = false) {
                 StatusRow("identity-role", "Role", account.self.role)
                 StatusRow("identity-device-id", "This device", account.self.id)
                 if (NativeGateway.status(context).origin == "https://peppy.pro") {
@@ -71,7 +71,7 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                 Button(onClick = { deleteOpen = true }, modifier = Modifier.testTag("vault-delete-button")) { Text("Delete vault") }
             }
         }
-        Section("relay-health-section", "Wake relay") {
+        Section("relay-health-section", "Wake relay", showDivider = account != null) {
             OutlinedTextField(relayOrigin, { relayOrigin = it }, label = { Text("Relay HTTPS origin") }, modifier = Modifier.testTag("relay-origin-field"))
             Row(Modifier.fillMaxWidth()) {
                 Text("Enable wake relay", Modifier.weight(1f))
