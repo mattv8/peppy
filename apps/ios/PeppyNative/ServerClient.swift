@@ -63,14 +63,14 @@ struct ServerClient: Sendable, CustomStringConvertible, CustomDebugStringConvert
     /// Authenticated request whose status the caller interprets (attachment transfer). Spends one
     /// request; 401/403 and origin violations still throw.
     func exchange(
-        _ method: String, _ path: String, body: Data? = nil, contentType: String? = nil, limit: Int, meter: inout RequestMeter
+        _ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil, contentType: String? = nil, limit: Int, meter: inout RequestMeter
     ) async throws -> HTTPResponse {
         try Task.checkCancellation()
         try meter.spend()
         var headers = ["Authorization": "Bearer \(token)", "Accept": "application/json"]
         if let contentType { headers["Content-Type"] = contentType }
         let response = try await transport.send(HTTPRequest(
-            method: method, url: origin.url(path), headers: headers, body: body, maxResponseBytes: limit
+            method: method, url: origin.url(path, query: query), headers: headers, body: body, maxResponseBytes: limit
         ))
         guard origin.contains(response.url) else { throw ClientError.originMismatch }
         switch response.status {

@@ -5,6 +5,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
+use peppy_hosted_api::{ApnsEnvironment, PushConfigAdvertisement, PushProvider};
 use peppy_server::{
     ServerBuilder,
     api::{
@@ -171,4 +172,20 @@ async fn builder_accepts_a_private_enrollment_authorization_adapter() {
         .await;
 
     assert!(server.is_ok());
+}
+
+#[tokio::test]
+async fn builder_rejects_inconsistent_push_configuration() {
+    let error = ServerBuilder::new(config("invalid-push-config"), pool())
+        .push_config(PushConfigAdvertisement {
+            available: true,
+            providers: vec![PushProvider::Fcm],
+            apns_environment: Some(ApnsEnvironment::Production),
+        })
+        .build()
+        .await
+        .err()
+        .expect("an APNs environment without APNs must fail closed");
+
+    assert!(error.to_string().contains("push configuration"));
 }

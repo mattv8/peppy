@@ -5552,6 +5552,64 @@ public func FfiConverterTypeNativePermit_lower(_ value: NativePermit) -> RustBuf
 }
 
 
+public struct NativePushConfig: Equatable, Hashable {
+    public var available: Bool
+    public var providers: [String]
+    public var apnsEnvironment: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(available: Bool, providers: [String], apnsEnvironment: String?) {
+        self.available = available
+        self.providers = providers
+        self.apnsEnvironment = apnsEnvironment
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativePushConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativePushConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativePushConfig {
+        return
+            try NativePushConfig(
+                available: FfiConverterBool.read(from: &buf), 
+                providers: FfiConverterSequenceString.read(from: &buf), 
+                apnsEnvironment: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativePushConfig, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterSequenceString.write(value.providers, into: &buf)
+        FfiConverterOptionString.write(value.apnsEnvironment, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePushConfig_lift(_ buf: RustBuffer) throws -> NativePushConfig {
+    return try FfiConverterTypeNativePushConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativePushConfig_lower(_ value: NativePushConfig) -> RustBuffer {
+    return FfiConverterTypeNativePushConfig.lower(value)
+}
+
+
 public struct NativeQueuedSend: Equatable, Hashable {
     public var messageId: String
     public var commandId: String
@@ -7950,6 +8008,14 @@ public func hostedSessionRequest(attemptId: String, idToken: String)throws  -> S
     )
 })
 }
+public func hostedWakeRelayUrl(origin: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_hosted_wake_relay_url(
+        FfiConverterString.lower(origin),uniffiCallStatus
+    )
+})
+}
 public func parseHostedAccount(json: String, expectedAccountId: String)throws  -> NativeHostedAccount  {
     return try  FfiConverterTypeNativeHostedAccount_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -7971,6 +8037,14 @@ public func parseHostedSession(json: String)throws  -> NativeHostedSession  {
     return try  FfiConverterTypeNativeHostedSession_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+public func parsePushConfig(json: String)throws  -> NativePushConfig  {
+    return try  FfiConverterTypeNativePushConfig_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_push_config(
         FfiConverterString.lower(json),uniffiCallStatus
     )
 })
@@ -8088,6 +8162,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_func_hosted_session_request() != 59693) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_func_hosted_wake_relay_url() != 42110) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_account() != 35553) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8095,6 +8172,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() != 62352) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() != 51462) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning() != 3935) {

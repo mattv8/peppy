@@ -155,7 +155,7 @@ impl EnrollmentAuthorization for CommunityEnrollmentAuthorization {
 use axum::{
     Json, Router,
     extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
-    extract::{ConnectInfo, FromRequestParts, Path, State},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -165,10 +165,13 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ipnet::IpNet;
-use peppy_hosted_api::enrollment::{
-    ClaimInstanceRequest, ClaimInstanceResponse, ClientKind, DeploymentMode, EnrollmentDevice,
-    EnrollmentRole, InstanceAccount, InstanceInfo, InstanceLoginRequest, InstanceManagement,
-    InstanceSession, VaultMaterial,
+use peppy_hosted_api::{
+    PushConfig, PushConfigAdvertisement,
+    enrollment::{
+        ClaimInstanceRequest, ClaimInstanceResponse, ClientKind, DeploymentMode, EnrollmentDevice,
+        EnrollmentRole, InstanceAccount, InstanceInfo, InstanceLoginRequest, InstanceManagement,
+        InstanceSession, VaultMaterial,
+    },
 };
 use peppy_protocol::{Envelope, EnvelopePurpose};
 use serde::{Deserialize, Serialize};
@@ -206,6 +209,7 @@ pub(super) struct ApiState {
     pub(super) event_stream_slots: Arc<tokio::sync::Semaphore>,
     pub(super) event_stream_sessions: Arc<std::sync::Mutex<HashMap<Vec<u8>, usize>>>,
     policy: Arc<dyn AccessPolicy>,
+    push_config: PushConfig,
     row_security: bool,
     instance_origin: Option<url::Url>,
     claim_policy: crate::instance::ClaimPolicy,
@@ -299,6 +303,7 @@ pub fn router(db: PgPool) -> Router {
         None,
         options,
         None,
+        PushConfigAdvertisement::default(),
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: authorization,
@@ -326,6 +331,7 @@ pub fn router_with_options(db: PgPool, options: TransportOptions) -> Router {
         None,
         options,
         None,
+        PushConfigAdvertisement::default(),
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: authorization,
@@ -350,6 +356,7 @@ pub fn router_with_options_and_relay(
         None,
         options,
         Some(relay_url),
+        PushConfigAdvertisement::default(),
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: Arc::new(CommunityEnrollmentAuthorization::new(db.clone())),
@@ -418,6 +425,7 @@ pub(crate) fn build_router(
     initialized_storage: Option<Storage>,
     options: TransportOptions,
     explicit_relay_url: Option<url::Url>,
+    push_advertisement: PushConfigAdvertisement,
     authorization: RouterAuthorization,
 ) -> (Router, Maintenance) {
     let RouterAuthorization {
@@ -446,10 +454,17 @@ pub(crate) fn build_router(
         .as_ref()
         .map(|config| config.trusted_proxy_cidrs.clone())
         .unwrap_or_default();
+    let push_config_response = push_advertisement
+        .response()
+        .expect("router requires a validated push configuration");
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
-        .route("/v1/devices/self/wake-route", put(register_wake_route))
+        .route("/v1/devices/self/push-config", get(push_config))
+        .route(
+            "/v1/devices/self/wake-route",
+            put(register_wake_route).delete(revoke_wake_route),
+        )
         .route("/v1/devices", get(devices))
         .route(
             "/v1/capabilities",
@@ -530,6 +545,7 @@ pub(crate) fn build_router(
         event_stream_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         event_stream_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         policy,
+        push_config: push_config_response,
         row_security,
         instance_origin: config
             .as_ref()
@@ -1707,12 +1723,24 @@ struct WakeRouteRequest {
     route_id: Uuid,
     wake_credential: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WakeRouteDeleteQuery {
+    route_id: Option<Uuid>,
+}
+
+async fn push_config(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<PushConfig>> {
+    authenticated(&s, &h, Operation::Sync).await?;
+    Ok(Json(s.push_config))
+}
+
 async fn register_wake_route(
     State(s): State<ApiState>,
     h: HeaderMap,
     Json(x): Json<WakeRouteRequest>,
 ) -> ApiResult<StatusCode> {
-    let p = authenticated(&s, &h, Operation::Publish).await?;
+    let p = authenticated(&s, &h, Operation::Sync).await?;
     if x.route_id.is_nil()
         || x.wake_credential.len() != 64
         || !x.wake_credential.bytes().all(|b| b.is_ascii_hexdigit())
@@ -1725,11 +1753,45 @@ async fn register_wake_route(
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "wake_route_begin"))?;
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(p.vault)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_vault_lock"))?;
+    revalidate_principal(&mut tx, &p).await?;
     sqlx::query("INSERT INTO device_wake_routes(vault_id,device_id,route_id,wake_credential) VALUES($1,$2,$3,$4) ON CONFLICT(vault_id,device_id) DO UPDATE SET route_id=EXCLUDED.route_id,wake_credential=EXCLUDED.wake_credential,revoked_at=NULL,created_at=now(),generation=device_wake_routes.generation+1")
         .bind(p.vault).bind(p.device).bind(x.route_id).bind(x.wake_credential).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "wake_route_register"))?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "wake_route_commit"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_wake_route(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Query(query): Query<WakeRouteDeleteQuery>,
+) -> ApiResult<StatusCode> {
+    let p = authenticated(&s, &h, Operation::Revoke).await?;
+    let mut tx = scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke_begin"))?;
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(p.vault)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke_vault_lock"))?;
+    revalidate_principal(&mut tx, &p).await?;
+    sqlx::query("WITH revoked AS (UPDATE device_wake_routes SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL AND ($3::uuid IS NULL OR route_id=$3) RETURNING vault_id,device_id) DELETE FROM device_wake_jobs jobs USING revoked WHERE jobs.vault_id=revoked.vault_id AND jobs.device_id=revoked.device_id")
+        .bind(p.vault)
+        .bind(p.device)
+        .bind(query.route_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke_commit"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -64,7 +64,10 @@ struct DeviceView: View {
         .tint(colors.Accent)
         .task { await model.load(); enrollmentLoaded = true }
         .task(id: scenePhase == .active && model.status.keysUnlocked) {
-            if scenePhase == .active { await model.syncInForeground() }
+            if scenePhase == .active {
+                await model.reconcileWakeRegistration()
+                await model.syncInForeground()
+            }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.observeContactChanges(phase == .active)
@@ -314,7 +317,7 @@ struct DeviceView: View {
                     }
                     .accessibilityIdentifier("owner-phone-section")
                 }
-                relaySection
+                if model.status.identity?.origin == "https://peppy.pro" { relaySection }
                 if model.status.role == "owner" { vaultSection }
                 if let identity = model.status.identity, identity.origin == "https://peppy.pro" {
                     Section {
@@ -382,14 +385,43 @@ struct DeviceView: View {
     }
 
     private var relaySection: some View {
-        Section("Wake relay") {
-            LabeledContent("APNs", value: model.relay == nil ? "Not configured" : "Ready to register")
-                .accessibilityIdentifier("relay-apns-row")
-            Text(model.relay == nil ? "No relay configured. Sync runs while the app is open." : "Enable APNs registration from Settings. Delivery is not guaranteed.")
-                .accessibilityIdentifier("relay-not-configured")
-            Text("Wake hints are optional. Missing a hint delays sync briefly; no messages are lost.")
+        Section {
+            Toggle(isOn: Binding(get: { model.backgroundUpdatesEnabled }, set: { model.setBackgroundUpdatesEnabled($0) })) {
+                Text("peppy.wake_updates_toggle_label", tableName: "Peppy")
+            }
+            .accessibilityIdentifier("relay-wake-toggle")
+            HStack {
+                Text("peppy.wake_status_label", tableName: "Peppy")
+                Spacer()
+                Text(wakeStatusCopy)
+            }
+            .accessibilityIdentifier("relay-wake-status")
+            Text(wakeFooterCopy)
                 .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("relay-wake-footer")
+        } header: {
+            Text("peppy.wake_section_title", tableName: "Peppy")
         }.accessibilityIdentifier("relay-health-section")
+    }
+
+    private var wakeStatusCopy: LocalizedStringKey {
+        switch model.wakeStatus {
+        case .registered: "peppy.wake_status_registered"
+        case .settingUp: "peppy.wake_status_pending"
+        case .retrying: "peppy.wake_status_retrying"
+        case .paused: "peppy.wake_status_paused"
+        case .unavailable: "peppy.wake_status_unavailable"
+        }
+    }
+
+    private var wakeFooterCopy: LocalizedStringKey {
+        switch model.wakeStatus {
+        case .registered: "peppy.wake_footer_registered"
+        case .settingUp: "peppy.wake_footer_pending"
+        case .retrying: "peppy.wake_footer_retrying"
+        case .paused: "peppy.wake_footer_paused"
+        case .unavailable: "peppy.wake_footer_unavailable_server"
+        }
     }
 
     private var vaultSection: some View {
@@ -433,16 +465,16 @@ struct SettingsView: View {
                     LabeledContent("Notification mirroring", value: "Unavailable on iOS").accessibilityValue("Unavailable")
                         .accessibilityIdentifier("settings-mirroring-toggle")
                 }
-                Section("Wake relay") {
-                    TextField("Operator relay HTTPS origin", text: $model.relayOrigin)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .accessibilityIdentifier("relay-origin-field")
-                    Button("Enable APNs wake relay") { model.configureRelay() }
-                        .disabled(model.relayOrigin.isEmpty || model.status.identity == nil)
-                        .accessibilityIdentifier("relay-enable-button")
-                    Text("Peppy registers with the operator relay only after you enable this option. Wake hints contain no message content and may be delayed or missing.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }.accessibilityIdentifier("relay-settings-section")
+                if model.status.identity?.origin != "https://peppy.pro" {
+                    Section("Wake relay") {
+                        TextField("Operator relay HTTPS origin", text: $model.relayOrigin)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityIdentifier("relay-origin-field")
+                        Button("Enable APNs wake relay") { model.configureRelay() }
+                            .disabled(model.relayOrigin.isEmpty || model.status.identity == nil)
+                            .accessibilityIdentifier("relay-enable-button")
+                    }.accessibilityIdentifier("relay-settings-section")
+                }
                 ContactsSection(model: model)
                 Section("About") {
                     LabeledContent("App version", value: "0.1")

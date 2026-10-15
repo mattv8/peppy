@@ -25,6 +25,11 @@ final class AppModel {
     private(set) var devicesLoaded = false
     private(set) var relay: RelayWakeClient?
     var relayOrigin = UserDefaults.standard.string(forKey: "peppy.relay-origin") ?? ""
+    enum WakeStatus: Equatable { case settingUp, registered, retrying, paused, unavailable }
+    private(set) var wakeStatus = WakeStatus.settingUp
+    private let wakePreferenceKey = "peppy.background-updates-preference"
+    /// Observable mirror of the durable preference. Network/OS state never writes this value.
+    private var wakePreferenceValue = "automatic"
     /// The active enrollment cannot be opened (e.g. its database is gone after a reinstall);
     /// disconnecting is the way out.
     private(set) var enrollmentBlocked = false
@@ -74,7 +79,8 @@ final class AppModel {
             return [.completed, .unchanged, .incremental].contains(report.outcome)
         }
         contacts.enabled = preferences.load().enabled
-        restoreRelayIfOptedIn()
+        migrateWakePreference()
+        wakePreferenceValue = UserDefaults.standard.string(forKey: wakePreferenceKey) ?? "automatic"
     }
 
     /// Must run during launch, before the app finishes launching (BackgroundTasks requirement).
@@ -95,6 +101,7 @@ final class AppModel {
 
     func load() async {
         await run(.idle) { try await $0.open() }
+        await reconcileWakeRegistration()
     }
 
     func importCredential(from result: Result<URL, any Error>) async {
@@ -113,9 +120,11 @@ final class AppModel {
 
     /// Non-destructive: the encrypted database, keys and queued work stay archived on this device.
     func disconnect() async {
+        // Queue cleanup while the old identity's credential context is still available.
+        try? await session.retireRelayWakeContexts()
+        await relay?.revoke()
         await run(.disconnecting) { try await $0.disconnect() }
         if status.identity == nil {
-            await relay?.revoke()
             relay = nil
             UserDefaults.standard.set(false, forKey: "peppy.relay-opted-in")
         }
@@ -124,9 +133,10 @@ final class AppModel {
     }
 
     func disconnectLocalOnly() async {
+        try? await session.retireRelayWakeContexts()
+        await relay?.revoke()
         await run(.disconnecting) { try await $0.disconnectLocalOnly() }
         if status.identity == nil {
-            await relay?.revoke()
             relay = nil
             UserDefaults.standard.set(false, forKey: "peppy.relay-opted-in")
             lastError = "Signed out locally only. This device credential may remain active on the server until it can be revoked."
@@ -277,6 +287,7 @@ final class AppModel {
             status = try await session.confirmPhoneEnrollment(sharedSecret: sharedSecret)
             lastError = nil
             enrollmentBlocked = false
+            await reconcileWakeRegistration()
             return .succeeded
         } catch is CancellationError {
             return .canceled
@@ -357,19 +368,126 @@ final class AppModel {
     func configureRelay() {
         do {
             let origin = try ServerOrigin(canonical: relayOrigin, allowLoopbackHTTP: false)
-            relay = RelayWakeClient(
-                origin: origin, transport: URLSessionTransport(), secure: KeychainSecureStore(),
-                publisher: SessionRelayWakeRoutePublisher(session: session)
-            )
             UserDefaults.standard.set(origin.serialized, forKey: "peppy.relay-origin")
             UserDefaults.standard.set(true, forKey: "peppy.relay-opted-in")
+            wakePreferenceValue = "enabled"
+            UserDefaults.standard.set("enabled", forKey: wakePreferenceKey)
             relayOrigin = origin.serialized
             lastError = nil
+            Task { await reconcileWakeRegistration() }
+        } catch { lastError = "Enter a canonical HTTPS relay origin." }
+    }
+
+    var backgroundUpdatesEnabled: Bool { wakePreferenceValue != "paused" }
+
+    func setBackgroundUpdatesEnabled(_ enabled: Bool) {
+        let preference = enabled ? "enabled" : "paused"
+        wakePreferenceValue = preference
+        UserDefaults.standard.set(preference, forKey: wakePreferenceKey)
+        Task {
+            if enabled { await reconcileWakeRegistration() }
+            else {
+                wakeStatus = .paused
+                // Persist retirement before attempting network work so this survives an offline
+                // pause or a process death with no in-memory relay client.
+                try? await session.retireRelayWakeContexts()
+                await relay?.revoke()
+                await drainRetiringWakeContexts()
+            }
+        }
+    }
+
+    /// APNs registration has no visible notification prompt. It occurs only for an eligible hosted
+    /// enrollment and a non-paused durable preference.
+    func reconcileWakeRegistration() async {
+        if status.identity == nil { status = (try? await session.open()) ?? status }
+        guard backgroundUpdatesEnabled, let identity = status.identity else {
+            // Retiring contexts outlive the active enrollment and preference. Drain them before
+            // returning so opting out cannot strand a server route after a cold restart.
+            await drainRetiringWakeContexts()
+            if !backgroundUpdatesEnabled { wakeStatus = .paused }
+            return
+        }
+        #if DEBUG
+        let environment = "sandbox"
+        #else
+        let environment = "production"
+        #endif
+        do {
+            let hosted = await session.isHostedWakeEligible(origin: identity.origin)
+            let origin: ServerOrigin
+            let wakeIdentity: RelayWakeIdentity
+            if hosted {
+                guard let configuration = try await session.hostedWakeConfiguration(environment: environment),
+                      let configuredOrigin = try? ServerOrigin(canonical: configuration.relayOrigin, allowLoopbackHTTP: false) else {
+                    wakeStatus = .unavailable
+                    return
+                }
+                origin = configuredOrigin
+                wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: configuration.environment)
+            } else {
+                guard let configuredOrigin = try? ServerOrigin(canonical: relayOrigin, allowLoopbackHTTP: false) else {
+                    wakeStatus = .unavailable
+                    return
+                }
+                origin = configuredOrigin
+                wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: environment)
+            }
+            let supportsCandidates = try await session.relayWakeSupportsCandidates(origin: origin)
+            // Hosted automatic registration requires replay-safe confirmation; explicit community
+            // relays retain their legacy wire compatibility when capability is absent.
+            guard !hosted || supportsCandidates else {
+                wakeStatus = .unavailable
+                return
+            }
+            if await relay?.isBound(to: wakeIdentity, relayOrigin: origin.serialized) != true {
+                let publisher = try await session.capturedRelayWakeRoutePublisher()
+                relay = RelayWakeClient(origin: origin, transport: URLSessionTransport(), secure: KeychainSecureStore(), publisher: publisher, identity: wakeIdentity, supportsCandidates: supportsCandidates)
+                try await relay?.migrateLegacyRouteIfNeeded()
+            }
+            // Every enabled reconcile reactivates this identity's context, including a bound client
+            // resumed after a pause. This clears any retiring duplicate, so the drain below cannot
+            // revoke the route that is about to be published.
+            try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: origin.serialized)
+            await drainRetiringWakeContexts()
+            await relay?.retryCleanup()
+            _ = try await relay?.publishConfirmedRoute()
+            await refreshWakeStatus()
             #if canImport(UIKit)
             UIApplication.shared.registerForRemoteNotifications()
             #endif
-        } catch { lastError = "Enter a canonical HTTPS relay origin." }
+        } catch {
+            wakeStatus = .retrying
+        }
     }
+
+    private func drainRetiringWakeContexts() async {
+        await session.drainRetiringRelayWakeContexts(relayTransport: URLSessionTransport(), secure: KeychainSecureStore())
+    }
+
+    func receiveAPNSToken(_ token: String) async {
+        guard backgroundUpdatesEnabled else { return }
+        if relay == nil { await reconcileWakeRegistration() }
+        do {
+            _ = try await relay?.beginEnrollment(deviceToken: token)
+            await refreshWakeStatus()
+        } catch {
+            wakeStatus = .retrying
+        }
+    }
+
+    func refreshWakeStatus() async {
+        guard backgroundUpdatesEnabled else { wakeStatus = .paused; return }
+        guard let status = try? await relay?.registrationStatus() else { wakeStatus = .unavailable; return }
+        switch status.phase {
+        case .registered: wakeStatus = .registered
+        case .pending, .confirmedUnpublished: wakeStatus = .settingUp
+        case .paused: wakeStatus = .paused
+        case .idle: wakeStatus = .unavailable
+        }
+    }
+
+    func apnsRegistrationFailed() { if backgroundUpdatesEnabled { wakeStatus = .retrying } }
 
     func wakeSync() async -> Bool {
         // A background APNs launch has no SwiftUI `.task` to open the session first.
@@ -383,9 +501,15 @@ final class AppModel {
         return !Task.isCancelled
     }
 
-    private func restoreRelayIfOptedIn() {
-        guard UserDefaults.standard.bool(forKey: "peppy.relay-opted-in"), !relayOrigin.isEmpty else { return }
-        configureRelay()
+    private func migrateWakePreference() {
+        guard UserDefaults.standard.object(forKey: wakePreferenceKey) == nil else { return }
+        if UserDefaults.standard.object(forKey: "peppy.relay-opted-in") == nil {
+            UserDefaults.standard.set("automatic", forKey: wakePreferenceKey)
+        } else if UserDefaults.standard.bool(forKey: "peppy.relay-opted-in") {
+            UserDefaults.standard.set("enabled", forKey: wakePreferenceKey)
+        } else {
+            UserDefaults.standard.set("paused", forKey: wakePreferenceKey)
+        }
     }
 
     /// One bounded pass while the app is in the foreground. SwiftUI cancels the calling task when
@@ -418,6 +542,7 @@ final class AppModel {
             status = try await body(session)
             lastError = nil
             enrollmentBlocked = false
+            await reconcileWakeRegistration()
         } catch {
             let failure = error as? ClientError
             lastError = failure?.userMessage ?? "Unexpected error."

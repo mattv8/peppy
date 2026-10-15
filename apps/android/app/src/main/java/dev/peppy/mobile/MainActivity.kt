@@ -79,6 +79,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge(statusBarStyle = systemBars, navigationBarStyle = systemBars)
         setContent { PeppyTheme { Surface { CompanionScreen() } } }
     }
+
+    override fun onResume() {
+        super.onResume()
+        // A challenge can expire while the process remains alive; foreground re-enters the
+        // serialized relay reconciliation path without doing network work on the activity.
+        RelayWakeRuntime.enrollmentChanged(applicationContext)
+    }
 }
 
 private val SMS_PERMISSIONS = arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS)

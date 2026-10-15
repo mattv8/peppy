@@ -36,6 +36,23 @@ public struct SelfHostedInstanceDiscovery: Equatable, Sendable {
     public let claimed: Bool
 }
 
+public struct HostedWakeConfiguration: Equatable, Sendable {
+    public let relayOrigin: String
+    public let environment: String
+}
+
+/// Protected-only replay context for a retiring wake route. It is never presented to UI or
+/// defaults; its device credential is the exact value captured before enrollment changes.
+public struct RelayWakeCleanupContext: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public let identity: RelayWakeIdentity
+    public let relayOrigin: String
+    public let deviceCredential: String
+    public var retiring: Bool
+    public var description: String { "RelayWakeCleanupContext(identity: \(identity.origin), relay: \(relayOrigin), credential: <redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["identity": identity, "relayOrigin": relayOrigin, "deviceCredential": "<redacted>", "retiring": retiring]) }
+}
+
 public struct VaultRequestProgress: Equatable, Sendable {
     public let origin: String
     public let requestID: String
@@ -668,6 +685,146 @@ public actor NativeSession {
         guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
     }
 
+    /// Hosted-only policy and push-config parsing live in the generated Rust facade. Native code
+    /// supplies device authentication and rejects a relay/APNs environment mismatch.
+    public func hostedWakeConfiguration(environment: String) async throws -> HostedWakeConfiguration? {
+        guard let record, let relay = hostedWakeRelayUrl(origin: record.identity.origin) else { return nil }
+        var meter = RequestMeter(limit: 2)
+        let server = try authenticatedServer(record.identity)
+        let response = try await server.exchange("GET", "/v1/devices/self/push-config", limit: ServerClient.maxSmallBytes, meter: &meter)
+        // An old server is an unavailable capability; every other non-success is a transient
+        // transport/server failure that callers must surface as retryable rather than silently
+        // treating it as an unsupported app.
+        guard response.status != 404 else { return nil }
+        guard (200..<300).contains(response.status) else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+        guard let json = String(data: response.body, encoding: .utf8) else {
+            throw ClientError.invalidResponse("push config")
+        }
+        let config = try parsePushConfig(json: json)
+        guard config.available, config.providers.contains("apns"), config.apnsEnvironment == environment else { return nil }
+        return HostedWakeConfiguration(relayOrigin: relay, environment: environment)
+    }
+
+    public func isHostedWakeEligible(origin: String) -> Bool {
+        hostedWakeRelayUrl(origin: origin) != nil
+    }
+
+    /// Probes only the pinned relay origin. Relay capability requests deliberately carry no
+    /// device credential: a relay must never receive server authentication.
+    public func relayWakeSupportsCandidates(origin: ServerOrigin) async throws -> Bool {
+        let response = try await transport.send(HTTPRequest(
+            method: "GET", url: origin.url("/v1/capabilities"), headers: ["Accept": "application/json"],
+            body: nil, maxResponseBytes: ServerClient.maxSmallBytes
+        ))
+        guard origin.contains(response.url) else { throw ClientError.originMismatch }
+        guard response.status != 404 else { return false }
+        guard (200..<300).contains(response.status) else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+        guard let value = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              let supported = value["confirm_candidates"] as? Bool else {
+            return false
+        }
+        return supported
+    }
+
+    /// Captures the current identity's authenticated server transport before an asynchronous
+    /// relay operation starts. The publisher remains valid for cleanup after this session closes.
+    public func capturedRelayWakeRoutePublisher() throws -> CapturedRelayWakeRoutePublisher {
+        guard let record else { throw ClientError.notEnrolled }
+        return CapturedRelayWakeRoutePublisher(server: try authenticatedServer(record.identity))
+    }
+
+    public func registerRelayWakeContext(identity: RelayWakeIdentity, relayOrigin: String) throws {
+        guard let record, record.identity.origin == identity.origin, record.identity.vaultId == identity.vaultId,
+              record.identity.deviceId == identity.deviceId else { throw ClientError.identityMismatch }
+        var contexts = try relayWakeContexts()
+        let context = RelayWakeCleanupContext(identity: identity, relayOrigin: relayOrigin,
+                                              deviceCredential: try store.token(record.identity), retiring: false)
+        // Replacing this bound context also retires its own retiring duplicate: the actor's durable
+        // cleanup queue for this namespace is now owned by the live client's retryCleanup. Other
+        // identities or relays keep their retiring contexts until their own drain completes.
+        contexts.removeAll { $0.identity == identity && $0.relayOrigin == relayOrigin }
+        contexts.append(context)
+        try saveRelayWakeContexts(contexts)
+    }
+
+    public func retireRelayWakeContexts() throws {
+        var contexts = try relayWakeContexts()
+        let activeIdentity = try store.activeIdentity()
+        guard let identity = record?.identity ?? activeIdentity else { return }
+        for index in contexts.indices where contexts[index].identity.origin == identity.origin &&
+            contexts[index].identity.vaultId == identity.vaultId && contexts[index].identity.deviceId == identity.deviceId {
+            contexts[index].retiring = true
+        }
+        try saveRelayWakeContexts(contexts)
+    }
+
+    public func retiringRelayWakeContexts() throws -> [RelayWakeCleanupContext] {
+        try relayWakeContexts().filter(\.retiring)
+    }
+
+    public func completeRetiringRelayWakeContext(_ context: RelayWakeCleanupContext) throws {
+        var contexts = try relayWakeContexts()
+        contexts.removeAll { $0 == context && $0.retiring }
+        try saveRelayWakeContexts(contexts)
+    }
+
+    /// Drains protected retiring routes without requiring an active enrollment or enabled
+    /// preference. Calling `revoke` first captures active/pending route proofs into the actor's
+    /// durable queue; only an empty queue authorizes removal of this credential context.
+    public func drainRetiringRelayWakeContexts(
+        relayTransport: any HTTPTransport, secure: any SecureStore
+    ) async {
+        guard let contexts = try? retiringRelayWakeContexts() else { return }
+        for context in contexts {
+            guard let relayOrigin = try? ServerOrigin(canonical: context.relayOrigin, allowLoopbackHTTP: false),
+                  let publisher = try? capturedRelayWakeRoutePublisher(context: context) else { continue }
+            let client = RelayWakeClient(origin: relayOrigin, transport: relayTransport, secure: secure,
+                                         publisher: publisher, identity: context.identity)
+            await client.revoke()
+            if (try? await client.hasPendingCleanup()) == false {
+                try? completeRetiringRelayWakeContext(context)
+            }
+        }
+    }
+
+    public func capturedRelayWakeRoutePublisher(context: RelayWakeCleanupContext) throws -> CapturedRelayWakeRoutePublisher {
+        CapturedRelayWakeRoutePublisher(server: ServerClient(
+            origin: try ServerOrigin(canonical: context.identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
+            token: context.deviceCredential, transport: transport
+        ))
+    }
+
+    private func relayWakeContexts() throws -> [RelayWakeCleanupContext] {
+        guard let data = try store.secure.read("relay-wake-cleanup-contexts-v1") else { return [] }
+        return try JSONDecoder().decode([RelayWakeCleanupContext].self, from: data)
+    }
+
+    private func saveRelayWakeContexts(_ contexts: [RelayWakeCleanupContext]) throws {
+        try store.secure.upsert("relay-wake-cleanup-contexts-v1", try JSONEncoder().encode(contexts))
+    }
+
+    /// A route ID fences delayed cleanup so it cannot remove a later enrollment for this device.
+    public func removeWakeRoute(routeId: String) async throws {
+        guard let record else { throw ClientError.notEnrolled }
+        var meter = RequestMeter(limit: 2)
+        let server = try authenticatedServer(record.identity)
+        let response = try await server.exchange(
+            "DELETE", "/v1/devices/self/wake-route",
+            query: [URLQueryItem(name: "route_id", value: routeId)],
+            limit: ServerClient.maxSmallBytes,
+            meter: &meter
+        )
+        // Older self-hosted servers predate route deletion. Their unsupported response must not
+        // prevent independent relay revocation.
+        guard (200..<300).contains(response.status) || response.status == 404 || response.status == 405 else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+    }
+
     private func changeEnrollment(_ body: () async throws -> SessionStatus) async throws -> SessionStatus {
         guard !changingEnrollment else { throw ClientError.enrollmentChangeInProgress }
         changingEnrollment = true
@@ -1043,11 +1200,43 @@ public actor NativeSession {
     }
 }
 
+public struct CapturedRelayWakeRoutePublisher: RelayWakeRoutePublisher {
+    private let server: ServerClient
+
+    init(server: ServerClient) { self.server = server }
+
+    public func publish(routeId: String, wakeCredential: String) async throws {
+        var meter = RequestMeter(limit: 2)
+        let response = try await server.exchange(
+            "PUT", "/v1/devices/self/wake-route",
+            body: try JSONSerialization.data(withJSONObject: ["route_id": routeId, "wake_credential": wakeCredential]),
+            contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter
+        )
+        guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
+    }
+
+    public func remove(routeId: String) async throws {
+        var meter = RequestMeter(limit: 2)
+        let response = try await server.exchange(
+            "DELETE", "/v1/devices/self/wake-route", query: [URLQueryItem(name: "route_id", value: routeId)],
+            limit: ServerClient.maxSmallBytes, meter: &meter
+        )
+        // 404/405: the route is gone or the server predates route deletion; relay cleanup must proceed.
+        guard (200..<300).contains(response.status) || response.status == 404 || response.status == 405 else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+    }
+}
+
+/// Compatibility publisher for callers that cannot capture a transport context yet.
 public struct SessionRelayWakeRoutePublisher: RelayWakeRoutePublisher {
     private let session: NativeSession
     public init(session: NativeSession) { self.session = session }
     public func publish(routeId: String, wakeCredential: String) async throws {
         try await session.publishWakeRoute(routeId: routeId, wakeCredential: wakeCredential)
+    }
+    public func remove(routeId: String) async throws {
+        try await session.removeWakeRoute(routeId: routeId)
     }
 }
 
