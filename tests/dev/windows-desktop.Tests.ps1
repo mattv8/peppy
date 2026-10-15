@@ -10,6 +10,13 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).ProviderPath
 $desktopScript = Join-Path $root 'infra/dev/windows-desktop.ps1'
 . $desktopScript -Action build -RepoPath $root -CargoTargetDir (Join-Path $root '.opencode/test-target')
 
+Assert-True (Test-NodeVersion -Selector '26' -Version 'v26.0.0') 'Major selectors must accept stable Node releases in their major line'
+Assert-True (Test-NodeVersion -Selector '26' -Version 'v26.12.3') 'Major selectors must accept later stable patches'
+Assert-True (Test-NodeVersion -Selector '26.12' -Version 'v26.12.3') 'Major.minor selectors must accept stable patches in their line'
+Assert-True (Test-NodeVersion -Selector '24.21.0' -Version 'v24.21.0') 'Exact selectors must retain exact-version matching'
+Assert-True (-not (Test-NodeVersion -Selector '26' -Version 'v260.0.0')) 'Major selectors must not match a longer major'
+Assert-True (-not (Test-NodeVersion -Selector '26' -Version 'v26.0.0-rc.1')) 'Node prereleases must not satisfy stable selectors'
+
 $threw = $false
 try {
   Invoke-Checked -File $env:ComSpec -Arguments @('/c', 'exit', '3')
