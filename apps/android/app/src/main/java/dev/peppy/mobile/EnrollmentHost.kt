@@ -324,13 +324,14 @@ internal class EnrollmentHost(
         } catch (_: Exception) { ImportResult.SERVER_REJECTED }
     }
 
-    fun cancelVaultRequest(origin: String) {
+    fun cancelVaultRequest(origin: String): Boolean {
         try {
-            if (clientFor(origin, Operation.VAULT_REQUEST).hasPreparedOwnerMaterial()) return
-        } catch (_: Exception) { return }
-        try { clientFor(origin, Operation.VAULT_REQUEST).clearVaultRequest() } catch (_: Exception) { }
+            if (clientFor(origin, Operation.VAULT_REQUEST).hasPreparedOwnerMaterial()) return true
+        } catch (_: Exception) { return false }
+        try { clientFor(origin, Operation.VAULT_REQUEST).clearVaultRequest() } catch (_: Exception) { return false }
         clearVaultRequestCheckpoint(origin)
         closeActiveClient()
+        return true
     }
 
     fun takeErrorCode(): String? = lastErrorCode.also { lastErrorCode = null }

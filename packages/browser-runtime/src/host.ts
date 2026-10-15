@@ -61,7 +61,7 @@ export interface BrowserNetwork {
   enrollmentAddPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
   enrollmentStatus(): Promise<EnrollmentView>;
   enrollmentApprove(): Promise<EnrollmentView>;
-  enrollmentCancel(): Promise<void>;
+  enrollmentCancel(options?: { waitingOnly?: boolean }): Promise<EnrollmentView | undefined>;
   enrollmentSignOut(): Promise<void>;
   enrollmentGenerateSecret(): Promise<string>;
   enrollmentManagement(): Promise<InstanceManagement>;
@@ -545,6 +545,8 @@ export class BrowserWorkerHost {
       const vaultOwner = typeof request.args.vaultOwner === "string" ? request.args.vaultOwner : undefined;
       const inviteLink = typeof request.args.inviteLink === "string" ? request.args.inviteLink : undefined;
       const displayName = typeof request.args.displayName === "string" ? request.args.displayName : undefined;
+      const waitingOnly = request.args.waitingOnly;
+      if (waitingOnly !== undefined && typeof waitingOnly !== "boolean") throw { code: "invalid-request" };
       const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
        : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username)
           : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "", username)
@@ -557,7 +559,7 @@ export class BrowserWorkerHost {
               : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
                 : request.command === "enrollment_status" ? await network.enrollmentStatus()
                    : request.command === "enrollment_approve" ? await network.enrollmentApprove()
-                    : request.command === "enrollment_cancel" ? (await network.enrollmentCancel(), undefined)
+                     : request.command === "enrollment_cancel" ? await network.enrollmentCancel(waitingOnly === true ? { waitingOnly: true } : undefined)
         : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
                         : request.command === "enrollment_generate_secret" ? { passphrase: await network.enrollmentGenerateSecret() }
                           : request.command === "enrollment_management" ? await network.enrollmentManagement()
@@ -662,7 +664,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentStatus() { return enrollment?.status() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentApprove() { return enrollment?.approve() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
-      async enrollmentCancel() { await enrollment?.cancel(); },
+       async enrollmentCancel(options) { return enrollment?.cancel(options); },
       async enrollmentSignOut() { await enrollment?.signOut(); },
       async enrollmentGenerateSecret() { if (!enrollment) throw { code: "unavailable" }; return enrollment.generateSecret(); },
       async enrollmentManagement() { if (!enrollment) throw { code: "unavailable" }; return enrollment.management(); },

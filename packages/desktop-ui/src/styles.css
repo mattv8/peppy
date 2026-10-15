@@ -609,6 +609,23 @@ select:focus-visible {
   color: var(--peppy-text-secondary);
   font-size: 12px;
 }
+.busy-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+}
+.busy-indicator-icon {
+  flex: 0 0 auto;
+  animation: busy-indicator-spin 900ms linear infinite;
+}
+@keyframes busy-indicator-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .busy-indicator-icon { animation: none; }
+}
 #unavailable-hint {
   display: block;
   margin-top: 4px;
@@ -894,6 +911,9 @@ select:focus-visible {
 }
 
 @media (forced-colors: active) {
+  .busy-indicator {
+    color: CanvasText;
+  }
   .traffic-light:focus-visible,
   .resize-handle:focus-visible {
     outline: 2px solid Highlight;

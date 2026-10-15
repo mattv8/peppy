@@ -2,7 +2,7 @@ const MAX_JSON_BYTES = 64 * 1024;
 const DEVICE_NAME = "Peppy Browser";
 
 type DeploymentMode = "community" | "hosted";
-type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
 type SessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 
 export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
@@ -27,6 +27,7 @@ export class BrowserEnrollment {
   private viewValue: EnrollmentView = { mode: "community", stage: "server" };
   private csrf?: string;
   private invitationId?: string;
+  private approvedInvitationId?: string;
   private invitationGeneration = 0;
   private enrollmentClient?: { origin: string; purpose: "fresh" | "owner" };
   private addPhonePending?: Promise<EnrollmentView>;
@@ -151,17 +152,28 @@ export class BrowserEnrollment {
   }
 
   private async createPhoneInvitation(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
+    let invitationGeneration = this.invitationGeneration;
     try {
       if (this.session.phase !== "ready" || this.requireIdentity().role !== "owner") throw new Error("enrollment-state");
-      if (this.invitationId && (this.viewValue.stage === "waiting_phone" || this.viewValue.stage === "verify_phone")) return this.view();
+      if (this.invitationId && (this.viewValue.stage === "waiting_phone" || this.viewValue.stage === "verify_phone" || this.isInvitationApproved(this.invitationId))) return this.view();
       if (this.invitationId) this.resetOwnerInvitation();
+      invitationGeneration = this.invitationGeneration;
       await this.initializeExistingOwner(this.viewValue.origin ?? this.origin);
-      const created = await this.request("/v1/enrollment/invitations", "POST", await this.rustRequest("_worker_enrollment_create_phone_invitation", { method }), true);
+      const ownerClient = this.enrollmentClient;
+      if (!this.isCurrentInvitationCreation(invitationGeneration)) return this.discardOwnerInvitationClient(ownerClient);
+      const request = await this.rustRequest("_worker_enrollment_create_phone_invitation", { method });
+      if (!this.isCurrentInvitationCreation(invitationGeneration)) return this.discardOwnerInvitationClient(ownerClient);
+      const created = await this.request("/v1/enrollment/invitations", "POST", request, true);
+      if (!this.isCurrentInvitationCreation(invitationGeneration)) return this.discardOwnerInvitationClient(ownerClient);
       await this.core.invoke({ command: "_worker_enrollment_consume_created_phone_invitation", args: { createdJson: JSON.stringify(created) } });
+      if (!this.isCurrentInvitationCreation(invitationGeneration)) return this.discardOwnerInvitationClient(ownerClient);
       const qr = await this.core.invoke({ command: "_worker_enrollment_get_phone_qr", args: {} });
+      if (!this.isCurrentInvitationCreation(invitationGeneration)) return this.discardOwnerInvitationClient(ownerClient);
       this.invitationId = required(created, "invitation_id");
-      this.viewValue = { ...this.viewValue, stage: "waiting_phone", qrPayload: required(qr, "qr"), expiresInSeconds: safeInteger(created.expires_in_seconds) };
+      const { errorCode: _errorCode, ...view } = this.viewValue;
+      this.viewValue = { ...view, stage: "waiting_phone", qrPayload: required(qr, "qr"), expiresInSeconds: safeInteger(created.expires_in_seconds) };
     } catch (error) {
+      if (this.invitationGeneration !== invitationGeneration) return this.discardOwnerInvitationClient();
       this.resetOwnerInvitation();
       this.fail(error);
     }
@@ -169,30 +181,51 @@ export class BrowserEnrollment {
   }
 
   public async status(): Promise<EnrollmentView> {
-    if (!this.invitationId) {
+    const invitationId = this.invitationId;
+    const invitationGeneration = this.invitationGeneration;
+    if (!invitationId) {
       if (this.viewValue.stage === "ready") await this.refreshGatewayPresence();
       return this.view();
     }
     try {
-      const status = await this.invitationStatus();
+      const status = await this.invitationStatus(invitationId);
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       const expiresInSeconds = safeInteger(status.expires_in_seconds);
       if (status.state === "claimed") {
+        if (this.isInvitationApproved(invitationId)) {
+          this.viewValue = { ...this.viewValue, expiresInSeconds };
+          return this.view();
+        }
         const sas = await this.core.invoke({ command: "_worker_enrollment_phone_status", args: { statusJson: JSON.stringify(status) } });
+        if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
         this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode: required(sas, "sas"), expiresInSeconds };
-      } else if (status.state === "consumed") {
+      } else if (status.state === "confirmed" || status.state === "consumed") {
         this.resetOwnerInvitation();
         this.viewValue = { ...this.viewValue, stage: "phone_connected", expiresInSeconds };
       } else if (status.state === "expired") {
-        this.resetOwnerInvitation();
-        this.viewValue = { ...this.viewValue, stage: "expired", expiresInSeconds };
-      } else if (["waiting", "approved", "confirmed"].includes(String(status.state))) {
-        this.viewValue = { ...this.viewValue, stage: "waiting_phone", expiresInSeconds };
+        if (this.isInvitationApproved(invitationId)) this.viewValue = { ...this.viewValue, stage: "phone_approved", qrPayload: undefined, verificationCode: undefined, expiresInSeconds };
+        else {
+          this.resetOwnerInvitation();
+          this.viewValue = { ...this.viewValue, stage: "expired", expiresInSeconds };
+        }
+      } else if (status.state === "approved") {
+        this.approvedInvitationId = invitationId;
+        this.viewValue = { ...this.viewValue, stage: "phone_approved", qrPayload: undefined, verificationCode: undefined, expiresInSeconds };
+      } else if (status.state === "waiting") {
+        this.viewValue = this.isInvitationApproved(invitationId)
+          ? { ...this.viewValue, stage: "phone_approved", qrPayload: undefined, verificationCode: undefined, expiresInSeconds }
+          : { ...this.viewValue, stage: "waiting_phone", expiresInSeconds };
       } else if (status.state === "denied") {
         throw new Error("enrollment-state");
       } else {
         throw new Error("enrollment-response");
       }
     } catch (error) {
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
+      if (this.isInvitationApproved(invitationId)) {
+        this.viewValue = { ...this.viewValue, stage: "phone_approved", qrPayload: undefined, verificationCode: undefined };
+        return this.view();
+      }
       this.fail(error);
     }
     return this.view();
@@ -210,25 +243,53 @@ export class BrowserEnrollment {
       if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
       await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}/approve`, "POST", request, true);
       if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
-      this.viewValue = { ...this.viewValue, stage: "waiting_phone", expiresInSeconds: safeInteger(status.expires_in_seconds) };
+      this.approvedInvitationId = invitationId;
+      this.viewValue = { ...this.viewValue, stage: "phone_approved", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: safeInteger(status.expires_in_seconds) };
     } catch (error) {
       if (!invitationId || this.isActiveOwnerInvitation(invitationId, invitationGeneration)) this.fail(error);
     }
     return this.view();
   }
 
-  public async cancel(): Promise<void> {
+  public async cancel(options: { waitingOnly?: boolean } = {}): Promise<EnrollmentView | undefined> {
     const invitationId = this.invitationId;
     this.invitationGeneration += 1;
     this.vaultRequestGeneration += 1;
     if (await this.pendingVaultRequest()) {
       await this.core.invoke({ command: "_worker_enrollment_clear_vault_request", args: {} });
       this.viewValue = { mode: this.viewValue.mode, stage: "signin", origin: this.origin };
-      return;
+      return options.waitingOnly ? this.view() : undefined;
     }
-    if (invitationId) await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}`, "DELETE", undefined, true);
+    if (!invitationId) {
+      if (this.viewValue.stage === "expired") this.viewValue = { ...this.viewValue, stage: "ready", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined };
+      return options.waitingOnly ? this.view() : undefined;
+    }
+    const invitationGeneration = this.invitationGeneration;
+    const status = await this.invitationStatus(invitationId);
+    if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return options.waitingOnly ? this.view() : undefined;
+    if (["approved", "confirmed", "consumed"].includes(String(status.state))) {
+      if (status.state === "approved") {
+        this.approvedInvitationId = invitationId;
+        this.viewValue = { ...this.viewValue, stage: "phone_approved", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: safeInteger(status.expires_in_seconds) };
+      } else {
+        this.resetOwnerInvitation();
+        this.viewValue = { ...this.viewValue, stage: "phone_connected", expiresInSeconds: safeInteger(status.expires_in_seconds) };
+      }
+      if (options.waitingOnly) return this.view();
+      throw new Error("enrollment-state");
+    }
+    if (!["waiting", "expired", "claimed"].includes(String(status.state))) throw new Error("enrollment-response");
+    if (options.waitingOnly && status.state === "claimed") {
+      const sas = await this.core.invoke({ command: "_worker_enrollment_phone_status", args: { statusJson: JSON.stringify(status) } });
+      if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return this.view();
+      this.viewValue = { ...this.viewValue, stage: "verify_phone", verificationCode: required(sas, "sas"), expiresInSeconds: safeInteger(status.expires_in_seconds) };
+      return this.view();
+    }
+    await this.request(`/v1/enrollment/invitations/${encodeURIComponent(invitationId)}`, "DELETE", undefined, true);
+    if (!this.isActiveOwnerInvitation(invitationId, invitationGeneration)) return options.waitingOnly ? this.view() : undefined;
     this.resetOwnerInvitation();
     this.viewValue = { ...this.viewValue, stage: "ready", qrPayload: undefined, verificationCode: undefined, expiresInSeconds: undefined };
+    return options.waitingOnly ? this.view() : undefined;
   }
 
   public async signOut(): Promise<void> {
@@ -403,6 +464,7 @@ export class BrowserEnrollment {
   private resetOwnerInvitation(): void {
     this.invitationGeneration += 1;
     this.invitationId = undefined;
+    this.approvedInvitationId = undefined;
     if (this.enrollmentClient?.purpose === "owner") this.enrollmentClient = undefined;
   }
 
@@ -437,6 +499,20 @@ export class BrowserEnrollment {
       && this.invitationGeneration === invitationGeneration
       && this.session.phase === "ready"
       && this.session.publicIdentity()?.role === "owner";
+  }
+
+  private isInvitationApproved(invitationId: string): boolean { return this.approvedInvitationId === invitationId; }
+
+  private isCurrentInvitationCreation(invitationGeneration: number): boolean {
+    return this.invitationGeneration === invitationGeneration
+      && !this.invitationId
+      && this.session.phase === "ready"
+      && this.session.publicIdentity()?.role === "owner";
+  }
+
+  private discardOwnerInvitationClient(client = this.enrollmentClient): EnrollmentView {
+    if (client?.purpose === "owner" && this.enrollmentClient === client) this.enrollmentClient = undefined;
+    return this.view();
   }
 
   private async rustRequest(command: string, args: Record<string, unknown>): Promise<unknown> {

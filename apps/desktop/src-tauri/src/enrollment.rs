@@ -41,6 +41,7 @@ pub struct Controller {
     invitation_id: Option<uuid::Uuid>,
     invitation: Option<InvitationStatus>,
     invitation_method: Option<EnrollmentMethod>,
+    phone_operation_epoch: Option<u64>,
     owner_resume: bool,
     owner_claim_in_flight: usize,
     owner_passphrase: Option<Zeroizing<String>>,
@@ -92,14 +93,30 @@ impl Controller {
                 "verify_phone"
             }
             Some(_)
+                if self
+                    .invitation
+                    .as_ref()
+                    .is_some_and(|status| status.state == EnrollmentState::Waiting) =>
+            {
+                "waiting_phone"
+            }
+            Some(_)
+                if self
+                    .invitation
+                    .as_ref()
+                    .is_some_and(|status| status.state == EnrollmentState::Approved) =>
+            {
+                "phone_approved"
+            }
+            Some(_)
                 if self.invitation.as_ref().is_some_and(|status| {
                     matches!(
                         status.state,
-                        EnrollmentState::Waiting | EnrollmentState::Approved
+                        EnrollmentState::Confirmed | EnrollmentState::Consumed
                     )
                 }) =>
             {
-                "waiting_phone"
+                "phone_connected"
             }
             Some(_)
                 if self
@@ -1255,6 +1272,7 @@ fn apply_discovery(
         .client
         .as_ref()
         .is_some_and(EnrollmentClient::has_prepared_owner_material);
+    controller.phone_operation_epoch = None;
     controller.has_gateway = has_gateway;
     set_identity_ready(controller, existing_role);
 }
@@ -2006,26 +2024,100 @@ pub async fn enrollment_create_vault(
     Ok(controller.view())
 }
 
+/// Drops a completed or unapproved expired invitation before beginning a new connection. Approved
+/// invitations deliberately remain in place: their phone may still confirm after the server's
+/// status becomes stale.
+fn retire_terminal_phone_invitation(controller: &mut Controller) -> BridgeResult<()> {
+    let Some(invitation_id) = controller.invitation_id else {
+        return Ok(());
+    };
+    if !controller.invitation.as_ref().is_some_and(|status| {
+        matches!(
+            status.state,
+            EnrollmentState::Confirmed | EnrollmentState::Consumed | EnrollmentState::Expired
+        )
+    }) {
+        return Ok(());
+    }
+    controller
+        .client
+        .as_mut()
+        .ok_or_else(enrollment_error)?
+        .clear_cancelled_owner_invitation(invitation_id)
+        .map_err(|_| enrollment_error())?;
+    controller.invitation_id = None;
+    controller.invitation = None;
+    controller.invitation_method = None;
+    controller.phone_operation_epoch = None;
+    Ok(())
+}
+
+/// A completion is surfaced once. Later entry points retire it locally before polling or
+/// cancellation so reopening Add phone cannot replay the earlier completion or DELETE it.
+fn retire_surfaced_phone_completion(
+    controller: &std::sync::Mutex<Controller>,
+) -> BridgeResult<bool> {
+    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if !controller.invitation.as_ref().is_some_and(|status| {
+        matches!(
+            status.state,
+            EnrollmentState::Confirmed | EnrollmentState::Consumed
+        )
+    }) {
+        return Ok(false);
+    }
+    retire_terminal_phone_invitation(&mut controller)?;
+    Ok(true)
+}
+
+/// An owner draft exists only between local request generation and server creation. Its epoch
+/// marker lets a delayed request clean up itself without dropping a newer client.
+fn discard_owner_draft(
+    controller: &std::sync::Mutex<Controller>,
+    draft_epoch: u64,
+) -> BridgeResult<()> {
+    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.phone_operation_epoch == Some(draft_epoch) && controller.invitation_id.is_none() {
+        controller.client = None;
+        controller.phone_operation_epoch = None;
+    }
+    Ok(())
+}
+
 async fn enrollment_add_phone_core(
     state: &AppState,
     method: EnrollmentMethod,
     hosted: &crate::hosted::HostedState,
+    epoch: u64,
 ) -> BridgeResult<EnrollmentView> {
     ensure_owner_client(state).await?;
-    let request = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .client
-        .as_mut()
-        .ok_or_else(enrollment_error)?
-        .create_phone_invitation(method)
-        .map_err(|_| enrollment_error())?;
-    let session = state.require_session().await?;
-    let origin = session.api.origin().to_owned();
-    let account = hosted_account_header(state, hosted).await?;
-    let created: InvitationCreated = serde_json::from_str(
-        &body(
+    let request = {
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        if controller.operation_epoch != epoch {
+            return Ok(controller.view());
+        }
+        retire_terminal_phone_invitation(&mut controller)?;
+        match controller
+            .client
+            .as_mut()
+            .ok_or_else(enrollment_error)?
+            .create_phone_invitation(method)
+        {
+            Ok(request) => {
+                controller.phone_operation_epoch = Some(epoch);
+                request
+            }
+            Err(_) => return Err(enrollment_error()),
+        }
+    };
+    let created = async {
+        let session = state.require_session().await?;
+        let origin = session.api.origin().to_owned();
+        let account = hosted_account_header(state, hosted).await?;
+        let response = body(
             device_request(
                 &session,
                 &origin,
@@ -2042,21 +2134,46 @@ async fn enrollment_add_phone_core(
             .await
             .map_err(|_| NetError::Offline)?,
         )
-        .await?,
-    )
-    .map_err(|_| enrollment_error())?;
+        .await?;
+        serde_json::from_str::<InvitationCreated>(&response).map_err(|_| enrollment_error())
+    }
+    .await;
+    let created = match created {
+        Ok(created) => created,
+        Err(error) => {
+            discard_owner_draft(&state.enrollment, epoch)?;
+            return Err(error);
+        }
+    };
     let mut controller = state
         .enrollment
         .lock()
         .map_err(|_| BridgeError::host_state())?;
-    controller
+    if controller.operation_epoch != epoch {
+        drop(controller);
+        discard_owner_draft(&state.enrollment, epoch)?;
+        return Ok(state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?
+            .view());
+    }
+    if controller.phone_operation_epoch != Some(epoch) {
+        return Ok(controller.view());
+    }
+    let consumed = controller
         .client
         .as_mut()
         .ok_or_else(enrollment_error)?
         .consume_created_invitation(
             serde_json::to_string(&created).map_err(|_| enrollment_error())?,
         )
-        .map_err(|_| enrollment_error())?;
+        .map_err(|_| enrollment_error());
+    if let Err(error) = consumed {
+        drop(controller);
+        discard_owner_draft(&state.enrollment, epoch)?;
+        return Err(error);
+    }
     controller.invitation_id = Some(created.invitation_id);
     controller.invitation = Some(InvitationStatus {
         state: EnrollmentState::Waiting,
@@ -2068,6 +2185,7 @@ async fn enrollment_add_phone_core(
         profile: None,
     });
     controller.invitation_method = Some(method);
+    controller.phone_operation_epoch = None;
     Ok(controller.view())
 }
 
@@ -2079,7 +2197,8 @@ pub async fn enrollment_add_phone(
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
-    enrollment_add_phone_core(&state, method, &hosted).await
+    let epoch = begin_owner_operation(&state.enrollment)?;
+    enrollment_add_phone_core(&state, method, &hosted, epoch).await
 }
 
 /// Rebuild the in-memory invitation client after a process restart. This is deliberately guarded
@@ -2156,11 +2275,42 @@ async fn refresh_invitation(
         .await?,
     )
     .map_err(|_| enrollment_error())?;
-    state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?
-        .invitation = Some(status);
+    apply_refreshed_invitation_status(&state.enrollment, id, status)
+}
+
+/// Applies only an owner-view-validated status for the invitation that was fetched. Once approval
+/// is observed, a delayed non-terminal response cannot regress the owner back to a rotatable QR.
+fn apply_refreshed_invitation_status(
+    controller: &std::sync::Mutex<Controller>,
+    expected_id: uuid::Uuid,
+    status: InvitationStatus,
+) -> BridgeResult<()> {
+    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.invitation_id != Some(expected_id) {
+        return Ok(());
+    }
+    let status_json = serde_json::to_string(&status).map_err(|_| enrollment_error())?;
+    let owner_view = controller
+        .client
+        .as_ref()
+        .ok_or_else(enrollment_error)?
+        .owner_phone_view(status_json)
+        .map_err(|_| enrollment_error())?;
+    if owner_view.invitation_id != expected_id {
+        return Err(enrollment_error());
+    }
+    if controller
+        .invitation
+        .as_ref()
+        .is_some_and(|current| current.state == EnrollmentState::Approved)
+        && !matches!(
+            owner_view.state,
+            EnrollmentState::Confirmed | EnrollmentState::Consumed
+        )
+    {
+        return Ok(());
+    }
+    controller.invitation = Some(status);
     Ok(())
 }
 
@@ -2197,6 +2347,65 @@ async fn cancel_phone_invitation(
     clear_confirmed_phone_cancellation(&state.enrollment, id)
 }
 
+fn phone_invitation_is_cancelable(
+    controller: &std::sync::Mutex<Controller>,
+    expected_id: uuid::Uuid,
+) -> BridgeResult<bool> {
+    let controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    Ok(controller.invitation_id == Some(expected_id)
+        && controller.invitation.as_ref().is_some_and(|status| {
+            matches!(
+                status.state,
+                EnrollmentState::Waiting | EnrollmentState::Expired | EnrollmentState::Claimed
+            )
+        }))
+}
+
+/// Completes generic cancellation only when the flow observed before its awaits is still current.
+/// A matching phone invitation is cleared with the rest of its cancelled flow; a later flow keeps
+/// its client, readiness, and protected recovery material.
+fn finish_enrollment_cancel(
+    controller: &std::sync::Mutex<Controller>,
+    store: &dyn SecretStore,
+    expected_epoch: u64,
+    cancelled_invitation: Option<uuid::Uuid>,
+) -> BridgeResult<()> {
+    let mut controller = controller.lock().map_err(|_| BridgeError::host_state())?;
+    if controller.operation_epoch != expected_epoch
+        || cancelled_invitation.is_some_and(|id| controller.invitation_id != Some(id))
+    {
+        return Ok(());
+    }
+    controller.operation_epoch = controller.operation_epoch.wrapping_add(1);
+    if !controller.vault_creation_in_flight {
+        if let Some(origin) = controller.origin.clone() {
+            if controller
+                .client
+                .as_ref()
+                .and_then(EnrollmentClient::pending_vault_request)
+                .is_some()
+            {
+                controller
+                    .client
+                    .as_mut()
+                    .expect("checked above")
+                    .clear_vault_request();
+                tombstone_vault_request_checkpoint(store, &origin)?;
+            }
+        }
+    }
+    controller.client = None;
+    controller.owner_passphrase = None;
+    controller.owner_resume = false;
+    controller.vault_request_state = None;
+    controller.vault_creation_in_flight = false;
+    controller.invitation_id = None;
+    controller.invitation = None;
+    controller.invitation_method = None;
+    controller.phone_operation_epoch = None;
+    Ok(())
+}
+
 /// Clears local invitation state only after the matching server cancellation succeeded.
 fn clear_confirmed_phone_cancellation(
     controller: &std::sync::Mutex<Controller>,
@@ -2215,6 +2424,7 @@ fn clear_confirmed_phone_cancellation(
     controller.invitation_id = None;
     controller.invitation = None;
     controller.invitation_method = None;
+    controller.phone_operation_epoch = None;
     Ok(())
 }
 
@@ -2237,6 +2447,7 @@ where
     A: FnOnce() -> AF,
     AF: std::future::Future<Output = BridgeResult<EnrollmentView>>,
 {
+    retire_surfaced_phone_completion(controller)?;
     if controller
         .lock()
         .map_err(|_| BridgeError::host_state())?
@@ -2343,12 +2554,13 @@ pub async fn enrollment_rotate_phone(
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
+    let epoch = begin_owner_operation(&state.enrollment)?;
     rotate_phone_core(
         &state.enrollment,
         method,
         || refresh_invitation(&state, &hosted),
         || cancel_phone_invitation(&state, &hosted),
-        || enrollment_add_phone_core(&state, method, &hosted),
+        || enrollment_add_phone_core(&state, method, &hosted, epoch),
     )
     .await
 }
@@ -2660,18 +2872,7 @@ pub async fn enrollment_status(
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
     crate::require_main(window.label())?;
-    let (invitation_active, reconcile_origin) = {
-        let controller = state
-            .enrollment
-            .lock()
-            .map_err(|_| BridgeError::host_state())?;
-        (
-            controller.invitation_id.is_some(),
-            (!controller.ready)
-                .then(|| controller.origin.clone())
-                .flatten(),
-        )
-    };
+    let (invitation_active, reconcile_origin) = enrollment_status_entry(&state.enrollment)?;
     if invitation_active {
         refresh_invitation(&state, &hosted).await?;
     }
@@ -2691,6 +2892,19 @@ pub async fn enrollment_status(
         reconcile_status_core(&mut controller, identity);
     }
     Ok(controller.view())
+}
+
+fn enrollment_status_entry(
+    enrollment: &std::sync::Mutex<Controller>,
+) -> BridgeResult<(bool, Option<String>)> {
+    retire_surfaced_phone_completion(enrollment)?;
+    let controller = enrollment.lock().map_err(|_| BridgeError::host_state())?;
+    Ok((
+        controller.invitation_id.is_some(),
+        (!controller.ready)
+            .then(|| controller.origin.clone())
+            .flatten(),
+    ))
 }
 
 #[tauri::command]
@@ -2726,12 +2940,21 @@ pub async fn enrollment_cancel(
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<()> {
     crate::require_main(window.label())?;
+    retire_surfaced_phone_completion(&state.enrollment)?;
+    let epoch = begin_owner_operation(&state.enrollment)?;
     let id = state
         .enrollment
         .lock()
         .map_err(|_| BridgeError::host_state())?
         .invitation_id;
     if let Some(id) = id {
+        refresh_invitation(&state, &hosted).await?;
+        if !phone_invitation_is_cancelable(&state.enrollment, id)? {
+            return Err(BridgeError::new(
+                "enrollment-state",
+                "This phone connection can no longer be cancelled.",
+            ));
+        }
         let session = state.require_session().await?;
         let origin = session.api.origin().to_owned();
         let account = hosted_account_header(&state, &hosted).await?;
@@ -2751,37 +2974,7 @@ pub async fn enrollment_cancel(
         )
         .await?;
     }
-    let mut controller = state
-        .enrollment
-        .lock()
-        .map_err(|_| BridgeError::host_state())?;
-    controller.operation_epoch = controller.operation_epoch.wrapping_add(1);
-    if !controller.vault_creation_in_flight {
-        if let Some(origin) = controller.origin.clone() {
-            if controller
-                .client
-                .as_ref()
-                .and_then(EnrollmentClient::pending_vault_request)
-                .is_some()
-            {
-                controller
-                    .client
-                    .as_mut()
-                    .expect("checked above")
-                    .clear_vault_request();
-                tombstone_vault_request_checkpoint(&*state.store, &origin)?;
-            }
-        }
-    }
-    controller.client = None;
-    controller.owner_passphrase = None;
-    controller.owner_resume = false;
-    controller.vault_request_state = None;
-    controller.vault_creation_in_flight = false;
-    controller.invitation_id = None;
-    controller.invitation = None;
-    controller.invitation_method = None;
-    Ok(())
+    finish_enrollment_cancel(&state.enrollment, &*state.store, epoch, id)
 }
 
 #[tauri::command]
@@ -4481,13 +4674,87 @@ mod owner_retry_tests {
     }
 
     #[test]
-    fn invitation_views_cover_waiting_and_expired_stages() {
+    fn invitation_views_map_waiting_approved_and_completed_stages() {
         let mut controller = ready_controller();
         controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 300));
         assert_eq!(controller.view().stage, "waiting_phone");
 
+        controller.invitation = Some(invitation_status(EnrollmentState::Approved, 0));
+        assert_eq!(controller.view().stage, "phone_approved");
+
+        controller.invitation = Some(invitation_status(EnrollmentState::Confirmed, 0));
+        assert_eq!(controller.view().stage, "phone_connected");
+
+        controller.invitation = Some(invitation_status(EnrollmentState::Consumed, 0));
+        assert_eq!(controller.view().stage, "phone_connected");
+
         controller.invitation = Some(invitation_status(EnrollmentState::Expired, 0));
         assert_eq!(controller.view().stage, "expired");
+    }
+
+    #[test]
+    fn approved_invitation_ignores_later_stale_statuses_until_completion() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller.invitation.as_mut().unwrap().state = EnrollmentState::Approved;
+        }
+
+        let expired = invitation_status(EnrollmentState::Expired, 0);
+        apply_refreshed_invitation_status(&controller, invitation_id, expired).unwrap();
+        assert_eq!(controller.lock().unwrap().view().stage, "phone_approved");
+
+        let consumed = {
+            let controller = controller.lock().unwrap();
+            let mut status = controller.invitation.clone().unwrap();
+            status.state = EnrollmentState::Consumed;
+            status
+        };
+        apply_refreshed_invitation_status(&controller, invitation_id, consumed).unwrap();
+        assert_eq!(controller.lock().unwrap().view().stage, "phone_connected");
+    }
+
+    #[test]
+    fn delayed_old_invitation_status_cannot_overwrite_a_newer_invitation() {
+        let old_id = uuid::Uuid::from_u128(7);
+        let new_id = uuid::Uuid::from_u128(8);
+        let controller = waiting_phone_controller(old_id, 300);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .clear_cancelled_owner_invitation(old_id)
+                .unwrap();
+            let client = controller.client.as_mut().unwrap();
+            client
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .unwrap();
+            client
+                .consume_created_invitation(
+                    serde_json::to_string(&InvitationCreated {
+                        invitation_id: new_id,
+                        expires_in_seconds: 300,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            controller.invitation_id = Some(new_id);
+            controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 300));
+        }
+
+        apply_refreshed_invitation_status(
+            &controller,
+            old_id,
+            invitation_status(EnrollmentState::Expired, 0),
+        )
+        .unwrap();
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.invitation_id, Some(new_id));
+        assert_eq!(controller.view().stage, "waiting_phone");
     }
 
     #[test]
@@ -4899,6 +5166,287 @@ mod owner_retry_tests {
         let controller = controller.lock().unwrap();
         assert_eq!(controller.invitation_id, Some(new_id));
         assert!(controller.client.as_ref().unwrap().get_qr_payload().is_ok());
+    }
+
+    #[test]
+    fn delayed_generic_cancellation_preserves_a_newer_phone_flow() {
+        let old_id = uuid::Uuid::from_u128(7);
+        let new_id = uuid::Uuid::from_u128(8);
+        let controller = waiting_phone_controller(old_id, 300);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller.operation_epoch = 9;
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .clear_cancelled_owner_invitation(old_id)
+                .unwrap();
+            let client = controller.client.as_mut().unwrap();
+            client
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .unwrap();
+            client
+                .consume_created_invitation(
+                    serde_json::to_string(&InvitationCreated {
+                        invitation_id: new_id,
+                        expires_in_seconds: 300,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            controller.invitation_id = Some(new_id);
+            controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 300));
+        }
+
+        finish_enrollment_cancel(&controller, &MemoryStore::default(), 8, Some(old_id)).unwrap();
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.invitation_id, Some(new_id));
+        assert!(controller.client.as_ref().unwrap().get_qr_payload().is_ok());
+    }
+
+    #[test]
+    fn stale_owner_draft_is_dropped_before_a_rebuilt_client_creates_again() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .clear_cancelled_owner_invitation(invitation_id)
+                .unwrap();
+            controller.invitation_id = None;
+            controller.invitation = None;
+            controller.invitation_method = None;
+            controller.operation_epoch = 8;
+            controller.phone_operation_epoch = Some(7);
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .unwrap();
+        }
+
+        discard_owner_draft(&controller, 7).unwrap();
+        assert!(controller.lock().unwrap().client.is_none());
+
+        let mut replacement =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        replacement
+            .create_owner_request(
+                "setup".into(),
+                "admin".into(),
+                "password long enough".into(),
+                RECOVERY_SECRET.into(),
+            )
+            .unwrap();
+        assert!(replacement
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .is_ok());
+    }
+
+    #[test]
+    fn terminal_or_expired_invitation_is_retired_before_creating_another_phone() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let next_id = uuid::Uuid::from_u128(8);
+        let controller = waiting_phone_controller(invitation_id, 300);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller.invitation.as_mut().unwrap().state = EnrollmentState::Consumed;
+            retire_terminal_phone_invitation(&mut controller).unwrap();
+            assert!(controller.invitation_id.is_none());
+            let client = controller.client.as_mut().unwrap();
+            client
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .unwrap();
+            client
+                .consume_created_invitation(
+                    serde_json::to_string(&InvitationCreated {
+                        invitation_id: next_id,
+                        expires_in_seconds: 300,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            controller.invitation_id = Some(next_id);
+            controller.invitation = Some(invitation_status(EnrollmentState::Waiting, 300));
+        }
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.invitation_id, Some(next_id));
+        assert!(controller.client.as_ref().unwrap().get_qr_payload().is_ok());
+
+        let expired = waiting_phone_controller(uuid::Uuid::from_u128(9), 300);
+        {
+            let mut expired = expired.lock().unwrap();
+            expired.invitation.as_mut().unwrap().state = EnrollmentState::Expired;
+            retire_terminal_phone_invitation(&mut expired).unwrap();
+            assert!(expired
+                .client
+                .as_mut()
+                .unwrap()
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn reopened_status_retires_consumed_connection_before_the_next_phone_create() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+        controller
+            .lock()
+            .unwrap()
+            .invitation
+            .as_mut()
+            .unwrap()
+            .state = EnrollmentState::Consumed;
+
+        assert_eq!(enrollment_status_entry(&controller).unwrap(), (false, None));
+        let mut controller = controller.lock().unwrap();
+        assert_eq!(controller.view().stage, "ready");
+        controller
+            .client
+            .as_mut()
+            .unwrap()
+            .create_phone_invitation(EnrollmentMethod::Transfer)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rotate_retires_a_stored_completion_without_cancelling_it() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+        controller
+            .lock()
+            .unwrap()
+            .invitation
+            .as_mut()
+            .unwrap()
+            .state = EnrollmentState::Consumed;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let refreshed = events.clone();
+        let cancelled = events.clone();
+        let created = events.clone();
+
+        rotate_phone_core(
+            &controller,
+            EnrollmentMethod::Transfer,
+            move || {
+                refreshed.lock().unwrap().push("refresh");
+                std::future::ready(Ok(()))
+            },
+            move || {
+                cancelled.lock().unwrap().push("cancel");
+                std::future::ready(Ok(()))
+            },
+            move || {
+                created.lock().unwrap().push("create");
+                std::future::ready(Ok(ready_controller().view()))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*events.lock().unwrap(), ["create"]);
+    }
+
+    #[test]
+    fn failed_second_add_keeps_the_first_draft_marker_for_stale_cleanup() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let controller = waiting_phone_controller(invitation_id, 300);
+        {
+            let mut controller = controller.lock().unwrap();
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .clear_cancelled_owner_invitation(invitation_id)
+                .unwrap();
+            controller.invitation_id = None;
+            controller.invitation = None;
+            controller.phone_operation_epoch = Some(7);
+            controller
+                .client
+                .as_mut()
+                .unwrap()
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .unwrap();
+            assert!(controller
+                .client
+                .as_mut()
+                .unwrap()
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .is_err());
+            assert_eq!(controller.phone_operation_epoch, Some(7));
+        }
+
+        discard_owner_draft(&controller, 7).unwrap();
+        assert!(controller.lock().unwrap().client.is_none());
+    }
+
+    #[test]
+    fn generic_cancellation_without_a_phone_retains_its_original_cleanup() {
+        let store = MemoryStore::default();
+        let mut client =
+            EnrollmentClient::new(ORIGIN.into(), ClientKind::Desktop, DEVICE_NAME.into()).unwrap();
+        client
+            .begin_vault_request(ORIGIN.into(), "A".repeat(43), "Taylor".into())
+            .unwrap();
+        let controller = Mutex::new(Controller {
+            client: Some(client),
+            owner_resume: true,
+            vault_request_state: Some("pending".into()),
+            operation_epoch: 8,
+            ..ready_controller()
+        });
+
+        finish_enrollment_cancel(&controller, &store, 8, None).unwrap();
+
+        let controller = controller.lock().unwrap();
+        assert_eq!(controller.operation_epoch, 9);
+        assert!(controller.client.is_none());
+        assert!(!controller.owner_resume);
+        assert!(controller.vault_request_state.is_none());
+        assert_eq!(
+            stored(&store, &vault_request_checkpoint_key(ORIGIN)).as_deref(),
+            Some(b"".as_slice())
+        );
+    }
+
+    #[test]
+    fn generic_cancellation_allows_claimed_but_refuses_approved_phone_invitations() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+
+        assert!(phone_invitation_is_cancelable(&controller, invitation_id).unwrap());
+        controller
+            .lock()
+            .unwrap()
+            .invitation
+            .as_mut()
+            .unwrap()
+            .state = EnrollmentState::Approved;
+        assert!(!phone_invitation_is_cancelable(&controller, invitation_id).unwrap());
+    }
+
+    #[test]
+    fn completed_explicit_cancellation_of_a_claimed_phone_clears_its_flow() {
+        let invitation_id = uuid::Uuid::from_u128(7);
+        let (controller, _) = claimed_phone_fixture(EnrollmentMethod::Transfer);
+        controller.lock().unwrap().operation_epoch = 8;
+
+        assert!(phone_invitation_is_cancelable(&controller, invitation_id).unwrap());
+        finish_enrollment_cancel(&controller, &MemoryStore::default(), 8, Some(invitation_id))
+            .unwrap();
+
+        let controller = controller.lock().unwrap();
+        assert!(controller.client.is_none());
+        assert!(controller.invitation_id.is_none());
     }
 
     #[tokio::test]

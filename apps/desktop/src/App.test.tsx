@@ -371,15 +371,29 @@ describe("setup landing routing", () => {
   });
 
   it("defers automatic phone setup per origin while header Add phone remains available", async () => {
-    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "owner" });
+    const refreshedSnapshot = {
+      ...await fixtureBridge.load_state(),
+      activeConversationId: undefined,
+      connection: { state: "connected" as const, origin: "https://example.test" },
+      gateways: [],
+      deviceRole: "owner" as const,
+    };
+    const refresh = deferred<DesktopSnapshot>();
+    await landingSnapshot({ connection: refreshedSnapshot.connection, gateways: [], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
     vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(enrollment("ready", { owner: true }));
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    const defer = await screen.findByRole("button", { name: "Set up phone later" });
+    vi.mocked(bridge.load_state).mockReturnValue(refresh.promise);
+
+    fireEvent.click(defer);
     await waitFor(() => expect(localStorage.getItem("peppy.setup.phoneDeferred:https://example.test")).toBe("1"));
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
     expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
+
+    await act(async () => refresh.resolve(refreshedSnapshot));
+    expect(screen.getByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
   });
 
   it("returns to the selected conversation when add phone is cancelled", async () => {
@@ -425,6 +439,42 @@ describe("setup landing routing", () => {
     await landingSnapshot({ connection: { state: "offline" }, encryption: { state: "unlocked" } });
     render(<App />);
     await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+  });
+
+  it("keeps the onboarding header when SetupLanding is displayed", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Set up Peppy");
+  });
+
+  it("shows the neutral Peppy header for a completed empty inbox", async () => {
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "unlocked" },
+      gateways: [SMS_ONLY],
+      deviceRole: "owner",
+      conversations: [],
+    });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
+  });
+
+  it("shows the neutral Peppy header for a deferred owner without a phone", async () => {
+    localStorage.setItem("peppy.setup.phoneDeferred:https://example.test", "1");
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "unlocked" },
+      gateways: [],
+      deviceRole: "owner",
+      conversations: [],
+    });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
   });
 });
 
@@ -954,6 +1004,18 @@ describe("lazy conversation history", () => {
 });
 
 describe("new-recipient drafts", () => {
+  it("keeps a new draft's recipient title when the inbox is empty", async () => {
+    host.conversations = [];
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
+    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
+    fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["+12025550100"]));
+    await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("(202) 555-0100"));
+  });
+
   it("deletes an empty recipientless draft directly and confirms before deleting content", async () => {
     host.drafts.set("empty-draft", { id: "draft-empty", conversationId: "empty-draft", text: "keep until confirmed", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);

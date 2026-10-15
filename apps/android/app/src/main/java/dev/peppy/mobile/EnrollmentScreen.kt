@@ -206,6 +206,7 @@ internal fun EnrollmentScreen(
     val scope = rememberCoroutineScope()
     val host = remember(context) { EnrollmentHost(context) }
     val scanGate = remember { EnrollmentScanGate() }
+    val operations = remember { EnrollmentOperationState() }
     var stage by remember { mutableStateOf(if (initialOrigin == null) EnrollmentStage.SERVER else EnrollmentStage.PHONE) }
     var origin by remember { mutableStateOf(initialOrigin.orEmpty()) }
     var setupToken by remember { mutableStateOf("") }
@@ -228,6 +229,7 @@ internal fun EnrollmentScreen(
     var discoveryGeneration by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var busyLabel by remember { mutableStateOf<Int?>(null) }
     var phone by remember { mutableStateOf<EnrollmentHost.PhoneEnrollment?>(null) }
     var phoneStatus by remember { mutableStateOf<String?>(null) }
     var phoneState by remember { mutableStateOf<EnrollmentHost.PhoneState?>(null) }
@@ -249,13 +251,16 @@ internal fun EnrollmentScreen(
     val invalidSetupToken = stringResource(R.string.peppy_enrollment_error_invalid_setup_token)
     val instanceAlreadyClaimed = stringResource(R.string.peppy_enrollment_error_already_claimed)
 
-    fun run(block: () -> ImportResult) {
-        if (busy) return
+    fun run(label: Int = R.string.peppy_production_pairing_connecting, block: () -> ImportResult) {
+        val operation = operations.begin() ?: return
         busy = true
+        busyLabel = label
         scope.launch(Dispatchers.IO) {
             val result = try { block() } catch (_: Exception) { ImportResult.NETWORK_ERROR }
             withContext(Dispatchers.Main) {
+                if (!operations.complete(operation)) return@withContext
                 busy = false
+                busyLabel = null
                 if (result == ImportResult.IMPORTED || result == ImportResult.UPDATED) onEnrolled()
                 else {
                     val errorCode = host.takeErrorCode()
@@ -272,6 +277,7 @@ internal fun EnrollmentScreen(
     }
 
     fun resetPhone() {
+        operations.invalidate()
         scanGeneration += 1
         scanGate.restart()
         phoneAttempt?.cancel()
@@ -285,6 +291,7 @@ internal fun EnrollmentScreen(
         phoneSecret = ""
         phoneConfirming = false
         busy = false
+        busyLabel = null
         error = null
     }
 
@@ -297,6 +304,7 @@ internal fun EnrollmentScreen(
 
     DisposableEffect(host) {
         onDispose {
+            operations.invalidate()
             scannerActive = false
             scanGate.cancel()
             scanGeneration += 1
@@ -332,12 +340,16 @@ internal fun EnrollmentScreen(
                     if (canonical == null) {
                         error = networkFailed
                     } else {
+                        val operation = operations.begin() ?: return@Button
                         busy = true
+                        busyLabel = R.string.peppy_production_pairing_checking
                         scope.launch(Dispatchers.IO) {
                             val discovery = try { host.discover(canonical)?.let(::parseInstanceDiscovery) } catch (_: Exception) { null }
                             val resume = if (discovery?.claimed == false) host.ownerResumeSecret(canonical) else EnrollmentHost.ResumeSecret.NONE
                             withContext(Dispatchers.Main) {
+                                if (!operations.complete(operation)) return@withContext
                                 busy = false
+                                busyLabel = null
                                 if (generation != discoveryGeneration) Unit
                                 else if (discovery == null) error = networkFailed
                                 else {
@@ -417,12 +429,16 @@ internal fun EnrollmentScreen(
                 Text(stringResource(R.string.peppy_enrollment_signin_username_hint), style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(adminPasswordInputs.password, { adminPasswordInputs = adminPasswordInputs.copy(password = it) }, label = { Text(stringResource(R.string.peppy_enrollment_admin_password)) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth().testTag("signin-password"))
                 Button(onClick = {
+                    val operation = operations.begin() ?: return@Button
                     val adminPassword = adminPasswordInputs.password
                     busy = true
+                    busyLabel = R.string.peppy_production_pairing_connecting
                     scope.launch(Dispatchers.IO) {
-                        val signedIn = host.signIn(origin, username, adminPassword)
+                        val signedIn = try { host.signIn(origin, username, adminPassword) } catch (_: Exception) { false }
                         withContext(Dispatchers.Main) {
+                            if (!operations.complete(operation)) return@withContext
                             busy = false
+                            busyLabel = null
                             if (signedIn) stage = EnrollmentStage.MANUAL
                             else error = enrollmentErrorMessage(host.takeErrorCode())?.let(context::getString) ?: networkFailed
                         }
@@ -445,13 +461,16 @@ internal fun EnrollmentScreen(
                 OutlinedTextField(inviteLink, { inviteLink = it }, label = { Text(stringResource(R.string.peppy_enrollment_invite_link_label)) }, modifier = Modifier.fillMaxWidth().testTag("invite-link-input"))
                 OutlinedTextField(displayName, { displayName = it }, label = { Text(stringResource(R.string.peppy_enrollment_display_name_label)) }, modifier = Modifier.fillMaxWidth().testTag("display-name-input"))
                 Button(onClick = {
+                    val operation = operations.begin() ?: return@Button
                     val generation = ++inviteGeneration
                     busy = true
+                    busyLabel = R.string.peppy_production_pairing_preparing
                     scope.launch(Dispatchers.IO) {
-                        val result = host.beginVaultRequest(origin, inviteLink, displayName)
+                        val result = try { host.beginVaultRequest(origin, inviteLink, displayName) } catch (_: Exception) { null }
                         withContext(Dispatchers.Main) {
-                            if (generation == inviteGeneration) {
+                            if (operations.complete(operation) && generation == inviteGeneration) {
                                 busy = false
+                                busyLabel = null
                                 if (result == null) error = enrollmentErrorMessage(host.takeErrorCode())?.let(context::getString) ?: networkFailed
                                 else { inviteState = result; stage = EnrollmentStage.INVITE_WAITING; error = null }
                             }
@@ -466,6 +485,10 @@ internal fun EnrollmentScreen(
                 LaunchedEffect(stage, origin, inviteGeneration, enrollmentForeground) {
                     var backoff = 1_000L
                     while (stage == EnrollmentStage.INVITE_WAITING && enrollmentForeground) {
+                        if (busy) {
+                            delay(100)
+                            continue
+                        }
                         val observedGeneration = inviteGeneration
                         when (withContext(Dispatchers.IO) { host.vaultRequestStatus(origin, inviteState) }) {
                             EnrollmentHost.VaultRequestState.APPROVED -> if (observedGeneration == inviteGeneration && stage == EnrollmentStage.INVITE_WAITING) {
@@ -480,7 +503,24 @@ internal fun EnrollmentScreen(
                         }
                     }
                 }
-                OutlinedButton(onClick = { ++inviteGeneration; stage = EnrollmentStage.CLAIMED_CHOOSER; scope.launch(Dispatchers.IO) { host.cancelVaultRequest(origin) } }, modifier = Modifier.testTag("invite-cancel")) { Text(stringResource(R.string.peppy_enrollment_invite_cancel_cta)) }
+                OutlinedButton(onClick = {
+                    val operation = operations.begin() ?: return@OutlinedButton
+                    busy = true
+                    busyLabel = R.string.peppy_production_pairing_cancelling
+                    scope.launch(Dispatchers.IO) {
+                        val cancelled = host.cancelVaultRequest(origin)
+                        withContext(Dispatchers.Main) {
+                            if (operations.complete(operation)) {
+                                busy = false
+                                busyLabel = null
+                                if (cancelled) {
+                                    inviteGeneration += 1
+                                    stage = EnrollmentStage.CLAIMED_CHOOSER
+                                } else error = networkFailed
+                            }
+                        }
+                    }
+                }, enabled = !busy, modifier = Modifier.testTag("invite-cancel")) { Text(stringResource(R.string.peppy_enrollment_invite_cancel_cta)) }
             }
             EnrollmentStage.INVITE_APPROVED -> {
                 Text(stringResource(R.string.peppy_enrollment_invite_approved_headline), Modifier.testTag("invite-approved-screen").semantics { liveRegion = LiveRegionMode.Assertive })
@@ -519,7 +559,24 @@ internal fun EnrollmentScreen(
                 val expired = stage == EnrollmentStage.INVITE_EXPIRED
                 Text(stringResource(if (expired) R.string.peppy_enrollment_invite_expired_headline else R.string.peppy_enrollment_invite_denied_headline), Modifier.testTag(if (expired) "invite-expired-screen" else "invite-denied-screen").semantics { liveRegion = LiveRegionMode.Assertive })
                 Text(stringResource(if (expired) R.string.peppy_enrollment_invite_expired_body else R.string.peppy_enrollment_invite_denied_body))
-                OutlinedButton(onClick = { ++inviteGeneration; stage = EnrollmentStage.CLAIMED_CHOOSER; scope.launch(Dispatchers.IO) { host.cancelVaultRequest(origin) } }, modifier = Modifier.testTag("invite-restart")) { Text(stringResource(R.string.peppy_enrollment_invite_restart_cta)) }
+                OutlinedButton(onClick = {
+                    val operation = operations.begin() ?: return@OutlinedButton
+                    busy = true
+                    busyLabel = R.string.peppy_production_pairing_cancelling
+                    scope.launch(Dispatchers.IO) {
+                        val cancelled = host.cancelVaultRequest(origin)
+                        withContext(Dispatchers.Main) {
+                            if (operations.complete(operation)) {
+                                busy = false
+                                busyLabel = null
+                                if (cancelled) {
+                                    inviteGeneration += 1
+                                    stage = EnrollmentStage.CLAIMED_CHOOSER
+                                } else error = networkFailed
+                            }
+                        }
+                    }
+                }, enabled = !busy, modifier = Modifier.testTag("invite-restart")) { Text(stringResource(R.string.peppy_enrollment_invite_restart_cta)) }
             }
             EnrollmentStage.PHONE -> {
                 Text(stringResource(R.string.peppy_hosted_join_headline))
@@ -532,7 +589,9 @@ internal fun EnrollmentScreen(
                     if (cameraGranted) {
                         scanner(Modifier.fillMaxWidth().weight(1f).testTag("enrollment-qr-scanner")) { raw ->
                             if (scannerActive && !busy && phone == null && phoneTerminal == null && scanGate.tryStart()) {
+                                val operation = operations.begin() ?: return@scanner
                                 busy = true
+                                busyLabel = R.string.peppy_production_pairing_connecting
                                 val generation = scanGeneration
                                 scope.launch(Dispatchers.IO) {
                                     var accepted = false
@@ -541,7 +600,7 @@ internal fun EnrollmentScreen(
                                         val inviteOrigin = host.parseVaultInviteLink(raw)
                                         if (inviteOrigin == null) candidate = host.beginPhoneClaim(raw)
                                         withContext(Dispatchers.Main) {
-                                            if (scannerActive && generation == scanGeneration && phone == null && scanGate.acceptResult()) {
+                                            if (operations.isActive(operation) && scannerActive && generation == scanGeneration && phone == null && scanGate.acceptResult()) {
                                                 if (inviteOrigin != null) {
                                                     inviteLink = raw
                                                     origin = inviteOrigin
@@ -561,14 +620,17 @@ internal fun EnrollmentScreen(
                                         }
                                     } catch (_: Exception) {
                                         withContext(Dispatchers.Main) {
-                                            if (scannerActive && generation == scanGeneration && phone == null && scanGate.acceptResult()) {
+                                            if (operations.isActive(operation) && scannerActive && generation == scanGeneration && phone == null && scanGate.acceptResult()) {
                                                 phoneTerminal = invalidQr
                                             }
                                         }
                                     } finally {
                                         if (!accepted) candidate?.close()
                                         withContext(NonCancellable + Dispatchers.Main) {
-                                            if (generation == scanGeneration) busy = false
+                                            if (operations.complete(operation)) {
+                                                busy = false
+                                                busyLabel = null
+                                            }
                                         }
                                     }
                                 }
@@ -697,6 +759,16 @@ internal fun EnrollmentScreen(
             }
         }
         error?.let { Text(it, Modifier.testTag("enrollment-error").semantics { liveRegion = LiveRegionMode.Assertive }) }
+        busyLabel?.let { label ->
+            Row(
+                Modifier.testTag("enrollment-progress").semantics { liveRegion = LiveRegionMode.Polite },
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(Modifier.testTag("enrollment-progress-spinner"))
+                Text(stringResource(label))
+            }
+        }
         OutlinedButton(onClick = {
             adminPasswordInputs = AdminPasswordInputs()
             inviteGeneration += 1
@@ -706,7 +778,10 @@ internal fun EnrollmentScreen(
             phoneAttempt?.cancel()
             phone?.close()
             host.close()
+            operations.invalidate()
+            busy = false
+            busyLabel = null
             onDismiss()
-        }, enabled = !phoneConfirming, modifier = Modifier.testTag("enrollment-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
+        }, enabled = !phoneConfirming && !busy, modifier = Modifier.testTag("enrollment-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
     }
 }

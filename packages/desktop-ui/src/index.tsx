@@ -7,6 +7,7 @@ import {
   ExternalLink,
   GripVertical,
   Loader,
+  LoaderCircle,
   MessageCircle,
   MessageSquarePlus,
   Minus,
@@ -196,6 +197,14 @@ export function StatusPopover({ tone, summary, children }: { tone: StatusTone; s
 export function ConnectionDot({ state, label }: { state: string; label: string }): ReactElement {
   return <span role="status" aria-label={label} title={label} data-connection-state={state}>
     <span className="connection-dot" aria-hidden />
+  </span>;
+}
+
+/** Visible pending status: the label is the live-region text; the spinner is decorative. */
+export function BusyIndicator({ id, label }: { id: string; label: string }): ReactElement {
+  return <span id={id} className="busy-indicator" role="status" aria-live="polite" aria-atomic="true">
+    <LoaderCircle className="busy-indicator-icon" size={14} strokeWidth={1.75} aria-hidden />
+    <span className="busy-indicator-label">{label}</span>
   </span>;
 }
 

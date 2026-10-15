@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import QRCode from "qrcode";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy } from "./generated/peppyCopy";
@@ -311,6 +312,133 @@ describe("SetupLanding", () => {
     expect(bridge.hosted_account).not.toHaveBeenCalled();
   });
 
+  it("keeps cancellation pending until the native cancellation settles and does not recreate the invitation", async () => {
+    const cancellation = deferred<void>();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+    vi.spyOn(bridge, "enrollment_cancel").mockReturnValue(cancellation.promise);
+    renderLanding({ fixedOrigin: "https://community.example", addingPhone: true });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(document.getElementById("setup-pending-operation")).toHaveTextContent(peppyCopy.production_pairing_cancelling);
+    await act(async () => cancellation.resolve());
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("waits for confirmed connection after approval and never restarts an approved invitation", async () => {
+    const advance = capturePoll();
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "phone_approved", owner: true }));
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "phone_approved", owner: true }));
+    renderLanding({ fixedOrigin: "https://community.example" });
+
+    expect(await screen.findByText(/phone approved/i)).toBeInTheDocument();
+    await advance();
+    expect(bridge.enrollment_rotate_phone).not.toHaveBeenCalled();
+    expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+  });
+
+  it("keeps completion pending through a synchronous callback failure and retries safely", async () => {
+    const onJoined = vi.fn().mockImplementationOnce(() => { throw { code: "offline" }; }).mockResolvedValueOnce(undefined);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "phone_connected", owner: true }));
+    renderLanding({ fixedOrigin: "https://community.example", onJoined });
+
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(onJoined).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(onJoined).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps deferral pending and actions disabled while the parent callback is still pending after cancel resolves", async () => {
+    const parent = deferred<void>();
+    const cancel = deferred<EnrollmentView>();
+    const onDeferPhone = vi.fn(() => parent.promise);
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockReturnValue(cancel.promise);
+    renderLanding({ enrolledWithoutPhone: true, onDeferPhone });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    expect(document.getElementById("setup-pending-operation")).toHaveTextContent(peppyCopy.production_pairing_cancelling);
+    await act(async () => cancel.resolve(view({ stage: "ready", owner: true })));
+    await waitFor(() => expect(onDeferPhone).toHaveBeenCalledOnce());
+    expect(document.getElementById("setup-pending-operation")).toHaveTextContent(peppyCopy.production_pairing_cancelling);
+    expect(screen.getByRole("button", { name: "Set up phone later" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+
+    await act(async () => parent.resolve());
+    await waitFor(() => expect(document.getElementById("setup-pending-operation")).not.toBeInTheDocument());
+  });
+
+  it("retries the deferral after a rejected native cancellation and calls the parent only once it succeeds", async () => {
+    const onDeferPhone = vi.fn();
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockRejectedValueOnce({ code: "offline" });
+    renderLanding({ enrolledWithoutPhone: true, onDeferPhone });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(onDeferPhone).toHaveBeenCalledOnce());
+    expect(bridge.enrollment_cancel_phone).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the error and Retry without calling the parent when native cancellation rejects", async () => {
+    const onDeferPhone = vi.fn();
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockRejectedValue({ code: "offline" });
+    renderLanding({ enrolledWithoutPhone: true, onDeferPhone });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    expect(await screen.findByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "offline");
+    expect(onDeferPhone).not.toHaveBeenCalled();
+  });
+
+  it("does not call the parent deferral when the landing unmounts during native cancellation", async () => {
+    const cancel = deferred<EnrollmentView>();
+    const onDeferPhone = vi.fn();
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockReturnValue(cancel.promise);
+    const rendered = renderLanding({ enrolledWithoutPhone: true, onDeferPhone });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    await waitFor(() => expect(bridge.enrollment_cancel_phone).toHaveBeenCalledOnce());
+    rendered.unmount();
+    await act(async () => cancel.resolve(view({ stage: "ready", owner: true })));
+
+    expect(onDeferPhone).not.toHaveBeenCalled();
+  });
+
+  it("does not call the parent deferral when the server mode changes during native cancellation", async () => {
+    const cancel = deferred<EnrollmentView>();
+    const onDeferPhone = vi.fn();
+    vi.spyOn(bridge, "enrollment_cancel_phone").mockReturnValue(cancel.promise);
+    const rendered = renderLanding({ mode: "self-hosted", onDeferPhone });
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    await waitFor(() => expect(bridge.enrollment_cancel_phone).toHaveBeenCalledOnce());
+
+    rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onDeferPhone={onDeferPhone} onJoined={vi.fn()} />);
+    await act(async () => cancel.resolve(view({ stage: "ready", owner: true })));
+
+    expect(onDeferPhone).not.toHaveBeenCalled();
+    expect(document.getElementById("setup-pending-operation")).not.toBeInTheDocument();
+  });
+
+  it("retries a rejected parent deferral through Retry", async () => {
+    const onDeferPhone = vi.fn().mockRejectedValueOnce({ code: "offline" }).mockResolvedValueOnce(undefined);
+    renderLanding({ enrolledWithoutPhone: true, onDeferPhone });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(onDeferPhone).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.getElementById("setup-pending-operation")).not.toBeInTheDocument());
+  });
+
+  it("shows one checking status while the initial owner reconciliation is pending", async () => {
+    const status = deferred<EnrollmentView>();
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
+    renderLanding({ enrolledWithoutPhone: true });
+
+    expect(screen.getAllByText(peppyCopy.production_pairing_checking)).toHaveLength(1);
+    await act(async () => status.resolve(view({ stage: "ready", owner: true, hasGateway: false })));
+  });
+
   it.each(["setup", "signin"] as const)("rechecks a stale owner %s status until it can create a phone invitation", async (staleStage) => {
     vi.useFakeTimers();
     vi.spyOn(bridge, "enrollment_status")
@@ -343,6 +471,7 @@ describe("SetupLanding", () => {
 
     expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
     expect(document.getElementById("enrollment-error-code")).toHaveAttribute("data-error-code", "owner-status-pending");
+    expect(document.getElementById("setup-owner-status-checking")).not.toBeInTheDocument();
     expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
   });
 
@@ -1566,6 +1695,211 @@ describe("SetupLanding", () => {
       expect(document.getElementById("self-hosted-url-error")).not.toBeInTheDocument();
       expect(input).not.toHaveAttribute("aria-invalid", "true");
       expect(connect).toBeEnabled();
+    });
+  });
+
+  describe("async pairing operations", () => {
+    const pendingIndicator = () => document.getElementById("setup-pending-operation");
+    const qrImage = () => document.getElementById("enrollment-qr-image");
+    const markNative = () => Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+
+    afterEach(() => {
+      delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    });
+
+    it("shows one preparing status while automatic invitation creation is pending", async () => {
+      const creation = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
+      vi.spyOn(bridge, "enrollment_add_phone").mockReturnValue(creation.promise);
+      renderLanding({ enrolledWithoutPhone: true });
+
+      await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+      expect(screen.getAllByText(peppyCopy.production_pairing_preparing)).toHaveLength(1);
+      await act(async () => creation.resolve(waitingView()));
+    });
+
+    it("does not implicitly cancel a claimed invitation on unmount", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "verify_phone", owner: true, verificationCode: "123456" }));
+      const rendered = renderLanding({ fixedOrigin: "https://community.example" });
+      await screen.findByRole("heading", { name: /verify the code/i });
+
+      rendered.unmount();
+
+      expect(bridge.enrollment_cancel).not.toHaveBeenCalled();
+    });
+
+    it("allows explicit cancellation after a phone claims the invitation", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "verify_phone", owner: true, verificationCode: "123456" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+      await waitFor(() => expect(bridge.enrollment_cancel).toHaveBeenCalledOnce());
+    });
+
+    it("shows encoding progress while the QR promise is pending and reveals the image once it resolves", async () => {
+      const encoded = deferred<string>();
+      vi.spyOn(QRCode, "toDataURL").mockImplementation(() => encoded.promise);
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByText(peppyCopy.production_pairing_qr_generating)).toBeInTheDocument();
+      expect(qrImage()).not.toBeInTheDocument();
+      await act(async () => encoded.resolve("data:image/png;base64,AAAA"));
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+      expect(qrImage()).toHaveAttribute("src", "data:image/png;base64,AAAA");
+      expect(screen.queryByText(peppyCopy.production_pairing_qr_generating)).not.toBeInTheDocument();
+    });
+
+    it("retries a rejected QR encoding with the same payload and creates no new invitation", async () => {
+      const encode = vi.spyOn(QRCode, "toDataURL")
+        .mockImplementationOnce(() => Promise.reject(new Error("encoder failed")))
+        .mockImplementationOnce(() => Promise.resolve("data:image/png;base64,AAAA"));
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      fireEvent.click(await screen.findByRole("button", { name: /try again/i }));
+
+      expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+      expect(encode.mock.calls.map(([payload]) => payload)).toEqual(["secret-qr-payload", "secret-qr-payload"]);
+      expect(bridge.enrollment_discover).toHaveBeenCalledOnce();
+      expect(bridge.enrollment_add_phone).not.toHaveBeenCalled();
+      expect(bridge.enrollment_rotate_phone).not.toHaveBeenCalled();
+    });
+
+    it("ignores a delayed encoding for an earlier payload after a newer invitation is shown", async () => {
+      const advance = capturePoll();
+      const oldEncoding = deferred<string>();
+      vi.spyOn(QRCode, "toDataURL").mockImplementation(((payload: string) => payload === "old-qr-payload"
+        ? oldEncoding.promise
+        : Promise.resolve(`data:${payload}`)) as typeof QRCode.toDataURL);
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView({ qrPayload: "old-qr-payload" }));
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(waitingView({ qrPayload: "new-qr-payload" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+      await screen.findByText(peppyCopy.production_pairing_qr_generating);
+
+      await advance();
+      await waitFor(() => expect(qrImage()).toHaveAttribute("src", "data:new-qr-payload"));
+      await act(async () => oldEncoding.resolve("data:old-qr-payload"));
+
+      expect(qrImage()).toHaveAttribute("src", "data:new-qr-payload");
+    });
+
+    it("shows refreshing progress and blocks conflicting actions during automatic rotation", async () => {
+      const rotation = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView({ expiresInSeconds: 15 }));
+      vi.spyOn(bridge, "enrollment_rotate_phone").mockReturnValue(rotation.promise);
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByText(peppyCopy.production_pairing_refreshing)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Enter shared secret on phone" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Set up phone later" })).toBeDisabled();
+
+      await act(async () => rotation.resolve(waitingView({ expiresInSeconds: 300 })));
+      await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+      expect(bridge.enrollment_rotate_phone).toHaveBeenCalledOnce();
+      expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("transfer");
+    });
+
+    it("keeps background status polls quiet with no pending indicator or disabled actions", async () => {
+      const advance = capturePoll();
+      const poll = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "enrollment_status").mockReturnValue(poll.promise);
+      renderLanding({ fixedOrigin: "https://community.example" });
+      await screen.findByRole("img", { name: /pairing qr/i });
+
+      await advance();
+
+      expect(bridge.enrollment_status).toHaveBeenCalledOnce();
+      expect(pendingIndicator()).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Enter shared secret on phone" })).toBeEnabled();
+      await act(async () => poll.resolve(waitingView()));
+    });
+
+    it("keeps the shared-secret phone action busy until the native reveal settles", async () => {
+      markNative();
+      const reveal = deferred<void>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "reveal_vault_secret").mockReturnValue(reveal.promise);
+      renderLanding({ fixedOrigin: "https://community.example" });
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+
+      await waitFor(() => expect(bridge.reveal_vault_secret).toHaveBeenCalledOnce());
+      expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret");
+      expect(pendingIndicator()).toHaveTextContent(peppyCopy.production_pairing_revealing);
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Enter shared secret on phone" })).toBeDisabled();
+
+      await act(async () => reveal.resolve());
+      await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    });
+
+    it("keeps the shared-secret method for near-expiry rotation and its hint after the reveal settles", async () => {
+      markNative();
+      const advance = capturePoll();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "enrollment_status").mockResolvedValue(waitingView({ expiresInSeconds: 10 }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      await waitFor(() => expect(bridge.reveal_vault_secret).toHaveBeenCalledOnce());
+      await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
+      expect(screen.getByText("After scanning, your phone asks for the vault shared secret. Enter it there, then compare the codes.")).toBeInTheDocument();
+
+      await advance();
+
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledTimes(2));
+      expect(bridge.enrollment_rotate_phone).toHaveBeenNthCalledWith(1, "shared_secret");
+      expect(bridge.enrollment_rotate_phone).toHaveBeenNthCalledWith(2, "shared_secret");
+    });
+
+    it.each(["verify_phone", "phone_approved", "expired"] as const)("never reveals the shared secret when rotation returns %s", async stage => {
+      markNative();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "enrollment_rotate_phone").mockResolvedValue(view({ stage, owner: true, verificationCode: "123456" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
+      await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
+      expect(bridge.reveal_vault_secret).not.toHaveBeenCalled();
+    });
+
+    it("does not reveal the shared secret when the landing unmounts before rotation settles", async () => {
+      markNative();
+      const rotation = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "enrollment_rotate_phone").mockReturnValue(rotation.promise);
+      const rendered = renderLanding({ fixedOrigin: "https://community.example" });
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
+
+      rendered.unmount();
+      await act(async () => rotation.resolve(waitingView()));
+
+      expect(bridge.reveal_vault_secret).not.toHaveBeenCalled();
+    });
+
+    it("does not reveal the shared secret or leave pending state after the server mode changes during rotation", async () => {
+      markNative();
+      const rotation = deferred<EnrollmentView>();
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
+      vi.spyOn(bridge, "enrollment_rotate_phone").mockReturnValue(rotation.promise);
+      const rendered = renderLanding({ mode: "self-hosted" });
+      fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
+
+      rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
+      await act(async () => rotation.resolve(waitingView()));
+
+      expect(bridge.reveal_vault_secret).not.toHaveBeenCalled();
+      expect(pendingIndicator()).not.toBeInTheDocument();
     });
   });
 });

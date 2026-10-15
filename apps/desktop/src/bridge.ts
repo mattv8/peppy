@@ -105,6 +105,7 @@ fixtureSnapshot.contactsPendingCount = 1;
 /** Fixture drafts keyed by conversation ID; mirrors the native compose-draft save contract (session.rs). */
 const fixtureDrafts = new Map<string, Draft>();
 let fixtureCreated = 0;
+let fixturePhoneApproved = false;
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
 const canonicalRecipient = (recipient: string) => normalizePhoneNumber(recipient) ?? recipient.trim();
 const canonicalRecipients = (recipientIds: string[]) => [...new Set(recipientIds.map(canonicalRecipient).filter(Boolean))];
@@ -295,8 +296,13 @@ export const fixtureBridge: DesktopBridge = {
   enrollment_rotate_phone: async () => ({ mode: "community", stage: "waiting_phone" }),
   enrollment_cancel_phone: async () => ({ mode: "community", stage: "ready", owner: true }),
   reveal_vault_secret: async () => undefined,
-  enrollment_status: async () => ({ mode: "community", stage: "server" }),
-  enrollment_approve: async () => ({ mode: "community", stage: "phone_connected", owner: true }),
+  enrollment_status: async () => fixturePhoneApproved
+    ? ({ mode: "community", stage: "phone_connected", owner: true })
+    : ({ mode: "community", stage: "server" }),
+  enrollment_approve: async () => {
+    fixturePhoneApproved = true;
+    return { mode: "community", stage: "phone_approved", owner: true };
+  },
   enrollment_cancel: async () => undefined,
   enrollment_sign_out: async () => undefined,
 

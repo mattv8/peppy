@@ -1975,6 +1975,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     ? snapshot.encryption.state !== "unlocked" && nativeCredentialed
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
   const canRecoverNativeSync = canUnlock || nativeCredentialed;
+  const needsServerSetup = snapshot?.connection.errorCode === "server-required" || (snapshot?.connection.state !== "connected" && !canUnlock);
+  const showSetup = Boolean(snapshot && (addingPhone || (!selected && (needsServerSetup || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2349,7 +2351,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <b data-header-title>{title ?? "Set up Peppy"}</b>
+                  <b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
@@ -2446,22 +2448,23 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot && (addingPhone || (!selected && (snapshot.connection.errorCode === "server-required" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview") || (snapshot.connection.state !== "connected" && !canUnlock)))) ? (
+              {showSetup && snapshot ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
                   enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
+                  enrollmentEstablished={snapshot.deviceRole === "owner" && snapshot.encryption.state === "unlocked"}
                   addingPhone={addingPhone}
                   connectionPending={snapshot.connection.errorCode === "connecting"}
                   onExit={() => setAddingPhone(false)}
-                  onDeferPhone={() => {
+                  onDeferPhone={async () => {
                     const key = phoneDeferredKey(snapshot.connection.origin);
                     if (key) localStorage.setItem(key, "1");
                     setPhoneDeferredOrigin(snapshot.connection.origin ?? null);
-                    setAddingPhone(false);
-                    void refresh();
+                    await refresh();
+                    if (addingPhone) setAddingPhone(false);
                   }}
-                  onJoined={() => { setAddingPhone(false); void refresh(); }}
+                  onJoined={async () => { await refresh(); setAddingPhone(false); }}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
                 />

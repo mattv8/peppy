@@ -364,6 +364,26 @@ describe("browser host RPC", () => {
     expect(enrollmentApprove).toHaveBeenCalledWith();
   });
 
+  it("validates and forwards waiting-only enrollment cancellation", async () => {
+    const session = new FakeSession();
+    const enrollmentCancel = vi.fn(async (options?: { waitingOnly?: boolean }) => options?.waitingOnly ? { mode: "community" as const, stage: "verify_phone" as const } : undefined);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentCancel } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_cancel", args: { waitingOnly: true } });
+    attached.emit({ id: 2, command: "enrollment_cancel", args: { waitingOnly: "true" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+
+    expect(enrollmentCancel).toHaveBeenCalledWith({ waitingOnly: true });
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { mode: "community", stage: "verify_phone" } });
+    expect(attached.messages).toContainEqual({ id: 2, ok: false, error: expect.objectContaining({ code: "invalid-request" }) });
+  });
+
   it.each([
     ["enrollment_create_owner", { passphrase: "manual-passphrase" }],
     ["enrollment_connect_shared_secret", { passphrase: "manual-passphrase" }],

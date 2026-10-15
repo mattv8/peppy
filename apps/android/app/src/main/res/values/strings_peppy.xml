@@ -73,6 +73,16 @@
     <string name="peppy_production_pairing_waiting">Waiting for the new device…</string>
     <string name="peppy_production_pairing_expired">This pairing request expired. Create a new one to try again.</string>
     <string name="peppy_production_pairing_connecting">Connecting…</string>
+    <string name="peppy_production_pairing_qr_generating">Generating connection code…</string>
+    <string name="peppy_production_pairing_qr_error">Could not generate the connection code. Try again.</string>
+    <string name="peppy_production_pairing_checking">Checking connection status…</string>
+    <string name="peppy_production_pairing_preparing">Preparing a connection code…</string>
+    <string name="peppy_production_pairing_refreshing">Refreshing connection code…</string>
+    <string name="peppy_production_pairing_approving">Approving phone…</string>
+    <string name="peppy_production_pairing_cancelling">Cancelling connection…</string>
+    <string name="peppy_production_pairing_revealing">Opening the shared-secret prompt…</string>
+    <string name="peppy_production_pairing_finishing">Finishing connection setup…</string>
+    <string name="peppy_production_pairing_idle">No connection code is active.</string>
     <string name="peppy_production_pairing_sas_label">Verification code</string>
     <string name="peppy_production_pairing_unlocked">Unlock this owner device before adding another device.</string>
     <string name="peppy_production_secure_storage_failed">Secure storage is unavailable. Setup has stopped to protect your keys and existing data.</string>

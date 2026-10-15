@@ -11,7 +11,7 @@ import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
 type PendingRequest = { resolve(value: unknown): void; reject(error: Error): void; timer: number };
-type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
 export type EnrollmentView = { mode: "community" | "hosted"; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
 export type InstanceManagement = { vault_id: string; devices: Array<{ device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean }>; storage_bytes: number; quota_bytes: number; replay_retention_days: number; isAdmin: boolean; username: string };
 export type VaultSummary = { vaultId: string; username: string; isAdmin: boolean; deviceCount: number; storageBytes: number; createdAt: string };
@@ -498,14 +498,14 @@ export class BrowserBridge implements DesktopBridge {
   public async enrollment_rotate_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
     const view = await this.enrollment_status();
     if (view.stage !== "waiting_phone" && view.stage !== "expired") return view;
-    await this.call("enrollment_cancel");
+    const cancelled = await this.call<EnrollmentView>("enrollment_cancel", { waitingOnly: true });
+    if (cancelled.stage !== "ready") return this.finishOwnerClaim(cancelled);
     return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method }));
   }
   public async enrollment_cancel_phone(): Promise<EnrollmentView> {
     const view = await this.enrollment_status();
     if (view.stage !== "waiting_phone" && view.stage !== "expired") return view;
-    await this.call("enrollment_cancel");
-    return this.enrollment_status();
+    return this.finishOwnerClaim(await this.call("enrollment_cancel", { waitingOnly: true }));
   }
   public reveal_vault_secret(): Promise<void> { return Promise.reject(new BrowserBridgeError("unavailable", "Vault shared secret reveal is unavailable in the browser.")); }
   public async enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView> {

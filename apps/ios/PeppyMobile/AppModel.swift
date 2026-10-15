@@ -231,8 +231,17 @@ final class AppModel {
         }
     }
 
-    func cancelVaultRequest(origin: String) {
-        Task { try? await session.cancelVaultRequest(origin: origin) }
+    func cancelVaultRequest(origin: String) async -> Bool {
+        activity = .enrolling
+        defer { activity = .idle }
+        do {
+            try await session.cancelVaultRequest(origin: origin)
+            lastError = nil
+            return true
+        } catch {
+            lastError = (error as? ClientError)?.userMessage ?? "Could not cancel the vault request."
+            return false
+        }
     }
 
     func vaultRequestRecoveryRequired() {

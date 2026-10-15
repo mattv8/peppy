@@ -64,6 +64,19 @@ describe("BrowserBridge", () => {
     await expect(management).resolves.toMatchObject({ vault_id: "vault" });
   });
 
+  it("does not rotate after the worker observes a claimed phone", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const rotation = bridge.enrollment_rotate_phone("shared_secret");
+    port.reply({ id: 1, ok: true, value: { mode: "community", stage: "waiting_phone" } });
+    await vi.waitFor(() => expect(port.sent[1]).toEqual({ id: 2, command: "enrollment_cancel", args: { waitingOnly: true } }));
+    port.reply({ id: 2, ok: true, value: { mode: "community", stage: "verify_phone", verificationCode: "123 456" } });
+
+    await expect(rotation).resolves.toMatchObject({ stage: "verify_phone" });
+    expect(port.sent).toHaveLength(2);
+    bridge.dispose();
+  });
+
   it("requires saving the generated community owner secret before forwarding it", async () => {
     const port = new TestPort();
     const restoreShowModal = stubShowModal();

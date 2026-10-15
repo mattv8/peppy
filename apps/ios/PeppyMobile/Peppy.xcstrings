@@ -721,6 +721,106 @@
         }
       }
     },
+    "peppy.production_pairing_qr_generating": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generating connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not generate the connection code. Try again."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking connection status…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_preparing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing a connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_refreshing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refreshing connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_approving": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving phone…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_cancelling": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelling connection…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_revealing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opening the shared-secret prompt…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_finishing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finishing connection setup…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_idle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No connection code is active."
+          }
+        }
+      }
+    },
     "peppy.production_pairing_sas_label": {
       "localizations": {
         "en": {

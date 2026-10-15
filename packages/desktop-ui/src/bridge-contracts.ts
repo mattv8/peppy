@@ -52,7 +52,7 @@ export type HostedAccountView = { available: boolean; signedIn: boolean; account
 /** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
 export type EnrollmentView = {
   mode: "community" | "hosted";
-  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
+  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
   origin?: string;
   owner?: boolean;
   hasGateway?: boolean;
