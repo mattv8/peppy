@@ -154,6 +154,7 @@ private fun CompanionScreen() {
     var smsCaptureEnabled by remember { mutableStateOf(GatewayPolicyHost(context).smsCaptureEnabled) }
     var destination by remember { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
+    var appFiltersOpen by remember { mutableStateOf(false) }
     var welcomeDestination by rememberSaveable { mutableStateOf(WelcomeDestination.HOSTED) }
     var ownerPhoneHost by remember { mutableStateOf<OwnerPhoneApprovalHost?>(null) }
     // Plain remember: the owner flow is transient, so it must not outlive its live host (no saved state).
@@ -184,6 +185,10 @@ private fun CompanionScreen() {
         status = current
         ownerPhoneAvailable = current.sharedKeysReady &&
             GatewayAccountHost.load(context)?.self?.let { it.role == "owner" && !it.revoked } == true
+    }
+
+    LaunchedEffect(status?.enrolled) {
+        if (status?.enrolled != true) appFiltersOpen = false
     }
 
     if (addPhoneOpen && ownerPhoneActions != null) {
@@ -250,6 +255,14 @@ private fun CompanionScreen() {
         return
     }
 
+    if (appFiltersOpen && !settingsOpen && status?.enrolled == true) {
+        NotificationAppFiltersScreen(onBack = {
+            appFiltersOpen = false
+            refresh++
+        })
+        return
+    }
+
     BackHandler(enabled = settingsOpen) { settingsOpen = false }
 
     Scaffold(
@@ -301,7 +314,7 @@ private fun CompanionScreen() {
             }
         }
 
-        if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked)) {
+        if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
             Text(
                 "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -334,8 +347,8 @@ private fun CompanionScreen() {
             unlockResult?.let { Text(unlockMessage(it), Modifier.testTag("unlock-error"), style = MaterialTheme.typography.bodySmall) }
         }
 
-        if (!settingsOpen && status?.enrolled == true && destination == "sms") Section("sms-tab-screen", stringResource(R.string.peppy_sms)) {
-        Section("status-section", "Phone status") {
+        if (!settingsOpen && status?.enrolled == true && destination == "sms") Section("sms-tab-screen", stringResource(R.string.peppy_sms), showDivider = false) {
+        Section("status-section", "Phone status", showDivider = false) {
             val current = status
             if (current == null) {
                 CircularProgressIndicator(Modifier.size(20.dp).testTag("status-loading"), strokeWidth = 2.dp)
@@ -418,7 +431,7 @@ private fun CompanionScreen() {
             Bullet("limitation-carrier", stringResource(R.string.peppy_carrier_not_encrypted))
         }
         }
-        if (!settingsOpen && status?.enrolled == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ })
+        if (!settingsOpen && status?.enrolled == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
         if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
             ContactSyncSettings(context = context, refresh = refresh, requestPermissions = { contactsPermissionRequest.launch(CONTACT_PERMISSIONS) }, onChanged = { refresh++ })
         }
@@ -437,9 +450,9 @@ private fun CompanionScreen() {
 
 
 @Composable
-internal fun Section(tag: String, title: String, content: @Composable () -> Unit) {
+internal fun Section(tag: String, title: String, showDivider: Boolean = true, content: @Composable () -> Unit) {
     Column(Modifier.fillMaxWidth().testTag(tag), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        HorizontalDivider()
+        if (showDivider) HorizontalDivider()
         Text(title, style = MaterialTheme.typography.titleMedium)
         content()
     }

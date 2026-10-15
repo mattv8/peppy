@@ -71,6 +71,126 @@
         }
       }
     },
+    "peppy.app_filters": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App filters"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading app filters…"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_all_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All apps allowed"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_muted_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 app muted"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_muted_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d apps muted"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_search": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search apps"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh app list"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock sync to view or change per-app filters."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No app notifications received yet. Filters appear after the first notification."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_no_match": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching apps."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_save_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save the app filter. Unlock sync and try again."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_load_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load app filters. Try again."
+          }
+        }
+      }
+    },
     "peppy.media_wifi_only": {
       "localizations": {
         "en": {
