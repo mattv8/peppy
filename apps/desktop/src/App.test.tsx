@@ -1004,6 +1004,97 @@ describe("lazy conversation history", () => {
 });
 
 describe("new-recipient drafts", () => {
+  it("hides the composer and exposes a draft CTA when no conversation is selected", async () => {
+    host.conversations = [];
+    render(<App />);
+
+    const cta = await screen.findByRole("button", { name: "New conversation" });
+    expect(cta).toHaveAttribute("id", "new-conversation-cta");
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+    expect(document.getElementById("conversation-stage")).toHaveStyle({
+      "--composer-overlay-height": "0px",
+    });
+
+    fireEvent.click(cta);
+
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+    expect(screen.getByLabelText("Composer")).toBeInTheDocument();
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+  });
+
+  it("starts an in-place draft from the thread-list toolbar", async () => {
+    host.conversations = [];
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+  });
+
+  it("does not show the CTA for a selected conversation", async () => {
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Composer")).toBeInTheDocument();
+  });
+
+  it("does not show the CTA while a new draft save is pending", async () => {
+    host.conversations = [];
+    const save = deferred<Draft>();
+    vi.mocked(bridge.save_draft).mockReturnValueOnce(save.promise);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
+    const recipients = await screen.findByLabelText("Recipients");
+    fireEvent.change(recipients, { target: { value: "+1 202 555 0100" } });
+    fireEvent.keyDown(recipients, { key: "Enter" });
+
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+
+    await act(async () => save.resolve({
+      id: "draft-conv-new-1",
+      conversationId: "conv-new-1",
+      text: "",
+      recipientIds: ["+12025550100"],
+      attachmentIds: [],
+      revision: "1",
+    }));
+  });
+
+  it("restores the empty CTA after deleting the last blank draft", async () => {
+    host.conversations = [];
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft" }));
+
+    expect(await screen.findByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Recipients")).not.toBeInTheDocument();
+    expect(document.getElementById("conversation-stage")).toHaveStyle({
+      "--composer-overlay-height": "0px",
+    });
+    expect(screen.queryByRole("button", { name: "Delete draft" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+  });
+
+  it("shows an initial load error without mounting the composer", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValue(new Error("Initial state unavailable"));
+    render(<App />);
+
+    expect(await screen.findByText("Initial state unavailable")).toHaveAttribute("role", "status");
+    expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+  });
+
   it("keeps a new draft's recipient title when the inbox is empty", async () => {
     host.conversations = [];
     render(<App />);
@@ -1441,6 +1532,8 @@ describe("draft durability", () => {
     expect(recovery).toHaveTextContent("late local text");
     expect(within(recovery).getByRole("button", { name: "Copy retained text" })).toBeInTheDocument();
     expect(within(recovery).getByRole("button", { name: "Restore in new draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /River/ }));
     const selectedRecovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
     expect(selectedRecovery).toHaveTextContent("late local text");

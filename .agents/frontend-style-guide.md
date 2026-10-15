@@ -64,9 +64,11 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 
 - Lucide icons only, through `desktop-ui` re-exports. No direct Lucide dependency
   in app packages. Keep each platform's window-control conventions.
-- Exactly one in-place compose action per window state: the thread-list toolbar
-  in side-rail mode; the titlebar in titlebar navigation or when the list is
-  hidden, collapsed, or another view is selected.
+- The in-place compose action is in the thread-list toolbar in side-rail mode;
+  it is in the titlebar in titlebar navigation or when the list is hidden,
+  collapsed, or another view is selected. With no conversation selected, a
+  centered empty-state `New conversation` CTA may coexist with either and
+  invokes the same in-place draft action.
 - `AppTitlebar.onNewMessage` is passed only in titlebar mode or when the list is
   inaccessible; otherwise it stays `undefined`.
 - In-place compose uses `MessageSquarePlus`. The separate detached action,

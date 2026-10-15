@@ -7,6 +7,7 @@ import {
   useCallback,
   useMemo,
   type CSSProperties,
+  type ReactNode,
   type RefCallback,
 } from "react";
 import { flushSync } from "react-dom";
@@ -405,6 +406,8 @@ function MessageList({
   onLoadOlder,
   suppressHistoryAnnouncements,
   historyExhausted,
+  onStartConversation,
+  noSelectionFeedback,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -421,6 +424,8 @@ function MessageList({
   onLoadOlder(): void;
   suppressHistoryAnnouncements: boolean;
   historyExhausted: boolean;
+  onStartConversation?: () => void;
+  noSelectionFeedback?: ReactNode;
 }) {
   if (loading)
     return (
@@ -445,8 +450,27 @@ function MessageList({
         onScroll={onScroll}
       >
         <div id="no-selection-state">
-          <MessageSquare size={32} aria-hidden />
-          <p>Select a conversation or start a new message</p>
+          <div id="no-selection-primary">
+            <MessageSquare size={32} aria-hidden />
+            {onStartConversation ? (
+              <>
+              <p>No conversation selected</p>
+              <button
+                id="new-conversation-cta"
+                className="primary-button"
+                type="button"
+                data-action="new-conversation"
+                onClick={onStartConversation}
+              >
+                <MessageSquarePlus size={16} aria-hidden />
+                New conversation
+              </button>
+              </>
+            ) : (
+              <p>Select a conversation or start a new message</p>
+            )}
+          </div>
+          {noSelectionFeedback && <div id="no-selection-feedback">{noSelectionFeedback}</div>}
         </div>
       </div>
     );
@@ -1671,6 +1695,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         await bridge.discard_draft({ id: current.id, conversationId: current.conversationId, expectedRevision: current.revision });
       store.remove(conversationId);
       setDeleteConfirmationId(null);
+      setNewComposeKey((current) =>
+        current && store.resolve(current) === conversationId ? null : current,
+      );
       if (selectedRef.current === conversationId) {
         const next = snapshotRef.current?.conversations.find(item => item.id !== conversationId)?.id ?? "";
         choose(next);
@@ -2023,6 +2050,49 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }}
     />
   );
+  const draftFeedback = slot?.error || recoveries.length ? (
+    <>
+      {slot?.error && <DraftRecovery
+        error={slot.error.message}
+        onRetry={() => void retrySave()}
+      />}
+      {recoveries.map(recovery => <section
+        key={recovery.id}
+        id={`draft-recovery-${recovery.id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+        data-draft-recovery={recovery.id}
+        aria-label="Recoverable unsaved draft"
+        role="status"
+      >
+        <p>{recovery.message}</p>
+        {recovery.content.text && <pre>{recovery.content.text}</pre>}
+        {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
+          void store.edit(recovery.destination!, recovery.content).then(outcome => {
+            if (outcome.ok) store.discardRecovery(recovery.id);
+            else setNotice(`Retained text was not applied: ${outcome.error}`);
+          });
+         }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
+          const { key } = store.createNew();
+          setNewComposeKey(key);
+          choose(key);
+          store.discardRecovery(recovery.id);
+          void store.edit(key, recovery.content);
+        }}>Restore in new draft</button>}
+        {recovery.content.text && <button className="secondary-button" type="button" onClick={() => {
+          void navigator.clipboard?.writeText(recovery.content.text).then(
+            () => setNotice("Recoverable text copied."),
+            () => setNotice("Could not copy recoverable text; select it above to copy."),
+          );
+        }}>Copy retained text</button>}
+        <button className="secondary-button" type="button" onClick={() => store.discardRecovery(recovery.id)}>Discard retained text</button>
+      </section>)}
+    </>
+  ) : undefined;
+  const noSelectionFeedback = notice || draftFeedback ? (
+    <>
+      {notice && <p id="no-selection-notice" role="status">{notice}</p>}
+      {draftFeedback}
+    </>
+  ) : undefined;
   const composer = (
             <section
       id="composer-area"
@@ -2043,43 +2113,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onRemoveAttachment={slotKey ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
         status={notice}
         statusActive={statusActive}
-        bannerSlot={slot?.error || recoveries.length ? (
-          <>
-            {slot?.error && <DraftRecovery
-              error={slot.error.message}
-              onRetry={() => void retrySave()}
-            />}
-            {recoveries.map(recovery => <section
-              key={recovery.id}
-              id={`draft-recovery-${recovery.id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
-              data-draft-recovery={recovery.id}
-              aria-label="Recoverable unsaved draft"
-              role="status"
-            >
-              <p>{recovery.message}</p>
-              {recovery.content.text && <pre>{recovery.content.text}</pre>}
-              {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
-                void store.edit(recovery.destination!, recovery.content).then(outcome => {
-                  if (outcome.ok) store.discardRecovery(recovery.id);
-                  else setNotice(`Retained text was not applied: ${outcome.error}`);
-                });
-               }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
-                const { key } = store.createNew();
-                setNewComposeKey(key);
-                choose(key);
-                store.discardRecovery(recovery.id);
-                void store.edit(key, recovery.content);
-              }}>Restore in new draft</button>}
-              {recovery.content.text && <button className="secondary-button" type="button" onClick={() => {
-                void navigator.clipboard?.writeText(recovery.content.text).then(
-                  () => setNotice("Recoverable text copied."),
-                  () => setNotice("Could not copy recoverable text; select it above to copy."),
-                );
-              }}>Copy retained text</button>}
-              <button className="secondary-button" type="button" onClick={() => store.discardRecovery(recovery.id)}>Discard retained text</button>
-            </section>)}
-          </>
-        ) : undefined}
+        bannerSlot={draftFeedback}
         statusSlot={
           <>
             <p id="reply-blocked-reason" data-reply-blocked role="status" hidden={!active?.replyBlockedReason}>
@@ -2146,6 +2180,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onLoadOlder={() => void loadOlderMessages()}
       suppressHistoryAnnouncements={suppressHistoryAnnouncements}
       historyExhausted={historyExhausted}
+      onStartConversation={!composerConversation && !slotKey ? () => void startNewMessage() : undefined}
+      noSelectionFeedback={!composerConversation && !slotKey ? noSelectionFeedback : undefined}
     />
   );
   const panelStatus = snapshot
@@ -2290,9 +2326,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               aria-label="New message"
               title="New message"
               data-action="new-message"
-              onClick={() =>
-                document.getElementById("recipient-search")?.focus()
-              }
+              onClick={() => void startNewMessage()}
             >
               <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden />
             </button>}
@@ -2379,7 +2413,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   <ExternalLink size={16} aria-hidden />
                 </button>
               )}
-              {((active?.recipientlessDraft && active.draftOnly) || (Boolean(newComposeKey) && content.recipientIds.length === 0)) && <button
+              {slotKey && ((active?.recipientlessDraft && active.draftOnly) || (Boolean(newComposeKey) && content.recipientIds.length === 0)) && <button
                 id="conversation-delete-draft"
                 className={deleteConfirmationId === slotKey ? "confirming" : undefined}
                 aria-label={deleteConfirmationId === slotKey ? "Confirm delete draft" : "Delete draft"}
@@ -2472,11 +2506,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <>
                   <div
                     id="conversation-stage"
-                    style={overlayHeight === null ? undefined : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties}
+                    style={
+                      !slotKey
+                        ? { "--composer-overlay-height": "0px" } as CSSProperties
+                        : overlayHeight === null
+                          ? undefined
+                          : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties
+                    }
                   >
                     {messages}
                     {recipientRail}
-                    {composer}
+                    {slotKey && composer}
                   </div>
                 </>
               )}
