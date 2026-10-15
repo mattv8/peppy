@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Modal } from "@peppy/desktop-ui";
 import { bridge, type DeviceRosterView, type ManagedDeviceView } from "./bridge";
 import { errorCode } from "./bridgeErrors";
 import "./device-settings.css";
@@ -41,8 +41,6 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
   const mounted = useRef(true);
   const loadSequence = useRef(0);
   const invoker = useRef<HTMLButtonElement | null>(null);
-  const dialog = useRef<HTMLDialogElement>(null);
-  const dialogHeading = useRef<HTMLHeadingElement>(null);
   const titleHeading = useRef<HTMLHeadingElement>(null);
   const previousServerOffline = useRef(serverOffline);
   const offline = serverOffline || offlineFromFailure;
@@ -85,42 +83,6 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
   useEffect(() => {
     if (offline && target && !pending) setTarget(null);
   }, [offline, pending, target]);
-  useEffect(() => {
-    if (pending && !dialog.current?.contains(document.activeElement)) dialogHeading.current?.focus();
-  }, [pending]);
-  useEffect(() => {
-    if (!target) return;
-    const element = dialog.current;
-    const supportsModal = typeof element?.showModal === "function";
-    if (supportsModal && !element.open) element.showModal();
-    if (!supportsModal && element) element.open = true;
-    const root = document.getElementById("root");
-    if (!supportsModal && root) root.inert = true;
-    dialogHeading.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !pendingRef.current) setTarget(null);
-      if (event.key !== "Tab" || !element) return;
-      const focusable = [dialogHeading.current, ...Array.from(element.querySelectorAll<HTMLElement>("button:not([disabled])"))].filter((item): item is HTMLElement => item !== null);
-      const first = focusable[0] ?? dialogHeading.current;
-      const last = focusable.at(-1) ?? dialogHeading.current;
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      if (!supportsModal && root) root.inert = false;
-      if (supportsModal && element?.open) element.close();
-      if (!supportsModal && element) element.open = false;
-    };
-  }, [target]);
-  useEffect(() => {
-    if (target || !invoker.current) return;
-    const trigger = invoker.current;
-    invoker.current = null;
-    if (trigger.isConnected) trigger.focus();
-    else titleHeading.current?.focus();
-  }, [target]);
 
   const current = roster?.devices.find(device => device.id === roster.currentDeviceId);
   const activeOwners = roster?.devices.filter(device => !device.revoked && device.role === "owner") ?? [];
@@ -176,11 +138,6 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
       <ul id="devices-active-list" aria-label="Active devices">{rows(false).map(row)}</ul>
       {rows(true).length > 0 && <details id="devices-removed" className="settings-disclosure"><summary>Previously removed</summary><ul aria-label="Previously removed devices">{rows(true).map(row)}</ul></details>}
     </div>}
-    {target && createPortal(<dialog id="device-revoke-dialog" ref={dialog} aria-labelledby="device-revoke-title" onCancel={event => { event.preventDefault(); close(); }}>
-      <h3 id="device-revoke-title" tabIndex={-1} ref={dialogHeading}>Remove {deviceName(target)}?</h3>
-      <p>Server access is revoked. Local data and secrets are not erased. Reconnecting requires enrollment.</p>
-      <button type="button" className="secondary-button" disabled={pending} onClick={close}>Cancel</button>
-      <button type="button" className="primary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void remove()}>Remove device</button>
-    </dialog>, document.body)}
+    {target && <Modal id="device-revoke-dialog" title={`Remove ${deviceName(target)}?`} busy={pending} onDismiss={close} opener={invoker} focusFallback={titleHeading} actions={<><button type="button" className="secondary-button" disabled={pending} onClick={close}>Cancel</button><button type="button" className="primary-button" disabled={pending} aria-busy={pending || undefined} onClick={() => void remove()}>Remove device</button></>}><p>Server access is revoked. Local data and secrets are not erased. Reconnecting requires enrollment.</p></Modal>}
   </section>;
 }

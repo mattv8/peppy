@@ -908,6 +908,40 @@ select:focus-visible {
 #pairing-panel output { font-family: monospace; font-size: 20px; letter-spacing: .08em; }
 #pairing-panel label { display: flex; gap: 8px; align-items: center; }
 
+.peppy-modal {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--peppy-text-primary);
+  overflow: hidden;
+}
+.peppy-modal[open] { display: grid; place-items: center; }
+.peppy-modal::backdrop { background: var(--peppy-backdrop, rgba(0, 0, 0, 0.4)); }
+.peppy-modal-panel {
+  display: grid;
+  gap: 12px;
+  width: min(420px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-radius-md, 8px);
+  background: var(--peppy-surface-panel);
+  box-shadow: var(--peppy-shadow-floating);
+  font-size: 13px;
+}
+.peppy-modal-title { margin: 0; color: var(--peppy-text-strong, var(--peppy-text-primary)); font-size: 14px; font-weight: 600; }
+.peppy-modal-title:focus { outline: none; }
+.peppy-modal-panel p { margin: 0; }
+.peppy-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 :where(.theme-system, .theme-light, .theme-dark)[data-bridge-mode="native"][data-platform="linux"] {
   --peppy-glass-surface: var(--peppy-glass-fallback);
   --peppy-glass-backdrop-filter: none;

@@ -5,7 +5,4 @@
 #settings-devices li span[data-presence-state="delayed"] { color: var(--peppy-warning-text); }
 #settings-devices li span[data-presence-state="never"], #settings-devices li span[data-presence-state="unknown"] { color: var(--peppy-text-muted); }
 #devices-removed { display: grid; gap: 8px; }
-#device-revoke-dialog { width: min(420px, calc(100vw - 32px)); display: grid; gap: 12px; padding: 16px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-md, 8px); background: var(--peppy-surface-panel); color: var(--peppy-text-primary); box-shadow: var(--peppy-shadow-floating); }
-#device-revoke-dialog::backdrop { background: color-mix(in srgb, var(--peppy-text-primary) 35%, transparent); }
-#device-revoke-dialog h3, #device-revoke-dialog p { margin: 0; }
 @media (max-width: 480px) { #settings-devices li { align-items: flex-start; flex-wrap: wrap; } #settings-devices li button { margin-left: auto; } }

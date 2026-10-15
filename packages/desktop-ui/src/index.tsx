@@ -29,6 +29,7 @@ import {
   normalizePhoneNumber,
 } from "./phone";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
+export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {
   formatPhoneInput,
