@@ -12,6 +12,15 @@ Development remains in progress. The simulator exercises synthetic messages, not
 - macOS bundles and DMGs, Windows installers, and Linux packages are development outputs. macOS bundles are development bundles, not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
 - The iOS simulator app and unsigned device archive do not establish signing, store, or device eligibility. The archive is not an installable IPA.
 
+Official desktop update releases are separate protected artifacts. Stable release
+dispatches run only from `production`; staging updates run only from pushes to
+`staging`. They use protected signing environments, version-bound updater
+signatures, signed checksums, and platform signing/notarization credentials.
+Development artifacts and direct artifact dispatches are never update feeds and
+must not be treated as signed installers. Provisioning, key rotation, rescue
+bootstrap, Linux package version mapping, and repository-key trust requirements
+are documented in [`infra/release/README-updates.md`](infra/release/README-updates.md).
+
 The desktop provides unread/tray updates, native notification banners and an in-app feed for mirrored Android notifications. Android emulators can receive synthetic SMS. iOS has no carrier executor or third-party notification listener in this build. Native banner delivery depends on OS permission, system notification settings and platform installation requirements; browser previews cannot verify it.
 
 ## Breaking rename boundary
