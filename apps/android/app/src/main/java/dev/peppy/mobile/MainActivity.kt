@@ -206,7 +206,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
         if (current.sharedKeysReady) RemoteMessagingService.resumeOrEnqueue(context)
-        if (MmsPreferences(context).enabled) MmsCaptureWork.ensurePeriodic(context)
+        MmsCaptureWork.onPermissionOrForeground(context)
         status = current
         smsCaptureEnabled = withContext(Dispatchers.IO) { GatewayPolicyHost(context).smsCaptureEnabled }
         ownerPhoneAvailable = current.sharedKeysReady &&
@@ -250,7 +250,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
         if (status?.sharedKeysReady == true) GatewayWork.enqueue(context)
     }
     val mmsPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (MmsPreferences(context).enabled && mmsReceiveGranted(context)) MmsCaptureWork.enqueue(context)
+        MmsCaptureWork.onPermissionOrForeground(context)
         refresh++
     }
     val contactsPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {

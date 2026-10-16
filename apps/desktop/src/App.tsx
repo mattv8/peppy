@@ -82,6 +82,11 @@ import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
 import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
 import { peppyCopy } from "./generated/peppyCopy";
+import { MediaLightbox } from "./media/MediaLightbox";
+import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
+import { MediaGrid } from "./media/MediaGrid";
+import { InlineMedia } from "./media/InlineMedia";
+import { groupMessages } from "./media/grouping";
 import { GatewayPicker } from "./GatewayPicker";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
@@ -444,6 +449,23 @@ function DraftRecovery({ error, onRetry }: { error: string; onRetry(): void }) {
 
 type RowRegistry = (id: string, row: HTMLElement | null) => void;
 
+function MessageMeta({ message }: { message: MessageView }) {
+  const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
+  const formattedTime = formatDateTime(displayedTime);
+  const isoTime = isoDateTime(displayedTime);
+  const deliveryConfirmed = message.status === "delivery-confirmed";
+  const deliveryLabel = deliveryTimeFallback ? "Delivery confirmed; sent time shown because delivery time is unavailable" : deliveryTimeUnavailable ? "Delivery confirmed; time unavailable" : "Delivery confirmed";
+  const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
+  if (!message.status && !formattedTime) return null;
+  return <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
+    {!deliveryConfirmed && message.status && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />}{STATUS_LABEL[message.status]}</span>}
+    {!deliveryConfirmed && message.status && formattedTime && <span className="message-meta-separator" aria-hidden>·</span>}
+    {formattedTime && isoTime && <time dateTime={isoTime}>{formattedTime}</time>}
+    {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
+    {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
+  </div>;
+}
+
 function MessageList({
   conversation,
   loading,
@@ -462,6 +484,11 @@ function MessageList({
   historyExhausted,
   onStartConversation,
   noSelectionFeedback,
+  onOpenMedia,
+  requestOriginal,
+  checkOriginal,
+  releaseMedia,
+  mediaRetryKey,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -480,6 +507,11 @@ function MessageList({
   historyExhausted: boolean;
   onStartConversation?: () => void;
   noSelectionFeedback?: ReactNode;
+  onOpenMedia(item: { attachment: AttachmentView; message: MessageView }): void;
+  requestOriginal(id: string): Promise<{ state: "ready"; url: string } | { state: "pending" }>;
+  checkOriginal(id: string): Promise<{ state: "ready"; url: string } | { state: "pending" }>;
+  releaseMedia(id: string, url: string): void;
+  mediaRetryKey: unknown;
 }) {
   if (loading)
     return (
@@ -545,17 +577,13 @@ function MessageList({
       <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
         {historyExhausted && <p id="history-beginning-marker">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
-        {conversation.messages.map((message) => {
-          const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
-          const formattedTime = formatDateTime(displayedTime);
-          const isoTime = isoDateTime(displayedTime);
-          const deliveryConfirmed = message.status === "delivery-confirmed";
-          const deliveryLabel = deliveryTimeFallback
-            ? "Delivery confirmed; sent time shown because delivery time is unavailable"
-            : deliveryTimeUnavailable
-              ? "Delivery confirmed; time unavailable"
-              : "Delivery confirmed";
-          const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
+        {groupMessages(conversation.messages).map((group) => {
+          const message = group.messages[0];
+          const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} />} renderAttachmentActions={(attachment) => {
+            const copy = publicCopies[attachment.id];
+            return <details data-gallery-sharing={attachment.id}><summary>Attachment actions</summary>{!copy && <button className="secondary-button" type="button" onClick={() => onPublish(attachment)} aria-label={`Create public link for ${attachment.name}`}>Create public link</button>}{copy && <div className="public-copy" data-public-copy-for={attachment.id}><label>Public link <span className="public-link-warning" role="status"><ShieldAlert size={12} aria-hidden /> Anyone with this link can view this copy</span><input readOnly aria-label={`Public link for ${attachment.name}`} value={copy.url} onFocus={(event) => event.currentTarget.select()} /></label><small>{expiryText(copy.expiresInSeconds)}</small></div>}</details>;
+          }} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} />;
           return (
             <div
               key={message.id}
@@ -574,6 +602,7 @@ function MessageList({
                   const copy = publicCopies[file.id];
                   const shareable =
                     file.state === "ready" && file.mediaType.startsWith("image/");
+                  if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <InlineMedia key={file.id} attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} />;
                   return (
                     <div
                       key={file.id}
@@ -603,7 +632,7 @@ function MessageList({
                       Retry {file.transfer}
                     </button>
                   )}
-                  {file.state === "ready" && (
+                  {(!file.mediaType.startsWith("image/") || file.state === "ready") && (
                     <button className="secondary-button" onClick={() => onSaveAttachment(file)} aria-label={`Save ${file.name}`}>
                       Save {file.name}
                     </button>
@@ -639,38 +668,7 @@ function MessageList({
                   );
                 })}
               </article>
-              {(message.status || formattedTime) && (
-                <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
-                  {!deliveryConfirmed && message.status && (
-                    <span className="message-meta-status">
-                      {["failed-before-submit", "failed-confirmed"].includes(
-                        message.status,
-                      ) ? (
-                        <X size={10} aria-hidden />
-                      ) : message.status === "unknown" ? (
-                        <TriangleAlert size={10} aria-hidden />
-                      ) : message.status === "sent" ? (
-                        <Check size={10} aria-hidden />
-                      ) : (
-                        <Clock size={10} aria-hidden />
-                      )}
-                      {STATUS_LABEL[message.status]}
-                    </span>
-                  )}
-                  {!deliveryConfirmed && message.status && formattedTime && <span className="message-meta-separator" aria-hidden>·</span>}
-                  {formattedTime && isoTime && <time dateTime={isoTime}>{formattedTime}</time>}
-                  {deliveryConfirmed && (
-                    <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}>
-                      <CheckCheck size={10} aria-hidden />
-                    </span>
-                  )}
-                  {phoneHistory && (
-                    <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}>
-                      <Smartphone size={10} aria-hidden />
-                    </span>
-                  )}
-                </div>
-              )}
+              <MessageMeta message={message} />
             </div>
           );
         })}
@@ -1034,6 +1032,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [conversationTab, setConversationTab] = useState<"messages" | "media">("messages");
+  const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
+  const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
+  const [lightboxHasNextPage, setLightboxHasNextPage] = useState(false);
+  const [mediaStateHint, setMediaStateHint] = useState(0);
+  const pendingSaveIdsRef = useRef(new Set<string>());
+  const gallerySessionRef = useRef(0);
+  const galleryConversationRef = useRef<string | undefined>(undefined);
+  const galleryCacheRef = useRef<{ conversationId?: string; items: GalleryMediaPageItem[]; nextCursor?: Parameters<typeof bridge.media_page>[1] }>({ items: [] });
+  const requestOriginal = useCallback((id: string) => bridge.load_media(id), []);
+  const checkOriginal = useCallback((id: string) => bridge.open_media(id), []);
+  const releaseMedia = useCallback((id: string, url: string) => { void bridge.close_media(id, url); }, []);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -1353,6 +1363,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const report = (prefix: string) => (error: unknown) =>
     setNotice(`${prefix}${errorText(error)}`);
+  const retryPendingSaves = async () => {
+    for (const attachmentId of pendingSaveIdsRef.current) {
+      try {
+        const media = await bridge.open_media(attachmentId);
+        if (media.state === "pending") continue;
+        await bridge.save_attachment(attachmentId);
+        pendingSaveIdsRef.current.delete(attachmentId);
+      } catch (error) {
+        if (errorCode(error) !== "media-pending") pendingSaveIdsRef.current.delete(attachmentId);
+      }
+    }
+  };
 
   /** Loads host state for one conversation; responses superseded by a newer request are dropped. */
   const refresh = async (conversationId = selectedRef.current) => {
@@ -1427,7 +1449,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     void refresh(composerConversation ?? undefined)
       .catch(report(""))
       .finally(() => setLoading(false));
-    const unsubscribe = bridge.subscribe(() => void refresh().catch(report("")));
+    const unsubscribe = bridge.subscribe(() => {
+      setMediaStateHint(current => current + 1);
+      void retryPendingSaves();
+      void refresh().catch(report(""));
+    });
     return () => {
       mountedRef.current = false;
       loadSequence.current += 1;
@@ -1473,6 +1499,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const active = snapshot?.conversations.find(
     (conversation) => conversation.id === slotKey,
   );
+  useEffect(() => {
+    setConversationTab("messages");
+    setLightboxItems(null);
+    setLightboxAttachmentId(undefined);
+    gallerySessionRef.current += 1;
+    pendingSaveIdsRef.current.clear();
+    galleryConversationRef.current = active?.id;
+    galleryCacheRef.current = { conversationId: active?.id, items: [] };
+  }, [active?.id, appLock?.locked, snapshot?.encryption.state]);
   const conversationLoaded =
     Boolean(active) && snapshot?.activeConversationId === slotKey;
   const messageIds = conversationLoaded
@@ -1915,7 +1950,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (!await bridge.save_attachment(attachment.id))
         setNotice("Attachment save cancelled.");
     } catch (error) {
-      setNotice(`Attachment save: ${errorText(error)}`);
+      if (errorCode(error) === "media-pending") {
+        pendingSaveIdsRef.current.add(attachment.id);
+        setNotice(`Downloading ${attachment.name} before saving.`);
+      } else setNotice(`Attachment save: ${errorText(error)}`);
     }
   };
 
@@ -2252,8 +2290,48 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const recipientRail = recipientPanel ? (
     <div id="recipient-rail-layer">{recipientPanel}</div>
   ) : null;
+  const toGalleryItem = (item: Awaited<ReturnType<typeof bridge.media_page>>["items"][number]): GalleryMediaPageItem => {
+    const message = active?.messages.find((candidate) => candidate.id === item.messageId) ?? { id: item.messageId, revision: item.cursor.localOrder, sender: item.senderAddress ? "other" : "self", senderAddress: item.senderAddress, body: "", timestamp: item.timestamp, attachments: [] };
+    return { attachment: { ...item.attachment, thumbnailUrl: item.mediaMeta?.thumbnail?.previewUrl ?? item.attachment.previewUrl, durationMs: item.mediaMeta?.durationMs ? Number(item.mediaMeta.durationMs) : undefined }, message, cursor: item.cursor };
+  };
+  const openGalleryItem = async (item: GalleryMediaPageItem, _loadedItems: GalleryMediaPageItem[]) => {
+    const conversationId = active?.id;
+    if (!conversationId) return;
+    const session = gallerySessionRef.current;
+    const isCurrent = () => gallerySessionRef.current === session && galleryConversationRef.current === conversationId;
+    try {
+      let cursor: Parameters<typeof bridge.media_page>[1];
+      let nextCursor: Parameters<typeof bridge.media_page>[1];
+      const items: GalleryMediaPageItem[] = [];
+      do {
+        const page = await bridge.media_page(conversationId, cursor, 40);
+        if (!isCurrent()) return;
+        items.push(...page.items.map(toGalleryItem));
+        nextCursor = page.nextCursor;
+        cursor = page.nextCursor;
+      } while (!items.some(candidate => candidate.attachment.id === item.attachment.id) && cursor);
+      if (!isCurrent() || !items.some(candidate => candidate.attachment.id === item.attachment.id)) return;
+      galleryCacheRef.current = { conversationId, items, nextCursor };
+      setLightboxItems(items);
+      setLightboxHasNextPage(Boolean(nextCursor));
+      setLightboxAttachmentId(item.attachment.id);
+    } catch {
+      if (isCurrent()) setNotice("Could not load conversation media.");
+    }
+  };
   const messages = (
-    <MessageList
+    <>
+      <div id="conversation-tabs" role="tablist" aria-label="Conversation views" onKeyDown={(event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        const next = conversationTab === "messages" ? "media" : "messages";
+        setConversationTab(next);
+        document.getElementById(next === "messages" ? "tab-messages" : "tab-media")?.focus();
+      }}>
+        <button id="tab-messages" type="button" role="tab" tabIndex={conversationTab === "messages" ? 0 : -1} aria-selected={conversationTab === "messages"} aria-controls="tabpanel-messages" onClick={() => setConversationTab("messages")}>Messages</button>
+        <button id="tab-media" type="button" role="tab" tabIndex={conversationTab === "media" ? 0 : -1} aria-selected={conversationTab === "media"} aria-controls="tabpanel-media" onClick={() => setConversationTab("media")}>Media</button>
+      </div>
+      <div id="tabpanel-messages" role="tabpanel" aria-labelledby="tab-messages" hidden={conversationTab !== "messages"}>
+      <MessageList
       conversation={active}
       loading={Boolean(active) && !conversationLoaded}
       registerRow={registerRow}
@@ -2271,7 +2349,33 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       historyExhausted={historyExhausted}
       onStartConversation={!composerConversation && !slotKey ? () => void startNewMessage() : undefined}
       noSelectionFeedback={!composerConversation && !slotKey ? noSelectionFeedback : undefined}
+      onOpenMedia={(item) => void openGalleryItem({ attachment: item.attachment, message: item.message }, [{ attachment: item.attachment, message: item.message }])}
+      requestOriginal={requestOriginal}
+      checkOriginal={checkOriginal}
+      releaseMedia={releaseMedia}
+      mediaRetryKey={mediaStateHint}
     />
+      </div>
+      {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
+        {active && <MediaPanel key={active.id} loadPage={async (cursor) => {
+          const page = await bridge.media_page(active.id, cursor as Parameters<typeof bridge.media_page>[1], 40);
+          return { items: page.items.map(toGalleryItem), nextCursor: page.nextCursor };
+        }} onOpen={(item, items) => void openGalleryItem(item, items)} />}
+      </div>}
+      {lightboxItems && lightboxAttachmentId && <MediaLightbox items={lightboxItems} initialAttachmentId={lightboxAttachmentId} onDismiss={() => { setLightboxItems(null); setLightboxAttachmentId(undefined); }} requestOriginal={requestOriginal} checkOriginal={checkOriginal} saveMedia={async (id) => { await bridge.save_attachment(id); }} releaseMedia={releaseMedia} hasNextPage={lightboxHasNextPage} retryKey={mediaStateHint} loadAdjacentPage={async (direction) => {
+        if (direction === "previous") return undefined;
+        const cache = galleryCacheRef.current;
+        if (!cache.conversationId || !cache.nextCursor) return undefined;
+        const session = gallerySessionRef.current;
+        const page = await bridge.media_page(cache.conversationId, cache.nextCursor, 40);
+        if (gallerySessionRef.current !== session || galleryConversationRef.current !== cache.conversationId) return undefined;
+        const pageItems = page.items.map(toGalleryItem).filter((candidate) => !cache.items.some((known) => known.attachment.id === candidate.attachment.id && known.message.id === candidate.message.id));
+        cache.items = [...cache.items, ...pageItems];
+        cache.nextCursor = page.nextCursor;
+        setLightboxHasNextPage(Boolean(page.nextCursor));
+        return { items: pageItems, hasNextPage: Boolean(page.nextCursor) };
+      }} />}
+    </>
   );
   const panelStatus = snapshot
     ? {

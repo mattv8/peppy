@@ -40,6 +40,15 @@ MMS requires an enabled, permission-ready Android gateway advertising MMS conten
 
 Attachment removal preserves draft revisions. Retry controls retry the encrypted file transfer, not the carrier message. Save uses a native file dialog and never exposes filesystem paths or encryption keys to the webview. Creating a public image link remains a separate, explicitly confirmed plaintext-sharing action.
 
+Version-3 MMS capture adds separately encrypted previews. Previews download for
+browsing; opening or saving an original requests that media on demand. Legacy
+originals up to 2 MiB retain automatic downloading. The shared desktop/browser
+conversation view groups consecutive images from the same known sender within
+three minutes, preserves each message's status, and provides a paged **Media**
+view and keyboard-navigable viewer. Video and audio playback starts only after a
+user action; unsupported formats retain the Save fallback. Viewing private media
+never creates a public link.
+
 The displayed byte estimate is a lower bound: carrier limits apply to the complete encoded MMS, including headers. A fallback limit is labeled as an application limit. Gateway validation can still reject a message that passed this estimate. An unknown carrier outcome is not automatically retried.
 
 Incomplete phone acquisition remains visible in the phone's health view until all parts are available. After acquisition completes, the event remains in the outbox until its parts upload; upload failures appear in transfer health. Android MMS is experimental pending physical-carrier acceptance. RCS is unavailable through the current companion integration.

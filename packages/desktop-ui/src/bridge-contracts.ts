@@ -6,7 +6,12 @@ export type ConnectionState = "connected" | "offline" | "missing-native-host" | 
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
+export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
+export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView };
+export type MediaPageItem = { messageId: string; senderAddress?: string; timestamp: string; attachment: AttachmentView; mediaMeta?: MediaMetadataView; cursor: MediaCursor };
+export type MediaPage = { items: MediaPageItem[]; nextCursor?: MediaCursor };
+export type MediaOpen = { state: "ready"; url: string; mediaType: string; byteSize: number } | { state: "pending" };
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
 export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
@@ -106,6 +111,11 @@ export interface DesktopBridge {
   pick_attachments(): Promise<AttachmentView[]>;
   retry_attachment(id: string): Promise<void>;
   save_attachment(id: string): Promise<boolean>;
+  request_attachment_download(id: string): Promise<void>;
+  media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage>;
+  open_media(id: string): Promise<MediaOpen>;
+  close_media(id: string, url?: string): Promise<void>;
+  load_media(id: string): Promise<MediaOpen>;
   /** Resolves null when the person cancels the native confirmation. */
   publish_attachment(id: string): Promise<PublicCopy | null>;
   /** Explicit user action only; omitting the ID starts a new-conversation draft. */

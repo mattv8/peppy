@@ -1,8 +1,8 @@
 //! Sanitized UI view models (the Rust side of `src/bridge.ts`). Only display data is
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
-    AppFilter, AttachmentInfo, AttachmentState, ComposeDraft, Direction, Message,
-    MirroredNotification, SendState, Transport,
+    AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft, Direction,
+    Error, MediaPage, Message, MessageId, MirroredNotification, SendState, Transport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -209,6 +209,9 @@ pub struct MessageView {
     pub id: String,
     pub revision: String,
     pub sender: &'static str,
+    /// Actual incoming sender, retained separately from the self/other display category.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
     pub body: String,
     /// Empty only when the provider did not supply a timestamp; never synthesized from arrival.
     pub timestamp: String,
@@ -243,6 +246,69 @@ pub struct AttachmentView {
     pub transfer: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCursorView {
+    pub sort_at_ms: String,
+    pub local_order: String,
+    pub message_id: String,
+    pub attachment_position: u32,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPageItemView {
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    pub timestamp: String,
+    pub attachment: AttachmentView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_meta: Option<MediaMetadataView>,
+    pub cursor: MediaCursorView,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMetadataView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<AttachmentView>,
+}
+
+pub fn media_metadata_view(meta: peppy_client_core::MediaMetadata) -> MediaMetadataView {
+    MediaMetadataView {
+        width: meta.width,
+        height: meta.height,
+        duration_ms: meta.duration_ms.map(|value| value.to_string()),
+        thumbnail: meta
+            .thumbnail
+            .as_ref()
+            .map(|item| attachment_view(item, None, None)),
+    }
+}
+
+/// Snapshot/history callers can enrich each visible attachment without relying on attachment order.
+pub fn message_attachment_media_metadata_view(
+    client: &Client,
+    message_id: MessageId,
+    attachment_id: AttachmentId,
+) -> Result<Option<MediaMetadataView>, Error> {
+    client
+        .message_attachment_media_metadata(message_id, attachment_id)
+        .map(|metadata| metadata.map(media_metadata_view))
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPageView {
+    pub items: Vec<MediaPageItemView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<MediaCursorView>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -330,6 +396,34 @@ pub fn attachment_view(
     }
 }
 
+pub fn media_page_view(page: MediaPage) -> MediaPageView {
+    fn cursor_view(cursor: peppy_client_core::MediaCursor) -> MediaCursorView {
+        MediaCursorView {
+            sort_at_ms: cursor.sort_at_ms.to_string(),
+            local_order: cursor.local_order.to_string(),
+            message_id: cursor.message_id.to_string(),
+            attachment_position: cursor.attachment_position,
+        }
+    }
+    MediaPageView {
+        items: page
+            .items
+            .into_iter()
+            .map(|item| MediaPageItemView {
+                message_id: item.message.record.message_id.to_string(),
+                sender_address: (item.message.direction == Direction::Incoming)
+                    .then_some(item.message.sender_address)
+                    .flatten(),
+                timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+                attachment: attachment_view(&item.attachment, None, None),
+                media_meta: item.media_meta.map(media_metadata_view),
+                cursor: cursor_view(item.cursor),
+            })
+            .collect(),
+        next_cursor: page.next_cursor.map(cursor_view),
+    }
+}
+
 /// Display address of the other party.
 pub fn counterpart(message: &Message) -> String {
     match message.payload.direction {
@@ -352,6 +446,9 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         } else {
             "other"
         },
+        sender_address: (message.payload.direction == Direction::Incoming)
+            .then(|| message.payload.sender_address.clone())
+            .flatten(),
         body: message.payload.body.clone(),
         timestamp: positive_ms_to_decimal(message.payload.sent_at_ms).unwrap_or_default(),
         status: message.send_state.map(send_state_label),

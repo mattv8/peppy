@@ -760,6 +760,32 @@ describe("BrowserBridge", () => {
     vi.useRealTimers();
   });
 
+  it("releases only the exact media URL so stale cleanup cannot revoke a newer open", async () => {
+    const port = new TestPort();
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const create = vi.fn().mockReturnValueOnce("blob:old").mockReturnValueOnce("blob:new");
+    const revoke = vi.fn();
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke });
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const oldOpen = bridge.open_media("attachment");
+    port.reply({ id: 1, ok: true, value: { state: "ready", bytes: new ArrayBuffer(1), mediaType: "video/mp4", byteSize: 1 } });
+    await expect(oldOpen).resolves.toMatchObject({ url: "blob:old" });
+    const newOpen = bridge.open_media("attachment");
+    port.reply({ id: 2, ok: true, value: { state: "ready", bytes: new ArrayBuffer(1), mediaType: "video/mp4", byteSize: 1 } });
+    await expect(newOpen).resolves.toMatchObject({ url: "blob:new" });
+    const close = bridge.close_media("attachment", "blob:old");
+    expect(revoke).toHaveBeenCalledWith("blob:old");
+    expect(revoke).not.toHaveBeenCalledWith("blob:new");
+    await expect(close).resolves.toBeUndefined();
+    await expect(bridge.close_media("attachment", "blob:old")).resolves.toBeUndefined();
+    const lastClose = bridge.close_media("attachment", "blob:new");
+    expect(port.sent.at(-1)).toMatchObject({ command: "close_media", args: { id: "attachment", url: "blob:new" } });
+    port.reply({ id: 3, ok: true, value: undefined });
+    await expect(lastClose).resolves.toBeUndefined();
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+  });
+
   it("approves a phone without a shared-secret dialog or passphrase payload", async () => {
     const port = new TestPort();
     const restoreShowModal = stubShowModal();

@@ -15,6 +15,7 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import androidx.work.WorkerParameters
 import java.io.File
+import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
@@ -26,6 +27,9 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisition
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionInput
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillDirection
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillPhase
+import uniffi.peppy_mobile_bindings.NativeMmsLegacyBackfillState
 import uniffi.peppy_mobile_bindings.NativeMmsSource
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 
@@ -36,6 +40,15 @@ object MmsCaptureWork {
 
     fun enqueue(context: Context) = schedule(context, ExistingWorkPolicy.KEEP, delayed = true, manualRecheck = false)
     fun refresh(context: Context) = schedule(context, ExistingWorkPolicy.REPLACE, delayed = false, manualRecheck = true)
+
+    /** Starts provider observation and bounded reconciliation after a permission or foreground change. */
+    fun onPermissionOrForeground(context: Context) {
+        MmsCaptureLifecycle.ensureObserver(context)
+        if (MmsPreferences(context).enabled && mmsReceiveGranted(context)) {
+            enqueue(context.applicationContext)
+            ensurePeriodic(context.applicationContext)
+        }
+    }
 
     internal fun handleResult(context: Context, result: MmsCaptureSummary) {
         if (result.captured > 0) GatewayWork.enqueue(context)
@@ -96,16 +109,23 @@ internal interface MmsCaptureProvider {
     fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long
 }
 
-internal interface MmsCaptureCore {
+internal interface MmsCaptureCore : MmsBackfillCore {
     fun acquisitions(limit: Int): List<NativeMmsAcquisition>
     fun begin(input: NativeMmsAcquisitionInput): NativeMmsAcquisition
     fun setState(id: String, state: NativeMmsAcquisitionState, reason: String?)
-    fun checkpoint(generation: String, subscription: String, imported: Boolean): String?
-    fun setCheckpoint(generation: String, subscription: String, imported: Boolean, providerId: String)
     fun mappedParts(id: String): Map<String, String>
+    fun partMetadataComplete(id: String): Set<String>
     fun pendingMediaBytes(): Long
     fun prepareAttachment(path: String, mediaType: String, name: String): String
     fun mapPart(id: String, providerPartId: String, attachmentId: String)
+    fun setPartMetadata(
+        id: String,
+        providerPartId: String,
+        width: Int?,
+        height: Int?,
+        durationMs: Long?,
+        thumbnailAttachmentId: String?,
+    )
     fun discardAttachment(id: String)
     fun complete(id: String)
 }
@@ -177,69 +197,61 @@ internal object MmsCapture {
         var followup = false
         val deadline = System.nanoTime() + PASS_BUDGET_NANOS
         fun budgetExpired() = System.nanoTime() >= deadline
-
-        val eligible = core.acquisitions(CORE_LIST).filter {
-            it.state == NativeMmsAcquisitionState.PENDING ||
-                (plan.manualRecheck && it.state in setOf(NativeMmsAcquisitionState.BLOCKED, NativeMmsAcquisitionState.UNAVAILABLE))
-        }
-        val cursorIndex = plan.recheckCursor?.let { cursor -> eligible.indexOfFirst { it.acquisitionId == cursor } } ?: -1
-        val durable = if (eligible.isEmpty()) emptyList() else {
-            (eligible.drop(cursorIndex + 1) + eligible.take(cursorIndex + 1)).take(MAX_PENDING_RECHECKS)
-        }
-        plan.saveRecheckCursor(durable.lastOrNull()?.acquisitionId)
-        for (acquisition in durable) {
-            val recheck = if (plan.manualRecheck && acquisition.state != NativeMmsAcquisitionState.PENDING) {
-                core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "manual_recheck")
-                acquisition.copy(state = NativeMmsAcquisitionState.PENDING, reason = "manual_recheck")
-            } else {
-                acquisition
-            }
-            if (budgetExpired()) { followup = true; break }
-            val providerId = recheck.input.source.providerMessageId.toLongOrNull() ?: continue
-            val record = provider.read(providerId)
-            if (record == null) {
-                core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.UNAVAILABLE, "provider_row_missing")
-                unavailable++
-                continue
-            }
-            val routeId = record.subscriptionId?.takeIf { it >= 0 }?.let(SimRoutes::routeId)
-            if (routeId == null || routeId != acquisition.input.source.subscriptionId) {
-                core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.UNAVAILABLE, "provider_subscription_changed")
-                unavailable++
-                continue
-            }
-            val outcome = try {
-                process(core, provider, tempDirectory, plan.generation, routeId, record, recheck.input.imported, recheck)
-            } catch (_: Exception) {
-                ProcessResult(durable = true)
-            }
-            captured += outcome.captured
-            pending += outcome.pending
-            unavailable += outcome.unavailable
-            followup = followup || outcome.followup
-        }
-
-        val frozenBaseline = plan.historyBaseline ?: provider.highWater().also(plan.saveHistoryBaseline)
-        var liveCheckpoint = core.checkpoint(plan.generation, PROVIDER_SCOPE, false)?.toLongOrNull()
-        if (liveCheckpoint == null) {
-            liveCheckpoint = frozenBaseline
-            core.setCheckpoint(plan.generation, PROVIDER_SCOPE, false, liveCheckpoint.toString())
-        }
-        val live = scan(core, provider, tempDirectory, plan.generation, imported = false, after = liveCheckpoint, upperBound = null, ::budgetExpired)
-        captured += live.captured
-        pending += live.pending
-        unavailable += live.unavailable
-        followup = followup || live.more
-
-        if (plan.importHistory && !budgetExpired()) {
-            val historyCheckpoint = core.checkpoint(plan.generation, PROVIDER_SCOPE, true)?.toLongOrNull() ?: 0L
-            val history = scan(core, provider, tempDirectory, plan.generation, imported = true, after = historyCheckpoint, upperBound = frozenBaseline, ::budgetExpired)
-            captured += history.captured
-            pending += history.pending
-            unavailable += history.unavailable
-            followup = followup || history.more
-            if (history.finished) plan.finishHistory()
-        }
+        val scanner = MmsBackfillScanner(core)
+        followup = scanner.run(
+            plan.generation,
+            PROVIDER_SCOPE,
+            MmsLegacyBackfillState(
+                plan.historyBaseline?.toString(),
+                plan.importHistory,
+                plan.recheckCursor,
+            ),
+            provider.highWater().toString(),
+            scanPage = { backfillPlan ->
+                val result = scan(
+                    core, provider, tempDirectory, plan.generation,
+                    imported = backfillPlan.phase == MmsBackfillPhase.HISTORY,
+                    after = backfillPlan.cursor?.toLongOrNull() ?: 0L,
+                    upperBound = if (backfillPlan.phase == MmsBackfillPhase.HISTORY) backfillPlan.historyUpperBound?.toLongOrNull() else null,
+                    budget = backfillPlan.budget.coerceIn(1, PAGE),
+                    budgetExpired = ::budgetExpired,
+                )
+                captured += result.captured
+                pending += result.pending
+                unavailable += result.unavailable
+                followup = followup || result.more
+                MmsBackfillPageResult(result.lastDurableId, result.exhausted, result.more)
+            },
+            recheck = recheck@{ request ->
+                if (budgetExpired()) return@recheck true
+                val acquisition = core.acquisitions(CORE_LIST).firstOrNull {
+                    it.input.source.providerMessageId == request.providerMessageId && it.input.incoming == request.incoming
+                }
+                val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck false
+                val record = provider.read(providerId) ?: run {
+                    acquisition?.let {
+                        core.setState(it.acquisitionId, NativeMmsAcquisitionState.UNAVAILABLE, "provider_row_missing")
+                        unavailable++
+                    }
+                    return@recheck false
+                }
+                val routeId = record.subscriptionId?.takeIf { it >= 0 }?.let(SimRoutes::routeId)
+                if (routeId == null || acquisition?.input?.source?.subscriptionId?.let { it != routeId } == true) {
+                    acquisition?.let {
+                        core.setState(it.acquisitionId, NativeMmsAcquisitionState.UNAVAILABLE, "provider_subscription_changed")
+                        unavailable++
+                    }
+                    return@recheck false
+                }
+                val outcome = try {
+                    process(core, provider, tempDirectory, plan.generation, routeId, record, acquisition?.input?.imported ?: false, acquisition)
+                } catch (_: Exception) { ProcessResult(durable = true) }
+                captured += outcome.captured
+                pending += outcome.pending
+                unavailable += outcome.unavailable
+                outcome.followup
+            },
+        )
         return MmsCaptureSummary(captured, pending, unavailable, followup)
     }
 
@@ -251,14 +263,15 @@ internal object MmsCapture {
         imported: Boolean,
         after: Long,
         upperBound: Long?,
+        budget: Int,
         budgetExpired: () -> Boolean,
     ): ScanResult {
-        val page = provider.page(after, PAGE)
+        val page = provider.page(after, budget)
         var captured = 0
         var pending = 0
         var unavailable = 0
         var followup = false
-        var processed = 0
+        var lastDurableId: String? = null
         var stopped = false
         var checkpointBlocked = false
         for (record in page.records) {
@@ -284,12 +297,11 @@ internal object MmsCapture {
                 checkpointBlocked = true
                 continue
             }
-            if (!checkpointBlocked) core.setCheckpoint(generation, PROVIDER_SCOPE, imported, record.id.toString())
-            processed++
+            if (!checkpointBlocked) lastDurableId = record.id.toString()
         }
-        val exhausted = page.records.size < PAGE || stopped || (upperBound != null && page.records.any { it.id > upperBound })
-        val finished = upperBound != null && exhausted && !followup && !checkpointBlocked
-        return ScanResult(captured, pending, unavailable, followup || (!checkpointBlocked && !exhausted && processed == PAGE), finished)
+        val reachedBound = upperBound != null && page.records.any { it.id > upperBound }
+        val exhausted = !followup && (page.records.size < budget || reachedBound)
+        return ScanResult(captured, pending, unavailable, followup || (!checkpointBlocked && !exhausted), lastDurableId, exhausted)
     }
 
     private fun process(
@@ -368,7 +380,8 @@ internal object MmsCapture {
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.BLOCKED, "too_many_attachments")
                 return ProcessResult(true, pending = 1)
             }
-            if (existing.containsKey(part.providerPartId.toString())) continue
+            val providerPartId = part.providerPartId.toString()
+            if (existing.containsKey(providerPartId) && providerPartId in core.partMetadataComplete(acquisition.acquisitionId)) continue
             val remaining = PENDING_MEDIA_LIMIT - core.pendingMediaBytes()
             if (remaining <= 0) {
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "media_quota")
@@ -376,12 +389,56 @@ internal object MmsCapture {
             }
             val temp = File.createTempFile("mms-", ".part", tempDirectory)
             var attachmentId: String? = null
+            var createdAttachment = false
             try {
                 provider.copyPart(part, temp, min(MAX_BYTES, remaining))
-                attachmentId = core.prepareAttachment(temp.absolutePath, part.mediaType ?: "application/octet-stream", part.name ?: "part-${part.providerPartId}")
-                core.mapPart(acquisition.acquisitionId, part.providerPartId.toString(), attachmentId)
+                attachmentId = existing[providerPartId] ?: core.prepareAttachment(temp.absolutePath, part.mediaType ?: "application/octet-stream", part.name ?: "part-${part.providerPartId}")
+                if (providerPartId !in existing) {
+                    createdAttachment = true
+                    core.mapPart(acquisition.acquisitionId, providerPartId, requireNotNull(attachmentId))
+                }
+                val preview = MmsMediaPreview().inspect(temp, part.mediaType)
+                var thumbnailId: String? = null
+                try {
+                    preview.jpegPreview?.let { jpeg ->
+                        val previewTemp = File.createTempFile("mms-preview-", ".jpg", tempDirectory)
+                        try {
+                            FileOutputStream(previewTemp).use { it.write(jpeg); it.fd.sync() }
+                            if (core.pendingMediaBytes() + jpeg.size <= PENDING_MEDIA_LIMIT) {
+                                thumbnailId = core.prepareAttachment(previewTemp.absolutePath, "image/jpeg", "preview-${part.providerPartId}.jpg")
+                            }
+                        } finally {
+                            previewTemp.delete()
+                        }
+                    }
+                    core.setPartMetadata(
+                        acquisition.acquisitionId,
+                        part.providerPartId.toString(),
+                        preview.metadata.width,
+                        preview.metadata.height,
+                        preview.metadata.durationMs,
+                        thumbnailId,
+                    )
+                } catch (_: Exception) {
+                    thumbnailId?.let { try { core.discardAttachment(it) } catch (_: Exception) { } }
+                    // The original is mapped already. Preserve it and record a deliberate absent
+                    // preview rather than failing or retaining an unlinked thumbnail.
+                    try {
+                        core.setPartMetadata(
+                            acquisition.acquisitionId,
+                            part.providerPartId.toString(),
+                            preview.metadata.width,
+                            preview.metadata.height,
+                            preview.metadata.durationMs,
+                            null,
+                        )
+                    } catch (_: Exception) {
+                        core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "preview_metadata_unavailable")
+                        return ProcessResult(true, pending = 1)
+                    }
+                }
             } catch (_: Exception) {
-                if (attachmentId != null) try { core.discardAttachment(attachmentId) } catch (_: Exception) { }
+                if (createdAttachment && attachmentId != null) try { core.discardAttachment(attachmentId) } catch (_: Exception) { }
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "part_unavailable")
                 return ProcessResult(true, pending = 1)
             } finally { temp.delete() }
@@ -408,7 +465,7 @@ internal object MmsCapture {
         return NativeMmsAcquisitionInput(
             NativeMmsSource(generation, routeId, record.id.toString(), record.threadId?.toString()),
             incoming, sender, recipients, record.subject, body, imported,
-            record.dateMs ?: System.currentTimeMillis(), record.transactionId,
+            record.dateMs ?: UNKNOWN_PROVIDER_DATE_MS, record.transactionId,
         )
     }
 
@@ -442,24 +499,64 @@ internal object MmsCapture {
     private const val SEND_REQ = 128
     private const val NOTIFICATION_IND = 130
     private const val RETRIEVE_CONF = 132
+    private const val UNKNOWN_PROVIDER_DATE_MS = 0L
 
     private data class ProcessResult(val durable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val followup: Boolean = false)
-    private data class ScanResult(val captured: Int, val pending: Int, val unavailable: Int, val more: Boolean, val finished: Boolean)
+    private data class ScanResult(val captured: Int, val pending: Int, val unavailable: Int, val more: Boolean, val lastDurableId: String?, val exhausted: Boolean)
 }
 
 private class NativeCore(private val client: NativeClientInterface) : MmsCaptureCore {
     override fun acquisitions(limit: Int) = client.mmsAcquisitions(limit.toULong())
     override fun begin(input: NativeMmsAcquisitionInput) = client.beginMmsAcquisition(input)
     override fun setState(id: String, state: NativeMmsAcquisitionState, reason: String?) = client.setMmsAcquisitionState(id, state, reason)
-    override fun checkpoint(generation: String, subscription: String, imported: Boolean) = client.mmsScanCheckpoint(generation, subscription, imported)
-    override fun setCheckpoint(generation: String, subscription: String, imported: Boolean, providerId: String) = client.setMmsScanCheckpoint(generation, subscription, imported, providerId)
+    override fun migrate(generation: String, scope: String, legacy: MmsLegacyBackfillState) =
+        client.migrateMmsBackfillState(generation, scope, NativeMmsLegacyBackfillState(legacy.historyBaseline, legacy.importHistory, legacy.recheckCursor))
+
+    override fun plans(generation: String, scope: String, observedMaxId: String) =
+        client.planMmsBackfillScans(generation, scope, observedMaxId).map {
+            MmsBackfillScanPlan(
+                MmsBackfillPhase.valueOf(it.phase.name),
+                it.cursor,
+                it.historyUpperBound,
+                it.historyComplete,
+                it.pause != null,
+                it.budget.coerceAtMost(Int.MAX_VALUE.toULong()).toInt(),
+            )
+        }
+
+    override fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String) =
+        client.advanceMmsBackfillPage(generation, scope, NativeMmsBackfillPhase.valueOf(phase.name), providerId)
+
+    override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean) =
+        client.finishMmsBackfillPhase(generation, scope, NativeMmsBackfillPhase.valueOf(phase.name), bound, exhausted)
+
+    override fun rechecks(generation: String, scope: String): MmsBackfillRecheck {
+        val recheck = client.mmsBackfillRecheckRequests(generation, scope)
+        return MmsBackfillRecheck(
+            recheck.requests.map { MmsBackfillRecheckRequest(it.providerMessageId, it.direction == NativeMmsBackfillDirection.INCOMING) },
+            recheck.budget.coerceAtMost(Int.MAX_VALUE.toULong()).toInt(),
+        )
+    }
     override fun pendingMediaBytes() = client.mmsPendingMediaBytes().toLong()
     override fun prepareAttachment(path: String, mediaType: String, name: String) = client.prepareAttachment(path, mediaType, name).attachmentId
     override fun mapPart(id: String, providerPartId: String, attachmentId: String) = client.setMmsAcquisitionPart(id, providerPartId, attachmentId)
+    override fun setPartMetadata(id: String, providerPartId: String, width: Int?, height: Int?, durationMs: Long?, thumbnailAttachmentId: String?) =
+        client.setMmsAcquisitionPartMetadata(
+            id,
+            providerPartId,
+            width?.toUInt(),
+            height?.toUInt(),
+            durationMs?.toULong(),
+            thumbnailAttachmentId,
+        )
     override fun complete(id: String) { client.completeMmsAcquisition(id) }
 
     override fun mappedParts(id: String): Map<String, String> =
         client.mmsAcquisitionParts(id).associate { it.providerPartId to it.attachmentId }
+    override fun partMetadataComplete(id: String): Set<String> =
+        client.mmsAcquisitionParts(id).filter {
+            it.width != null || it.height != null || it.durationMs != null || it.thumbnailAttachmentId != null
+        }.mapTo(mutableSetOf()) { it.providerPartId }
     override fun discardAttachment(id: String) {
         client.discardUnreferencedAttachment(id)
     }

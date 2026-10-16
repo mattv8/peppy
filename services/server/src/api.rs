@@ -498,6 +498,7 @@ pub(crate) fn build_router(
             "/v1/attachments/reserve",
             post(attachments::reserve_attachment),
         )
+        .route("/v1/attachments/usage", get(attachments::attachment_usage))
         .route(
             "/v1/attachments/{attachment_id}/upload",
             put(attachments::upload_attachment),
