@@ -221,13 +221,59 @@ describe("DevicesSettings", () => {
     expect(screen.queryByRole("button", { name: "Remove Pixel 8" })).not.toBeInTheDocument();
   });
 
-  it("shows raw presence without treating a mobile owner as something other than a phone", async () => {
+  it("binds delayed presence to its device metadata badge", async () => {
     vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
       { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
       { id: "phone", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wakeRoute: true },
     ] });
     render(<DevicesSettings />);
-    expect(await screen.findByText(/Android · Owner · Active · Last seen 5m ago/)).toBeInTheDocument();
+    await screen.findByText("Pixel 8");
+    const phone = document.querySelector('[data-device-id="phone"]')!;
+    expect(phone.querySelector('[data-device-badge="platform"]')).toHaveTextContent("Android");
+    expect(phone.querySelector('[data-device-badge="role"]')).toHaveTextContent("Owner");
+    expect(phone.querySelector('[data-device-badge="enrollment"]')).toHaveTextContent("Active");
+    expect(phone.querySelector('[data-device-badge="current"]')).not.toBeInTheDocument();
+    expect(phone.querySelector('[data-device-badge="presence"]')).toHaveAttribute("data-presence-state", "delayed");
+    expect(phone.querySelector('[data-device-badge="presence"]')).toHaveTextContent("Last seen 5m ago");
+  });
+
+  it("shows current and unknown device details as separate badges", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "Unknown desktop", kind: "unrecognized", role: "unknown", revoked: false },
+    ] });
+    render(<DevicesSettings />);
+    await screen.findByText("Unknown desktop");
+    const currentDevice = document.querySelector('[data-device-id="self"]')!;
+    expect(currentDevice.querySelector('[data-device-badge="platform"]')).toHaveTextContent("Unknown platform");
+    expect(currentDevice.querySelector('[data-device-badge="role"]')).toHaveTextContent("Unknown role");
+    expect(currentDevice.querySelector('[data-device-badge="enrollment"]')).toHaveTextContent("Active");
+    expect(currentDevice.querySelector('[data-device-badge="current"]')).toHaveTextContent("This device");
+    expect(currentDevice.querySelector('[data-device-badge="presence"]')).toHaveAttribute("data-presence-state", "unknown");
+  });
+
+  it("binds connected and never presence only to active device badges", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false, presence: { state: "connected", last_seen_age_seconds: 0 } },
+      { id: "never", name: "Browser", kind: "browser", role: "device", revoked: false, presence: { state: "never", last_seen_age_seconds: null } },
+    ] });
+    render(<DevicesSettings />);
+    await screen.findByText("This Mac");
+    expect(document.querySelector('[data-device-id="self"] [data-device-badge="presence"]')).toHaveAttribute("data-presence-state", "connected");
+    expect(document.querySelector('[data-device-id="self"] [data-device-badge="presence"]')).toHaveTextContent("Connected");
+    expect(document.querySelector('[data-device-id="never"] [data-device-badge="presence"]')).toHaveAttribute("data-presence-state", "never");
+    expect(document.querySelector('[data-device-id="never"] [data-device-badge="presence"]')).toHaveTextContent("Never connected");
+  });
+
+  it("omits live presence from removed device details", async () => {
+    vi.mocked(bridge.list_devices).mockResolvedValue({ currentDeviceId: "self", devices: [
+      { id: "self", name: "This Mac", kind: "desktop", role: "owner", revoked: false },
+      { id: "old", name: "Old phone", kind: "ios", role: "owner", revoked: true, presence: { state: "connected", last_seen_age_seconds: 0 } },
+    ] });
+    render(<DevicesSettings />);
+    await screen.findByText("This Mac");
+    const removedDevice = document.querySelector('[data-device-id="old"]')!;
+    expect(removedDevice.querySelector('[data-device-badge="enrollment"]')).toHaveTextContent("Removed");
+    expect(removedDevice.querySelector('[data-device-badge="presence"]')).not.toBeInTheDocument();
   });
 
   it("keeps a loaded roster when a later load reports the server offline", async () => {
