@@ -2,11 +2,11 @@
 //! supervisor. All functions here are synchronous (they call into client-core / the filesystem)
 //! and are invoked from `spawn_blocking`, never directly on an async worker or the UI thread.
 use crate::{
-    credentials::{ensure_database_key, prepare_data_dir, stored_credential, Binding},
+    credentials::{Binding, ensure_database_key, prepare_data_dir, stored_credential},
     dto::{
         self, AttachmentView, ConversationView, DraftView, GatewayView, Head, HistoryPage, Snapshot,
     },
-    error::{core_error, BridgeError, BridgeResult},
+    error::{BridgeError, BridgeResult, core_error},
     media,
     net::Api,
     notifications::NotificationPreferences,
@@ -23,8 +23,8 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
     },
 };
 use tokio::sync::Notify;
@@ -107,6 +107,8 @@ pub struct Session {
     /// Wakes a pending reconnect wait (for example after unlock).
     pub reconnect_wake: Notify,
     pub cancel: CancellationToken,
+    /// Supervisor tasks are retained until an update restart has observed their completion.
+    workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub notifier: Notifier,
     pub mismatch: AtomicBool,
     /// Wakes the live loop to run a requested contact-projection repair snapshot now.
@@ -115,6 +117,11 @@ pub struct Session {
     pub repair_attempted: AtomicBool,
     /// A staged snapshot generation known to be impossible to complete; never resumed.
     pub abandoned_snapshot: Mutex<Option<u64>>,
+}
+
+fn started_sessions() -> &'static Mutex<Vec<Weak<Session>>> {
+    static SESSIONS: OnceLock<Mutex<Vec<Weak<Session>>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 impl Drop for Session {
@@ -186,6 +193,7 @@ pub fn open_session(
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
         cancel: CancellationToken::new(),
+        workers: Mutex::new(Vec::new()),
         notifier,
         mismatch: AtomicBool::new(false),
         abandoned_snapshot: Mutex::new(None),
@@ -224,6 +232,45 @@ fn compose_error(error: ComposeError) -> BridgeError {
 }
 
 impl Session {
+    pub(crate) fn register_started(session: &Arc<Self>) {
+        let mut sessions = started_sessions()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        sessions.retain(|session| session.strong_count() != 0);
+        sessions.push(Arc::downgrade(session));
+    }
+
+    pub(crate) fn active_and_retired() -> Vec<Arc<Self>> {
+        let mut sessions = started_sessions()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let active = sessions.iter().filter_map(Weak::upgrade).collect();
+        sessions.retain(|session| session.strong_count() != 0);
+        active
+    }
+    pub(crate) fn track_worker(&self, worker: tokio::task::JoinHandle<()>) {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(worker);
+    }
+
+    pub(crate) fn take_workers(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(
+            &mut *self
+                .workers
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        )
+    }
+
+    pub(crate) fn retain_workers(&self, workers: Vec<tokio::task::JoinHandle<()>>) {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .extend(workers);
+    }
+
     pub fn request_work(&self) {
         self.work_wake.notify_one();
     }
@@ -1006,7 +1053,7 @@ fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{fixture_at, PHRASE};
+    use crate::tests::{PHRASE, fixture_at};
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::AtomicUsize;
 
@@ -1153,9 +1200,11 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(refreshed.conversations[0].has_older_messages, Some(true));
-        assert!(session
-            .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
-            .is_err());
+        assert!(
+            session
+                .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
+                .is_err()
+        );
         let other = session
             .client
             .capture_incoming(IncomingSms {
@@ -1171,9 +1220,11 @@ mod tests {
             .record
             .message_id
             .to_string();
-        assert!(session
-            .history_page(&conversation.to_string(), &other_id)
-            .is_err());
+        assert!(
+            session
+                .history_page(&conversation.to_string(), &other_id)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1183,11 +1234,15 @@ mod tests {
             .collect::<Vec<_>>();
         let eligible = bounded_preview_ids(ids.iter().copied());
         assert_eq!(eligible.len(), MAX_PREVIEW_CACHE);
-        assert!(ids[..MAX_PREVIEW_CACHE]
-            .iter()
-            .all(|id| eligible.contains(id)));
-        assert!(ids[MAX_PREVIEW_CACHE..]
-            .iter()
-            .all(|id| !eligible.contains(id)));
+        assert!(
+            ids[..MAX_PREVIEW_CACHE]
+                .iter()
+                .all(|id| eligible.contains(id))
+        );
+        assert!(
+            ids[MAX_PREVIEW_CACHE..]
+                .iter()
+                .all(|id| !eligible.contains(id))
+        );
     }
 }

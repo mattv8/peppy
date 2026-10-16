@@ -4,16 +4,16 @@
 //! webview receives only `HostedAccountView`.
 
 use crate::{
-    error::{BridgeError, BridgeResult},
-    net::{read_bounded, NetError},
-    secure_store::SecretStore,
     AppState,
+    error::{BridgeError, BridgeResult},
+    net::{NetError, read_bounded},
+    secure_store::SecretStore,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::routes;
 use peppy_hosted_client::{
-    hosted_login_request, hosted_session_request, parse_hosted_account, parse_hosted_login_attempt,
-    parse_hosted_session, prepare, restore, HostedProvisioning,
+    HostedProvisioning, hosted_login_request, hosted_session_request, parse_hosted_account,
+    parse_hosted_login_attempt, parse_hosted_session, prepare, restore,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -74,6 +74,7 @@ pub(crate) async fn provision_enrollment(
     state: &AppState,
     hosted: &HostedState,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(state)?;
     let origin = hosted_origin()?;
     provision_core(
         &*state.store,
@@ -276,6 +277,7 @@ pub async fn hosted_account(
     state: tauri::State<'_, AppState>,
     hosted: tauri::State<'_, HostedState>,
 ) -> BridgeResult<HostedAccountView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     if client_id().is_none() {
         return Ok(HostedAccountView::unavailable());
@@ -289,6 +291,7 @@ pub async fn hosted_sign_out(
     state: tauri::State<'_, AppState>,
     hosted: tauri::State<'_, HostedState>,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     tombstone_session(&*state.store, &hosted, &hosted_origin()?).await
 }
@@ -315,6 +318,7 @@ pub async fn hosted_sign_in(
     hosted: tauri::State<'_, HostedState>,
     provider: String,
 ) -> BridgeResult<HostedAccountView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     if provider != "google" || client_id().is_none() {
         return Err(hosted_error());
@@ -440,6 +444,7 @@ pub async fn hosted_provision(
     state: tauri::State<'_, AppState>,
     hosted: tauri::State<'_, HostedState>,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let (app, state) = (&app, &*state);
     provision_core(
@@ -621,7 +626,7 @@ where
             return Err(BridgeError::new(
                 "has-vault",
                 "This Peppy Hosted account already has a vault.",
-            ))
+            ));
         }
         (None, _) => false,
     };

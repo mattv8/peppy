@@ -51,6 +51,9 @@ mod sync;
 mod tests;
 mod tls;
 mod tray;
+mod update_linux;
+mod update_safety;
+mod updates;
 mod window_chrome;
 mod windows;
 
@@ -134,6 +137,8 @@ pub struct AppState {
     store: Arc<dyn SecretStore>,
     config_lock: Mutex<()>,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
+    /// Serializes session retirement and opening without holding `session` across a worker drain.
+    session_open_lock: tokio::sync::Mutex<()>,
     composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
     enrollment: Mutex<enrollment::Controller>,
     /// Serializes credential import and post-dialog credential export against configuration changes.
@@ -150,6 +155,8 @@ pub struct AppState {
     app_lock_attempts: Arc<app_lock::Attempts>,
     media_capabilities: Mutex<HashMap<String, MediaCapability>>,
     media_read_budget: Arc<MediaReadBudget>,
+    update_safety: update_safety::SafetyGate,
+    updates: updates::UpdateManager,
 }
 
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
@@ -180,6 +187,13 @@ fn window_error() -> BridgeError {
         "window-context",
         "This operation is only available in the main window.",
     )
+}
+
+fn admit_update_operation(state: &AppState) -> BridgeResult<update_safety::OperationGuard> {
+    state
+        .update_safety
+        .enter()
+        .map_err(|message| BridgeError::new("update-busy", message))
 }
 
 /// Runtime defense in depth behind the Tauri ACL: settings, import, unlock, publication,
@@ -271,6 +285,7 @@ impl AppState {
             store,
             config_lock: Mutex::new(()),
             session: tokio::sync::Mutex::new(None),
+            session_open_lock: tokio::sync::Mutex::new(()),
             composer_scopes: Mutex::new(HashMap::new()),
             enrollment: Mutex::new(enrollment::Controller::default()),
             import_lock: tokio::sync::Mutex::new(()),
@@ -286,6 +301,8 @@ impl AppState {
             app_lock_attempts: Arc::new(app_lock::Attempts::default()),
             media_capabilities: Mutex::new(HashMap::new()),
             media_read_budget: Arc::new(MediaReadBudget::new(MAX_CONCURRENT_MEDIA_READS)),
+            update_safety: update_safety::SafetyGate::default(),
+            updates: updates::UpdateManager::new(env!("CARGO_PKG_VERSION").into()),
         }
     }
 
@@ -305,6 +322,7 @@ impl AppState {
     }
 
     async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+        let _opening = self.session_open_lock.lock().await;
         if let Ok(mut scopes) = self.composer_scopes.lock() {
             scopes.clear();
         }
@@ -327,22 +345,48 @@ impl AppState {
     /// The session for the active binding, opened on demand. A session for any other binding is
     /// stopped first, so a client/key opened for one credential is never reused for another.
     pub async fn session(&self) -> BridgeResult<Option<Arc<Session>>> {
+        let _operation = self
+            .update_safety
+            .enter()
+            .map_err(|message| BridgeError::new("update-busy", message))?;
+        let _opening = self.session_open_lock.lock().await;
         let config = self.config()?;
-        let mut guard = self.session.lock().await;
         let Some(binding) = config.active_binding().cloned() else {
-            if let Some(old) = guard.take() {
+            if let Some(old) = self.session.lock().await.take() {
                 old.cancel.cancel();
             }
             self.revoke_media_capabilities();
             return Ok(None);
         };
-        if let Some(existing) = guard.as_ref() {
-            if existing.binding == binding {
-                return Ok(Some(existing.clone()));
+        let retiring = {
+            let mut current = self.session.lock().await;
+            if let Some(existing) = current.as_ref() {
+                if existing.binding == binding && !existing.cancel.is_cancelled() {
+                    return Ok(Some(existing.clone()));
+                }
             }
-            existing.cancel.cancel();
-            *guard = None;
+            current.take()
+        };
+        if let Some(retiring) = retiring {
+            retiring.cancel.cancel();
             self.revoke_media_capabilities();
+            if !sync::drain(&retiring, std::time::Duration::from_secs(30)).await {
+                // Keep the retiring session observable while its workers own
+                // storage. `session_open_lock` serializes every opener, so a
+                // timeout must never leave an empty slot that admits another.
+                let mut current = self.session.lock().await;
+                if current.is_none() {
+                    *current = Some(retiring);
+                }
+                return Err(BridgeError::new(
+                    "session-draining",
+                    "Peppy is still finishing the previous account session.",
+                ));
+            }
+            let current = self.session.lock().await.clone();
+            if current.is_some() {
+                return Ok(current);
+            }
         }
         if let Ok(mut scopes) = self.composer_scopes.lock() {
             composer_scope::clear_for_binding(&mut scopes, &binding);
@@ -351,13 +395,24 @@ impl AppState {
             .known(&binding)
             .map(|known| known.cached_epochs.clone())
             .unwrap_or_default();
-        let (root, store, notifier) =
-            (self.root.clone(), self.store.clone(), self.notifier.clone());
+        let (root, store, notifier, opening_binding) = (
+            self.root.clone(),
+            self.store.clone(),
+            self.notifier.clone(),
+            binding.clone(),
+        );
         let session = Arc::new(
-            blocking(move || open_session(&root, &*store, &binding, &epochs, notifier)).await?,
+            blocking(move || open_session(&root, &*store, &opening_binding, &epochs, notifier))
+                .await?,
         );
         sync::start(&session);
-        *guard = Some(session.clone());
+        let mut current = self.session.lock().await;
+        if let Some(existing) = current.as_ref() {
+            if existing.binding == binding && !existing.cancel.is_cancelled() {
+                return Ok(Some(existing.clone()));
+            }
+        }
+        *current = Some(session.clone());
         Ok(Some(session))
     }
 
@@ -532,6 +587,7 @@ async fn load_state(
     conversation_id: Option<String>,
     history_from_message_id: Option<String>,
 ) -> BridgeResult<Snapshot> {
+    let _operation = admit_update_operation(&state)?;
     if state.app_locked.load(Ordering::Acquire) {
         return Ok(locked_snapshot(
             state.app_lock_storage_available.load(Ordering::Acquire),
@@ -591,6 +647,7 @@ async fn load_history(
     conversation_id: String,
     before_message_id: String,
 ) -> BridgeResult<HistoryPage> {
+    let _operation = admit_update_operation(&state)?;
     if state.app_locked.load(Ordering::Acquire) {
         return Err(BridgeError::new("app-locked", "Peppy is locked."));
     }
@@ -620,6 +677,7 @@ async fn configure_server(
     state: State<'_, AppState>,
     origin: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let origin = origin::validate_origin(&origin)?;
     let _import = state.import_lock.lock().await;
@@ -657,6 +715,7 @@ async fn activate_native_credential(
     state: &AppState,
     bytes: zeroize::Zeroizing<Vec<u8>>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(state)?;
     let credential = Arc::new(parse_credential(&bytes)?);
     drop(bytes);
     let _import = state.import_lock.lock().await;
@@ -776,6 +835,7 @@ async fn unlock_sync(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let vault = fetch_vault(
@@ -845,6 +905,7 @@ async fn unlock_app(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     if !state.app_locked.load(Ordering::Acquire) {
         return Ok(true);
@@ -874,6 +935,7 @@ async fn set_app_lock(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     if !state.app_lock_storage_available.load(Ordering::Acquire) {
         return Ok(false);
@@ -1003,7 +1065,20 @@ async fn save_draft(
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<DraftView> {
-    let session = state.require_session().await?;
+    // The lifecycle reservation permits only the already-open session for a captured webview
+    // that still owes its update draft flush. It must not create or replace a session.
+    let session = if lifecycle::update_flush_pending(window.app_handle(), window.label()) {
+        state
+            .session
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(BridgeError::no_session)?
+    } else {
+        let _operation = admit_update_operation(&state)?;
+        let session = state.require_session().await?;
+        return save_draft_for_window(&state, window.label(), session, input).await;
+    };
     save_draft_for_window(&state, window.label(), session, input).await
 }
 
@@ -1014,6 +1089,7 @@ async fn discard_draft(
     state: State<'_, AppState>,
     input: DiscardDraftInput,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let conversation_id = input.conversation_id.clone();
@@ -1080,6 +1156,7 @@ async fn send_draft(
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<SendResultView> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     send_draft_for_window(&state, window.label(), session, input).await
 }
@@ -1090,6 +1167,7 @@ async fn mark_seen(
     state: State<'_, AppState>,
     visible_message_ids: Vec<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     // A composer must never acknowledge another conversation's messages. The
     // UI supplies message IDs rather than a conversation ID, so resolve each
     // one through the scoped native session before applying the acknowledgement.
@@ -1119,18 +1197,21 @@ async fn mark_seen(
 
 #[tauri::command]
 async fn list_contact_books(state: State<'_, AppState>) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::list_books(&session)).await
 }
 
 #[tauri::command]
 async fn list_devices(state: State<'_, AppState>) -> BridgeResult<devices::DeviceRosterView> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     devices::list(&session).await
 }
 
 #[tauri::command]
 async fn revoke_device(state: State<'_, AppState>, device_id: String) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     devices::revoke(&session, &device_id).await
 }
@@ -1142,6 +1223,7 @@ async fn list_contacts(
     query: Option<String>,
     offset: Option<u32>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::list_contacts(&session, &book_id, query.as_deref(), offset)).await
 }
@@ -1153,6 +1235,7 @@ async fn search_contact_recipients(
     query: String,
     source_device_id: Option<String>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::search_recipients(&session, &query, source_device_id.as_deref()))
         .await
@@ -1161,6 +1244,7 @@ async fn search_contact_recipients(
 /// Latches a contact projection repair; the live loop runs one fenced snapshot.
 #[tauri::command]
 async fn request_contact_repair(state: State<'_, AppState>) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::request_repair(&session)).await
 }
@@ -1170,6 +1254,7 @@ async fn request_contact_sync(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::request_sync(&session, &book_id)).await
 }
@@ -1179,6 +1264,7 @@ async fn get_contact_sync_request(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::sync_request_status(&session, &book_id)).await
 }
@@ -1189,6 +1275,7 @@ async fn list_contact_edits(
     state: State<'_, AppState>,
     book_id: Option<String>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::list_edits(&session, book_id.as_deref())).await
 }
@@ -1200,6 +1287,7 @@ async fn pick_contact_photo(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<Option<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     state.require_session().await?;
     let Some(path) = dialogs::pick_file(&app, "Choose a contact photo").await? else {
         return Ok(None);
@@ -1211,6 +1299,7 @@ async fn pick_contact_photo(
 
 #[tauri::command]
 async fn forget_contact_book(state: State<'_, AppState>, book_id: String) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::forget_book(&session, &book_id)).await
 }
@@ -1220,6 +1309,7 @@ async fn submit_contact_edit(
     state: State<'_, AppState>,
     input: serde_json::Value,
 ) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::submit(&session, &input)).await
 }
@@ -1229,6 +1319,7 @@ async fn list_restorable_contacts(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::restorable(&session, &book_id)).await
 }
@@ -1239,6 +1330,7 @@ async fn restore_contact(
     book_id: String,
     contact_id: String,
 ) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::restore(&session, &book_id, &contact_id)).await
 }
@@ -1248,6 +1340,7 @@ async fn pick_attachments(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<Vec<dto::AttachmentView>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     let paths = dialogs::pick_files(&app, "Attach files (encrypted before upload)").await?;
     if paths.len() > 10 {
@@ -1384,6 +1477,7 @@ async fn retry_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let s = session.clone();
@@ -1399,6 +1493,7 @@ async fn save_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
@@ -1574,6 +1669,7 @@ async fn request_attachment_download(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
@@ -1590,6 +1686,7 @@ async fn media_page(
     cursor: Option<MediaCursorInput>,
     limit: Option<usize>,
 ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
@@ -1619,6 +1716,7 @@ async fn media_page_around(
     message_id: Option<String>,
     limit: Option<usize>,
 ) -> BridgeResult<peppy_desktop_api::MediaPageAroundView> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
@@ -1655,6 +1753,7 @@ async fn media_page_newer(
     cursor: MediaCursorInput,
     limit: Option<usize>,
 ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
@@ -1679,6 +1778,7 @@ async fn open_media(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<OpenMediaView> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
@@ -1772,6 +1872,7 @@ async fn load_media(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<OpenMediaView> {
+    let _operation = admit_update_operation(&state)?;
     request_attachment_download(window.clone(), state.clone(), id.clone()).await?;
     open_media(window, state, id).await
 }
@@ -1783,6 +1884,7 @@ async fn close_media(
     id: String,
     url: Option<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     let released_sessions = {
@@ -2506,6 +2608,7 @@ async fn publish_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<Option<PublicCopyView>> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let attachment = AttachmentId::from_str(&id)
@@ -2653,6 +2756,7 @@ async fn create_public_copy(
 }
 
 async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     let state = app.state::<AppState>();
     let conversation = match conversation {
@@ -2681,6 +2785,7 @@ async fn open_composer(
     app: tauri::AppHandle,
     conversation_id: Option<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     new_composer(app, conversation_id).await
 }
@@ -2693,6 +2798,7 @@ async fn dismiss_notification(
     state: State<'_, AppState>,
     target: NotificationTarget,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
@@ -2707,6 +2813,7 @@ async fn dismiss_all_notifications(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
@@ -2738,6 +2845,7 @@ async fn set_app_muted(
     app_name: String,
     muted: bool,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
@@ -2757,6 +2865,7 @@ async fn mark_notifications_seen(
     state: State<'_, AppState>,
     targets: Vec<NotificationTarget>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     blocking(move || {
@@ -2775,6 +2884,7 @@ fn set_notification_preferences(
     state: State<'_, AppState>,
     preferences: NotificationPreferences,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     state.notifications.set_preferences(preferences)?;
     (state.notifier)();
@@ -2790,6 +2900,7 @@ fn set_notification_context(
     view: NotificationView,
     conversation_id: Option<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     state.notifications.set_context(view, conversation_id);
     Ok(())
@@ -2802,6 +2913,7 @@ fn request_notification_permission(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> BridgeResult<String> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     let _plugin_state = app.notification().request_permission().map_err(|_| {
         BridgeError::new(
@@ -2820,6 +2932,7 @@ fn set_start_at_login(
     app: tauri::AppHandle,
     enabled: bool,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     let launcher = app.autolaunch();
     let result = if enabled {
@@ -2839,6 +2952,7 @@ async fn popout_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> BridgeResult<heads_runtime::PopoutResult> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     let conversation = ConversationId::from_str(&conversation_id)
@@ -2853,6 +2967,7 @@ async fn hide_head(
     app: tauri::AppHandle,
     conversation_id: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     let _conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-conversation", "The conversation ID is invalid."))?;
@@ -2890,6 +3005,7 @@ fn close_composer(window: tauri::WebviewWindow) -> BridgeResult<()> {
 /// panel ownership; callers never supply an ID.
 #[tauri::command]
 async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     let conversation = tray::composer_conversation(window.label()).ok_or_else(|| {
         BridgeError::new(
             "composer-context",
@@ -2906,6 +3022,342 @@ async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     lifecycle::request_window_and_wait(&app, window.label(), lifecycle::Action::Close).await?;
     heads_runtime::dismiss_generation(&app, &conversation.to_string(), generation).await
+}
+
+#[tauri::command]
+fn update_status(state: State<'_, AppState>) -> updates::types::UpdateStatus {
+    state.updates.status()
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    state.updates.check(&app).await
+}
+
+#[tauri::command]
+fn set_automatic_updates(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    state.updates.set_automatic(enabled)
+}
+
+#[tauri::command]
+fn defer_update(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    state.updates.defer()
+}
+
+#[tauri::command]
+fn report_update_activity(window: tauri::WebviewWindow, state: State<'_, AppState>, active: bool) {
+    state.updates.report_activity(window.label(), active);
+}
+
+#[tauri::command]
+async fn restart_for_update(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    install_staged_update(&app, &state, updates::install::InstallIntent::User).await
+}
+
+async fn install_staged_update(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    intent: updates::install::InstallIntent,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    // The updater plugin has no safe staged-payload handoff in the base build yet.
+    // Refuse before entering lifecycle exclusion rather than exit with an unchecked payload.
+    let status = state.updates.status();
+    if !status.can_restart {
+        return Err(BridgeError::new(
+            "update-not-ready",
+            "No verified update is ready to restart.",
+        ));
+    }
+    let Some(staged) = state.updates.staged() else {
+        return Err(BridgeError::new(
+            "update-not-ready",
+            "No verified update payload is staged.",
+        ));
+    };
+    if let Err(error) = updates::install::preflight(&status.package_kind, intent) {
+        if error.code == "update-authorization-required" {
+            state.updates.set_authorization_required();
+            state.updates.emit(app);
+        }
+        return Err(error);
+    }
+    let bytes = staged.verified_bytes()?;
+    let permit = lifecycle::prepare_update(app).await?;
+    state.updates.set_installing(&staged.update.version)?;
+    state.updates.emit(app);
+    if !sync::drain_all(std::time::Duration::from_secs(30)).await {
+        // Keep the reservation until every active and retired supervisor has completed.
+        // Releasing it earlier would permit a new session while old storage work remains live.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
+            let state = app.state::<AppState>();
+            state.updates.install_failed(
+                "Background work finished. Restart the verified update when ready.",
+            );
+            state.updates.emit(&app);
+            drop(permit);
+        });
+        return Err(BridgeError::new(
+            "update-busy",
+            "Peppy is still finishing background work.",
+        ));
+    }
+    if let Err(error) = updates::install::write_restart_marker(
+        &state.root,
+        &staged.update.version,
+        restart_in_background(main_window_visible(app)),
+    ) {
+        state
+            .updates
+            .install_failed("Could not record the update restart state.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    state
+        .updates
+        .record_install_attempt(&staged.update.version)?;
+    let install_guard = permit.commit();
+    #[cfg(target_os = "linux")]
+    if matches!(status.package_kind.as_str(), "deb" | "rpm") {
+        return install_linux_system_package(app, state, staged, install_guard, intent).await;
+    }
+    // `install` verifies the bytes again. On Windows it exits only after the updater launches;
+    // on other supported bundles it replaces the payload before the immediate relaunch.
+    if staged.update.install(bytes).is_err() {
+        updates::install::clear_restart_marker(&state.root);
+        state
+            .updates
+            .install_failed("Could not install the verified update.");
+        state.updates.emit(app);
+        return Err(BridgeError::new(
+            "update-install",
+            "Could not install the verified update.",
+        ));
+    }
+    // Do not release the update reservation or tell windows that draft editing is safe until the
+    // installer has completed its recoverable work. A failed installation drops `install_guard`,
+    // which restores the captured UI and admission gates.
+    install_guard.finish();
+    state.allow_exit.store(true, Ordering::Release);
+    app.restart();
+}
+
+#[cfg(target_os = "linux")]
+async fn install_linux_system_package(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    staged: updates::StagedUpdate,
+    install_guard: lifecycle::UpdateInstallGuard,
+    intent: updates::install::InstallIntent,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    use update_linux::{InstallOutcome, LinuxPackageInstaller, ZbusPackageKit};
+
+    let expected_version = staged.update.version.clone();
+    let backend = match ZbusPackageKit::connect().await {
+        Ok(backend) => backend,
+        Err(_) => {
+            updates::install::clear_restart_marker(&state.root);
+            state
+                .updates
+                .install_failed("PackageKit is unavailable on this Linux installation.");
+            state.updates.emit(app);
+            return Err(BridgeError::new(
+                "update-packagekit",
+                "PackageKit is unavailable on this Linux installation.",
+            ));
+        }
+    };
+    let installer = LinuxPackageInstaller::new(backend);
+    match installer
+        .install_verified(
+            &staged.path,
+            &expected_version,
+            intent == updates::install::InstallIntent::User,
+        )
+        .await
+    {
+        InstallOutcome::Success { .. } => {
+            if let Err(error) = state.updates.finish_external_update(&expected_version) {
+                updates::install::clear_restart_marker(&state.root);
+                state
+                    .updates
+                    .install_failed("Could not finalize the installed system update.");
+                state.updates.emit(app);
+                return Err(error);
+            }
+            install_guard.finish();
+            state.allow_exit.store(true, Ordering::Release);
+            app.restart();
+        }
+        InstallOutcome::CompletionUnknown { message: _ } => {
+            let reconcile_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                // Keep this installer (and its private PackageKit transaction identity) alive.
+                // Installed-version metadata alone cannot release the lifecycle fence.
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    match installer.reconcile_pending(&expected_version).await {
+                        Some(InstallOutcome::Success { .. }) => {
+                            let state = reconcile_app.state::<AppState>();
+                            if state
+                                .updates
+                                .finish_external_update(&expected_version)
+                                .is_err()
+                            {
+                                updates::install::clear_restart_marker(&state.root);
+                                state.updates.install_failed(
+                                    "Could not finalize the installed system update.",
+                                );
+                                state.updates.emit(&reconcile_app);
+                            } else {
+                                install_guard.finish();
+                                state.allow_exit.store(true, Ordering::Release);
+                                reconcile_app.restart();
+                            }
+                            break;
+                        }
+                        Some(InstallOutcome::CompletionUnknown { .. }) | None => continue,
+                        Some(outcome) => {
+                            let state = reconcile_app.state::<AppState>();
+                            updates::install::clear_restart_marker(&state.root);
+                            state.updates.install_failed(&packagekit_message(outcome));
+                            state.updates.emit(&reconcile_app);
+                            break;
+                        }
+                    }
+                }
+            });
+            // The lifecycle guard and manager installation claim both remain held
+            // until this exact PackageKit transaction reaches a typed terminal state.
+            state.updates.emit(app);
+            Err(BridgeError::new(
+                "update-packagekit-pending",
+                "PackageKit completion is still being verified.",
+            ))
+        }
+        outcome => {
+            updates::install::clear_restart_marker(&state.root);
+            if matches!(outcome, InstallOutcome::AuthorizationRequired) {
+                state.updates.set_authorization_required();
+                state.updates.emit(app);
+                return Err(BridgeError::new(
+                    "update-packagekit",
+                    "PackageKit authorization is required.",
+                ));
+            }
+            let message = packagekit_message(outcome);
+            state.updates.install_failed(&message);
+            state.updates.emit(app);
+            Err(BridgeError::new("update-packagekit", message))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn packagekit_message(outcome: update_linux::InstallOutcome) -> String {
+    use update_linux::InstallOutcome;
+
+    match outcome {
+        InstallOutcome::Unsupported { message } | InstallOutcome::Failed { message } => message,
+        InstallOutcome::AuthorizationRequired => "PackageKit authorization is required.".into(),
+        InstallOutcome::Cancelled => "PackageKit authorization was cancelled.".into(),
+        InstallOutcome::Locked => "PackageKit is busy with another transaction.".into(),
+        InstallOutcome::CompletionUnknown { message } => message,
+        InstallOutcome::SettledUnknown { message } => message,
+        InstallOutcome::Success { .. } => "PackageKit completed unexpectedly.".into(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn restart_after_external_package_update(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> BridgeResult<()> {
+    use update_linux::{LinuxPackageInstaller, ZbusPackageKit};
+
+    let backend = ZbusPackageKit::connect()
+        .await
+        .map_err(|_| BridgeError::new("update-packagekit", "PackageKit is unavailable."))?;
+    let installer = LinuxPackageInstaller::new(backend);
+    let Some(installed) = installer.installed_version().await else {
+        return Ok(());
+    };
+    if !installer.daemon_is_idle().await || !state.updates.should_restart_external(app, &installed)
+    {
+        return Ok(());
+    }
+    let permit = lifecycle::prepare_update(app).await?;
+    if !sync::drain_all(std::time::Duration::from_secs(30)).await {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
+            let state = app.state::<AppState>();
+            state.updates.install_failed(
+                "Background work finished. Restart the installed system update when ready.",
+            );
+            state.updates.emit(&app);
+            drop(permit);
+        });
+        return Err(BridgeError::new(
+            "update-busy",
+            "Peppy is still finishing background work.",
+        ));
+    }
+    if let Err(error) = updates::install::write_restart_marker(
+        &state.root,
+        &installed,
+        restart_in_background(main_window_visible(app)),
+    ) {
+        state
+            .updates
+            .install_failed("Could not record the update restart state.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    let guard = permit.commit();
+    if let Err(error) = state.updates.finish_external_update(&installed) {
+        updates::install::clear_restart_marker(&state.root);
+        state
+            .updates
+            .install_failed("Could not finalize the installed system update.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    guard.finish();
+    state.allow_exit.store(true, Ordering::Release);
+    app.restart();
+}
+
+fn main_window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window(tray::MAIN)
+        .and_then(|window| window.is_visible().ok())
+        // An unavailable visibility query must not turn a foreground restart
+        // into a hidden launch.
+        .unwrap_or(true)
+}
+
+fn restart_in_background(main_visible: bool) -> bool {
+    !main_visible
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2961,6 +3413,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let root = app
                 .path()
@@ -2986,8 +3439,20 @@ pub fn run() {
                 notifier.clone(),
             ));
             #[cfg(not(target_os = "macos"))]
-            app.manage(AppState::new(root, Arc::new(secure_store), notifier));
+            app.manage(AppState::new(
+                root.clone(),
+                Arc::new(secure_store),
+                notifier,
+            ));
             let state = app.state::<AppState>();
+            state
+                .updates
+                .initialize(&app.handle(), &root)
+                .map_err(|error| error.message)?;
+            let restart_marker = updates::install::confirm_restart_marker(
+                &root,
+                &state.updates.status().current_version,
+            );
             match app_lock::status(&*state.store) {
                 Ok(app_lock::Status::Disabled) => state.app_locked.store(false, Ordering::Release),
                 Ok(app_lock::Status::Enabled) => {}
@@ -2998,6 +3463,50 @@ pub fn run() {
                 }
             }
             app.manage(hosted::HostedState::default());
+            let updates = state.updates.clone();
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                loop {
+                    if updates.check_due() {
+                        let _ = updates.check_automatic(&update_handle).await;
+                    }
+                    tokio::time::sleep(updates.next_check_delay()).await;
+                }
+            });
+            let updates = state.updates.clone();
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let state = update_handle.state::<AppState>();
+                    if updates.should_auto_restart(&update_handle) {
+                        let _ = install_staged_update(
+                            &update_handle,
+                            &state,
+                            updates::install::InstallIntent::Automatic,
+                        )
+                        .await;
+                    }
+                }
+            });
+            #[cfg(target_os = "linux")]
+            {
+                let status = state.updates.status();
+                if status.channel != updates::types::UpdateChannel::Disabled
+                    && matches!(status.package_kind.as_str(), "deb" | "rpm")
+                {
+                    let update_handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            let state = update_handle.state::<AppState>();
+                            let _ =
+                                restart_after_external_package_update(&update_handle, &state).await;
+                        }
+                    });
+                }
+            }
             // The state hint is emitted after normal live applies and snapshot work alike. Core's
             // queue contains only live first-insert candidates, so this native drain cannot turn
             // history/snapshot replay into banners.
@@ -3006,6 +3515,9 @@ pub fn run() {
                 let handle = banner_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = handle.state::<AppState>();
+                    let Ok(_operation) = admit_update_operation(&state) else {
+                        return;
+                    };
                     let Ok(Some(session)) = state.session().await else {
                         return;
                     };
@@ -3031,6 +3543,26 @@ pub fn run() {
                     });
                 },
                 |app| {
+                    if app.state::<AppState>().app_locked.load(Ordering::Acquire) {
+                        tray::show_main(app);
+                        return;
+                    }
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        if let Err(error) = install_staged_update(
+                            &app,
+                            &state,
+                            updates::install::InstallIntent::User,
+                        )
+                        .await
+                        {
+                            tray::show_main(&app);
+                            dialogs::inform(&app, "Could not restart for update", &error.message);
+                        }
+                    });
+                },
+                |app| {
                     if let Err(error) = lifecycle::request_quit(app) {
                         tray::show_main(app);
                         dialogs::inform(app, "Could not quit Peppy", &error.message);
@@ -3038,9 +3570,18 @@ pub fn run() {
                 },
             );
             TRAY_ACTIVE.store(installed, Ordering::Relaxed);
+            let _ = tray::set_update_status(app.handle(), &state.updates.status());
+            let tray_handle = app.handle().clone();
+            app.listen(updates::STATE_EVENT, move |_| {
+                let state = tray_handle.state::<AppState>();
+                let _ = tray::set_update_status(&tray_handle, &state.updates.status());
+            });
             heads_runtime::install(app.handle()).map_err(|e| e.message)?;
             if startup::hide_initial_main(
-                startup::background_requested(std::env::args()),
+                startup::restart_background(
+                    restart_marker,
+                    startup::background_requested(std::env::args()),
+                ),
                 installed,
             ) {
                 startup::background_main(app.handle()).map_err(|e| e.message)?;
@@ -3050,7 +3591,11 @@ pub fn run() {
             // Resume background sync for an already imported credential without any prompt.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let _ = handle.state::<AppState>().session().await;
+                let state = handle.state::<AppState>();
+                let Ok(_operation) = admit_update_operation(&state) else {
+                    return;
+                };
+                let _ = state.session().await;
             });
             Ok(())
         })
@@ -3121,7 +3666,11 @@ pub fn run() {
                                 );
                             }
                         }
-                        lifecycle::Operation::Switch => unreachable!("close cannot switch account"),
+                        lifecycle::Operation::Switch | lifecycle::Operation::Update => {
+                            unreachable!(
+                                "close cannot initiate account switching or update restart"
+                            )
+                        }
                     }
                 }
             }
@@ -3177,6 +3726,12 @@ pub fn run() {
         hide_head,
         close_composer,
         close_head_panel,
+        update_status,
+        check_for_updates,
+        restart_for_update,
+        defer_update,
+        set_automatic_updates,
+        report_update_activity,
         acknowledge_lifecycle,
         $($extra,)*
     ] };
@@ -3190,6 +3745,8 @@ pub fn run() {
             "load_state"
                 | "load_history"
                 | "get_app_lock_status"
+                | "update_status"
+                | "report_update_activity"
                 | "unlock_app"
                 | "acknowledge_lifecycle"
         );

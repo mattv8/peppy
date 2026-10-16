@@ -257,6 +257,9 @@ pub(crate) fn panel_window_event(window: &tauri::Window, event: &WindowEvent) {
         serial
     };
     tauri::async_runtime::spawn(async move {
+        let Ok(_operation) = crate::admit_update_operation(&app.state::<AppState>()) else {
+            return;
+        };
         tokio::time::sleep(Duration::from_millis(400)).await;
         let head_runtime = runtime(&app);
         if head_runtime
@@ -370,6 +373,13 @@ fn schedule_refresh(app: &AppHandle) {
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let Ok(_operation) = crate::admit_update_operation(&app.state::<AppState>()) else {
+            if let Ok(mut state) = runtime(&app).state.lock() {
+                state.refreshing = false;
+                state.queued = false;
+            }
+            return;
+        };
         loop {
             refresh(&app).await;
             let again = {
@@ -893,6 +903,9 @@ fn handle_moved_inline(
     frame: HeadFrame,
     settled: bool,
 ) {
+    let Ok(_operation) = crate::admit_update_operation(&app.state::<AppState>()) else {
+        return;
+    };
     let valid = {
         let runtime = runtime(app);
         let Ok(mut state) = runtime.state.lock() else {
@@ -932,6 +945,9 @@ fn handle_moved_inline(
 }
 
 async fn handle_action(app: &AppHandle, action: RuntimeAction) {
+    let Ok(_operation) = crate::admit_update_operation(&app.state::<AppState>()) else {
+        return;
+    };
     match action {
         RuntimeAction::Activate {
             conversation_id,
@@ -1093,6 +1109,7 @@ async fn activate(app: &AppHandle, conversation_id: &str, generation: u64) {
 }
 
 pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResult<PopoutResult> {
+    let _operation = crate::admit_update_operation(&app.state::<AppState>())?;
     let app_state = app.state::<AppState>();
     let binding = app_state
         .config()?
@@ -1292,6 +1309,7 @@ fn restore_prior(app: &AppHandle, conversation_id: &str, prior: Option<ActiveHea
 }
 
 pub async fn dismiss(app: &AppHandle, conversation_id: &str) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&app.state::<AppState>())?;
     let generation = runtime(app)
         .state
         .lock()
@@ -1306,6 +1324,7 @@ pub async fn dismiss(app: &AppHandle, conversation_id: &str) -> BridgeResult<()>
 /// A deleted local draft cannot retain a persistent floating-head pin. The normal state hint
 /// refresh hides any native head and updates the tray after this durable cleanup.
 pub fn forget_deleted_conversation(app: &AppHandle, conversation_id: &str) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&app.state::<AppState>())?;
     let binding = runtime(app)
         .state
         .lock()
@@ -1582,6 +1601,7 @@ pub fn dismiss_from_tray(app: &AppHandle, conversation_id: &str) {
 }
 
 pub async fn reset(app: &AppHandle) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&app.state::<AppState>())?;
     {
         let runtime = runtime(app);
         let mut state = runtime

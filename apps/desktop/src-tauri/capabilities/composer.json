@@ -27,6 +27,7 @@
     "allow-close-composer",
     "allow-close-head-panel",
     "allow-search-contact-recipients",
-    "allow-acknowledge-lifecycle"
+    "allow-acknowledge-lifecycle",
+    "allow-report-update-activity"
   ]
 }

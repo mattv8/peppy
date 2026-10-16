@@ -1,14 +1,17 @@
 //! Tray/background behavior and the single conversation-composer window factory.
+use std::sync::{Mutex, OnceLock};
+
 use crate::{
     error::{BridgeError, BridgeResult},
     heads::PanelLayout,
+    updates::types::{UpdatePhase, UpdateStatus},
 };
 use peppy_client_core::ConversationId;
 use tauri::{
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
     image::Image,
     menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 pub const MAIN: &str = "main";
@@ -16,9 +19,26 @@ pub const COMPOSER_PREFIX: &str = "composer-";
 const TRAY_ID: &str = "peppy";
 const HEAD_OPEN_PREFIX: &str = "head-open:";
 const HEAD_DISMISS_PREFIX: &str = "head-dismiss:";
+const UPDATE_ID: &str = "update";
 const PANEL_WIDTH: f64 = 340.0;
 const PANEL_HEIGHT: f64 = 440.0;
 const PANEL_GAP: f64 = 8.0;
+
+#[derive(Clone)]
+struct UpdateItem {
+    label: String,
+}
+
+#[derive(Default)]
+struct MenuState {
+    heads: Vec<(String, String)>,
+    update: Option<UpdateItem>,
+}
+
+fn menu_state() -> &'static Mutex<MenuState> {
+    static STATE: OnceLock<Mutex<MenuState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(MenuState::default()))
+}
 
 #[cfg(any(target_os = "macos", test))]
 fn template_icon_rgba(size: u32) -> Vec<u8> {
@@ -53,10 +73,11 @@ fn tray_icon() -> tauri::Result<Image<'static>> {
 pub fn install(
     app: &AppHandle,
     on_compose: impl Fn(&AppHandle) + Send + Sync + 'static,
+    on_update: impl Fn(&AppHandle) + Send + Sync + 'static,
     on_quit: impl Fn(&AppHandle) + Send + Sync + 'static,
 ) -> bool {
     let build = || -> tauri::Result<()> {
-        let menu = build_menu(app, &[])?;
+        let menu = build_menu(app)?;
         TrayIconBuilder::with_id(TRAY_ID)
             .icon(tray_icon()?)
             .icon_as_template(cfg!(target_os = "macos"))
@@ -69,6 +90,8 @@ pub fn install(
                     show_main(app);
                 } else if id == "compose" {
                     on_compose(app);
+                } else if id == UPDATE_ID {
+                    on_update(app);
                 } else if id == "quit" {
                     on_quit(app);
                 } else if let Some(conversation_id) = id.strip_prefix(HEAD_OPEN_PREFIX) {
@@ -83,8 +106,20 @@ pub fn install(
     build().is_ok()
 }
 
-fn build_menu(app: &AppHandle, heads: &[(String, String)]) -> tauri::Result<Menu<tauri::Wry>> {
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let state = menu_state().lock().expect("tray menu state poisoned");
+    build_menu_with(app, &state.heads, state.update.as_ref())
+}
+
+fn build_menu_with(
+    app: &AppHandle,
+    heads: &[(String, String)],
+    update: Option<&UpdateItem>,
+) -> tauri::Result<Menu<tauri::Wry>> {
     let open = MenuItem::with_id(app, "open", "Open Peppy", true, None::<&str>)?;
+    let update = update
+        .map(|item| MenuItem::with_id(app, UPDATE_ID, &item.label, true, None::<&str>))
+        .transpose()?;
     let compose = MenuItem::with_id(app, "compose", "New message", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Peppy", true, None::<&str>)?;
@@ -118,7 +153,14 @@ fn build_menu(app: &AppHandle, heads: &[(String, String)]) -> tauri::Result<Menu
         !heads.is_empty(),
         &head_refs,
     )?;
-    Menu::with_items(app, &[&open, &compose, &floating, &separator, &quit])
+    if let Some(update) = update.as_ref() {
+        Menu::with_items(
+            app,
+            &[&open, update, &compose, &floating, &separator, &quit],
+        )
+    } else {
+        Menu::with_items(app, &[&open, &compose, &floating, &separator, &quit])
+    }
 }
 
 fn menu_name(name: &str) -> String {
@@ -143,11 +185,40 @@ fn menu_name(name: &str) -> String {
 /// Rebuilds only the tray menu. Names are resolved from the current local
 /// session and are never persisted in the pin file.
 pub fn set_floating_conversations(app: &AppHandle, heads: &[(String, String)]) -> bool {
-    let Ok(menu) = build_menu(app, heads) else {
+    if let Ok(mut state) = menu_state().lock() {
+        state.heads = heads.to_vec();
+    }
+    let Ok(menu) = build_menu(app) else {
         return false;
     };
     app.tray_by_id(TRAY_ID)
         .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok())
+}
+
+pub fn set_update_status(app: &AppHandle, status: &UpdateStatus) -> bool {
+    if let Ok(mut state) = menu_state().lock() {
+        state.update = update_item(status);
+    }
+    let Ok(menu) = build_menu(app) else {
+        return false;
+    };
+    app.tray_by_id(TRAY_ID)
+        .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok())
+}
+
+fn update_item(status: &UpdateStatus) -> Option<UpdateItem> {
+    match status.phase {
+        UpdatePhase::Ready if status.can_restart => Some(UpdateItem {
+            label: "Update ready — Restart Peppy".into(),
+        }),
+        UpdatePhase::Deferred if status.can_restart => Some(UpdateItem {
+            label: "Update ready — Restart Peppy".into(),
+        }),
+        UpdatePhase::AuthorizationRequired => Some(UpdateItem {
+            label: "Update requires authorization".into(),
+        }),
+        _ => None,
+    }
 }
 
 /// User-initiated only (tray/dock).
@@ -627,5 +698,23 @@ mod tests {
         assert_eq!(menu_name(" Alice\n  Example "), "Alice Example");
         assert_eq!(menu_name("\n\t"), "conversation");
         assert_eq!(menu_name(&"x".repeat(80)).chars().count(), 60);
+    }
+
+    #[test]
+    fn update_menu_surfaces_only_actionable_restart_or_authorization() {
+        let mut status =
+            UpdateStatus::idle("1.0.0".into(), crate::updates::types::UpdateChannel::Stable);
+        assert!(update_item(&status).is_none());
+        status.phase = UpdatePhase::Ready;
+        status.can_restart = true;
+        assert_eq!(
+            update_item(&status).unwrap().label,
+            "Update ready — Restart Peppy"
+        );
+        status.phase = UpdatePhase::AuthorizationRequired;
+        assert_eq!(
+            update_item(&status).unwrap().label,
+            "Update requires authorization"
+        );
     }
 }

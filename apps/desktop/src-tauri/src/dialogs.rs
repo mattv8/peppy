@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{Mutex, OnceLock},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
@@ -32,6 +32,13 @@ pub enum PassphrasePurpose {
 
 fn dialog_error() -> BridgeError {
     BridgeError::new("native-dialog", "The native dialog could not be shown.")
+}
+
+fn admit(app: &AppHandle) -> BridgeResult<crate::update_safety::OperationGuard> {
+    app.state::<crate::AppState>()
+        .update_safety
+        .enter()
+        .map_err(|message| BridgeError::new("update-busy", message))
 }
 
 const VAULT_SECRET_TITLE: &str = "Vault shared secret";
@@ -184,6 +191,7 @@ async fn show_secret_dialog(
 /// Displays a native-only vault secret. Done, Close, Escape, and the close box all mean Done;
 /// only the copy button writes the clipboard.
 pub async fn show_vault_secret(app: &AppHandle, secret: Zeroizing<String>) -> BridgeResult<()> {
+    let _operation = admit(app)?;
     let mut clipboard = NativeSecretClipboard;
     let mut feedback = None;
     loop {
@@ -205,6 +213,7 @@ pub async fn show_vault_secret(app: &AppHandle, secret: Zeroizing<String>) -> Br
 }
 
 pub async fn pick_file(app: &AppHandle, title: &str) -> BridgeResult<Option<PathBuf>> {
+    let _operation = admit(app)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -223,6 +232,7 @@ pub async fn pick_file(app: &AppHandle, title: &str) -> BridgeResult<Option<Path
 }
 
 pub async fn pick_files(app: &AppHandle, title: &str) -> BridgeResult<Vec<PathBuf>> {
+    let _operation = admit(app)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -250,6 +260,7 @@ pub async fn save_file(
     title: &str,
     suggested_name: &str,
 ) -> BridgeResult<Option<PathBuf>> {
+    let _operation = admit(app)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -275,6 +286,7 @@ pub async fn confirm(
     message: &str,
     accept: &str,
 ) -> BridgeResult<bool> {
+    let _operation = admit(app)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .message(message)
@@ -291,11 +303,14 @@ pub async fn confirm(
 }
 
 pub fn inform(app: &AppHandle, title: &str, message: &str) {
+    let Ok(operation) = admit(app) else {
+        return;
+    };
     app.dialog()
         .message(message)
         .title(title)
         .kind(MessageDialogKind::Info)
-        .show(|_| {});
+        .show(move |_| drop(operation));
 }
 
 /// Returns `None` when the person cancels. The passphrase is collected only by a native secure
@@ -305,6 +320,7 @@ pub async fn passphrase(
     app: &AppHandle,
     purpose: PassphrasePurpose,
 ) -> BridgeResult<Option<Zeroizing<String>>> {
+    let _operation = admit(app)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
         // SAFETY: AppKit objects are created, used and released on the main thread only.
@@ -316,9 +332,10 @@ pub async fn passphrase(
 
 #[cfg(target_os = "windows")]
 pub async fn passphrase(
-    _: &AppHandle,
+    app: &AppHandle,
     purpose: PassphrasePurpose,
 ) -> BridgeResult<Option<Zeroizing<String>>> {
+    let _operation = admit(app)?;
     tokio::task::spawn_blocking(move || windows_dialog::secure_passphrase(purpose))
         .await
         .map_err(|_| dialog_error())?
@@ -326,9 +343,10 @@ pub async fn passphrase(
 
 #[cfg(target_os = "linux")]
 pub async fn passphrase(
-    _: &AppHandle,
+    app: &AppHandle,
     purpose: PassphrasePurpose,
 ) -> BridgeResult<Option<Zeroizing<String>>> {
+    let _operation = admit(app)?;
     tokio::task::spawn_blocking(move || linux::secure_passphrase(purpose))
         .await
         .map_err(|_| dialog_error())?
@@ -336,9 +354,10 @@ pub async fn passphrase(
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub async fn passphrase(
-    _: &AppHandle,
+    app: &AppHandle,
     _: PassphrasePurpose,
 ) -> BridgeResult<Option<Zeroizing<String>>> {
+    let _operation = admit(app)?;
     Err(BridgeError::new(
         "platform-gate",
         "This platform does not yet have a reviewed native secure passphrase dialog; Peppy will not ask for it in the webview.",
@@ -392,21 +411,21 @@ fn trim_helper_terminator(value: &mut Vec<u8>) {
 #[cfg(target_os = "windows")]
 mod windows_dialog {
     use super::{
-        passphrase_from_utf8, BridgeError, BridgeResult, PassphrasePurpose, Zeroizing,
-        MAX_PASSPHRASE_BYTES,
+        BridgeError, BridgeResult, MAX_PASSPHRASE_BYTES, PassphrasePurpose, Zeroizing,
+        passphrase_from_utf8,
     };
     use windows::{
-        core::w,
         Win32::{
             Foundation::{ERROR_CANCELLED, HWND, WIN32_ERROR},
             Graphics::Gdi::HBITMAP,
             Security::Credentials::{
-                CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI,
+                CRED_MAX_CREDENTIAL_BLOB_SIZE, CREDUI_FLAGS_ALWAYS_SHOW_UI,
                 CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
                 CREDUI_FLAGS_PASSWORD_ONLY_OK, CREDUI_INFOW, CREDUI_MAX_USERNAME_LENGTH,
-                CRED_MAX_CREDENTIAL_BLOB_SIZE,
+                CredUIPromptForCredentialsW,
             },
         },
+        core::w,
     };
     use zeroize::Zeroize;
 
@@ -566,8 +585,8 @@ mod windows_dialog {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        passphrase_from_utf8, trim_helper_terminator, BridgeError, BridgeResult, PassphrasePurpose,
-        Zeroizing, MAX_PASSPHRASE_BYTES,
+        BridgeError, BridgeResult, MAX_PASSPHRASE_BYTES, PassphrasePurpose, Zeroizing,
+        passphrase_from_utf8, trim_helper_terminator,
     };
     use std::{
         io::{Read, Result as IoResult},
@@ -575,8 +594,7 @@ mod linux {
     };
 
     const UNLOCK_TITLE: &str = "Unlock Peppy sync";
-    const UNLOCK_MESSAGE: &str =
-        "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.";
+    const UNLOCK_MESSAGE: &str = "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.";
     const RESUME_OWNER_SECRET_TITLE: &str = "Resume Peppy server setup";
     const RESUME_OWNER_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.";
     const RECOVER_VAULT_SECRET_TITLE: &str = "Complete vault setup";
@@ -700,10 +718,10 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::{
+        COPY_FAILED, COPY_SUCCEEDED, SecretClipboard, SecretDialogAction, SecretDialogStep,
+        VAULT_SECRET_CLOSE, VAULT_SECRET_COPY, VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
         handle_secret_dialog_action, passphrase_from_utf8, secret_message, trim_helper_terminator,
-        vault_secret_action, vault_secret_buttons, SecretClipboard, SecretDialogAction,
-        SecretDialogStep, COPY_FAILED, COPY_SUCCEEDED, VAULT_SECRET_CLOSE, VAULT_SECRET_COPY,
-        VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
+        vault_secret_action, vault_secret_buttons,
     };
     use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
 
@@ -872,7 +890,7 @@ mod tests {
 #[allow(unexpected_cfgs, deprecated)]
 mod macos {
     use cocoa::{
-        base::{id, nil, YES},
+        base::{YES, id, nil},
         foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString},
     };
     use objc::{class, msg_send, sel, sel_impl};

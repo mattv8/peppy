@@ -73,10 +73,18 @@ const COMMANDS: &[&str] = &[
     "enrollment_status",
     "enrollment_cancel",
     "enrollment_sign_out",
+    "update_status",
+    "check_for_updates",
+    "restart_for_update",
+    "defer_update",
+    "set_automatic_updates",
+    "report_update_activity",
 ];
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PEPPY_DEV_TLS_CERT");
+    println!("cargo:rerun-if-env-changed=PEPPY_UPDATE_CHANNEL");
+    println!("cargo:rerun-if-env-changed=PEPPY_UPDATE_PUBLIC_KEY");
     #[cfg(feature = "dev-local-tls")]
     embed_development_tls_ca();
     tauri_build::try_build(

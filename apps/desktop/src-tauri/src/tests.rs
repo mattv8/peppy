@@ -18,6 +18,12 @@ use peppy_client_core::{
 use peppy_crypto::{create_vault_check_header, derive_root_key};
 use std::{path::Path, sync::Arc};
 
+#[test]
+fn restart_marker_preserves_visible_windows_and_backgrounds_hidden_windows() {
+    assert!(!crate::restart_in_background(true));
+    assert!(crate::restart_in_background(false));
+}
+
 pub const PHRASE: &str = "correct horse battery staple";
 
 pub(crate) fn noop() -> Notifier {
