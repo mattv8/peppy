@@ -658,6 +658,9 @@ async fn mobile_owner_claim_exposes_raw_kind_through_authenticated_devices() {
     .await;
     assert_eq!(devices.status(), StatusCode::OK);
     let devices = json_body(devices).await;
+    let last_seen_age_seconds = devices["devices"][0]["presence"]["last_seen_age_seconds"]
+        .as_u64()
+        .expect("authenticated roster presence must include a nonnegative last-seen age");
     assert_eq!(
         devices["devices"],
         json!([{
@@ -667,7 +670,12 @@ async fn mobile_owner_claim_exposes_raw_kind_through_authenticated_devices() {
             "revoked": false,
             "profile_fingerprint": claim["material"]["fingerprint"],
             "key_epoch": 1,
-            "kind": "android"
+            "kind": "android",
+            "presence": {
+                "state": "seen",
+                "last_seen_age_seconds": last_seen_age_seconds
+            },
+            "wake_route": false
         }])
     );
 
