@@ -19,6 +19,7 @@ pub enum Operation {
     Window(Action),
     Quit,
     Switch,
+    Update,
 }
 
 impl Operation {
@@ -29,6 +30,7 @@ impl Operation {
             // Switching is an internal reason for flushing. The UI only needs
             // the existing close/save behavior; native owns the later teardown.
             Self::Switch => Action::Close,
+            Self::Update => Action::Close,
         }
     }
 }
@@ -239,6 +241,12 @@ impl Coordinator {
         self.pending.is_some()
     }
 
+    fn update_flush_pending(&self, label: &str) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.operation == Operation::Update && pending.remaining.contains(label)
+        })
+    }
+
     fn take_failure(&mut self, kind: FailureKind, failed_label: Option<String>) -> Option<Failure> {
         let pending = self.pending.take()?;
         let failure = Failure {
@@ -276,6 +284,10 @@ impl TopologyGate {
         } else {
             false
         }
+    }
+
+    fn updating(&self) -> bool {
+        matches!(self.active, Some((_, Operation::Update)))
     }
 
     #[cfg(test)]
@@ -327,6 +339,69 @@ pub struct SwitchPermit {
     id: String,
     labels: BTreeSet<String>,
     armed: bool,
+}
+
+/// Holds update restart exclusion after every current draft has acknowledged its flush. Dropping
+/// an unfinished permit restores the captured windows and permits ordinary work again.
+pub struct UpdatePermit {
+    app: tauri::AppHandle,
+    id: String,
+    labels: BTreeSet<String>,
+    safety: Option<crate::update_safety::RestartGuard>,
+    armed: bool,
+}
+
+impl UpdatePermit {
+    /// Transfers exclusion to an install guard. The guard must live until installation either
+    /// fails (then drop restores normal operation) or commits to process termination.
+    pub fn commit(mut self) -> UpdateInstallGuard {
+        self.armed = false;
+        UpdateInstallGuard {
+            app: self.app.clone(),
+            id: self.id.clone(),
+            labels: self.labels.clone(),
+            safety: self.safety.take(),
+            armed: true,
+        }
+    }
+}
+
+#[must_use = "hold this guard until installation fails or process termination commits"]
+pub struct UpdateInstallGuard {
+    app: tauri::AppHandle,
+    id: String,
+    labels: BTreeSet<String>,
+    safety: Option<crate::update_safety::RestartGuard>,
+    armed: bool,
+}
+
+impl UpdateInstallGuard {
+    /// The installer has committed and process termination follows immediately. Deliberately keep
+    /// the reservations alive until process exit so no UI can become editable before termination.
+    pub fn finish(mut self) {
+        self.armed = false;
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for UpdateInstallGuard {
+    fn drop(&mut self) {
+        if self.armed && release_topology(&self.app, &self.id) {
+            self.safety.take();
+            restore_update_state(&self.app, &self.labels, &self.id);
+            replay_pending_quit(&self.app);
+        }
+    }
+}
+
+impl Drop for UpdatePermit {
+    fn drop(&mut self) {
+        if self.armed && release_topology(&self.app, &self.id) {
+            self.safety.take();
+            restore_update_state(&self.app, &self.labels, &self.id);
+            replay_pending_quit(&self.app);
+        }
+    }
 }
 
 impl SwitchPermit {
@@ -434,6 +509,17 @@ pub fn request_quit(app: &tauri::AppHandle) -> crate::error::BridgeResult<()> {
     }
     let id = uuid::Uuid::new_v4().to_string();
     if let Err(error) = reserve_topology(app, id.clone(), Operation::Quit) {
+        if app
+            .state::<crate::AppState>()
+            .lifecycle_gate
+            .lock()
+            .ok()
+            .is_some_and(|gate| gate.updating())
+        {
+            // An update flush/installer owns topology. Retain the user's quit
+            // intent and replay it only after its workers and reservation end.
+            return Ok(());
+        }
         state
             .quit_requested
             .store(false, std::sync::atomic::Ordering::Release);
@@ -454,6 +540,16 @@ pub fn request_quit(app: &tauri::AppHandle) -> crate::error::BridgeResult<()> {
         finish_quit(app);
     }
     Ok(())
+}
+
+fn replay_pending_quit(app: &tauri::AppHandle) {
+    let state = app.state::<crate::AppState>();
+    if state
+        .quit_requested
+        .swap(false, std::sync::atomic::Ordering::AcqRel)
+    {
+        let _ = request_quit(app);
+    }
 }
 
 /// Acquires a topology permit before target capture and keeps it through the
@@ -495,6 +591,81 @@ pub async fn prepare_switch(app: &tauri::AppHandle) -> crate::error::BridgeResul
             Err(error)
         }
     }
+}
+
+/// Acquires both update exclusion and the topology permit, then flushes every current webview
+/// draft. It never exits: callers must drain mutation workers and verify installer prerequisites
+/// before transferring it to [`UpdatePermit::commit`].
+pub async fn prepare_update(app: &tauri::AppHandle) -> crate::error::BridgeResult<UpdatePermit> {
+    let safety = app
+        .state::<crate::AppState>()
+        .update_safety
+        .reserve()
+        .map_err(|message| crate::error::BridgeError::new("update-busy", message))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(error) = reserve_topology(app, id.clone(), Operation::Update) {
+        drop(safety);
+        return Err(error);
+    }
+    let labels = app.webview_windows().keys().cloned().collect::<Vec<_>>();
+    let started = match begin_with_id(app, Operation::Update, labels, id.clone()) {
+        Ok(started) => started,
+        Err(error) => {
+            abort_update_preparation(app, safety, &id, &BTreeSet::new());
+            return Err(error);
+        }
+    };
+    let request_labels = started.request.labels.clone();
+    let completion = match started.done.await {
+        Ok(completion) => completion,
+        Err(_) => {
+            abort_update_preparation(app, safety, &id, &request_labels);
+            return Err(crate::error::BridgeError::host_state());
+        }
+    };
+    match completion {
+        Ok(completion) => Ok(UpdatePermit {
+            app: app.clone(),
+            id,
+            labels: completion.labels,
+            safety: Some(safety),
+            armed: true,
+        }),
+        Err(failure) => {
+            abort_update_preparation(app, safety, &id, &request_labels);
+            Err(crate::error::BridgeError::new(
+                "lifecycle",
+                failure.message(),
+            ))
+        }
+    }
+}
+
+/// Releases every update reservation before replaying a quit that was queued
+/// behind it. Keeping this in one path prevents the sticky quit flag from
+/// turning later user quit requests into no-ops after a failed preparation.
+fn abort_update_preparation(
+    app: &tauri::AppHandle,
+    safety: crate::update_safety::RestartGuard,
+    id: &str,
+    labels: &BTreeSet<String>,
+) {
+    if release_topology(app, id) {
+        emit_finished(app, labels, id, false);
+    }
+    drop(safety);
+    replay_pending_quit(app);
+}
+
+/// True only while this captured webview still owes the update transaction a draft flush. Native
+/// save-draft admission may use this narrow exception while restart reservation is held; it must
+/// never create or replace a session, and acknowledgement immediately removes eligibility.
+pub fn update_flush_pending(app: &tauri::AppHandle, label: &str) -> bool {
+    app.state::<crate::AppState>()
+        .lifecycle
+        .lock()
+        .ok()
+        .is_some_and(|coordinator| coordinator.update_flush_pending(label))
 }
 
 fn begin(
@@ -627,6 +798,9 @@ fn apply_completion(
             // The waiter owns account-switch teardown so callers cannot mutate
             // binding state until it has observed successful completion.
         }
+        Operation::Update => {
+            // Update preparation owns final exit; acknowledgements only persist drafts.
+        }
         Operation::Window(action) => {
             for label in completion.labels {
                 let Some(window) = app.get_webview_window(&label) else {
@@ -671,6 +845,11 @@ fn finish_quit(app: &tauri::AppHandle) {
 }
 
 fn restore_after_failure(app: &tauri::AppHandle, failure: &Failure) {
+    if failure.operation == Operation::Update {
+        let _ = release_topology(app, &failure.request_id);
+        restore_update_state(app, &failure.labels, &failure.request_id);
+        return;
+    }
     if failure.operation == Operation::Quit {
         app.state::<crate::AppState>()
             .quit_requested
@@ -693,6 +872,11 @@ fn restore_after_failure(app: &tauri::AppHandle, failure: &Failure) {
     }
     emit_finished(app, &failure.labels, &failure.request_id, false);
     crate::dialogs::inform(app, "Drafts were not closed", failure.message());
+    let _ = app.emit(crate::STATE_EVENT, ());
+}
+
+fn restore_update_state(app: &tauri::AppHandle, labels: &BTreeSet<String>, id: &str) {
+    emit_finished(app, labels, id, false);
     let _ = app.emit(crate::STATE_EVENT, ());
 }
 
@@ -816,9 +1000,11 @@ mod tests {
             )
             .unwrap();
 
-        assert!(coordinator
-            .expire(&first.request.id, now + Duration::from_millis(11))
-            .is_none());
+        assert!(
+            coordinator
+                .expire(&first.request.id, now + Duration::from_millis(11))
+                .is_none()
+        );
         assert!(coordinator.is_pending());
         assert_eq!(
             coordinator
@@ -843,29 +1029,37 @@ mod tests {
                 now,
             )
             .unwrap();
-        assert!(coordinator
-            .begin_at(
-                Operation::Quit,
-                ["main".to_owned()],
-                Duration::from_secs(1),
-                now,
-            )
-            .is_err());
-        assert!(coordinator
-            .acknowledge_at("old", "main", true, now)
-            .is_err());
-        assert!(coordinator
-            .acknowledge_at(&started.request.id, "unknown", true, now)
-            .is_err());
+        assert!(
+            coordinator
+                .begin_at(
+                    Operation::Quit,
+                    ["main".to_owned()],
+                    Duration::from_secs(1),
+                    now,
+                )
+                .is_err()
+        );
+        assert!(
+            coordinator
+                .acknowledge_at("old", "main", true, now)
+                .is_err()
+        );
+        assert!(
+            coordinator
+                .acknowledge_at(&started.request.id, "unknown", true, now)
+                .is_err()
+        );
         assert_eq!(
             coordinator
                 .acknowledge_at(&started.request.id, "main", true, now)
                 .unwrap(),
             Progress::Pending
         );
-        assert!(coordinator
-            .acknowledge_at(&started.request.id, "main", true, now)
-            .is_err());
+        assert!(
+            coordinator
+                .acknowledge_at(&started.request.id, "main", true, now)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -970,5 +1164,61 @@ mod tests {
             }
         );
         assert!(!coordinator.is_pending());
+    }
+
+    #[tokio::test]
+    async fn update_flush_rejects_one_window_without_completing_the_other() {
+        let now = at(0);
+        let mut coordinator = Coordinator::default();
+        let started = coordinator
+            .begin_at(
+                Operation::Update,
+                ["main".to_owned(), "composer-a".to_owned()],
+                TIMEOUT,
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .acknowledge_at(&started.request.id, "main", true, now)
+                .unwrap(),
+            Progress::Pending
+        );
+        let Progress::Failed(failure) = coordinator
+            .acknowledge_at(&started.request.id, "composer-a", false, now)
+            .unwrap()
+        else {
+            panic!("a negative update draft acknowledgement must abort preparation");
+        };
+        assert_eq!(failure.operation, Operation::Update);
+        assert_eq!(
+            failure.restore_labels,
+            BTreeSet::from(["composer-a".to_owned()])
+        );
+        assert!(started.done.await.unwrap().is_err());
+    }
+
+    #[test]
+    fn update_flush_eligibility_ends_after_that_window_acknowledges() {
+        let now = at(0);
+        let mut coordinator = Coordinator::default();
+        let started = coordinator
+            .begin_at(
+                Operation::Update,
+                ["main".to_owned(), "composer-a".to_owned()],
+                TIMEOUT,
+                now,
+            )
+            .unwrap();
+        assert!(coordinator.update_flush_pending("main"));
+        assert!(!coordinator.update_flush_pending("unknown"));
+        assert_eq!(
+            coordinator
+                .acknowledge_at(&started.request.id, "main", true, now)
+                .unwrap(),
+            Progress::Pending
+        );
+        assert!(!coordinator.update_flush_pending("main"));
+        assert!(coordinator.update_flush_pending("composer-a"));
     }
 }

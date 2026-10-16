@@ -1,25 +1,25 @@
 //! Regression tests for the DU security review (reports/DU-security-review.md).
 use crate::{
-    credentials::{parse_credential, tests::credential_json, tests::TOKEN},
+    AppState, PreparedPublicCopy,
+    credentials::{parse_credential, tests::TOKEN, tests::credential_json},
     secure_store::{MemoryStore, SecretStore},
     session::Session,
-    sync::{self, classify, next_backoff, Failure, MediaOutcome, STABLE_CONNECTION},
-    tests::{fixture_at, gateway, input, noop, open, routed, PHRASE},
-    AppState, PreparedPublicCopy,
+    sync::{self, Failure, MediaOutcome, STABLE_CONNECTION, classify, next_backoff},
+    tests::{PHRASE, fixture_at, gateway, input, noop, open, routed},
 };
 use axum::{
+    Json, Router,
     extract::{Path as AxumPath, Query},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
-    Json, Router,
 };
 use peppy_client_core::{Cursor, RawSnapshotRecord, SnapshotPurpose};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicU16, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicU16, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -212,7 +212,11 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
             .cloned()
             .collect::<HashSet<_>>()
     };
-    let expected: HashSet<String> = crate::COMPOSER_COMMANDS.iter().map(|c| allow(c)).collect();
+    let expected: HashSet<String> = crate::COMPOSER_COMMANDS
+        .iter()
+        .map(|command| allow(command))
+        .chain(std::iter::once("allow-report-update-activity".into()))
+        .collect();
     assert!(expected.contains("allow-close-head-panel"));
     assert_eq!(app_permissions(&composer), expected);
     for main_only in [
@@ -229,6 +233,10 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "hosted_sign_out",
         "hosted_open_billing",
         "hosted_provision",
+        "check_for_updates",
+        "restart_for_update",
+        "set_automatic_updates",
+        "defer_update",
     ] {
         assert!(
             !composer.contains(&allow(main_only)),
@@ -669,12 +677,14 @@ async fn reserve_conflict_recovers_only_from_authenticated_duplicate_finalize_pr
 
     assert_eq!(finalized.load(Ordering::SeqCst), 1);
     assert!(session.client.pending_uploads().unwrap().is_empty());
-    assert!(session
-        .client
-        .attachment_info(attachment.id.parse().unwrap())
-        .unwrap()
-        .state
-        .is_local());
+    assert!(
+        session
+            .client
+            .attachment_info(attachment.id.parse().unwrap())
+            .unwrap()
+            .state
+            .is_local()
+    );
     session.cancel.cancel();
 }
 
@@ -746,29 +756,35 @@ async fn work_requests_wake_only_the_worker() {
         );
     tokio::time::sleep(Duration::from_millis(100)).await;
     session.request_work();
-    assert!(tokio::time::timeout(Duration::from_secs(2), worker)
-        .await
-        .expect("worker woke")
-        .unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker woke")
+            .unwrap()
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !live.is_finished(),
         "a reconnect wait must not consume the worker's wake-up"
     );
     session.reconnect_wake.notify_one();
-    assert!(tokio::time::timeout(Duration::from_secs(2), live)
-        .await
-        .unwrap()
-        .unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), live)
+            .await
+            .unwrap()
+            .unwrap()
+    );
     // Cancellation ends both waits with `false`.
     let waiter = session.clone();
     let cancelled =
         tokio::spawn(async move { sync::pause_worker(&waiter, Duration::from_secs(30)).await });
     session.cancel.cancel();
-    assert!(!tokio::time::timeout(Duration::from_secs(2), cancelled)
-        .await
-        .unwrap()
-        .unwrap());
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(2), cancelled)
+            .await
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[test]
@@ -864,9 +880,11 @@ fn refused_sends_keep_the_revision_and_results_report_it() {
         (stale.code, stale.current_revision.as_deref()),
         ("stale-draft", Some(draft.revision.as_str()))
     );
-    assert!(serde_json::to_string(&stale)
-        .unwrap()
-        .contains("\"currentRevision\""));
+    assert!(
+        serde_json::to_string(&stale)
+            .unwrap()
+            .contains("\"currentRevision\"")
+    );
     // A successful send (route persisted + atomic send) reports the stored revision.
     let fixed = session
         .save_draft(&input(

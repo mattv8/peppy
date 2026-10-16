@@ -1,12 +1,12 @@
 //! Native-only enrollment orchestration. Secrets are collected by native dialogs and never cross IPC.
 use crate::{
-    credentials::{parse_credential, ImportedCredential},
+    AppState,
+    credentials::{ImportedCredential, parse_credential},
     dialogs::{self, PassphrasePurpose},
     error::{BridgeError, BridgeResult},
-    net::{read_bounded, NetError, MAX_JSON_BYTES},
+    net::{MAX_JSON_BYTES, NetError, read_bounded},
     origin,
     secure_store::SecretStore,
-    AppState,
 };
 use peppy_client_core::{KeyProfile, VaultCheckHeader};
 use peppy_hosted_api::enrollment::{
@@ -949,6 +949,7 @@ async fn install_identity(
     passphrase: Zeroizing<String>,
     expected_binding: Option<crate::credentials::Binding>,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(state)?;
     let metadata = identity.metadata().clone();
     let origin = identity.origin().to_owned();
     let vault_secret = passphrase.clone();
@@ -1110,6 +1111,7 @@ pub async fn enrollment_discover(
     state: State<'_, AppState>,
     origin: Option<String>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let selected = match origin {
         Some(value) => origin::validate_origin(&value)?,
@@ -1239,6 +1241,7 @@ pub async fn enrollment_start_over(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     start_over_core(&state.enrollment, &*state.store, fetch_instance).await
 }
@@ -1336,6 +1339,7 @@ pub async fn enrollment_create_owner(
     hosted: State<'_, crate::hosted::HostedState>,
     input: Option<UsernameInput>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     if state
         .enrollment
@@ -1431,6 +1435,7 @@ pub async fn enrollment_sign_in(
     hosted: State<'_, crate::hosted::HostedState>,
     input: Option<UsernameInput>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     if state
         .enrollment
@@ -1499,6 +1504,7 @@ pub async fn enrollment_connect_shared_secret(
     hosted: State<'_, crate::hosted::HostedState>,
     input: Option<VaultOwnerInput>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let expected_binding = state.config()?.active_binding().cloned();
     let Some(passphrase) = dialogs::passphrase(&app, PassphrasePurpose::Unlock).await? else {
@@ -1598,6 +1604,7 @@ pub async fn enrollment_begin_vault_request(
     state: State<'_, AppState>,
     input: BeginVaultRequestInput,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let invite = EnrollmentClient::parse_vault_invite_link(&input.invite_link)
         .map_err(|_| enrollment_error())?;
@@ -1701,6 +1708,7 @@ pub async fn enrollment_vault_request_status(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let epoch = begin_owner_operation(&state.enrollment)?;
     let resubmit = {
@@ -1837,6 +1845,7 @@ pub async fn enrollment_create_vault(
     state: State<'_, AppState>,
     input: UsernameInput,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let epoch = begin_owner_operation(&state.enrollment)?;
     let Some(password) = collect_new_admin_password(&state.enrollment, epoch, |purpose| {
@@ -2196,6 +2205,7 @@ pub async fn enrollment_add_phone(
     method: EnrollmentMethod,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let epoch = begin_owner_operation(&state.enrollment)?;
     enrollment_add_phone_core(&state, method, &hosted, epoch).await
@@ -2537,6 +2547,7 @@ pub async fn enrollment_cancel_phone(
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     cancel_phone_core(
         &state.enrollment,
@@ -2553,6 +2564,7 @@ pub async fn enrollment_rotate_phone(
     method: EnrollmentMethod,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let epoch = begin_owner_operation(&state.enrollment)?;
     rotate_phone_core(
@@ -2786,6 +2798,7 @@ pub async fn enrollment_approve(
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     refresh_invitation(&state, &hosted).await?;
     let session = state.require_session().await?;
@@ -2871,6 +2884,7 @@ pub async fn enrollment_status(
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let (invitation_active, reconcile_origin) = enrollment_status_entry(&state.enrollment)?;
     if invitation_active {
@@ -2913,6 +2927,7 @@ pub async fn reveal_vault_secret(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let session = state.require_session().await?;
     let unlocked = crate::sync::blocking({
@@ -2939,6 +2954,7 @@ pub async fn enrollment_cancel(
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     retire_surfaced_phone_completion(&state.enrollment)?;
     let epoch = begin_owner_operation(&state.enrollment)?;
@@ -2982,6 +2998,7 @@ pub async fn enrollment_sign_out(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     state
         .enrollment
@@ -2996,14 +3013,14 @@ mod owner_retry_tests {
     use super::*;
     use crate::secure_store::{MemoryStore, SecretStore};
     use crate::tests::gateway;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use peppy_hosted_api::enrollment::{
         ClaimInstanceRequest, ClaimInstanceResponse, ClaimInvitationRequest,
         CreateInvitationRequest, EnrollmentTranscript, InstanceSession, InvitationClaim,
     };
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
 
     const ORIGIN: &str = "https://community.example";
@@ -3260,13 +3277,15 @@ mod owner_retry_tests {
                     PassphrasePurpose::AdminPasswordCreate,
                 ]
             );
-            assert!(!controller
-                .lock()
-                .unwrap()
-                .client
-                .as_ref()
-                .unwrap()
-                .has_prepared_owner_material());
+            assert!(
+                !controller
+                    .lock()
+                    .unwrap()
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .has_prepared_owner_material()
+            );
         }
     }
 
@@ -3320,13 +3339,15 @@ mod owner_retry_tests {
             ]
         );
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
-        assert!(!controller
-            .lock()
-            .unwrap()
-            .client
-            .as_ref()
-            .unwrap()
-            .has_prepared_owner_material());
+        assert!(
+            !controller
+                .lock()
+                .unwrap()
+                .client
+                .as_ref()
+                .unwrap()
+                .has_prepared_owner_material()
+        );
     }
 
     #[tokio::test]
@@ -3416,13 +3437,15 @@ mod owner_retry_tests {
         );
 
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
-        assert!(!controller
-            .lock()
-            .unwrap()
-            .client
-            .as_ref()
-            .unwrap()
-            .has_prepared_owner_material());
+        assert!(
+            !controller
+                .lock()
+                .unwrap()
+                .client
+                .as_ref()
+                .unwrap()
+                .has_prepared_owner_material()
+        );
     }
 
     #[tokio::test]
@@ -3465,11 +3488,13 @@ mod owner_retry_tests {
         assert!(store.get(&owner_checkpoint_key(ORIGIN)).unwrap().is_none());
         let controller = controller.lock().unwrap();
         assert!(!controller.ready);
-        assert!(!controller
-            .client
-            .as_ref()
-            .unwrap()
-            .has_prepared_owner_material());
+        assert!(
+            !controller
+                .client
+                .as_ref()
+                .unwrap()
+                .has_prepared_owner_material()
+        );
     }
 
     #[tokio::test]
@@ -3812,11 +3837,13 @@ mod owner_retry_tests {
         );
         let guard = controller.lock().unwrap();
         assert!(!guard.owner_resume);
-        assert!(!guard
-            .client
-            .as_ref()
-            .unwrap()
-            .is_pending_owner_creation_for_origin(ORIGIN));
+        assert!(
+            !guard
+                .client
+                .as_ref()
+                .unwrap()
+                .is_pending_owner_creation_for_origin(ORIGIN)
+        );
     }
 
     #[tokio::test]
@@ -3840,10 +3867,12 @@ mod owner_retry_tests {
                     Ok(_) => panic!("start over should reject this response"),
                 };
             assert!(matches!(error.code, "offline" | "instance_already_claimed"));
-            assert!(store
-                .get(&owner_checkpoint_key(ORIGIN))
-                .unwrap()
-                .is_some_and(|value| !value.is_empty()));
+            assert!(
+                store
+                    .get(&owner_checkpoint_key(ORIGIN))
+                    .unwrap()
+                    .is_some_and(|value| !value.is_empty())
+            );
         }
     }
 
@@ -4511,15 +4540,17 @@ mod owner_retry_tests {
             Some(profile.key_epoch)
         );
 
-        assert!(recover_phone_handoff_after_fetch(
-            &session,
-            &binding,
-            &preparation,
-            &profile,
-            &header,
-            RECOVERY_SECRET,
-        )
-        .unwrap());
+        assert!(
+            recover_phone_handoff_after_fetch(
+                &session,
+                &binding,
+                &preparation,
+                &profile,
+                &header,
+                RECOVERY_SECRET,
+            )
+            .unwrap()
+        );
         assert_eq!(
             session.client.key_status().unwrap().active_epoch,
             Some(profile.key_epoch)
@@ -4534,10 +4565,12 @@ mod owner_retry_tests {
             serde_json::from_str(&request).unwrap();
         approved.encrypted_key_package = request.encrypted_key_package;
         approved.transfer_nonce = request.transfer_nonce;
-        assert!(!recipient
-            .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            !recipient
+                .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4593,22 +4626,26 @@ mod owner_retry_tests {
             device_id: uuid::Uuid::new_v4().to_string(),
             ..binding.clone()
         };
-        assert!(!phone_handoff_recovery_is_current(
-            &controller,
-            &session,
-            &swapped_binding,
-            &preparation,
-        )
-        .unwrap());
-        assert!(!recover_phone_handoff_after_fetch(
-            &session,
-            &swapped_binding,
-            &preparation,
-            &profile,
-            &header,
-            RECOVERY_SECRET,
-        )
-        .unwrap());
+        assert!(
+            !phone_handoff_recovery_is_current(
+                &controller,
+                &session,
+                &swapped_binding,
+                &preparation,
+            )
+            .unwrap()
+        );
+        assert!(
+            !recover_phone_handoff_after_fetch(
+                &session,
+                &swapped_binding,
+                &preparation,
+                &profile,
+                &header,
+                RECOVERY_SECRET,
+            )
+            .unwrap()
+        );
         assert!(matches!(
             prepare_phone_approval_request(&controller, &preparation, &session).unwrap(),
             Err(peppy_hosted_client::HostedClientError::KeysUnavailable)
@@ -4814,10 +4851,12 @@ mod owner_retry_tests {
             client: Some(request),
             ..ready_controller()
         };
-        assert!(admission_client(&mut controller)
-            .unwrap()
-            .pending_vault_request()
-            .is_some());
+        assert!(
+            admission_client(&mut controller)
+                .unwrap()
+                .pending_vault_request()
+                .is_some()
+        );
     }
 
     #[test]
@@ -4836,10 +4875,12 @@ mod owner_retry_tests {
         let client = admission_client(&mut guard).unwrap();
         assert!(!client.is_pending_owner_creation_for_origin(ORIGIN));
         assert!(!guard.owner_resume);
-        assert!(store
-            .get(&owner_checkpoint_key(ORIGIN))
-            .unwrap()
-            .is_some_and(|checkpoint| !checkpoint.is_empty()));
+        assert!(
+            store
+                .get(&owner_checkpoint_key(ORIGIN))
+                .unwrap()
+                .is_some_and(|checkpoint| !checkpoint.is_empty())
+        );
 
         let mut fresh = unclaimed_controller().into_inner().unwrap();
         let before = fresh.client.as_ref().unwrap().checkpoint().unwrap();
@@ -5111,13 +5152,15 @@ mod owner_retry_tests {
             .get_qr_payload()
             .unwrap();
 
-        assert!(cancel_phone_core(
-            &controller,
-            || std::future::ready(Ok(())),
-            || std::future::ready(Err(BridgeError::new("offline", "offline"))),
-        )
-        .await
-        .is_err());
+        assert!(
+            cancel_phone_core(
+                &controller,
+                || std::future::ready(Ok(())),
+                || std::future::ready(Err(BridgeError::new("offline", "offline"))),
+            )
+            .await
+            .is_err()
+        );
 
         let controller = controller.lock().unwrap();
         assert_eq!(controller.invitation_id, Some(invitation_id));
@@ -5244,9 +5287,11 @@ mod owner_retry_tests {
                 RECOVERY_SECRET.into(),
             )
             .unwrap();
-        assert!(replacement
-            .create_phone_invitation(EnrollmentMethod::Transfer)
-            .is_ok());
+        assert!(
+            replacement
+                .create_phone_invitation(EnrollmentMethod::Transfer)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -5285,12 +5330,14 @@ mod owner_retry_tests {
             let mut expired = expired.lock().unwrap();
             expired.invitation.as_mut().unwrap().state = EnrollmentState::Expired;
             retire_terminal_phone_invitation(&mut expired).unwrap();
-            assert!(expired
-                .client
-                .as_mut()
-                .unwrap()
-                .create_phone_invitation(EnrollmentMethod::Transfer)
-                .is_ok());
+            assert!(
+                expired
+                    .client
+                    .as_mut()
+                    .unwrap()
+                    .create_phone_invitation(EnrollmentMethod::Transfer)
+                    .is_ok()
+            );
         }
     }
 
@@ -5376,12 +5423,14 @@ mod owner_retry_tests {
                 .unwrap()
                 .create_phone_invitation(EnrollmentMethod::Transfer)
                 .unwrap();
-            assert!(controller
-                .client
-                .as_mut()
-                .unwrap()
-                .create_phone_invitation(EnrollmentMethod::Transfer)
-                .is_err());
+            assert!(
+                controller
+                    .client
+                    .as_mut()
+                    .unwrap()
+                    .create_phone_invitation(EnrollmentMethod::Transfer)
+                    .is_err()
+            );
             assert_eq!(controller.phone_operation_epoch, Some(7));
         }
 
@@ -5806,18 +5855,22 @@ mod owner_retry_tests {
         .unwrap();
 
         assert_eq!(view.stage, "invite_expired");
-        assert!(store
-            .get(&vault_request_checkpoint_key(ORIGIN))
-            .unwrap()
-            .is_none_or(|bytes| bytes.is_empty()));
-        assert!(controller
-            .lock()
-            .unwrap()
-            .client
-            .as_ref()
-            .unwrap()
-            .pending_vault_request()
-            .is_none());
+        assert!(
+            store
+                .get(&vault_request_checkpoint_key(ORIGIN))
+                .unwrap()
+                .is_none_or(|bytes| bytes.is_empty())
+        );
+        assert!(
+            controller
+                .lock()
+                .unwrap()
+                .client
+                .as_ref()
+                .unwrap()
+                .pending_vault_request()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -5908,18 +5961,22 @@ mod owner_retry_tests {
             .unwrap();
 
             assert_eq!(error.code, code);
-            assert!(store
-                .get(&vault_request_checkpoint_key(ORIGIN))
-                .unwrap()
-                .is_some_and(|bytes| !bytes.is_empty()));
+            assert!(
+                store
+                    .get(&vault_request_checkpoint_key(ORIGIN))
+                    .unwrap()
+                    .is_some_and(|bytes| !bytes.is_empty())
+            );
             let guard = controller.lock().unwrap();
             assert_eq!(guard.vault_request_state.as_deref(), Some("pending"));
-            assert!(guard
-                .client
-                .as_ref()
-                .unwrap()
-                .pending_vault_request()
-                .is_some());
+            assert!(
+                guard
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .pending_vault_request()
+                    .is_some()
+            );
         }
     }
 
@@ -6043,10 +6100,12 @@ mod owner_retry_tests {
         let binding = active_binding();
         let state = state_with_active_binding(&root, store.clone(), &binding);
 
-        assert!(existing_identity(&state, OTHER_ORIGIN)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            existing_identity(&state, OTHER_ORIGIN)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(store.reads.load(Ordering::SeqCst), 0);
         assert!(!binding.data_dir(root.path()).exists());
         assert!(state.session.lock().await.is_none());

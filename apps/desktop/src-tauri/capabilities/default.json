@@ -79,6 +79,12 @@
     "allow-enrollment-approve",
     "allow-enrollment-status",
     "allow-enrollment-cancel",
-    "allow-enrollment-sign-out"
+    "allow-enrollment-sign-out",
+    "allow-update-status",
+    "allow-check-for-updates",
+    "allow-restart-for-update",
+    "allow-defer-update",
+    "allow-set-automatic-updates",
+    "allow-report-update-activity"
   ]
 }

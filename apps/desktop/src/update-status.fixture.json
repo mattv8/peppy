@@ -1,0 +1,15 @@
+{
+  "currentVersion": "1.2.3",
+  "channel": "stable",
+  "phase": "ready",
+  "automatic": true,
+  "availableVersion": "1.2.4",
+  "progressPercent": 100,
+  "lastCheckedAt": "2026-10-16T12:00:00Z",
+  "deferredUntil": null,
+  "message": null,
+  "releaseNotesUrl": "https://github.com/mattv8/peppy/releases/tag/v1.2.4",
+  "canRestart": true,
+  "packageKind": "appimage",
+  "unattended": false
+}
