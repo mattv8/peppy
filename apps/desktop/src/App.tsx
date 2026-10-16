@@ -34,7 +34,6 @@ import {
   NavButtons,
   type NavigationPosition,
   Panel,
-  Radio,
   RecipientPicker,
   RecipientPanel,
   ResizeHandle,
@@ -83,6 +82,7 @@ import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
 import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
 import { peppyCopy } from "./generated/peppyCopy";
+import { GatewayPicker } from "./GatewayPicker";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
 import {
@@ -275,6 +275,7 @@ function availabilityLabel(gateway: GatewayView): string {
     case "sms_unavailable": return "SMS unavailable";
     case "unsupported_platform": return "Can't send SMS";
     case "capabilities_unknown": case "unknown": return "Status unknown";
+    case "connected": return "Connected";
     default: return "";
   }
 }
@@ -393,49 +394,37 @@ function GatewaySelector({
   const presenceHint = statusHint ?? (selectedGateway && (availabilityProblem(selectedGateway) ?? (selectedAvailability === "unknown" ? `${selectedGateway.name}'s status is unknown.` : undefined)));
   return (
     <section id="gateway-selector" aria-label="Phone and SIM" aria-describedby={statusHint || presenceHint ? "gateway-presence-hint" : undefined} data-route-state={problem ? "blocked" : selectedAvailability === "delayed" ? "delayed" : "ready"}>
-        <select
-          aria-label="Phone"
-          value={value}
-          onChange={(event) => choose(event.target.value)}
-          disabled={!gateways.length}
-        >
-          {route.kind === "none" && (
-            <option value="" disabled>
-              {gateways.length ? "Choose phone and SIM" : "No phone"}
-            </option>
-          )}
-          {route.kind === "stale" && (
-            <option value={value} disabled>
-              Unavailable route · SIM {route.simId}
-            </option>
-          )}
-          {gateways.map((item) => {
-            const key = routeKey(item.id, item.simId);
-            return (
-              <option
-                key={key}
-                value={key}
-                data-gateway-id={item.id}
-                data-sim-id={item.simId}
-                data-gateway-availability={gatewayAvailability(item)}
-                disabled={gatewayAvailability(item) === "unsupported_platform"}
-              >
-                {item.name}{item.simId ? ` · ${simLabel(item)}` : ""}{item.simulated ? " · Simulated" : ""}{availabilityLabel(item) ? ` · ${availabilityLabel(item)}` : ""}
-              </option>
-            );
-          })}
-        </select>
-      <span className="route-status-icon" aria-hidden>
-        {problem ? (
-          <TriangleAlert size={14} aria-hidden />
-        ) : selectedAvailability === "delayed" ? (
-          <Clock size={14} aria-hidden />
-        ) : selectedAvailability === "connected" ? (
-          <Radio size={14} aria-hidden />
-        ) : (
-          <span />
-        )}
-      </span>
+      <GatewayPicker
+        options={[
+          ...(route.kind === "stale"
+            ? [{
+                value,
+                name: "Unavailable route",
+                simLabel: `SIM ${route.simId}`,
+                disabled: true,
+                gatewayId: route.gatewayId,
+                simId: route.simId,
+              }]
+            : []),
+          ...gateways.map((item) => ({
+            value: routeKey(item.id, item.simId),
+            name: item.name,
+            simLabel: simLabel(item),
+            statusLabel: availabilityLabel(item),
+            simulated: item.simulated,
+            availability: gatewayAvailability(item),
+            disabled: gatewayAvailability(item) === "unsupported_platform",
+            gatewayId: item.id,
+            simId: item.simId,
+          })),
+        ]}
+        value={value}
+        placeholder={gateways.length ? "Choose phone and SIM" : "No phone"}
+        disabled={!gateways.length}
+        onChange={choose}
+        describedBy={statusHint || presenceHint ? "gateway-presence-hint" : undefined}
+        invalid={Boolean(problem)}
+      />
       <span id="gateway-presence-hint" className="visually-hidden" role="status" aria-live="polite">{statusHint ?? presenceHint}</span>
     </section>
   );
