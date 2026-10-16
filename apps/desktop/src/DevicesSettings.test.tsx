@@ -22,7 +22,7 @@ describe("DevicesSettings", () => {
       { id: "phone", name: "Pixel 8", kind: "android", role: "owner", revoked: false },
       { id: "old", name: "Old phone", kind: "ios", role: "owner", revoked: true },
     ] });
-    vi.mocked(bridge.revoke_device).mockReset();
+    vi.mocked(bridge.revoke_device).mockReset().mockResolvedValue(undefined);
   });
 
   it("loads devices under StrictMode", async () => {
@@ -157,7 +157,8 @@ describe("DevicesSettings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Remove Pixel 8" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
     await waitFor(() => expect(screen.getByText("Previously removed")).toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "Devices" })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Devices" })).toHaveFocus());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("keeps the roster visible when accepted removal cannot reload", async () => {
