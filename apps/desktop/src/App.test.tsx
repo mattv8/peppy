@@ -729,6 +729,14 @@ const type = (value: string) =>
   fireEvent.change(message(), { target: { value } });
 const routeValue = (gateway: GatewayView) =>
   `${encodeURIComponent(gateway.id)} ${encodeURIComponent(gateway.simId)}`;
+const chooseGateway = async (gateway: GatewayView) => {
+  fireEvent.click(screen.getByRole("combobox", { name: "Phone" }));
+  const option = (await screen.findAllByRole("option")).find(
+    (candidate) => candidate.getAttribute("data-gateway-choice") === routeValue(gateway),
+  );
+  if (!option) throw new Error(`Gateway choice was not rendered: ${routeValue(gateway)}`);
+  fireEvent.click(option);
+};
 const openComposerWindow = (conversationId: string, head = false) =>
   window.history.replaceState(
     {},
@@ -1387,9 +1395,7 @@ describe("new-recipient drafts", () => {
       expectedRevision: "1",
     });
 
-    fireEvent.change(screen.getByLabelText("Phone"), {
-      target: { value: routeValue(SMS_ONLY) },
-    });
+    await chooseGateway(SMS_ONLY);
     await waitFor(() =>
       expect(host.drafts.get("conv-new-1")?.simId).toBe("sim-1"),
     );
@@ -1702,9 +1708,7 @@ describe("draft durability", () => {
   it("blocks send after a rejected save, keeps the edits, and sends the latest text once a retry succeeds", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    fireEvent.change(screen.getByLabelText("Phone"), {
-      target: { value: routeValue(SMS_ONLY) },
-    });
+    await chooseGateway(SMS_ONLY);
     await waitFor(() => expect(host.drafts.get("aurora")?.simId).toBe("sim-1"));
     type("saved text");
     await waitFor(() =>
@@ -1735,9 +1739,7 @@ describe("draft durability", () => {
   it("does not resend when send reports a moved draft and retains the text for review", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    fireEvent.change(screen.getByLabelText("Phone"), {
-      target: { value: routeValue(SMS_ONLY) },
-    });
+    await chooseGateway(SMS_ONLY);
     type("send only after review");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("send only after review"));
     host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
@@ -1951,6 +1953,21 @@ describe("composer window", () => {
     expect(bridge.close_head_panel).not.toHaveBeenCalled();
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(bridge.close_composer).toHaveBeenCalledTimes(2));
+  });
+
+  it("dismisses the phone picker with Escape before collapsing the head panel", async () => {
+    openComposerWindow("aurora", true);
+    render(<App />);
+    const phone = await screen.findByRole("combobox", { name: "Phone" });
+    fireEvent.click(phone);
+    expect(await screen.findByRole("listbox")).toBeInTheDocument();
+
+    await act(async () => { fireEvent.keyDown(phone, { key: "Escape" }); });
+
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(bridge.close_composer).not.toHaveBeenCalled();
+    fireEvent.keyDown(phone, { key: "Escape" });
+    await waitFor(() => expect(bridge.close_composer).toHaveBeenCalledOnce());
   });
 
   it("uses and persists the separate head composer height", async () => {
@@ -2205,18 +2222,18 @@ describe("gateway routes", () => {
   it("distinguishes two SIMs on one gateway device and blocks MMS on the SMS-only SIM", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
-    const select = screen.getByLabelText("Phone") as HTMLSelectElement;
-    const values = within(select)
-      .getAllByRole("option")
-      .map((option) => (option as HTMLOptionElement).value);
+    fireEvent.click(screen.getByRole("combobox", { name: "Phone" }));
+    const choices = await screen.findAllByRole("option");
+    const values = choices.map((option) => option.getAttribute("data-gateway-choice"));
     expect(new Set(values.filter(Boolean)).size).toBe(2);
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Phone" }), { key: "Escape" });
 
     fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
     await waitFor(() =>
       expect(host.drafts.get("aurora")?.attachmentIds).toEqual(["file-1"]),
     );
-    fireEvent.change(select, { target: { value: routeValue(SMS_ONLY) } });
+    await chooseGateway(SMS_ONLY);
     await waitFor(() =>
       expect(host.drafts.get("aurora")).toMatchObject({
         gatewayId: "gw-phone",
@@ -2228,7 +2245,7 @@ describe("gateway routes", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
 
-    fireEvent.change(select, { target: { value: routeValue(MMS_SIM) } });
+    await chooseGateway(MMS_SIM);
     await waitFor(() =>
       expect(host.drafts.get("aurora")).toMatchObject({
         gatewayId: "gw-phone",
@@ -2264,9 +2281,9 @@ describe("gateway routes", () => {
     });
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("hello"));
-    expect(screen.getByLabelText("Phone")).toHaveDisplayValue(
-      "Unavailable route · SIM sim-9",
-    );
+    const phone = screen.getByRole("combobox", { name: "Phone" });
+    expect(phone.querySelector('[data-route-badge="device"]')).toHaveTextContent("Unavailable route");
+    expect(phone.querySelector('[data-route-badge="sim"]')).toHaveTextContent("SIM sim-9");
     expect(
       screen.getByText(/no longer reported/),
     ).toBeInTheDocument();
@@ -2306,9 +2323,13 @@ describe("gateway routes", () => {
   it("keeps an unsupported iPhone route visible but disabled", async () => {
     host.gateways = [{ ...SMS_ONLY, name: "My iPhone", availability: "unsupported_platform" }];
     render(<App />);
+    fireEvent.click(await screen.findByRole("combobox", { name: "Phone" }));
     const option = await screen.findByRole("option", { name: /My iPhone/ });
-    expect(option).toBeDisabled();
+    expect(option).toHaveAttribute("aria-disabled", "true");
     expect(option).toHaveAttribute("data-gateway-availability", "unsupported_platform");
+    fireEvent.click(option);
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
   });
 });
 
