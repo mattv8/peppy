@@ -294,6 +294,101 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
         #expect(try owner.view().count == 5)
     }
 
+    @Test func remoteScanRequestBypassesHistoryAndCompletesAfterANewFullScan() async throws {
+        let owner = try await owner(sampleContacts(2))
+        await owner.provider.configure { $0.historyEnabled = true }
+        let initial = try await owner.run()
+        let bookId = try #require(initial.bookId)
+        let requester = try requester(owner)
+
+        _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try requester.requestContactSync(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        try await deliver(from: requester, to: owner)
+
+        let scan = try await owner.run(.backgroundRefresh)
+        #expect(scan.outcome == .completed && scan.authoritative, "a pending remote request must not take the history fast path")
+        _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        let status = try NativeContactsCoordinator.object(
+            requester.contactSyncRequestStatus(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        )
+        #expect(status["state"] as? String == "completed")
+    }
+
+    @Test func aRequestDeliveredDuringASavedScanWaitsForTheNextScan() async throws {
+        let owner = try await owner(sampleContacts(201))
+        let first = try await owner.run(.backgroundRefresh)
+        let bookId = try #require(first.bookId)
+        #expect(first.outcome == .partial && first.captured == 200)
+        let requester = try requester(owner)
+
+        _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try requester.requestContactSync(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        try await deliver(from: requester, to: owner)
+        let delivered = try NativeContactsCoordinator.object(
+            owner.client.pendingContactSyncScans(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        )
+        #expect((delivered["requests"] as? [[String: Any]])?.count == 1)
+
+        let resumed = try await owner.run(.foreground)
+        #expect(resumed.outcome == .completed && resumed.captured == 1, "the existing bounded scan must resume instead of restarting")
+        let stillPending = try NativeContactsCoordinator.object(
+            owner.client.pendingContactSyncScans(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        )
+        #expect((stillPending["requests"] as? [[String: Any]])?.count == 1)
+        _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        let waiting = try NativeContactsCoordinator.object(
+            requester.contactSyncRequestStatus(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        )
+        #expect(waiting["state"] as? String == "waiting", "a scan that began before the request cannot satisfy it")
+
+        let freshPartial = try await owner.run(.foreground)
+        #expect(freshPartial.outcome == .partial && freshPartial.captured == 200)
+        let scanning = try NativeContactsCoordinator.object(
+            owner.client.pendingContactSyncScans(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        )
+        let orphanRows = scanning["requests"] as? [[String: Any]]
+        #expect(orphanRows?.count == 1, "unfinished scanning work stays visible for orphan recovery")
+        #expect(orphanRows?.first?["state"] as? String == "scanning")
+        #expect((orphanRows?.first?["scanId"] as? String)?.isEmpty == false)
+        let fresh = try await owner.run(.foreground)
+        #expect(fresh.outcome == .completed && fresh.authoritative)
+        var completed: [String: Any] = [:]
+        for _ in 0..<20 {
+            _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+            _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+            completed = try NativeContactsCoordinator.object(
+                requester.contactSyncRequestStatus(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+            )
+            if completed["state"] as? String == "completed" { break }
+        }
+        #expect(completed["state"] as? String == "completed")
+    }
+
+    @Test func disabledSyncBlocksPendingRemoteScan() async throws {
+        let owner = try await owner(sampleContacts(1))
+        let bookId = try #require(try await owner.run().bookId)
+        let requester = try requester(owner)
+
+        _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try requester.requestContactSync(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        try await deliver(from: requester, to: owner)
+
+        owner.preferences.save(ContactsPreferences(enabled: false))
+        #expect(try await owner.run().outcome == .disabled)
+        _ = try await ForegroundSync(client: owner.client, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        _ = try await ForegroundSync(client: requester, server: serverClient(owner.server), vaultId: owner.server.vaultId).run()
+        let status = try NativeContactsCoordinator.object(
+            requester.contactSyncRequestStatus(inputJson: NativeContactsCoordinator.json(["book_id": bookId]))
+        )
+        #expect(status["state"] as? String == "blocked")
+        #expect(status["reason"] as? String == "sync_disabled")
+    }
+
     @Test func limitedAccessNeverAnchorsHistoryOrDeletes() async throws {
         let owner = try await owner(sampleContacts(4))
         await owner.provider.configure { $0.historyEnabled = true }
@@ -617,6 +712,32 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
 /// Session-level pass: background relaunch reopen, unlock gating and real HTTP upload.
 @Suite struct ContactsSessionTests {
     let passphrase = "io synthetic vault passphrase"
+
+    @Test func disabledSessionPassIsNonThrowingAndDoesNotCapture() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        let store = InMemorySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let session = NativeSession(
+            secureStore: store,
+            transport: DeviceScopedTransport(server: server, deviceId: deviceId),
+            databaseDirectory: temporaryDirectory(),
+            allowLoopbackHTTP: false
+        )
+        _ = try await session.importCredential(server.credential(deviceId: deviceId))
+        _ = try await session.unlock(passphrase: passphrase)
+        let provider = WritableFakeProvider()
+        await provider.configure { $0.book = sampleContacts(1) }
+
+        let report = try await session.contactsPass(
+            reason: .foreground,
+            provider: provider,
+            preferences: InMemoryContactsPreferences(ContactsPreferences(enabled: false)),
+            isCancelled: { false }
+        )
+        #expect(report.outcome == .disabled)
+        #expect(await provider.saves.isEmpty)
+        await session.close()
+    }
 
     @Test func passNeedsUnlockThenSyncsAndUploads() async throws {
         let server = try FakeServer(passphrase: passphrase)

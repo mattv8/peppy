@@ -18,7 +18,7 @@ This produces `apps/web/dist/` with the bundled UI and WASM core.
 
 - **Emscripten** 6.0.11
 - **Rust** from the repository's pinned toolchain with `wasm32-unknown-emscripten` target
-- **Node** 24.21.0 (pinned in `.node-version`)
+- **Node** 26 (major version selected in `.node-version`; minor and patch updates supported)
 - **pnpm** 12.8.1
 
 Build sources include:

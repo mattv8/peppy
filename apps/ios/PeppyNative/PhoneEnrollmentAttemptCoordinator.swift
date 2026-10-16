@@ -76,6 +76,7 @@ public final class PhoneEnrollmentAttemptCoordinator {
     }
 
     public var isConfirming: Bool { phase == .confirming }
+    public var isStarting: Bool { phase == .scanning }
     public var canRetryConfirmation: Bool { phase == .retryableFailure }
     public var needsRescan: Bool { phase == .terminalFailure }
     public var activeAttempt: UUID? { attempt }
@@ -110,5 +111,31 @@ public final class PhoneEnrollmentAttemptCoordinator {
             status = next
         }
         return .canceled
+    }
+}
+
+/// Rejects a quiet owner-phone poll result when a foreground action began after it.
+@MainActor
+public final class OwnerPhonePollingCoordinator {
+    private var generation = 0
+    private var activeAction: Int?
+
+    public init() {}
+
+    public func beginPoll() -> Int { generation }
+
+    public func shouldApplyPoll(_ pollGeneration: Int) -> Bool {
+        activeAction == nil && generation == pollGeneration
+    }
+
+    public func beginAction() -> Int {
+        generation &+= 1
+        activeAction = generation
+        return generation
+    }
+
+    public func finishAction(_ actionGeneration: Int) {
+        guard activeAction == actionGeneration else { return }
+        activeAction = nil
     }
 }

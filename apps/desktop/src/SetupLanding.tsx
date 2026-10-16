@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
+import { BusyIndicator } from "@peppy/desktop-ui";
 import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy, type PeppyCopyKey } from "./generated/peppyCopy";
 import "./setup-landing.css";
@@ -9,11 +10,16 @@ type HostedPath = "chooser" | "existing" | "new";
 type Route = "checking" | "chooser" | "new" | "enrollment" | "lapsed" | "billing" | "provisioning" | "passphrase";
 type Method = "transfer" | "shared_secret";
 type Stage = EnrollmentView["stage"];
+type InvitationAttempt = "idle" | "starting" | "active" | "stopped";
+type PendingOperation = { id: number; label: PeppyCopyKey };
+type EnrollmentOperation = { action: (isCurrent: () => boolean) => Promise<EnrollmentView>; retry: () => void; label: PeppyCopyKey; startOver?: boolean; reconcileCreateOwner?: boolean };
 
 const copy = (key: PeppyCopyKey) => peppyCopy[key];
-const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone"]);
+const pollingStages = new Set<Stage>(["waiting_phone", "verify_phone", "phone_approved"]);
 const reconciliationStages = new Set<Stage>(["server", "setup", "signin"]);
 const pollIntervalMs = 4_000;
+const ownerReconcileRetryMs = 1_000;
+const maxOwnerStatusRetries = 15;
 const invitePollBackoffMs = [1_000, 2_000, 5_000, 10_000];
 const qrOptions = { errorCorrectionLevel: "M" as const, margin: 4, width: 512 };
 const methodHints: Record<Method, string> = {
@@ -41,6 +47,7 @@ const diagnosticErrorCodes = new Set<string>([
   "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
   "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable",
   "vault_not_found", "request_not_found", "request_not_approved", "operation_conflict", "admin-password-length",
+  "owner-status-pending",
 ]);
 const diagnosticErrorCode = (code: unknown): string => typeof code === "string" && diagnosticErrorCodes.has(code) ? code : "unavailable";
 const thrownErrorCode = (error: unknown): string => typeof error === "object" && error !== null && "code" in error ? diagnosticErrorCode(error.code) : "unavailable";
@@ -77,7 +84,8 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "vault_request_completed") return "This vault request was already completed. Contact an owner if you need access.";
   if (errorCode === "request_completed_without_material") return "This vault request was already completed. Start a new request to try again.";
   if (errorCode === "admin-password-length") return copy("admin_password_length");
-  if (errorCode === "vault-secret-unavailable") return "This device doesn't have the vault shared secret stored.";
+  if (errorCode === "vault-secret-unavailable") return "This device's vault shared secret is not stored. Open Settings, choose Unlock sync natively in Sync encryption, then retry phone approval.";
+  if (errorCode === "owner-status-pending") return "This device is set up, but its status is still being confirmed. Try again.";
   return "Peppy could not complete this step. Your server address was kept.";
 };
 
@@ -115,14 +123,17 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone = false, onExit, onDeferPhone, onJoined, fixedOrigin, accountUrl }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
   addingPhone?: boolean;
+  connectionPending?: boolean;
   onExit?(): void;
-  onDeferPhone?(): void;
-  onJoined(): void;
+  enrollmentEstablished?: boolean;
+  onDeferPhone?(): void | Promise<void>;
+  onJoined(): void | Promise<void>;
+  onInitialEnrollmentStart?(): void;
   fixedOrigin?: string;
   accountUrl?: string;
 }) {
@@ -134,13 +145,19 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const [view, setView] = useState<EnrollmentView | null>(null);
   const [qr, setQr] = useState("");
   const [method, setMethod] = useState<Method>("transfer");
+  const [qrRetry, setQrRetry] = useState(0);
   const [verified, setVerified] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
+  const [invitationAttempt, setInvitationAttempt] = useState<InvitationAttempt>("idle");
+  const [qrState, setQrState] = useState<"idle" | "generating" | "error">("idle");
   const [sharedSecretError, setSharedSecretError] = useState<string | null>(null);
   const [startOverConfirming, setStartOverConfirming] = useState(false);
   const [startOverAttempted, setStartOverAttempted] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const [provisionError, setProvisionError] = useState(false);
+  const [hostedOperation, setHostedOperation] = useState<PeppyCopyKey | null>(null);
+  const [ownerStatusChecking, setOwnerStatusChecking] = useState(false);
   const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
   const [connectedOrigin, setConnectedOrigin] = useState<string | null>(fixedOrigin ?? null);
   const [selfHostedUrlBlurred, setSelfHostedUrlBlurred] = useState(false);
@@ -165,40 +182,73 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   const discoverStarted = useRef(false);
   const fixedStarted = useRef(false);
   const enrollEpoch = useRef(0);
+  const statusRequestEpoch = useRef(0);
+  const foregroundStatusRequest = useRef<number | null>(null);
+  const ownerStatusRetryTimer = useRef<number | null>(null);
+  const ownerStatusRetryAttempts = useRef(0);
   const mutationInFlight = useRef(false);
-  const phoneInviteStarted = useRef(false);
   const rotatedInvitation = useRef<string | null>(null);
   const lastRotationOutcome = useRef<Stage | null>(null);
   const invitePollEpoch = useRef(0);
   const accountFetchEpoch = useRef(0);
   const signInEpoch = useRef(0);
   const enrollmentActive = useRef(false);
+  const mounted = useRef(true);
+  const operationId = useRef(0);
+  const invitationAttemptRef = useRef<InvitationAttempt>("idle");
+  const qrRequestId = useRef(0);
   const stageRef = useRef<Stage | null>(null);
   const retryRef = useRef<() => void>(() => undefined);
   const previousMode = useRef(mode);
   const previousRoute = useRef<Route | null>(null);
+  const latestRoutingState = useRef({ enrolledWithoutPhone, addingPhone });
+  latestRoutingState.current = { enrolledWithoutPhone, addingPhone };
 
   const community = Boolean(fixedOrigin) || mode === "self-hosted" || enrolledWithoutPhone || addingPhone;
   const hostedBrowser = Boolean(fixedOrigin && accountUrl);
 
+  const setInvitationState = (next: InvitationAttempt) => {
+    invitationAttemptRef.current = next;
+    setInvitationAttempt(next);
+  };
+  const beginPending = (label: PeppyCopyKey) => {
+    const id = ++operationId.current;
+    setPendingOperation({ id, label });
+    setBusy(true);
+    return id;
+  };
+  const endPending = (id: number) => {
+    if (!mounted.current || operationId.current !== id) return;
+    setPendingOperation(null);
+    setBusy(false);
+  };
+
   const apply = (next: EnrollmentView) => {
-    enrollmentActive.current = pollingStages.has(next.stage);
+    if (!mounted.current) return;
+    if (stageRef.current === "phone_approved" && (next.stage === "waiting_phone" || next.stage === "verify_phone" || next.stage === "expired")) return;
+    enrollmentActive.current = next.stage === "waiting_phone";
     if (next.stage !== stageRef.current) setVerified(false);
     stageRef.current = next.stage;
     setView(next);
   };
+  const clearOwnerStatusRetry = () => {
+    if (ownerStatusRetryTimer.current !== null) window.clearTimeout(ownerStatusRetryTimer.current);
+    ownerStatusRetryTimer.current = null;
+    ownerStatusRetryAttempts.current = 0;
+  };
   const failedView = (): EnrollmentView => ({ mode: mode === "hosted" ? "hosted" : "community", stage: "error", origin: connectedOrigin ?? undefined, errorCode: "unavailable" });
-  const runEnrollment = async (action: () => Promise<EnrollmentView>, retry: () => void, isStartOver = false, background = false): Promise<EnrollmentView | null> => {
+  const runEnrollment = async ({ action, retry, label, startOver = false, reconcileCreateOwner = false }: EnrollmentOperation): Promise<EnrollmentView | null> => {
     const epoch = ++enrollEpoch.current;
     let result: EnrollmentView | null = null;
     retryRef.current = retry;
-    setStartOverAttempted(isStartOver);
-    if (!background) setBusy(true);
+    setStartOverAttempted(startOver);
+    const pendingId = beginPending(label);
     mutationInFlight.current = true;
     try {
-      const next = await action();
+      const next = await action(() => mounted.current && epoch === enrollEpoch.current);
+      if (epoch !== enrollEpoch.current) return null;
       result = next;
-      if (epoch === enrollEpoch.current) apply(next);
+      apply(next);
       return next;
     } catch (error) {
       if (epoch === enrollEpoch.current) apply({ ...failedView(), errorCode: thrownErrorCode(error) });
@@ -206,8 +256,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     } finally {
       if (epoch === enrollEpoch.current) {
         mutationInFlight.current = false;
-        if (!background) setBusy(false);
-        if ((enrolledWithoutPhone || addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus();
+        if (pendingId !== null) endPending(pendingId);
+        const routing = latestRoutingState.current;
+        if ((reconcileCreateOwner || routing.enrolledWithoutPhone || routing.addingPhone) && result && reconciliationStages.has(result.stage)) void refreshStatus(true);
       }
     }
   };
@@ -218,8 +269,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const resetEnrollment = () => {
     enrollEpoch.current += 1;
+    foregroundStatusRequest.current = null;
     mutationInFlight.current = false;
+    clearOwnerStatusRetry();
     invitePollEpoch.current += 1;
+    operationId.current += 1;
     cancelActive();
     enrollmentActive.current = false;
     stageRef.current = null;
@@ -227,11 +281,14 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     setQr("");
     setVerified(false);
     setBusy(false);
+    setPendingOperation(null);
+    setInvitationState("idle");
   };
   const refreshAccount = async () => {
     const epoch = ++accountFetchEpoch.current;
     setAccountError(false);
     setAccountLoading(true);
+    setHostedOperation("production_pairing_checking");
     try {
       const next = await bridge.hosted_account();
       if (epoch === accountFetchEpoch.current) setAccount(next);
@@ -243,111 +300,193 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
       }
       return null;
     } finally {
-      if (epoch === accountFetchEpoch.current) setAccountLoading(false);
+      if (epoch === accountFetchEpoch.current) {
+        setAccountLoading(false);
+        setHostedOperation(null);
+      }
     }
   };
 
-  const discover = (origin?: string) => runEnrollment(() => bridge.enrollment_discover(origin), () => discover(origin));
-  const createOwner = () => runEnrollment(() => bridge.enrollment_create_owner({ username }), createOwner);
-  const startOver = () => runEnrollment(
-    async () => {
+  const discover = (origin?: string) => runEnrollment({ action: () => bridge.enrollment_discover(origin), retry: () => discover(origin), label: "production_pairing_connecting" });
+  const createOwner = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_create_owner({ username }), retry: createOwner, label: "production_pairing_connecting", reconcileCreateOwner: true });
+  };
+  const startOver = () => runEnrollment({
+    action: async () => {
       const next = await bridge.enrollment_start_over();
       setStartOverConfirming(false);
       return next;
-    },
-    () => discover(view?.origin ?? connectedOrigin ?? undefined),
-    true,
-  );
-  const signInEnrollment = () => runEnrollment(() => bridge.enrollment_sign_in({ username }), signInEnrollment);
-  const connectSharedSecret = () => runEnrollment(() => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), connectSharedSecret);
-  const beginVaultRequest = () => runEnrollment(async () => {
-    setInviteError(null);
-    try { return await bridge.enrollment_begin_vault_request({ inviteLink, displayName }); }
-    catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "invite_invalid") {
-        setInviteError(copy("enrollment_error_invite_invalid"));
-        return { mode: "community", stage: "invite_request" };
+    }, retry: () => discover(view?.origin ?? connectedOrigin ?? undefined), label: "production_pairing_connecting", startOver: true,
+  });
+  const signInEnrollment = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_sign_in({ username }), retry: signInEnrollment, label: "production_pairing_connecting" });
+  };
+  const connectSharedSecret = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), retry: connectSharedSecret, label: "production_pairing_connecting" });
+  };
+  const beginVaultRequest = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: async () => {
+      setInviteError(null);
+      try { return await bridge.enrollment_begin_vault_request({ inviteLink, displayName }); }
+      catch (error) {
+        if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "invite_invalid") {
+          setInviteError(copy("enrollment_error_invite_invalid"));
+          return { mode: "community", stage: "invite_request" };
+        }
+        throw error;
       }
-      throw error;
-    }
-  }, beginVaultRequest);
-  const createVault = () => runEnrollment(() => bridge.enrollment_create_vault({ username: vaultUsername }), createVault);
-  const addPhone = (next: Method) => {
+    }, retry: beginVaultRequest, label: "production_pairing_connecting" });
+  };
+  const createVault = () => {
+    onInitialEnrollmentStart?.();
+    return runEnrollment({ action: () => bridge.enrollment_create_vault({ username: vaultUsername }), retry: createVault, label: "production_pairing_connecting" });
+  };
+  const addPhone = (next: Method, automatic = false) => {
+    if (invitationAttemptRef.current === "stopped" && automatic) return;
     setMethod(next);
-    void runEnrollment(() => bridge.enrollment_add_phone(next), () => addPhone(next));
+    setInvitationState("starting");
+    void runEnrollment({ action: () => bridge.enrollment_add_phone(next), retry: () => addPhone(next), label: "production_pairing_preparing" }).then(result => {
+      if (!result || invitationAttemptRef.current === "stopped") return;
+      setInvitationState(result.stage === "waiting_phone" ? "active" : "stopped");
+    });
   };
   const rotatePhone = (next: Method, automatic = false) => {
     setMethod(next);
-    return runEnrollment(async () => {
+    return runEnrollment({ action: async () => {
       const outcome = await bridge.enrollment_rotate_phone(next);
       if (automatic) lastRotationOutcome.current = outcome.stage;
       return outcome;
-    }, () => { void rotatePhone(next, automatic); }, false, automatic);
+    }, retry: () => { void rotatePhone(next, automatic); }, label: "production_pairing_refreshing" });
   };
-  const deferPhone = async () => {
-    const result = await runEnrollment(() => bridge.enrollment_cancel_phone(), () => { void deferPhone(); });
-    // A phone that already claimed the code keeps the verification step open.
-    if (result && result.stage !== "verify_phone") onDeferPhone?.();
+  const deferPhone = () => {
+    setInvitationState("stopped");
+    void runEnrollment({
+      action: async isCurrent => {
+        const next = await bridge.enrollment_cancel_phone();
+        // A phone that already claimed the code keeps the verification step open.
+        if (!isCurrent() || next.stage === "verify_phone" || next.stage === "phone_approved") return next;
+        await onDeferPhone?.();
+        return next;
+      },
+      retry: deferPhone,
+      label: "production_pairing_cancelling",
+    });
   };
   const useSharedSecretPhone = () => {
     setSharedSecretError(null);
-    void rotatePhone("shared_secret").then(async result => {
-      if (!result || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
-      try {
-        await bridge.reveal_vault_secret();
-      } catch (error) {
-        setSharedSecretError(enrollmentErrorMessage(thrownErrorCode(error)));
-      }
+    setMethod("shared_secret");
+    void runEnrollment({
+      action: async isCurrent => {
+        if (!isCurrent()) return view ?? failedView();
+        const next = await bridge.enrollment_rotate_phone("shared_secret");
+        if (!isCurrent() || next.stage !== "waiting_phone" || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return next;
+        try {
+          await bridge.reveal_vault_secret();
+        } catch (error) {
+          if (isCurrent()) setSharedSecretError(enrollmentErrorMessage(thrownErrorCode(error)));
+        }
+        return next;
+      },
+      retry: useSharedSecretPhone,
+      label: "production_pairing_revealing",
     });
   };
   const approve = () => {
     if (!verified) return;
-    void runEnrollment(() => bridge.enrollment_approve(), approve);
+    void runEnrollment({ action: () => bridge.enrollment_approve(), retry: approve, label: "production_pairing_approving" });
   };
   const retryStatus = () => {
+    clearOwnerStatusRetry();
     void refreshStatus(true);
   };
   const refreshStatus = async (foreground = false) => {
+    if (foregroundStatusRequest.current !== null) return;
     if (mutationInFlight.current) return;
+    const statusRequest = ++statusRequestEpoch.current;
     const epoch = enrollEpoch.current;
-    if (foreground) setBusy(true);
+    const pendingId = foreground ? beginPending("production_pairing_checking") : null;
+    if (foreground) {
+      foregroundStatusRequest.current = statusRequest;
+    }
     try {
       const next = await bridge.enrollment_status();
-      if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
-      if ((enrolledWithoutPhone || addingPhone) && next.stage === "server") {
+      if (statusRequest !== statusRequestEpoch.current || epoch !== enrollEpoch.current || mutationInFlight.current) return;
+      const routing = latestRoutingState.current;
+      if (routing.enrolledWithoutPhone && !routing.addingPhone && (next.stage === "setup" || next.stage === "signin")) {
+        if (stageRef.current === "setup" || stageRef.current === "signin") {
+          stageRef.current = null;
+          setView(null);
+        }
+        setOwnerStatusChecking(true);
+        ownerStatusRetryAttempts.current += 1;
+        if (ownerStatusRetryAttempts.current >= maxOwnerStatusRetries) {
+          setOwnerStatusChecking(false);
+          retryRef.current = retryStatus;
+          apply({ ...failedView(), errorCode: "owner-status-pending" });
+          return;
+        }
+        if (ownerStatusRetryTimer.current !== null) window.clearTimeout(ownerStatusRetryTimer.current);
+        ownerStatusRetryTimer.current = window.setTimeout(() => {
+          ownerStatusRetryTimer.current = null;
+          void refreshStatus();
+        }, ownerReconcileRetryMs);
+        return;
+      }
+      clearOwnerStatusRetry();
+      setOwnerStatusChecking(false);
+      if ((routing.enrolledWithoutPhone || routing.addingPhone) && next.stage === "server") {
         void discover();
         return;
       }
       if (next.stage === "error") retryRef.current = retryStatus;
       apply(next);
     } catch (error) {
-      if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
+      if (statusRequest !== statusRequestEpoch.current || epoch !== enrollEpoch.current || mutationInFlight.current) return;
+      ownerStatusRetryAttempts.current = 0;
+      setOwnerStatusChecking(false);
       retryRef.current = retryStatus;
       apply({ ...failedView(), errorCode: thrownErrorCode(error) });
     } finally {
-      if (foreground && epoch === enrollEpoch.current) setBusy(false);
+      if (foreground && foregroundStatusRequest.current === statusRequest) {
+        foregroundStatusRequest.current = null;
+        if (pendingId !== null && statusRequest === statusRequestEpoch.current && epoch === enrollEpoch.current) endPending(pendingId);
+      }
     }
   };
   const cancelPairing = () => {
     invitePollEpoch.current += 1;
+    setInvitationState("stopped");
     if (addingPhone) {
-      enrollEpoch.current += 1;
+      const cancelEpoch = ++enrollEpoch.current;
+      foregroundStatusRequest.current = null;
       mutationInFlight.current = false;
       enrollmentActive.current = false;
-      void bridge.enrollment_cancel().catch(() => undefined).finally(onExit);
+      const pendingId = beginPending("production_pairing_cancelling");
+      void bridge.enrollment_cancel().catch(() => undefined).finally(() => {
+        endPending(pendingId);
+        if (mounted.current && enrollEpoch.current === cancelEpoch) onExit?.();
+      });
       return;
     }
-    void runEnrollment(async () => {
+    void runEnrollment({ action: async () => {
       await bridge.enrollment_cancel();
       enrollmentActive.current = false;
       return bridge.enrollment_status();
-    }, cancelPairing);
+    }, retry: cancelPairing, label: "production_pairing_cancelling" });
   };
   const changeServer = () => {
     enrollEpoch.current += 1;
+    operationId.current += 1;
+    foregroundStatusRequest.current = null;
     mutationInFlight.current = false;
+    clearOwnerStatusRetry();
     cancelActive();
     setBusy(false);
+    setPendingOperation(null);
     apply({ mode: "community", stage: "server", origin: connectedOrigin ?? undefined });
   };
   const backToChooser = () => {
@@ -361,6 +500,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     recordModeChoice("hosted");
     const epoch = ++signInEpoch.current;
     setSignInError(false);
+    setHostedOperation("production_pairing_connecting");
     setBusy(true);
     try {
       const next = await bridge.hosted_sign_in("google");
@@ -371,7 +511,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     } catch {
       if (epoch === signInEpoch.current) setSignInError(true);
     } finally {
-      if (epoch === signInEpoch.current) setBusy(false);
+      if (epoch === signInEpoch.current) {
+        setBusy(false);
+        setHostedOperation(null);
+      }
     }
   };
 
@@ -380,11 +523,17 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     signInEpoch.current += 1;
   };
 
-  useEffect(() => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
     invalidateAccountFlows();
     enrollEpoch.current += 1;
+    foregroundStatusRequest.current = null;
     mutationInFlight.current = false;
+    clearOwnerStatusRetry();
     cancelActive();
+    };
   }, []);
   useEffect(() => {
     if (fixedOrigin || previousMode.current === mode) return;
@@ -412,8 +561,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   }, [fixedOrigin]);
   useEffect(() => {
     if (!enrolledWithoutPhone && !addingPhone) return;
-    void refreshStatus();
-  }, [addingPhone, enrolledWithoutPhone]);
+    setOwnerStatusChecking(true);
+    void refreshStatus(true);
+  }, [addingPhone, enrolledWithoutPhone, enrollmentEstablished]);
 
   const route: Route = addingPhone ? "enrollment" : accountLoading && account === null ? "checking"
     : account?.signedIn
@@ -451,11 +601,28 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   }, [route]);
 
   const stage = view?.stage ?? null;
+  const invitationCanStart = invitationAttempt === "idle" || invitationAttempt === "stopped";
+  const automaticPhoneInvitationPending = stage === "ready" && Boolean(view?.owner)
+    && (addingPhone || view?.hasGateway === false)
+    && invitationAttempt === "idle";
   useEffect(() => {
-    if (stage !== "ready" || !view?.owner || (view.hasGateway && !addingPhone) || phoneInviteStarted.current || mutationInFlight.current) return;
-    phoneInviteStarted.current = true;
-    addPhone("transfer");
+    if (stage !== "ready" || !view?.owner || (!addingPhone && view.hasGateway !== false) || invitationAttemptRef.current !== "idle" || mutationInFlight.current) return;
+    addPhone("transfer", true);
   }, [stage, view?.owner, view?.hasGateway]);
+  useEffect(() => {
+    if (stage !== "ready" || !view?.owner || addingPhone || view.hasGateway !== undefined) return;
+    let active = true;
+    let timer: number | undefined;
+    const pollGatewayStatus = async () => {
+      await refreshStatus();
+      if (active) timer = window.setTimeout(() => void pollGatewayStatus(), pollIntervalMs);
+    };
+    timer = window.setTimeout(() => void pollGatewayStatus(), pollIntervalMs);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [addingPhone, stage, view?.hasGateway, view?.owner]);
   useEffect(() => {
     if (stage !== "locked") setVaultOwner("");
     if (stage !== "signin") setSigninPath("chooser");
@@ -521,36 +688,42 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     }
   }, [payload]);
   useEffect(() => {
+    qrRequestId.current += 1;
+    const requestId = qrRequestId.current;
     if (!payload) {
       setQr("");
+      setQrState("idle");
       return;
     }
+    setQr("");
     let live = true;
-    void QRCode.toDataURL(payload, qrOptions).then(url => { if (live) setQr(url); }).catch(() => { if (live) setQr(""); });
+    setQrState("generating");
+    void QRCode.toDataURL(payload, qrOptions).then(url => {
+      if (live && requestId === qrRequestId.current) {
+        setQr(url);
+        setQrState("idle");
+      }
+    }).catch(() => {
+      if (live && requestId === qrRequestId.current) {
+        setQr("");
+        setQrState("error");
+      }
+    });
     return () => {
       live = false;
     };
-  }, [payload]);
+  }, [payload, qrRetry]);
   useEffect(() => {
     if (!stage || !pollingStages.has(stage)) return;
     const timer = window.setInterval(() => {
-      const epoch = enrollEpoch.current;
-      void bridge.enrollment_status().then(next => {
-        if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
-        if (next.stage === "error") retryRef.current = retryStatus;
-        apply(next);
-      }).catch(error => {
-        if (epoch !== enrollEpoch.current || mutationInFlight.current) return;
-        retryRef.current = retryStatus;
-        apply({ ...failedView(), errorCode: thrownErrorCode(error) });
-      });
+      void refreshStatus();
     }, pollIntervalMs);
     return () => window.clearInterval(timer);
   }, [stage]);
   useEffect(() => {
     const invitation = stage === "waiting_phone" ? view?.qrPayload : stage === "expired" ? `expired:${view?.qrPayload ?? ""}` : null;
     const nearExpiry = stage === "waiting_phone" && (view?.expiresInSeconds ?? Infinity) <= 15;
-    if (!invitation || (!nearExpiry && stage !== "expired") || mutationInFlight.current || rotatedInvitation.current === invitation) return;
+    if (!invitation || invitationAttemptRef.current === "stopped" || (!nearExpiry && stage !== "expired") || mutationInFlight.current || rotatedInvitation.current === invitation) return;
     if (stage === "expired" && lastRotationOutcome.current === "expired") return;
     rotatedInvitation.current = invitation;
     void rotatePhone(method, true);
@@ -559,7 +732,18 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   useEffect(() => {
     if (!joinedNow || joined.current) return;
     joined.current = true;
-    onJoined();
+    const pendingId = beginPending("production_pairing_finishing");
+    void (async () => {
+      try {
+        await onJoined();
+      } catch (error) {
+        joined.current = false;
+        retryRef.current = () => apply({ mode: view?.mode ?? (mode === "hosted" ? "hosted" : "community"), stage: "phone_connected" });
+        apply({ ...failedView(), errorCode: thrownErrorCode(error) });
+      } finally {
+        endPending(pendingId);
+      }
+    })();
   }, [joinedNow, onJoined]);
   useEffect(() => {
     if (route === "checking") return;
@@ -600,9 +784,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
   };
   const provision = () => {
     setProvisionError(false);
+    setHostedOperation("production_pairing_preparing");
     setBusy(true);
     void bridge.hosted_provision().catch(() => setProvisionError(true)).finally(() => {
       setBusy(false);
+      setHostedOperation(null);
       void refreshAccount();
     });
   };
@@ -747,10 +933,13 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           <Stage stage="ready">
             <Heading>Connect your phone</Heading>
             <p>Connect a phone to start sending messages. Permissions are granted on the phone, not here.</p>
-            <p id="enrollment-preparing-status" role="status">Preparing a connection code…</p>
-            {phoneInviteStarted.current && !mutationInFlight.current && <div className="enrollment-actions">
+            {invitationCanStart && !automaticPhoneInvitationPending && !busy && <p id="enrollment-idle-status">{copy("production_pairing_idle")}</p>}
+            {invitationCanStart && !automaticPhoneInvitationPending && (view.hasGateway !== undefined || addingPhone) && !mutationInFlight.current && !connectionPending && !busy && <div className="enrollment-actions">
               <button id="enrollment-show-connection-code-button" className="primary-button" disabled={busy} onClick={() => addPhone(method)}>Show connection code</button>
               <button id="enrollment-ready-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
+            </div>}
+            {invitationAttempt === "idle" && !addingPhone && view.hasGateway === undefined && onDeferPhone && !connectionPending && !busy && <div className="enrollment-actions">
+              <button id="enrollment-unknown-roster-defer-phone-button" className="secondary-button" disabled={busy} onClick={() => void deferPhone()}>Set up phone later</button>
             </div>}
           </Stage>
         );
@@ -759,6 +948,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           <Stage stage="waiting_phone">
             <Heading>Connect your phone</Heading>
             <p>Open Peppy on your phone and scan this code.</p>
+            {qrState === "generating" && <BusyIndicator id="enrollment-qr-generating" label={copy("production_pairing_qr_generating")} />}
+            {qrState === "error" && <p id="enrollment-qr-error" className="setup-field-error" role="alert">{copy("production_pairing_qr_error")} <button className="secondary-button" disabled={busy} onClick={() => setQrRetry(current => current + 1)}>{copy("try_again")}</button></p>}
             {qr && (
               <div id="enrollment-qr-hero">
                 <img id="enrollment-qr-image" src={qr} alt="" aria-hidden="true" />
@@ -791,6 +982,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             </div>
           </Stage>
         );
+      case "phone_approved":
+        return <Stage stage="phone_approved"><Heading>Phone approved</Heading><BusyIndicator id="enrollment-phone-approved-status" label={copy("owner_phone_approved_body")} />{onExit && <div className="enrollment-actions"><button id="enrollment-approved-close-button" className="secondary-button" disabled={busy} onClick={onExit}>Close</button></div>}</Stage>;
       case "phone_connected":
         return <Stage stage="phone_connected"><Heading>Phone connected</Heading><p role="status">Finish setup on your phone.</p></Stage>;
       case "expired":
@@ -823,7 +1016,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     }
   };
 
-  const statusMessage = stage === "setup" && view?.ownerResumePending ? copy("setup_owner_resume_status")
+  const statusMessage = pendingOperation || hostedOperation || ownerStatusChecking ? "" : stage === "setup" && view?.ownerResumePending ? copy("setup_owner_resume_status")
     : stage === "waiting_phone" ? "Scan this code with your phone."
     : stage === "verify_phone" ? "Compare the verification code before approving."
       : stage === "phone_connected" ? "Phone connected. Finish setup on your phone."
@@ -854,7 +1047,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
     const body = fixedOrigin ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
     content = (
       <section id="self-hosted-panel" aria-label={headline}>
-        {!enrolledWithoutPhone && <><h2 tabIndex={-1}>{headline}</h2><p>{body}</p></>}
+        {!enrolledWithoutPhone && !enrollmentEstablished && <><h2 tabIndex={-1}>{headline}</h2><p>{body}</p></>}
         {fixedOrigin && <p id="fixed-self-hosted-origin">{hostedBrowser && <span className="setup-hint">Server: </span>}{fixedOrigin}</p>}
         {showUrlForm && (
           <>
@@ -866,7 +1059,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
             <button id="self-hosted-connect-button" className="primary-button" disabled={!validOrigin || busy} onClick={connectSelfHosted}>Connect</button>
           </>
         )}
-        {(view !== null || fixedOrigin) && <div id="enrollment-panel">{renderEnrollment()}</div>}
+        {(view !== null || fixedOrigin || enrolledWithoutPhone || enrollmentEstablished) && <div id="enrollment-panel">{renderEnrollment()}</div>}
         {hostedBrowser && <p id="setup-account-billing-hint" className="setup-hint"><a id="setup-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer">Manage account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a></p>}
       </section>
     );
@@ -881,7 +1074,13 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, addingPhone =
           <h1>Set up Peppy</h1>
           {!enrolledWithoutPhone && !fixedOrigin && <select ref={modeSelect} id="setup-mode-select" aria-label="Server mode" disabled={busy && stage === "verify_phone"} value={mode} onChange={event => selectMode(event.target.value as Mode)}><option value="hosted">{copy("setup_mode_hosted")}</option><option value="self-hosted">{copy("setup_mode_self_hosted")}</option></select>}
         </header>
-        <div id="setup-landing-body" role="region" ref={bodyRef}>{content}</div>
+        <div id="setup-landing-body" role="region" ref={bodyRef}>
+          {pendingOperation && <BusyIndicator id="setup-pending-operation" label={copy(pendingOperation.label)} />}
+          {!pendingOperation && hostedOperation && <BusyIndicator id="setup-hosted-operation" label={copy(hostedOperation)} />}
+          {!pendingOperation && !hostedOperation && ownerStatusChecking && <BusyIndicator id="setup-owner-status-checking" label={copy("production_pairing_checking")} />}
+          {!pendingOperation && !hostedOperation && !ownerStatusChecking && connectionPending && <BusyIndicator id="setup-connection-checking" label={copy("production_pairing_checking")} />}
+          {content}
+        </div>
       </div>
       <div id="setup-status-region" className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{statusMessage}</div>
     </section>

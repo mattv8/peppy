@@ -156,6 +156,48 @@ fn mapped_parts_preserve_order_when_retried_as_an_ordered_prefix() {
 }
 
 #[test]
+fn list_matches_repeated_source_lookup_with_state_reason_and_attachments() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client
+        .begin_mms_acquisition(input("lookup-list", Direction::Incoming))
+        .unwrap();
+    let [first, second] = [
+        attachment(&client, &dir, "lookup-first.png"),
+        attachment(&client, &dir, "lookup-second.png"),
+    ];
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "first", first)
+        .unwrap();
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "second", second)
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &acquisition.acquisition_id,
+            MmsAcquisitionState::Blocked,
+            Some("waiting for provider"),
+        )
+        .unwrap();
+
+    let by_source = client
+        .begin_mms_acquisition(input("lookup-list", Direction::Incoming))
+        .unwrap();
+    let listed = client
+        .mms_acquisitions(MAX_MMS_ACQUISITIONS)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.acquisition_id == acquisition.acquisition_id)
+        .unwrap();
+
+    assert_eq!(by_source, listed);
+    assert_eq!(listed.state, MmsAcquisitionState::Blocked);
+    assert_eq!(listed.reason.as_deref(), Some("waiting for provider"));
+    assert_eq!(listed.attachment_ids, vec![first, second]);
+}
+
+#[test]
 fn source_thread_and_sim_keep_conversations_isolated() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

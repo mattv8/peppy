@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CoreRejectedError } from "./core.js";
 import { BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
+import { TransportError } from "./transport.js";
 
 function locks(): OwnerLockManager {
   let held = false;
@@ -26,9 +27,11 @@ class FakeSession implements HostSession {
   public phase: "unenrolled" | "locked" | "ready" | "closed" = "ready";
   public readonly calls: Array<{ command: string; args: Record<string, unknown>; mutation: boolean }> = [];
   public snapshot: Record<string, unknown> = {};
+  public previewAttachment?: (id: string) => Promise<string | undefined>;
   public async query(command: string, args: Record<string, unknown>) {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
+    if (command === "_worker_identity_metadata") return { deviceId: "00000000-0000-0000-0000-000000000001" };
     return command === "snapshot" ? this.snapshot : { command };
   }
   public async mutate(command: string, args: Record<string, unknown>) { this.calls.push({ command, args, mutation: true }); return { command }; }
@@ -100,6 +103,62 @@ describe("browser host RPC", () => {
     ]);
   });
 
+  it("checkpoints scan requests but reads scan status without a mutation", async () => {
+    const session = new FakeSession();
+    await dispatchBrowserRpc(session, { id: 1, command: "request_contact_sync", args: { bookId: "book" } });
+    await dispatchBrowserRpc(session, { id: 2, command: "get_contact_sync_request", args: { bookId: "book" } });
+    expect(session.calls).toEqual([
+      { command: "request_contact_sync", args: { bookId: "book" }, mutation: true },
+      { command: "get_contact_sync_request", args: { bookId: "book" }, mutation: false },
+    ]);
+  });
+
+  it("does not broadcast a change for a scan status read, but wakes after an enqueued request", async () => {
+    const session = new FakeSession();
+    const wake = vi.fn();
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, wake } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "get_contact_sync_request", args: { bookId: "book" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).not.toContainEqual({ event: "changed" });
+    expect(wake).not.toHaveBeenCalled();
+
+    attached.emit({ id: 2, command: "request_contact_sync", args: { bookId: "book" } });
+    await eventually(() => wake.mock.calls.length === 1);
+    expect(attached.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("forwards history pages as a read-only core request", async () => {
+    const session = new FakeSession();
+    await expect(dispatchBrowserRpc(session, {
+      id: 1,
+      command: "load_history",
+      args: { conversationId: "conversation", beforeMessageId: "message" },
+    })).resolves.toMatchObject({ id: 1, ok: true });
+    expect(session.calls).toEqual([{
+      command: "load_history",
+      args: { conversationId: "conversation", beforeMessageId: "message" },
+      mutation: false,
+    }]);
+  });
+
+  it("does not query history from a locked browser session", async () => {
+    const session = new FakeSession();
+    session.phase = "locked";
+    await expect(dispatchBrowserRpc(session, {
+      id: 1,
+      command: "load_history",
+      args: { conversationId: "conversation", beforeMessageId: "message" },
+    })).resolves.toMatchObject({ ok: false, error: { code: "locked" } });
+    expect(session.calls).toEqual([]);
+  });
+
   it("uses the Rust contact_snapshot address contract after loading the snapshot", async () => {
     const session = new FakeSession();
     session.snapshot = {
@@ -152,6 +211,19 @@ describe("browser host RPC", () => {
     expect(value.conversations[0].messages).toHaveLength(33);
     expect(value.conversations[0].messages.every(message => message.attachments)).toBe(true);
     expect(previews).toBe(32);
+  });
+
+  it("uses the smaller preview budget for an older history page", async () => {
+    const session = new FakeSession();
+    const attachments = Array.from({ length: 13 }, (_, index) => ({ id: `image-${index}`, mediaType: "image/png", state: "ready" }));
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "load_history" ? { messages: attachments.map((attachment, index) => ({ id: `message-${index}`, attachments: [attachment] })) } : { command };
+    };
+    let previews = 0;
+    session.previewAttachment = async () => { previews += 1; return "data:image/png;base64,cHJldmlldw=="; };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "load_history", args: { conversationId: "conversation", beforeMessageId: "message" } })).resolves.toMatchObject({ ok: true });
+    expect(previews).toBe(12);
   });
 
   it("attaches two ports to one session and broadcasts only after a mutation", async () => {
@@ -308,6 +380,43 @@ describe("browser host RPC", () => {
     });
   });
 
+  it("routes approval without accepting or forwarding a passphrase", async () => {
+    const session = new FakeSession();
+    const enrollmentApprove = vi.fn(async () => ({ mode: "community" as const, stage: "waiting_phone" as const }));
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentApprove } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_approve", args: { passphrase: "must-not-reach-network" } });
+
+    await eventually(() => enrollmentApprove.mock.calls.length === 1);
+    expect(enrollmentApprove).toHaveBeenCalledWith();
+  });
+
+  it("validates and forwards waiting-only enrollment cancellation", async () => {
+    const session = new FakeSession();
+    const enrollmentCancel = vi.fn(async (options?: { waitingOnly?: boolean }) => options?.waitingOnly ? { mode: "community" as const, stage: "verify_phone" as const } : undefined);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, enrollmentCancel } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "enrollment_cancel", args: { waitingOnly: true } });
+    attached.emit({ id: 2, command: "enrollment_cancel", args: { waitingOnly: "true" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+
+    expect(enrollmentCancel).toHaveBeenCalledWith({ waitingOnly: true });
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { mode: "community", stage: "verify_phone" } });
+    expect(attached.messages).toContainEqual({ id: 2, ok: false, error: expect.objectContaining({ code: "invalid-request" }) });
+  });
+
   it.each([
     ["enrollment_create_owner", { passphrase: "manual-passphrase" }],
     ["enrollment_connect_shared_secret", { passphrase: "manual-passphrase" }],
@@ -411,6 +520,73 @@ describe("browser host RPC", () => {
     expect(enrollmentManagement).toHaveBeenCalledOnce();
     expect(enrollmentRevokeDevice).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000002");
     expect(session.calls).toEqual([]);
+  });
+
+  it("routes roster reads and revocation through the device-authenticated network adapter", async () => {
+    const session = new FakeSession();
+    const listDevices = vi.fn(async () => ({ devices: [] }));
+    const revokeDevice = vi.fn(async () => undefined);
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, listDevices, revokeDevice } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { currentDeviceId: "00000000-0000-0000-0000-000000000001", devices: [] } });
+    attached.emit({ id: 2, command: "revoke_device", args: { deviceId: "00000000-0000-0000-0000-000000000002" } });
+    await eventually(() => revokeDevice.mock.calls.length === 1);
+    expect(listDevices).toHaveBeenCalledOnce();
+    expect(revokeDevice).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000002");
+    expect(session.calls).toEqual([{ command: "_worker_identity_metadata", args: {}, mutation: false }]);
+  });
+
+  it("forwards optional raw roster presence without requiring older servers to provide it", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(), boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, listDevices: async () => ({ devices: [{ device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wake_route: true }] }) } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { currentDeviceId: "00000000-0000-0000-0000-000000000001", devices: [{ id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "seen", last_seen_age_seconds: 300 }, wakeRoute: true }] } });
+  });
+
+  it("drops an unrecognized optional presence state while retaining the roster", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => undefined, stop: async () => undefined, listDevices: async () => ({ devices: [{ device_id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false, presence: { state: "future", last_seen_age_seconds: 1 } }] }) } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: true, value: { currentDeviceId: "00000000-0000-0000-0000-000000000001", devices: [{ id: "00000000-0000-0000-0000-000000000002", name: "Pixel 8", kind: "android", role: "owner", revoked: false }] } });
+  });
+
+  it("preserves device-management server codes without changing unrelated transport failures", async () => {
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: {
+        start: async () => undefined,
+        stop: async () => undefined,
+        listDevices: async () => { throw new TransportError("revoked"); },
+      } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "list_devices", args: {} });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: expect.objectContaining({ code: "invalid_bearer" }) });
+
+    session.query = async () => { throw new TransportError("revoked"); };
+    const response = await dispatchBrowserRpc(session, { id: 2, command: "list_contact_books", args: {} });
+    expect(response).toMatchObject({ ok: false, error: { code: "unavailable" } });
   });
 
   it("fails closed when Web Locks are unavailable", async () => {

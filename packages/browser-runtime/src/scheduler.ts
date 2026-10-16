@@ -58,10 +58,13 @@ export class BrowserScheduler {
   public poll(): Promise<SchedulerStatus> {
     if (this.running) return this.running;
     this.controller = new AbortController();
-    this.running = this.round(this.controller.signal)
+    const running = this.round(this.controller.signal)
       .then(() => this.setStatus("connected"))
-      .catch(error => this.setStatus(statusFor(error)))
-      .finally(() => { this.running = undefined; this.controller = undefined; });
+      .catch(error => {
+        if (isCancelled(error)) throw error;
+        return this.setStatus(statusFor(error));
+      })
+    this.running = running.finally(() => { this.running = undefined; this.controller = undefined; });
     return this.running;
   }
 
@@ -91,7 +94,7 @@ export class BrowserScheduler {
       if (await this.hasPendingProjectionWork()) await this.apply(signal);
       await this.refreshServerContext(signal);
     } catch (error) {
-      await this.refreshOfflineContext(error, signal);
+      await this.refreshOfflineContext(statusFor(error), signal);
       throw error;
     }
   }
@@ -232,9 +235,8 @@ export class BrowserScheduler {
     await this.session.query("_worker_apply_server_context", { devices, capabilities, connection: "connected" });
   }
 
-  private async refreshOfflineContext(error: unknown, signal: AbortSignal): Promise<void> {
+  private async refreshOfflineContext(connection: SchedulerConnection, signal: AbortSignal): Promise<void> {
     if (signal.aborted) return;
-    const connection = error instanceof TransportError && error.kind === "offline" ? "offline" : "error";
     try {
       await this.session.query("_worker_apply_server_context", { devices: null, capabilities: null, connection });
     } catch {
@@ -255,8 +257,20 @@ function eventPath(purpose: string): "/v1/commands" | "/v1/events" {
 }
 
 function statusFor(error: unknown): SchedulerConnection {
-  if (error instanceof TransportError) return error.kind === "revoked" ? "revoked" : error.kind === "offline" || error.kind === "cancelled" ? "offline" : "error";
+  if (error instanceof TransportError) {
+    if (error.kind === "revoked") return "revoked";
+    if (error.kind === "offline" || isUnavailableStatus(error.status)) return "offline";
+    return "error";
+  }
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "key-mismatch" ? "key-mismatch" : "error";
+}
+
+function isCancelled(error: unknown): boolean {
+  return error instanceof TransportError && error.kind === "cancelled";
+}
+
+function isUnavailableStatus(status: number | undefined): boolean {
+  return status === 502 || status === 503 || status === 504;
 }
 
 function isResync(error: unknown): boolean {

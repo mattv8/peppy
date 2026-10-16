@@ -2,7 +2,7 @@
 
 Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for setup, container builds, emulator operations, and checks.
 
-This native Kotlin/Compose app is a **gateway phone**, not a replacement for the default messaging app. Once enrolled and unlocked, its bottom navigation has **Mirroring**, **SMS**, and **Account** tabs; Settings is available from the enrolled shell. Subscriber conversations and composition remain in the shared webview product surface, not in this app.
+This native Kotlin/Compose app is a **gateway phone**, not a replacement for the default messaging app. Once enrolled and unlocked, its bottom navigation has **Mirroring**, **SMS**, **Contacts**, and **Account** tabs; Settings is available from the enrolled shell. Subscriber conversations and composition remain in the shared webview product surface, not in this app.
 
 ## Enrollment and account
 
@@ -42,13 +42,15 @@ Commands use the current default SMS subscription. If it changes or disappears, 
 
 ## Relay wakes and encryption boundary
 
-The optional FCM wake relay is **off by default**. An operator must configure the relay and the user must explicitly enable it; without Firebase configuration, registration waits and normal bounded sync still runs while the app is open. FCM receives only content-free `wake` or `challenge` values and a wake only schedules work—it never authorizes carrier work. This repository does not claim a live signed FCM delivery path.
+For a verified enrollment at `https://peppy.pro`, Background updates register automatically when the hosted server advertises FCM support. An existing disabled legacy relay preference remains paused; users can pause or resume the durable hosted setting from Account. Self-hosted/community relays retain their manual origin and enable controls. Firebase auto-init is disabled: the app requests an FCM token only from the eligible reconciliation worker (or for an explicitly enabled custom relay). Builds without Firebase app configuration report unavailable rather than acquiring a token.
+
+Registration and cleanup run through network-constrained WorkManager reconciliation, so they may be delayed by connectivity, process death, quota, or locked keys. The relay stores only provider token metadata and content-free `wake`/`challenge` values. A wake delegates to the optional gateway reconnect seam, then falls back to expedited bounded sync with quota fallback; it never authorizes carrier work or promises immediate delivery. This repository does not claim a live signed FCM delivery path.
 
 Vault sync envelopes and private attachment copies retain the existing encrypted body transport. Carrier SMS/MMS itself is outside that encryption boundary. The server's private attachment store is encrypted; public derivatives require a separate explicit publication action.
 
 ## Contacts and experimental MMS
 
-Contact sync is separately enabled and permission-gated. The phone publishes its own book and applies remote edits according to its local Auto / Confirm / Off policy; permission loss and incomplete scans do not imply deletion. Photos are private encrypted 256×256 JPEG attachments, capped at 64 KiB. Doze, force-stop, provider behavior, ContactsProvider behavior, and background work can delay synchronization.
+The unlocked **Contacts** tab is the home of contact sync. Contact sync is separately enabled and permission-gated. The phone publishes its own book and applies remote edits according to its local Auto / Confirm / Off policy; permission loss and incomplete scans do not imply deletion. Photos are private encrypted 256×256 JPEG attachments, capped at 64 KiB. Doze, force-stop, provider behavior, ContactsProvider behavior, and background work can delay synchronization.
 
 Experimental MMS requires participating clients that advertise MMS content version 2 or later. The existing messaging app downloads carrier MMS; Peppy scans available provider parts and uploads completed encrypted records. The phone validates encoded size against the reported carrier limit or a conservative 300 KiB fallback. Confirmed send is distinct from delivery, uncertain attempts are not automatically resent, and carrier MMS remains outside Peppy's encryption boundary.
 

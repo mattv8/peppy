@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ContactAvatar, Plus, X } from "@peppy/desktop-ui";
+import { ContactAvatar, Modal, Plus, X } from "@peppy/desktop-ui";
 import {
   type ContactView,
   type ContactPhone,
@@ -130,6 +130,7 @@ export function ContactForm({
     naturalWidth: number;
     naturalHeight: number;
   } | null>(null);
+  const photoPickerRef = useRef<HTMLButtonElement>(null);
 
   const displayName =
     [draft.givenName, draft.familyName].filter(Boolean).join(" ") ||
@@ -344,6 +345,7 @@ export function ContactForm({
             <label htmlFor="contact-photo-picker">Photo</label>
             <button
               id="contact-photo-picker"
+              ref={photoPickerRef}
               data-action="pick-photo"
               data-has-photo={draft.photoDataUrl ? "true" : "false"}
               aria-label={draft.photoDataUrl ? "Change photo" : "Add photo"}
@@ -681,6 +683,7 @@ export function ContactForm({
       {cropDialog && (
         <PhotoCropDialog
           photo={cropDialog}
+          opener={photoPickerRef}
           onConfirm={handleCropConfirm}
           onCancel={() => setCropDialog(null)}
         />
@@ -691,10 +694,12 @@ export function ContactForm({
 
 function PhotoCropDialog({
   photo,
+  opener,
   onConfirm,
   onCancel,
 }: {
   photo: { dataUrl: string; naturalWidth: number; naturalHeight: number };
+  opener: React.RefObject<HTMLButtonElement | null>;
   onConfirm(croppedDataUrl: string): void;
   onCancel(): void;
 }) {
@@ -795,40 +800,47 @@ function PhotoCropDialog({
   };
 
   return (
-    <dialog id="photo-crop-dialog" aria-labelledby="photo-crop-title" open>
-      <div id="photo-crop-container">
-        <h3 id="photo-crop-title">Crop photo to square</h3>
-        <div
-          id="photo-crop-viewport"
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
-          onKeyDown={handleKeyDown}
-          tabIndex={0}
-          aria-label="Photo crop position"
-          aria-describedby="photo-crop-hint"
-        >
-          <img
-            id="photo-crop-image"
-            src={photo.dataUrl}
-            alt="Original photo to crop"
-            style={{
-              width: photo.naturalWidth * scale,
-              height: photo.naturalHeight * scale,
-              transform: `translate(-${offset.x}px, -${offset.y}px)`,
-            }}
-          />
-        </div>
-        <canvas id="photo-crop-preview" ref={canvasRef} width={targetSize} height={targetSize} />
-        <p id="photo-crop-hint">Use arrow keys or drag to position. Shift+arrow moves faster.</p>
-        <div id="photo-crop-actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className="primary-button" onClick={handleConfirm}>
+    <Modal
+      id="photo-crop-dialog"
+      className="photo-crop-panel"
+      title="Crop photo to square"
+      opener={opener}
+      onDismiss={onCancel}
+      actions={
+        <>
+          <button type="button" className="secondary-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="primary-button" onClick={handleConfirm}>
             Confirm crop
           </button>
-        </div>
+        </>
+      }
+    >
+      <div
+        id="photo-crop-viewport"
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        aria-label="Photo crop position"
+        aria-describedby="photo-crop-hint"
+      >
+        <img
+          id="photo-crop-image"
+          src={photo.dataUrl}
+          alt="Original photo to crop"
+          style={{
+            width: photo.naturalWidth * scale,
+            height: photo.naturalHeight * scale,
+            transform: `translate(-${offset.x}px, -${offset.y}px)`,
+          }}
+        />
       </div>
-    </dialog>
+      <canvas id="photo-crop-preview" ref={canvasRef} width={targetSize} height={targetSize} />
+      <p id="photo-crop-hint">Use arrow keys or drag to position. Shift+arrow moves faster.</p>
+    </Modal>
   );
 }

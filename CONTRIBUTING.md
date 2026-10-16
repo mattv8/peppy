@@ -89,11 +89,13 @@ Retry after startup completes, or override the timeout via `-e PEPPY_WORKSPACE_L
 | Android emulator operations | Host Android SDK with `platform-tools`, an AVD, and emulator tools | `just android-emulator`, `just android-forward`, `just android-deploy`, `just android-smoke`, `just android-sms` |
 | iOS host checks | macOS Command Line Tools, Swift, and generated mobile bindings | `just ios-test` |
 
-On macOS, `desktop-dev`, `desktop-bundle`, and `desktop-run` use already-installed Homebrew `node@24` and `rustup` kegs when the current PATH is missing or mismatches the repository pins. They do not install tools or change global environment configuration; missing kegs leave the normal actionable pin check in place. For other commands, select the pinned kegs in the current terminal:
+Use a stable Node 26 release (`.node-version` selects the major version), pnpm 12.8.1, and the pinned Rust toolchain. Node minor and patch updates within 26 are supported. On macOS, `desktop-dev`, `desktop-bundle`, and `desktop-run` keep a compatible Node on PATH; otherwise they look for already-installed Homebrew `node@26` or `node` and `rustup` kegs. The helpers do not install tools or change global environment configuration. For other commands, select the installed kegs in the current terminal:
 
 ```sh
-export PATH="$(brew --prefix rustup)/bin:$(brew --prefix node@24)/bin:$PATH"
+export PATH="$(brew --prefix rustup)/bin:$(brew --prefix node)/bin:$PATH"
 ```
+
+This example uses Homebrew's unversioned `node` formula; substitute `node@26` if that is the formula you installed.
 
 ## Android build backends
 
@@ -204,7 +206,9 @@ Keep `.opencode/dev/tls/` private and preserve its CA across restarts. Replacing
 the CA requires rebuilding the native apps. Unset `DEBUG` or set `DEBUG=false`
 and restart/rebuild to return to the existing loopback HTTP workflow.
 
-On macOS, `desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory. `desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`.
+On macOS, `desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory.
+
+`desktop-dev`, `desktop-bundle`, and `desktop-run` run `pnpm install --frozen-lockfile` before building to synchronize dependencies with the selected source tree's lockfile. An install failure stops the build; `desktop-run` does not open an older bundle. These commands do not upgrade packages beyond the lockfile.
 
 Development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources. Development uses a separate Keychain namespace. The first dev launch creates an empty profile. Any prior app data and Keychain records stored under the production identity `org.peppy.desktop` remain unchanged; there is no automatic migration. Legacy Keychain records copy only within the current namespace, never from production into dev.
 

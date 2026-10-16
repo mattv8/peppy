@@ -89,7 +89,14 @@ internal object ContactSyncHost {
     fun pass(context: Context, session: GatewaySession): Boolean {
         val prefs = ContactSyncPreferences(context)
         ensureObserver(context)
-        if (!prefs.enabled && !prefs.retirePending) return false
+        if (!prefs.enabled && !prefs.retirePending) {
+            // Do not let contact projection backfill keep disabled users' gateway work queued.
+            // A result, if there is accepted work, is sealed into the ordinary outbox below.
+            val coordinator = coordinator(context, session.client, session.deviceId)
+            runCatching { coordinator.setScanRequestCapability(false) }
+            runCatching { coordinator.reportPendingSyncBlocked("sync_disabled") }
+            return false
+        }
         val readiness = readiness(session.client)
         if (!readiness.contactsReady) return readiness.backfillPending
         // GatewaySync performs the fenced repair before invoking this callback. Keep this guard
@@ -101,6 +108,7 @@ internal object ContactSyncHost {
             prefs.retirePending = false
             return false
         }
+        coordinator.setScanRequestCapability(true)
         return coordinator.run(charging = charging(context)).more
     }
 

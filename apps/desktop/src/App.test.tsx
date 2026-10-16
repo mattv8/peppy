@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { StrictMode } from "react";
 import {
   act,
   cleanup,
@@ -17,6 +18,7 @@ import {
   type DesktopSnapshot,
   type Draft,
   type DraftInput,
+  type EnrollmentView,
   type GatewayView,
   type SendDraftInput,
 } from "./bridge";
@@ -216,6 +218,150 @@ describe("setup landing routing", () => {
     await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://server.example"));
   });
 
+  it("reconciles a stale browser claim result after a connected-owner subscription snapshot", async () => {
+    const creation = deferred<EnrollmentView>();
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline" as const, errorCode: "server-required" },
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    vi.spyOn(bridge, "enrollment_status").mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    current = {
+      ...current,
+      connection: { state: "connected", origin: "https://community.example" },
+      deviceRole: "owner",
+      gateways: [],
+    };
+    await act(async () => hint?.());
+    await act(async () => creation.resolve(enrollment("server", { stage: "setup" })));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["native", {}, "https://127.0.0.1:7000"],
+    ["browser", { hostKind: "browser" as const, fixedOrigin: "https://community.example" }, "https://community.example"],
+  ])("waits for the host connection before showing owner recovery actions in the %s host", async (hostKind, appProps, origin) => {
+    const creation = deferred<EnrollmentView>();
+    const status = deferred<EnrollmentView>();
+    const invitation = deferred<EnrollmentView>();
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline", origin, errorCode: "server-required" },
+      encryption: { state: "locked" },
+      gateways: [],
+      deviceRole: undefined,
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup", origin: current.connection.origin, setupCodeRequired: false }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+    vi.spyOn(bridge, "enrollment_status").mockReturnValue(status.promise);
+    vi.spyOn(bridge, "enrollment_add_phone").mockReturnValue(invitation.promise);
+
+    if (hostKind === "native") localStorage.setItem("peppy.setup.mode", "self-hosted");
+    render(<App {...appProps} />);
+    if (hostKind === "native") {
+      fireEvent.change(await screen.findByLabelText(/server url/i, { selector: "#self-hosted-url-input" }), { target: { value: origin } });
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    }
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+
+    current = {
+      ...current,
+      connection: { state: "offline", origin, errorCode: "connecting" },
+      encryption: { state: "unlocked" },
+      deviceRole: "owner",
+      gateways: [],
+    };
+    await act(async () => hint?.());
+    await act(async () => creation.resolve(enrollment("server", { stage: "setup", origin: current.connection.origin, setupCodeRequired: false })));
+
+    await waitFor(() => expect(bridge.enrollment_status).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "Create server" })).toBeDisabled();
+    await act(async () => status.resolve(enrollment("ready", { owner: true, hasGateway: false, origin: current.connection.origin })));
+    await waitFor(() => expect(bridge.enrollment_add_phone).toHaveBeenCalledWith("transfer"));
+    expect(bridge.enrollment_add_phone).toHaveBeenCalledOnce();
+    await act(async () => invitation.resolve(enrollment("ready", { owner: true, hasGateway: false, origin })));
+    expect(screen.queryByRole("button", { name: "Show connection code" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set up phone later" })).not.toBeInTheDocument();
+
+    current = {
+      ...current,
+      connection: { state: "connected", origin },
+    };
+    await act(async () => hint?.());
+
+    expect(await screen.findByRole("button", { name: "Show connection code" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Set up phone later" })).toBeEnabled();
+  });
+
+  it("rechecks a remounted connected owner until its stale status becomes ready", async () => {
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline", origin: "https://community.example", errorCode: "server-required" },
+      encryption: { state: "locked" },
+      deviceRole: undefined,
+      gateways: [],
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_status")
+      .mockResolvedValueOnce(enrollment("server", { stage: "setup" }))
+      .mockResolvedValueOnce(enrollment("ready", { owner: true, hasGateway: false }));
+    vi.spyOn(bridge, "enrollment_add_phone").mockResolvedValue(enrollment("waiting_phone", { qrPayload: "enrollment", expiresInSeconds: 300 }));
+
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    expect(await screen.findByRole("button", { name: "Create server" })).toBeInTheDocument();
+    vi.useFakeTimers();
+    try {
+      current = { ...current, connection: { state: "offline", origin: "https://community.example", errorCode: "connecting" } };
+      await act(async () => hint?.());
+      expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+      current = { ...current, connection: { state: "connected", origin: "https://community.example" }, deviceRole: "owner" };
+      current = { ...current, encryption: { state: "unlocked" } };
+      await act(async () => hint?.());
+      expect(document.getElementById("enrollment-checking")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+      expect(screen.queryByRole("button", { name: "Create server" })).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: /connect your phone/i })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a locked connected owner on the workbench", async () => {
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "locked" },
+      gateways: [],
+      deviceRole: "owner",
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(bridge.enrollment_status).not.toHaveBeenCalled();
+  });
+
   it("opens owner add phone enrollment from the workbench even with a gateway", async () => {
     await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [SMS_ONLY], deviceRole: "owner" });
     vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
@@ -225,15 +371,29 @@ describe("setup landing routing", () => {
   });
 
   it("defers automatic phone setup per origin while header Add phone remains available", async () => {
-    await landingSnapshot({ connection: { state: "connected", origin: "https://example.test" }, gateways: [], deviceRole: "owner" });
-    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true }));
+    const refreshedSnapshot = {
+      ...await fixtureBridge.load_state(),
+      activeConversationId: undefined,
+      connection: { state: "connected" as const, origin: "https://example.test" },
+      gateways: [],
+      deviceRole: "owner" as const,
+    };
+    const refresh = deferred<DesktopSnapshot>();
+    await landingSnapshot({ connection: refreshedSnapshot.connection, gateways: [], deviceRole: "owner" });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: false }));
     vi.spyOn(bridge, "enrollment_cancel_phone").mockResolvedValue(enrollment("ready", { owner: true }));
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Set up phone later" }));
+    const defer = await screen.findByRole("button", { name: "Set up phone later" });
+    vi.mocked(bridge.load_state).mockReturnValue(refresh.promise);
+
+    fireEvent.click(defer);
     await waitFor(() => expect(localStorage.getItem("peppy.setup.phoneDeferred:https://example.test")).toBe("1"));
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add phone" }));
     expect(await screen.findByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
+
+    await act(async () => refresh.resolve(refreshedSnapshot));
+    expect(screen.getByRole("button", { name: "Set up phone later" })).toBeInTheDocument();
   });
 
   it("returns to the selected conversation when add phone is cancelled", async () => {
@@ -258,6 +418,110 @@ describe("setup landing routing", () => {
     render(<App hostKind="browser" fixedOrigin="https://community.example" />);
     await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
     expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("starts native phone pairing without invoking the sync unlock for an unlocked owner", async () => {
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "unlocked" },
+      gateways: [SMS_ONLY],
+      deviceRole: "owner",
+    });
+    vi.mocked(bridge.enrollment_status).mockResolvedValue(enrollment("ready", { owner: true, hasGateway: true }));
+    const unlock = vi.spyOn(bridge, "unlock_sync");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Add phone" }));
+    expect(await screen.findByText("Connect your phone")).toBeInTheDocument();
+    expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unlocked native session that is offline without a selected conversation on the workbench", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "offline" }, encryption: { state: "unlocked" } });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Server offline");
+    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Peppy will reconnect automatically.");
+    expect(document.querySelector("[data-status-trigger]")).toHaveAttribute("data-status-tone", "warning");
+    expect(document.getElementById("connection-status")).toHaveAttribute("data-server-unreachable");
+  });
+
+  it("retains initial setup through a credentialed outage and clears it after reconnecting", async () => {
+    const creation = deferred<EnrollmentView>();
+    const initial = await fixtureBridge.load_state();
+    let current: DesktopSnapshot = {
+      ...initial,
+      activeConversationId: undefined,
+      connection: { state: "offline", origin: "https://example.test", errorCode: "server-required" },
+      encryption: { state: "locked" },
+      gateways: [],
+      deviceRole: undefined,
+    };
+    vi.spyOn(bridge, "load_state").mockImplementation(async () => current);
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(signedOut);
+    vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(enrollment("server", { stage: "setup" }));
+    vi.spyOn(bridge, "enrollment_create_owner").mockReturnValue(creation.promise);
+
+    render(<App hostKind="browser" fixedOrigin="https://example.test" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create server" }));
+    current = {
+      ...current,
+      connection: { state: "offline", origin: "https://example.test", errorCode: "server-unavailable" },
+      encryption: { state: "unlocked" },
+      deviceRole: "owner",
+      gateways: [SMS_ONLY],
+    };
+    await act(async () => hint?.());
+
+    expect(document.getElementById("setup-landing")).toBeInTheDocument();
+    expect(document.getElementById("server-offline-banner")).toHaveTextContent("Server offline");
+    current = { ...current, connection: { state: "connected", origin: "https://example.test" } };
+    await act(async () => hint?.());
+    await waitFor(() => expect(document.getElementById("setup-landing")).not.toBeInTheDocument());
+  });
+
+  it("does not present an offline banner while a connection is unknown", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "connecting" }, encryption: { state: "unlocked" } });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("server-offline-banner")).not.toBeInTheDocument();
+    expect(document.getElementById("server-offline-announcement")).toHaveTextContent("");
+  });
+
+  it("keeps the onboarding header when SetupLanding is displayed", async () => {
+    await landingSnapshot({ connection: { state: "offline", errorCode: "server-required" } });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("setup-landing")).toBeInTheDocument());
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Set up Peppy");
+  });
+
+  it("shows the neutral Peppy header for a completed empty inbox", async () => {
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "unlocked" },
+      gateways: [SMS_ONLY],
+      deviceRole: "owner",
+      conversations: [],
+    });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
+  });
+
+  it("shows the neutral Peppy header for a deferred owner without a phone", async () => {
+    localStorage.setItem("peppy.setup.phoneDeferred:https://example.test", "1");
+    await landingSnapshot({
+      connection: { state: "connected", origin: "https://example.test" },
+      encryption: { state: "unlocked" },
+      gateways: [],
+      deviceRole: "owner",
+      conversations: [],
+    });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
   });
 });
 
@@ -542,7 +806,354 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("lazy conversation history", () => {
+  it("retains only valid loaded image previews across an anchored state refresh", async () => {
+    const conversation = host.conversations[0];
+    conversation.messages[0].attachments = [
+      { ...conversation.messages[0].attachments[0], id: "kept-preview", name: "kept.png", previewUrl: "blob:kept" },
+      { ...conversation.messages[0].attachments[0], id: "not-ready-preview", name: "not-ready.png", previewUrl: "blob:not-ready" },
+      { ...conversation.messages[0].attachments[0], id: "removed-preview", name: "removed.png", previewUrl: "blob:removed" },
+    ];
+    render(<App />);
+    expect(await screen.findByRole("img", { name: "kept.png" })).toHaveAttribute("src", "blob:kept");
+
+    const refreshed = structuredClone(host.load(conversation.id));
+    refreshed.conversations[0].messages[0].attachments = [
+      { ...conversation.messages[0].attachments[0], previewUrl: undefined },
+      { ...conversation.messages[0].attachments[1], state: "failed", previewUrl: undefined },
+    ];
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+    await act(async () => hint?.());
+
+    expect(bridge.load_state).toHaveBeenLastCalledWith(conversation.id, conversation.messages[0].id);
+    expect(screen.getByRole("img", { name: "kept.png" })).toHaveAttribute("src", "blob:kept");
+    expect(screen.queryByRole("img", { name: "not-ready.png" })).not.toBeInTheDocument();
+    expect(document.querySelector('[data-attachment-id="removed-preview"]')).not.toBeInTheDocument();
+  });
+
+  it("requests subscription refreshes from the first loaded message anchor", async () => {
+    const conversation = host.conversations[0];
+    conversation.messages.unshift({
+      ...conversation.messages[0],
+      id: "m-first-loaded",
+      body: "First loaded message",
+      attachments: [],
+    });
+    render(<App />);
+    await screen.findByText("First loaded message");
+
+    await act(async () => hint?.());
+
+    expect(bridge.load_state).toHaveBeenLastCalledWith(conversation.id, "m-first-loaded");
+  });
+
+  it("retains a prepended prefix and exhaustion when its deferred refresh resolves later", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const refresh = deferred<DesktopSnapshot>();
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.mocked(bridge.load_state).mockImplementationOnce(async (id) => host.load(id)).mockReturnValueOnce(refresh.promise);
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    await act(async () => hint?.());
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await act(async () => page.resolve({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-older-prefix", body: "Older prefix", attachments: [] }],
+      hasMore: false,
+    }));
+    expect(await screen.findByText("Older prefix")).toBeInTheDocument();
+    expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
+
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].hasOlderMessages = true;
+    refreshed.conversations[0].messages.push({
+      ...conversation.messages[0],
+      id: "m-arrived-during-refresh",
+      body: "Arrived during refresh",
+      attachments: [],
+    });
+    await act(async () => refresh.resolve(refreshed));
+
+    expect(screen.getByText("Older prefix")).toBeInTheDocument();
+    expect(screen.getByText("Arrived during refresh")).toBeInTheDocument();
+    expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  });
+
+  it("renders every arrival in an anchored refresh larger than fifty messages", async () => {
+    const conversation = host.conversations[0];
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].messages = Array.from({ length: 61 }, (_, index) => ({
+      ...conversation.messages[0],
+      id: index === 0 ? conversation.messages[0].id : `m-arrival-${index}`,
+      body: index === 0 ? conversation.messages[0].body : `Arrival ${index}`,
+      attachments: [],
+    }));
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+
+    await act(async () => hint?.());
+
+    expect(await screen.findByText("Arrival 60")).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-message-id]")).toHaveLength(61);
+    expect(screen.getByText("Arrival 1")).toBeInTheDocument();
+  });
+
+  it("clears previews and discards an older page that resolves after lock", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    conversation.messages[0].attachments[0].previewUrl = "blob:sensitive";
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    expect(await screen.findByRole("img", { name: "photo.png" })).toHaveAttribute("src", "blob:sensitive");
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+
+    const locked = host.load(conversation.id);
+    locked.connection = { state: "offline", origin: "https://example.test", errorCode: "app-locked" };
+    locked.conversations = [];
+    locked.activeConversationId = undefined;
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(locked);
+    await act(async () => hint?.());
+    expect(await screen.findByRole("heading", { name: "Peppy is locked" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "photo.png" })).not.toBeInTheDocument();
+
+    await act(async () => page.resolve({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-stale-after-lock", body: "Stale after lock", attachments: [] }],
+      hasMore: false,
+    }));
+    expect(screen.queryByText("Stale after lock")).not.toBeInTheDocument();
+  });
+
+  it("does not update state when an older page resolves after unmount", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { unmount } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    unmount();
+
+    await act(async () => page.resolve({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-stale-after-unmount", body: "Stale after unmount", attachments: [] }],
+      hasMore: false,
+    }));
+
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("shows a visible error when a history page belongs to another conversation", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: "river",
+      messages: [{ ...conversation.messages[0], id: "m-wrong-conversation", body: "Wrong conversation", attachments: [] }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry loading older messages" })).toBeInTheDocument();
+    expect(screen.getByText("Hello from Aurora")).toBeInTheDocument();
+    expect(screen.queryByText("Wrong conversation")).not.toBeInTheDocument();
+  });
+
+  it("keeps historical prepends out of the live region until the next frame", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-quiet-history", body: "Quiet history", attachments: [] }],
+      hasMore: false,
+    });
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    frames.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+
+    expect(await screen.findByText("Quiet history")).toBeInTheDocument();
+    const content = document.getElementById("message-list-content")!;
+    expect(content).toHaveAttribute("aria-live", "off");
+    await act(async () => frames.splice(0).forEach((callback) => callback(performance.now())));
+    expect(content).not.toHaveAttribute("aria-live");
+  });
+
+  it("loads the initial snapshot and an older page under StrictMode", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-strict-before", body: "Strict history" }],
+      hasMore: false,
+    });
+    render(<StrictMode><App /></StrictMode>);
+    expect(await screen.findByText("Hello from Aurora")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Strict history")).toBeInTheDocument();
+  });
+
+  it("loads an older page once from the manual fallback and retains chronological rows", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-before", body: "Older message" }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Older message")).toBeInTheDocument();
+    expect(bridge.load_history).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  });
+
+  it("keeps rendered history when an older-page retry fails", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-before", body: "Recovered history" }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByRole("button", { name: "Retry loading older messages" })).toBeInTheDocument();
+    expect(screen.getByText("Hello from Aurora")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading older messages" }));
+    expect(await screen.findByText("Recovered history")).toBeInTheDocument();
+  });
+
+  it("discards an older-page response after switching conversations", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    page.resolve({ conversationId: conversation.id, messages: [{ ...conversation.messages[0], id: "m-stale", body: "Stale history" }], hasMore: false });
+    await screen.findByText("Hello from River");
+    expect(screen.queryByText("Stale history")).not.toBeInTheDocument();
+  });
+});
+
 describe("new-recipient drafts", () => {
+  it("hides the composer and exposes a draft CTA when no conversation is selected", async () => {
+    host.conversations = [];
+    render(<App />);
+
+    const cta = await screen.findByRole("button", { name: "New conversation" });
+    expect(cta).toHaveAttribute("id", "new-conversation-cta");
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+    expect(document.getElementById("conversation-stage")).toHaveStyle({
+      "--composer-overlay-height": "0px",
+    });
+
+    fireEvent.click(cta);
+
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+    expect(screen.getByLabelText("Composer")).toBeInTheDocument();
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+  });
+
+  it("starts an in-place draft from the thread-list toolbar", async () => {
+    host.conversations = [];
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+  });
+
+  it("does not show the CTA for a selected conversation", async () => {
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Composer")).toBeInTheDocument();
+  });
+
+  it("does not show the CTA while a new draft save is pending", async () => {
+    host.conversations = [];
+    const save = deferred<Draft>();
+    vi.mocked(bridge.save_draft).mockReturnValueOnce(save.promise);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
+    const recipients = await screen.findByLabelText("Recipients");
+    fireEvent.change(recipients, { target: { value: "+1 202 555 0100" } });
+    fireEvent.keyDown(recipients, { key: "Enter" });
+
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
+    expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
+
+    await act(async () => save.resolve({
+      id: "draft-conv-new-1",
+      conversationId: "conv-new-1",
+      text: "",
+      recipientIds: ["+12025550100"],
+      attachmentIds: [],
+      revision: "1",
+    }));
+  });
+
+  it("restores the empty CTA after deleting the last blank draft", async () => {
+    host.conversations = [];
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft" }));
+
+    expect(await screen.findByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Recipients")).not.toBeInTheDocument();
+    expect(document.getElementById("conversation-stage")).toHaveStyle({
+      "--composer-overlay-height": "0px",
+    });
+    expect(screen.queryByRole("button", { name: "Delete draft" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
+  });
+
+  it("shows an initial load error without mounting the composer", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValue(new Error("Initial state unavailable"));
+    render(<App />);
+
+    expect(await screen.findByText("Initial state unavailable")).toHaveAttribute("role", "status");
+    expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+  });
+
+  it("keeps a new draft's recipient title when the inbox is empty", async () => {
+    host.conversations = [];
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
+    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
+    fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["+12025550100"]));
+    await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("(202) 555-0100"));
+  });
+
   it("deletes an empty recipientless draft directly and confirms before deleting content", async () => {
     host.drafts.set("empty-draft", { id: "draft-empty", conversationId: "empty-draft", text: "keep until confirmed", recipientIds: [], attachmentIds: [], revision: "1" });
     render(<App />);
@@ -968,6 +1579,8 @@ describe("draft durability", () => {
     expect(recovery).toHaveTextContent("late local text");
     expect(within(recovery).getByRole("button", { name: "Copy retained text" })).toBeInTheDocument();
     expect(within(recovery).getByRole("button", { name: "Restore in new draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /River/ }));
     const selectedRecovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
     expect(selectedRecovery).toHaveTextContent("late local text");
@@ -1477,6 +2090,40 @@ describe("gateway routes", () => {
     expect(bridge.send_draft).not.toHaveBeenCalled();
     expect(bridge.save_draft).not.toHaveBeenCalled();
   });
+
+  it("blocks an offline route without discarding its draft", async () => {
+    host.gateways = [{ ...SMS_ONLY, availability: "offline" }];
+    host.drafts.set("aurora", storedDraft({ simId: "sim-1", text: "Keep this draft" }));
+    render(<App />);
+
+    await screen.findByDisplayValue("Keep this draft");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(document.getElementById("gateway-presence-hint")).toHaveTextContent("isn't responding");
+    expect(host.drafts.get("aurora")?.text).toBe("Keep this draft");
+  });
+
+  it("allows delayed and legacy SMS routes while labeling legacy status as unknown", async () => {
+    host.gateways = [{ ...SMS_ONLY, availability: "delayed" }];
+    host.drafts.set("aurora", storedDraft({ simId: "sim-1" }));
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Send" })).toBeEnabled();
+    expect(document.getElementById("gateway-selector")).toHaveAttribute("data-route-state", "delayed");
+    expect(document.getElementById("gateway-status-hint")).toBeVisible();
+
+    cleanup();
+    host.gateways = [{ ...SMS_ONLY, availability: "unknown" }];
+    render(<App />);
+    expect(await screen.findByText(/Status unknown/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+  });
+
+  it("keeps an unsupported iPhone route visible but disabled", async () => {
+    host.gateways = [{ ...SMS_ONLY, name: "My iPhone", availability: "unsupported_platform" }];
+    render(<App />);
+    const option = await screen.findByRole("option", { name: /My iPhone/ });
+    expect(option).toBeDisabled();
+    expect(option).toHaveAttribute("data-gateway-availability", "unsupported_platform");
+  });
 });
 
 describe("host state display", () => {
@@ -1566,6 +2213,38 @@ describe("host state display", () => {
     expect(alert).toHaveTextContent("Unlock rejected.");
     expect(alert.closest('[data-settings-section="sync"]')).toBeInTheDocument();
     expect(unlock).toHaveBeenCalledOnce();
+  });
+
+  it("offers native sync unlock to an unlocked native session and runs it only on click", async () => {
+    host.encryption = { state: "unlocked" };
+    const unlock = vi.spyOn(bridge, "unlock_sync").mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const unlockButton = screen.getByRole("button", { name: "Unlock sync natively" });
+    expect(unlock).not.toHaveBeenCalled();
+    fireEvent.click(unlockButton);
+    await waitFor(() => expect(unlock).toHaveBeenCalledOnce());
+  });
+
+  it.each(["credentials-required", "revoked"])("hides native sync unlock when the connection reports %s", async (errorCode) => {
+    host.encryption = { state: "unlocked" };
+    host.connection = { state: "connected", origin: "https://example.test", errorCode };
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="sync"]')).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unlock sync natively" })).not.toBeInTheDocument();
+  });
+
+  it("offers no sync unlock button to an unlocked browser session", async () => {
+    const snapshot = host.load();
+    vi.mocked(bridge.load_state).mockResolvedValue({ ...snapshot, mode: "browser", desktop: undefined, encryption: { state: "unlocked" } });
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="sync"]')).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^unlock sync/i })).not.toBeInTheDocument();
   });
 
 
@@ -2652,5 +3331,26 @@ describe("desktop app lock", () => {
     expect(status).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.queryByRole("checkbox", { name: "Require a password when Peppy starts" })).not.toBeInTheDocument();
+  });
+});
+
+describe("vault shared secret reveal", () => {
+  it("shows the generic fallback, not the raw native message, for an unknown reveal error", async () => {
+    vi.mocked(bridge.load_state).mockResolvedValue({
+      ...host.load(),
+      deviceRole: "owner",
+      connection: { state: "connected", origin: "https://example.test" },
+    });
+    const reveal = vi.spyOn(bridge, "reveal_vault_secret").mockRejectedValue(
+      Object.assign(new Error("raw keychain detail /private/secret"), { code: "keychain-unexpected" }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show vault shared secret" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The native operation failed. Your edits remain in this window.",
+    );
+    expect(reveal).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/raw keychain detail/)).not.toBeInTheDocument();
   });
 });

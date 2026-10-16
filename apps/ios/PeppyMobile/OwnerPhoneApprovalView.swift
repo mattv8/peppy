@@ -8,6 +8,10 @@ import PeppyNative
 
 @MainActor
 struct OwnerPhoneApprovalView: View {
+    private enum Operation: Equatable {
+        case none, preparing, refreshing, approving, revealing, cancelling
+    }
+
     let host: OwnerPhoneApprovalHost
     @Binding var isPresented: Bool
     /// The Phase-B owner supplies a device-authenticated, transient reveal surface.
@@ -17,8 +21,7 @@ struct OwnerPhoneApprovalView: View {
     @State private var qr: String?
     @State private var codesMatch = false
     @State private var errorCode: String?
-    @State private var isBusy = false
-    @State private var isRotating = false
+    @State private var operation = Operation.none
     @State private var showingApprovalPrompt = false
     @State private var promptSecret = ""
     @State private var promptContinuation: CheckedContinuation<String?, Never>?
@@ -27,7 +30,10 @@ struct OwnerPhoneApprovalView: View {
     @State private var showingRevealSheet = false
     @State private var requestedMethod = OwnerPhoneMethod.transfer
     @State private var hasCancelledInvitation = false
+    @State private var revealOperationID: UUID?
+    @State private var polling = OwnerPhonePollingCoordinator()
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(host: OwnerPhoneApprovalHost, isPresented: Binding<Bool>, revealSecret: @escaping () async -> AppModel.OwnerVaultSecretRevealOutcome = { .unavailable }) {
         self.host = host
@@ -40,11 +46,15 @@ struct OwnerPhoneApprovalView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     stageContent
+                    if let label = operationLabel {
+                        operationIndicator(label, id: "owner-phone-operation")
+                    }
                     if let errorCode {
                         Text(errorMessage(errorCode))
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("owner-phone-error")
                         Button(String(localized: "peppy.try_again", table: "Peppy")) { Task { await retry() } }
+                            .disabled(isBusy)
                     }
                 }
                 .onChange(of: errorCode) { _, value in
@@ -58,6 +68,7 @@ struct OwnerPhoneApprovalView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(String(localized: "peppy.cancel", table: "Peppy")) { Task { await cancel() } }
+                        .disabled(isBusy)
                         .accessibilityIdentifier("owner-phone-cancel")
                 }
             }
@@ -91,10 +102,14 @@ struct OwnerPhoneApprovalView: View {
             if phase != .active {
                 revealedSecret = nil
                 showingRevealSheet = false
+                revealOperationID = nil
             }
         }
         .onDisappear {
             resumePrompt(with: nil)
+            revealedSecret = nil
+            revealError = nil
+            revealOperationID = nil
             cancelWaitingInvitation()
         }
     }
@@ -104,11 +119,6 @@ struct OwnerPhoneApprovalView: View {
         case .waiting:
             Text("peppy.owner_phone_waiting_headline", tableName: "Peppy").font(.title2.bold())
             Text("peppy.owner_phone_waiting_body", tableName: "Peppy")
-            if isRotating {
-                ProgressView()
-                    .accessibilityLabel(Text("peppy.production_pairing_connecting", tableName: "Peppy"))
-                    .accessibilityIdentifier("owner-phone-qr-rotating")
-            }
             if let qr, let image = qrImage(qr) {
                 Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
                     .frame(maxWidth: 320).clipShape(RoundedRectangle(cornerRadius: 16))
@@ -121,6 +131,7 @@ struct OwnerPhoneApprovalView: View {
                 Text("peppy.owner_phone_shared_secret_cta", tableName: "Peppy")
             }
             .buttonStyle(.bordered)
+            .disabled(isBusy)
             .accessibilityIdentifier("owner-phone-shared-secret")
         case .verify:
             Text("peppy.owner_phone_verify_headline", tableName: "Peppy").font(.title2.bold())
@@ -134,11 +145,10 @@ struct OwnerPhoneApprovalView: View {
                 .frame(minHeight: 44).accessibilityIdentifier("owner-phone-codes-match")
             Button(String(localized: "peppy.owner_phone_approve_cta", table: "Peppy")) { Task { await approve() } }
                 .disabled(!codesMatch || isBusy).accessibilityIdentifier("owner-phone-approve")
-            if isBusy { connectingSpinner }
         case .approved:
-            Text("peppy.owner_phone_approved_body", tableName: "Peppy").font(.title2.bold())
-                .accessibilityIdentifier("owner-phone-approved")
-            connectingSpinner
+            // The approved prose doubles as the persistent waiting indicator, so it is announced once.
+            operationIndicator("peppy.owner_phone_approved_body", id: "owner-phone-approved")
+                .font(.title2.bold())
         case .connected:
             Text("peppy.owner_phone_connected_headline", tableName: "Peppy").font(.title2.bold())
                 .accessibilityAddTraits(.isHeader).accessibilityIdentifier("owner-phone-connected")
@@ -148,19 +158,17 @@ struct OwnerPhoneApprovalView: View {
             Text("peppy.owner_phone_expired_headline", tableName: "Peppy").font(.title2.bold())
             Text("peppy.owner_phone_expired_body", tableName: "Peppy")
             Button(String(localized: "peppy.owner_phone_restart_cta", table: "Peppy")) { Task { await start() } }
+                .disabled(isBusy)
                 .accessibilityIdentifier("owner-phone-restart")
         case .denied:
             Text("peppy.owner_phone_error_denied", tableName: "Peppy").foregroundStyle(.red)
                 .accessibilityIdentifier("owner-phone-denied")
             Button(String(localized: "peppy.owner_phone_restart_cta", table: "Peppy")) { Task { await start() } }
+                .disabled(isBusy)
                 .accessibilityIdentifier("owner-phone-restart")
         case .none:
-            connectingSpinner
+            EmptyView()
         }
-    }
-
-    private var connectingSpinner: some View {
-        ProgressView().accessibilityLabel(Text("peppy.production_pairing_connecting", tableName: "Peppy"))
     }
 
     private var countdownText: String {
@@ -196,6 +204,10 @@ struct OwnerPhoneApprovalView: View {
     }
 
     private func start() async {
+        guard !isBusy else { return }
+        let action = polling.beginAction()
+        operation = .preparing
+        defer { polling.finishAction(action); operation = .none }
         apply(await host.start(method: requestedMethod))
     }
 
@@ -206,26 +218,42 @@ struct OwnerPhoneApprovalView: View {
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, !isBusy else { continue }
             if stage == .waiting {
-                isRotating = true
-                apply(await host.rotateIfNeeded(requested: requestedMethod))
-                isRotating = false
+                let poll = polling.beginPoll()
+                let showsRefresh = (status?.expiresInSeconds ?? 0) <= 15
+                if showsRefresh { operation = .refreshing }
+                let result = await host.rotateIfNeeded(requested: requestedMethod)
+                guard !Task.isCancelled, isPresented, polling.shouldApplyPoll(poll) || showsRefresh else { continue }
+                apply(result)
+                if showsRefresh { operation = .none }
             } else {
-                apply(await host.poll(), keepsError: true)
+                let poll = polling.beginPoll()
+                let result = await host.poll()
+                guard !Task.isCancelled, isPresented, polling.shouldApplyPoll(poll) else { continue }
+                apply(result, keepsError: true)
             }
         }
     }
 
     /// The reveal is offered only after the invitation has switched to the shared-secret method, as on desktop.
     private func revealSharedSecret() async {
+        guard !isBusy else { return }
+        let action = polling.beginAction()
+        operation = .refreshing
+        defer { polling.finishAction(action); operation = .none }
         let rotation = await host.rotateIfNeeded(requested: .sharedSecret)
-        guard case .view = rotation else {
+        guard case let .view(next, _) = rotation, next.stage == .waiting else {
             apply(rotation)
             return
         }
         requestedMethod = .sharedSecret
         apply(rotation)
+        operation = .revealing
+        let operationID = UUID()
+        revealOperationID = operationID
+        defer { if revealOperationID == operationID { revealOperationID = nil } }
         switch await revealSecret() {
         case .revealed(let secret):
+            guard isPresented, scenePhase == .active, revealOperationID == operationID else { return }
             revealedSecret = secret
             revealError = nil
             showingRevealSheet = true
@@ -238,20 +266,37 @@ struct OwnerPhoneApprovalView: View {
             revealError = String(localized: "peppy.owner_phone_error_secret_unavailable", table: "Peppy")
             showingRevealSheet = true
         }
+        operation = .none
     }
 
     private func approve() async {
-        isBusy = true
+        guard !isBusy else { return }
+        let action = polling.beginAction()
+        operation = .approving
+        defer { polling.finishAction(action); operation = .none }
         apply(await host.approve(prompt: promptForSecret))
-        isBusy = false
     }
 
-    /// Cancel always closes the sheet. The Waiting invitation is cancelled best-effort.
+    /// Only a waiting invitation can be revoked; later stages simply close this local surface.
     private func cancel() async {
+        guard !isBusy else { return }
         resumePrompt(with: nil)
+        guard status?.stage == .waiting else {
+            isPresented = false
+            return
+        }
         hasCancelledInvitation = true
-        isPresented = false
-        _ = await host.cancel()
+        let action = polling.beginAction()
+        operation = .cancelling
+        let result = await host.cancel()
+        polling.finishAction(action)
+        operation = .none
+        switch result {
+        case .cancelled: isPresented = false
+        case .view, .failed:
+            hasCancelledInvitation = false
+            apply(result)
+        }
     }
 
     private func retry() async {
@@ -275,7 +320,7 @@ struct OwnerPhoneApprovalView: View {
     }
 
     private func cancelWaitingInvitation() {
-        guard status?.stage == .waiting, !hasCancelledInvitation else { return }
+        guard status?.stage == .waiting, !hasCancelledInvitation, !isBusy else { return }
         hasCancelledInvitation = true
         Task { _ = await host.cancel() }
     }
@@ -330,5 +375,33 @@ struct OwnerPhoneApprovalView: View {
         default: "peppy.owner_phone_error_server_rejected"
         }
         return NSLocalizedString(key, tableName: "Peppy", comment: "")
+    }
+
+    private var isBusy: Bool { operation != .none }
+
+    private var operationLabel: String? {
+        switch operation {
+        case .none: nil
+        case .preparing: "peppy.production_pairing_preparing"
+        case .refreshing: "peppy.production_pairing_refreshing"
+        case .approving: "peppy.production_pairing_approving"
+        case .revealing: "peppy.production_pairing_revealing"
+        case .cancelling: "peppy.production_pairing_cancelling"
+        }
+    }
+
+    private func operationIndicator(_ key: String, id: String) -> some View {
+        HStack {
+            if reduceMotion {
+                Image(systemName: "hourglass")
+                    .accessibilityHidden(true)
+            } else {
+                ProgressView().accessibilityHidden(true)
+            }
+            Text(NSLocalizedString(key, tableName: "Peppy", comment: ""))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(NSLocalizedString(key, tableName: "Peppy", comment: "")))
+        .accessibilityIdentifier(id)
     }
 }

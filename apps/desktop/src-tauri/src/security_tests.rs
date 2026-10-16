@@ -173,6 +173,13 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
 
     let composer = permissions(include_str!("../capabilities/composer.json"));
     let main = permissions(include_str!("../capabilities/default.json"));
+    assert!(commands.contains(&"load_history".to_owned()));
+    assert!(registered.contains("fn load_history("));
+    let handler = &registered[registered.find("tauri::generate_handler![").unwrap()..];
+    assert!(handler.contains("\n        load_history,"));
+    assert!(crate::COMPOSER_COMMANDS.contains(&"load_history"));
+    assert!(main.contains("allow-load-history"));
+    assert!(composer.contains("allow-load-history"));
     for command in [
         "enrollment_begin_vault_request",
         "enrollment_vault_request_status",
@@ -228,6 +235,34 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     // Composer windows cannot minimize/maximize the main shell either.
     assert!(!composer.contains("core:window:allow-minimize"));
     assert!(!main.contains("allow-close-head-panel"));
+}
+
+#[test]
+fn device_management_commands_are_registered_for_the_main_window_only() {
+    let commands = declared_commands();
+    let registered = include_str!("lib.rs");
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    for command in [
+        "list_devices",
+        "revoke_device",
+        "request_contact_sync",
+        "get_contact_sync_request",
+    ] {
+        assert!(
+            commands.contains(&command.to_owned()),
+            "{command} is not declared"
+        );
+        assert!(
+            registered.contains(&format!("\n        {command},")),
+            "{command} is not registered"
+        );
+        assert!(main.contains(&allow(command)), "main lacks {command}");
+        assert!(
+            !composer.contains(&allow(command)),
+            "composer can call {command}"
+        );
+    }
 }
 
 #[test]

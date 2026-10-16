@@ -39,6 +39,16 @@ const APPLY_STEPS: usize = 8;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
 
+/// Sync records gateway HTTP outages as reachability failures without changing other API clients.
+fn sync_net_error(error: NetError) -> BridgeError {
+    match error {
+        NetError::Status {
+            status: 502..=504, ..
+        } => BridgeError::new("server-unavailable", "The configured server is temporarily unavailable."),
+        error => error.into(),
+    }
+}
+
 /// Runs client-core work off the async workers.
 pub async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> BridgeResult<T> + Send + 'static,
@@ -67,7 +77,10 @@ pub async fn fetch_vault(
     vault_id: &str,
     device_id: &str,
 ) -> BridgeResult<VaultResponse> {
-    let vault: VaultResponse = api.get_json("/v1/vault", MAX_JSON_BYTES).await?;
+    let vault: VaultResponse = api
+        .get_json("/v1/vault", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let same = |a: &str, b: &str| {
         uuid::Uuid::parse_str(a)
             .ok()
@@ -114,11 +127,16 @@ async fn refresh_vault(session: &Arc<Session>) -> BridgeResult<()> {
 }
 
 pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
-    let devices: DevicesResponse = session.api.get_json("/v1/devices", MAX_JSON_BYTES).await?;
+    let devices: DevicesResponse = session
+        .api
+        .get_json("/v1/devices", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let capabilities: CapabilitiesResponse = session
         .api
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
-        .await?;
+        .await
+        .map_err(sync_net_error)?;
     let views = gateway_views(&devices, &capabilities);
     let device_role = extract_device_role(&devices, &session.binding.device_id);
     let changed = {
@@ -128,6 +146,7 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         status.gateways = views.clone();
         status.gateways_known = true;
         status.device_role = device_role;
+        status.revoked_device_ids = devices.devices.iter().filter(|device| device.revoked).map(|device| device.device_id.clone()).collect();
         changed
     };
     if changed {
@@ -299,7 +318,11 @@ async fn start_or_resume(
             return Ok(progress);
         }
     }
-    let start: SnapshotStart = session.api.get_json("/v1/snapshot", MAX_JSON_BYTES).await?;
+    let start: SnapshotStart = session
+        .api
+        .get_json("/v1/snapshot", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let invalid = || BridgeError::from(NetError::Invalid);
     let high_water = start
         .high_water_cursor
@@ -397,7 +420,7 @@ async fn import_cut(
             Err(NetError::Status {
                 status: 409 | 400, ..
             }) => return Err(CutError::Impossible),
-            Err(error) => return Err(CutError::Other(error.into())),
+            Err(error) => return Err(CutError::Other(sync_net_error(error))),
         };
         if page.records.is_empty() {
             return Err(CutError::Impossible);
@@ -1094,6 +1117,14 @@ enum WsEnd {
     Ended { stable: bool, code: &'static str },
 }
 
+const PRESENCE_REFRESH_DELAY: Duration = Duration::from_millis(100);
+
+fn schedule_presence_refresh(due: &mut Option<Instant>, now: Instant) {
+    if due.is_none() {
+        *due = Some(now + PRESENCE_REFRESH_DELAY);
+    }
+}
+
 fn close_code(frame: Option<&tungstenite::protocol::CloseFrame>) -> Option<u16> {
     frame.map(|frame| u16::from(frame.code))
 }
@@ -1192,6 +1223,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
         code,
     };
     let mut last_frame = Instant::now();
+    let mut presence_refresh_due = None;
     let mut pinged = false;
     let mut liveness = tokio::time::interval(Duration::from_secs(15));
     loop {
@@ -1212,6 +1244,16 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                 } else if socket.flush().await.is_err() {
                     return ended("live-unavailable");
                 }
+                continue;
+            }
+            _ = async {
+                match presence_refresh_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                presence_refresh_due = None;
+                let _ = refresh_gateways(session).await;
                 continue;
             }
             next = socket.next() => next,
@@ -1239,6 +1281,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         }
                     }
                     "resync_required" => return WsEnd::Resync,
+                    "presence_changed" => schedule_presence_refresh(&mut presence_refresh_due, Instant::now()),
                     _ => {}
                 }
             }
@@ -1307,6 +1350,40 @@ async fn live(session: Arc<Session>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_status_tests {
+    use super::*;
+
+    #[test]
+    fn presence_hints_coalesce_without_dropping_the_first_refresh() {
+        let now = Instant::now();
+        let mut due = None;
+        schedule_presence_refresh(&mut due, now);
+        let first = due.expect("the first presence hint schedules a refresh");
+        schedule_presence_refresh(&mut due, now + Duration::from_millis(10));
+        assert_eq!(due, Some(first));
+        assert_eq!(first.duration_since(now), PRESENCE_REFRESH_DELAY);
+    }
+
+    #[test]
+    fn gateway_statuses_map_to_server_unavailable_only_in_sync() {
+        for status in [502, 503, 504] {
+            assert_eq!(
+                sync_net_error(NetError::Status { status, code: None }).code,
+                "server-unavailable"
+            );
+        }
+        assert_eq!(
+            sync_net_error(NetError::Status {
+                status: 500,
+                code: None,
+            })
+            .code,
+            "server-rejected"
+        );
     }
 }
 

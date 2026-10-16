@@ -1,5 +1,5 @@
 //! Shared local draft composition policy for native and browser hosts.
-use crate::{DraftView, GatewayView, SendResultView, draft_view};
+use crate::{DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view};
 use peppy_client_core::{
     AttachmentId, Client, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId, Direction,
     DraftId, Error as CoreError, GatewayRoute, Message, Transport,
@@ -104,6 +104,40 @@ fn parse_route(gateway: &str, sim: &str) -> Result<GatewayRoute, ComposeError> {
             .map_err(|_| ui("invalid-route", "The phone ID is invalid."))?,
         subscription_id: sim.to_owned(),
     })
+}
+fn gateway_sendable(gateway: &GatewayView) -> Result<(), ComposeError> {
+    let (code, message) = match gateway.availability {
+        GatewayAvailability::Offline => (
+            "gateway-offline",
+            "The selected phone is offline; the draft was kept.",
+        ),
+        GatewayAvailability::NeverConnected => (
+            "gateway-not-connected",
+            "The selected phone has not connected yet; the draft was kept.",
+        ),
+        GatewayAvailability::NoSmsSim => (
+            "gateway-no-sms-sim",
+            "The selected phone has no SMS SIM; the draft was kept.",
+        ),
+        GatewayAvailability::SmsPermissionNeeded => (
+            "gateway-permission-needed",
+            "The selected phone needs SMS permission; the draft was kept.",
+        ),
+        GatewayAvailability::SmsUnavailable | GatewayAvailability::UnsupportedPlatform => (
+            "gateway-unsupported",
+            "The selected phone/SIM cannot send SMS; the draft was kept.",
+        ),
+        GatewayAvailability::CapabilitiesUnknown => (
+            "gateway-capabilities-unknown",
+            "The selected phone has not reported valid SMS capabilities; the draft was kept.",
+        ),
+        GatewayAvailability::Unknown
+        | GatewayAvailability::Connected
+        | GatewayAvailability::Delayed => {
+            return Ok(());
+        }
+    };
+    Err(ui(code, message))
 }
 fn other_party(message: &Message) -> Vec<String> {
     match message.payload.direction {
@@ -282,23 +316,6 @@ pub fn send_draft(
             ));
         }
     };
-    validate_draft_source(client, draft_id, &input.conversation_id)?;
-    let stored: ComposeDraft = client
-        .resolve_compose_draft_for_send(draft_id, expected)
-        .map_err(ComposeError::Core)?;
-    if !input.conversation_id.is_empty()
-        && input.conversation_id != stored.conversation_id.to_string()
-    {
-        return Err(ui(
-            "invalid-draft",
-            "The draft does not belong to this conversation.",
-        ));
-    }
-    if stored.revision != expected {
-        return Err(ComposeError::Core(CoreError::StaleDraft {
-            current_revision: stored.revision,
-        }));
-    }
     let gateways = gateways.ok_or_else(|| {
         ui(
             "gateways-unknown",
@@ -316,6 +333,24 @@ pub fn send_draft(
             "gateway-unsupported",
             "The selected phone/SIM cannot send SMS; the draft was kept.",
         ));
+    }
+    gateway_sendable(gateway)?;
+    validate_draft_source(client, draft_id, &input.conversation_id)?;
+    let stored: ComposeDraft = client
+        .resolve_compose_draft_for_send(draft_id, expected)
+        .map_err(ComposeError::Core)?;
+    if !input.conversation_id.is_empty()
+        && input.conversation_id != stored.conversation_id.to_string()
+    {
+        return Err(ui(
+            "invalid-draft",
+            "The draft does not belong to this conversation.",
+        ));
+    }
+    if stored.revision != expected {
+        return Err(ComposeError::Core(CoreError::StaleDraft {
+            current_revision: stored.revision,
+        }));
     }
     let route = parse_route(gateway_id, sim_id)?;
     let (derived_recipients, latest_transport) =
@@ -485,4 +520,58 @@ fn validate_draft_source(
         ));
     }
     Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gateway(availability: GatewayAvailability) -> GatewayView {
+        GatewayView {
+            id: "gateway".into(),
+            name: "Gateway".into(),
+            sim_id: "sim".into(),
+            online: false,
+            simulated: false,
+            supports_sms: true,
+            supports_mms: true,
+            availability,
+            last_seen_age_seconds: None,
+            presence: None,
+            wake_route: false,
+            capability_note: None,
+            mms_content_version: Some(2),
+            mms_max_bytes: None,
+            mms_limit_source: None,
+            mms_max_recipients: None,
+        }
+    }
+
+    #[test]
+    fn send_guard_blocks_unavailable_states_and_keeps_unknown_sendable() {
+        for availability in [
+            GatewayAvailability::Offline,
+            GatewayAvailability::NeverConnected,
+            GatewayAvailability::NoSmsSim,
+            GatewayAvailability::SmsPermissionNeeded,
+            GatewayAvailability::SmsUnavailable,
+            GatewayAvailability::CapabilitiesUnknown,
+            GatewayAvailability::UnsupportedPlatform,
+        ] {
+            assert!(
+                gateway_sendable(&gateway(availability)).is_err(),
+                "{availability:?}"
+            );
+        }
+        for availability in [
+            GatewayAvailability::Unknown,
+            GatewayAvailability::Connected,
+            GatewayAvailability::Delayed,
+        ] {
+            assert!(
+                gateway_sendable(&gateway(availability)).is_ok(),
+                "{availability:?}"
+            );
+        }
+    }
 }

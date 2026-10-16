@@ -1,0 +1,417 @@
+import Foundation
+import XCTest
+@testable import PeppyNative
+
+final class HostedWakeRuntimeTests: XCTestCase {
+    func testRetiringContextSurvivesNewSessionAndUsesCapturedBearer() async throws {
+        let store = InMemorySecureStore()
+        let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
+        let context = RelayWakeCleanupContext(identity: identity, relayOrigin: "https://relay.example.test", deviceCredential: "old-bearer", retiring: true)
+        try store.upsert("relay-wake-cleanup-contexts-v1", JSONEncoder().encode([context]))
+        let transport = CapabilityTransport(status: 204, body: [:])
+        let recreated = NativeSession(secureStore: store, transport: transport,
+                                      databaseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), allowLoopbackHTTP: false)
+
+        let restored = try await recreated.retiringRelayWakeContexts()
+        XCTAssertEqual(restored, [context])
+        let publisher = try await recreated.capturedRelayWakeRoutePublisher(context: context)
+        try await publisher.remove(routeId: UUID().uuidString.lowercased())
+        XCTAssertEqual(transport.request?.headers["Authorization"], "Bearer old-bearer")
+
+        try await recreated.completeRetiringRelayWakeContext(context)
+        let remaining = try await recreated.retiringRelayWakeContexts()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testRecreatedPausedDrainRevokesStoredRouteBeforeRemovingContext() async throws {
+        let store = InMemorySecureStore()
+        let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
+        let context = RelayWakeCleanupContext(identity: identity, relayOrigin: "https://relay.example.test", deviceCredential: "old-bearer", retiring: true)
+        let route = RelayWakeRoute(routeId: UUID().uuidString.lowercased(), manageCredential: String(repeating: "a", count: 64), wakeCredential: String(repeating: "b", count: 64), tokenFingerprint: "token")
+        try store.upsert("relay-wake-cleanup-contexts-v1", JSONEncoder().encode([context]))
+        let account = "relay-wake-v2|\(identity.origin)|\(identity.vaultId)|\(identity.deviceId)|\(identity.environment)|\(context.relayOrigin)|route"
+        try store.upsert(account, JSONEncoder().encode(route))
+        let transport = CleanupTransport()
+        let recreated = NativeSession(secureStore: store, transport: transport,
+                                      databaseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), allowLoopbackHTTP: false)
+
+        await recreated.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
+
+        XCTAssertEqual(transport.paths, ["DELETE /v1/devices/self/wake-route", "POST /v1/routes/\(route.routeId)/revoke"])
+        XCTAssertEqual(transport.serverBearer, "Bearer old-bearer")
+        let remaining = try await recreated.retiringRelayWakeContexts()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testLegacyRouteMigratesToDurableCleanupBeforeSlotRemoval() async throws {
+        let store = InMemorySecureStore()
+        let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
+        let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
+        // The v1 client keyed its slots by the relay origin. The server-origin slot is a decoy that
+        // must not be migrated or removed by this relay client.
+        let legacy = Self.legacyRoute()
+        let decoy = Self.legacyRoute()
+        let relayAccount = "relay-wake-v1|\(origin.serialized)|route"
+        let decoyAccount = "relay-wake-v1|\(identity.origin)|route"
+        try store.upsert(relayAccount, JSONSerialization.data(withJSONObject: legacy))
+        try store.upsert(decoyAccount, JSONSerialization.data(withJSONObject: decoy))
+        let client = RelayWakeClient(origin: origin, transport: CleanupTransport(), secure: store,
+                                     publisher: NoopPublisher(), identity: identity)
+
+        try await client.migrateLegacyRouteIfNeeded()
+        XCTAssertNil(store.value(relayAccount))
+        XCTAssertNotNil(store.value(decoyAccount))
+        let hasCleanup = try await client.hasPendingCleanup()
+        XCTAssertTrue(hasCleanup)
+
+        // Durable: a fresh client over the same protected store still owns the queued cleanup.
+        let recreated = RelayWakeClient(origin: origin, transport: CleanupTransport(), secure: store,
+                                        publisher: NoopPublisher(), identity: identity)
+        let stillQueued = try await recreated.hasPendingCleanup()
+        XCTAssertTrue(stillQueued)
+    }
+
+    func testBoundPublisherTreatsOldServerDeleteAsTerminal() async throws {
+        let store = InMemorySecureStore()
+        let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
+        let context = RelayWakeCleanupContext(identity: identity, relayOrigin: "https://relay.example.test", deviceCredential: "device-bearer", retiring: true)
+        let transport = CapabilityTransport(status: 405, body: [:])
+        let recreated = NativeSession(secureStore: store, transport: transport,
+                                      databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+
+        let publisher = try await recreated.capturedRelayWakeRoutePublisher(context: context)
+        try await publisher.remove(routeId: UUID().uuidString.lowercased())
+        XCTAssertEqual(transport.request?.method, "DELETE")
+        XCTAssertEqual(transport.request?.headers["Authorization"], "Bearer device-bearer")
+    }
+
+    func testResumeReactivatesContextAfterSuccessfulPauseCleanup() async throws {
+        let store = InMemorySecureStore()
+        let transport = CleanupTransport()
+        let (session, wakeIdentity, relayOrigin) = try await Self.enrolledSession(store: store, transport: transport)
+        try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+
+        try await session.retireRelayWakeContexts()
+        await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
+        XCTAssertTrue(try Self.contexts(store).isEmpty)
+
+        // Resume in the same process reuses the bound client, so registration must run again.
+        try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+        let live = try Self.contexts(store)
+        XCTAssertEqual(live.count, 1)
+        XCTAssertEqual(live.first?.retiring, false)
+    }
+
+    func testOfflinePauseResumeNeverRevokesNewRouteThroughRetiringDuplicate() async throws {
+        let store = InMemorySecureStore()
+        let transport = CleanupTransport()
+        let (session, wakeIdentity, relayOrigin) = try await Self.enrolledSession(store: store, transport: transport)
+        let route = RelayWakeRoute(routeId: UUID().uuidString.lowercased(), manageCredential: String(repeating: "c", count: 64), wakeCredential: String(repeating: "d", count: 64), tokenFingerprint: "token")
+        let routeAccount = "relay-wake-v2|\(wakeIdentity.origin)|\(wakeIdentity.vaultId)|\(wakeIdentity.deviceId)|\(wakeIdentity.environment)|\(relayOrigin)|route"
+        try store.upsert(routeAccount, JSONEncoder().encode(route))
+        try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+
+        // Offline pause: the context is retiring and its cleanup stays queued, never drained.
+        try await session.retireRelayWakeContexts()
+        XCTAssertEqual(try Self.contexts(store).first?.retiring, true)
+
+        // Resume with the retiring duplicate still present must not drain the new live route.
+        try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+        await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
+        XCTAssertTrue(transport.paths.isEmpty)
+        let live = try Self.contexts(store)
+        XCTAssertEqual(live.count, 1)
+        XCTAssertEqual(live.first?.retiring, false)
+    }
+
+    func testRegistrationKeepsRetiringContextsOfOtherIdentities() async throws {
+        let store = InMemorySecureStore()
+        let transport = CleanupTransport()
+        let (session, wakeIdentity, relayOrigin) = try await Self.enrolledSession(store: store, transport: transport)
+        let other = RelayWakeIdentity(origin: wakeIdentity.origin, vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: wakeIdentity.environment)
+        let otherContext = RelayWakeCleanupContext(identity: other, relayOrigin: relayOrigin, deviceCredential: "other-bearer", retiring: true)
+        try store.upsert("relay-wake-cleanup-contexts-v1", JSONEncoder().encode([otherContext]))
+
+        try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+
+        let remaining = try Self.contexts(store)
+        XCTAssertTrue(remaining.contains(otherContext))
+        XCTAssertEqual(remaining.filter { !$0.retiring }.count, 1)
+    }
+
+    func testCapabilityProbeUsesPinnedUnauthenticatedRequest() async throws {
+        let transport = CapabilityTransport(status: 200, body: ["confirm_candidates": true])
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(), transport: transport,
+            databaseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            allowLoopbackHTTP: false
+        )
+        let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
+
+        let supportsCandidates = try await session.relayWakeSupportsCandidates(origin: origin)
+        XCTAssertTrue(supportsCandidates)
+        XCTAssertEqual(transport.request?.method, "GET")
+        XCTAssertEqual(transport.request?.url.path, "/v1/capabilities")
+        XCTAssertNil(transport.request?.headers["Authorization"])
+    }
+
+    func testMissingCapabilityUsesLegacyCompatibility() async throws {
+        let transport = CapabilityTransport(status: 404, body: [:])
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(), transport: transport,
+            databaseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            allowLoopbackHTTP: false
+        )
+        let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
+        let supportsCandidates = try await session.relayWakeSupportsCandidates(origin: origin)
+        XCTAssertFalse(supportsCandidates)
+    }
+
+    func testCapabilityProbeTreatsRateLimitAsRetryable() async throws {
+        let transport = CapabilityTransport(status: 429, body: [:])
+        let session = NativeSession(
+            secureStore: InMemorySecureStore(), transport: transport,
+            databaseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            allowLoopbackHTTP: false
+        )
+        let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
+        do {
+            _ = try await session.relayWakeSupportsCandidates(origin: origin)
+            XCTFail("Expected retryable server error")
+        } catch let error as ClientError {
+            guard case .server(429, _) = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+}
+
+extension HostedWakeRuntimeTests {
+    func testCoalescedWakeWorkRunsOverlappingSameKeyOnce() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let second = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        try? await Task.sleep(for: .milliseconds(10))
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 1)
+
+        await probe.releaseAll()
+        await first.value
+        await second.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 1)
+    }
+
+    func testCoalescedWakeWorkRunsDifferentKeysConcurrently() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let second = Task { @MainActor in await coordinator.run(key: 2) { await probe.run() } }
+        await probe.waitForRuns(2)
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 2)
+
+        await probe.releaseAll()
+        await first.value
+        await second.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 2)
+    }
+
+    func testCoalescedWakeWorkCancelledWaiterReturnsWithoutCancellingWork() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+        defer { Task { await probe.releaseAll() } }
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let returned = expectation(description: "cancelled waiter returned")
+        let joiner = Task { @MainActor in
+            await coordinator.run(key: 1) { await probe.run() }
+            returned.fulfill()
+        }
+        joiner.cancel()
+        await fulfillment(of: [returned], timeout: 1)
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 1)
+
+        await probe.releaseAll()
+        await first.value
+        await joiner.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 1)
+
+        let later = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(2)
+        await probe.releaseAll()
+        await later.value
+        let totalRuns = await probe.runCount
+        XCTAssertEqual(totalRuns, 2)
+    }
+
+    func testCoalescedWakeWorkCancelledWaiterDoesNotClearRunningWork() async {
+        let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
+        let probe = WakeWorkProbe()
+
+        let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        await probe.waitForRuns(1)
+        let cancelledJoiner = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        cancelledJoiner.cancel()
+        await cancelledJoiner.value
+        let laterJoiner = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
+        try? await Task.sleep(for: .milliseconds(10))
+        let runs = await probe.runCount
+        XCTAssertEqual(runs, 1)
+
+        await probe.releaseAll()
+        await first.value
+        await laterJoiner.value
+        let completed = await probe.completedCount
+        XCTAssertEqual(completed, 1)
+    }
+
+    func testWakeFenceRetiresCapturedWorkWhenPauseWins() {
+        var fence = WakeWorkFence()
+        let captured = fence.generation
+        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: true), .proceed)
+
+        fence.preferenceChanged()
+        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: false), .retirePaused)
+    }
+
+    func testWakeFenceSupersedesCapturedWorkAfterPauseAndResume() {
+        var fence = WakeWorkFence()
+        let captured = fence.generation
+        fence.preferenceChanged()
+        fence.preferenceChanged()
+
+        // A capability or registration answer from before the toggle must not continue on its own.
+        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: true), .superseded)
+    }
+
+    func testPauseWinningRegistrationRetiresAndDrainsTheLiveContext() async throws {
+        let store = InMemorySecureStore()
+        let transport = CleanupTransport()
+        let (session, wakeIdentity, relayOrigin) = try await Self.enrolledSession(store: store, transport: transport)
+        var fence = WakeWorkFence()
+        let captured = fence.generation
+
+        // Registration completes after the pause began: the context is live until the checkpoint.
+        try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
+        fence.preferenceChanged()
+        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: false), .retirePaused)
+
+        // The sequence AppModel runs on .retirePaused: retire, then drain before returning.
+        try await session.retireRelayWakeContexts()
+        await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
+        XCTAssertTrue(try Self.contexts(store).isEmpty)
+    }
+
+    func testEnabledExitSweepDrainsRetiringContextOfAnotherRelay() async throws {
+        let store = InMemorySecureStore()
+        let transport = CleanupTransport()
+        let (session, wakeIdentity, _) = try await Self.enrolledSession(store: store, transport: transport)
+        // An unavailable enabled reconcile does not register; the sweep still drains older retiring contexts.
+        let stale = RelayWakeCleanupContext(identity: wakeIdentity, relayOrigin: "https://old-relay.example.test", deviceCredential: "device-bearer", retiring: true)
+        try store.upsert("relay-wake-cleanup-contexts-v1", JSONEncoder().encode([stale]))
+
+        await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
+
+        XCTAssertTrue(try Self.contexts(store).isEmpty)
+    }
+
+    fileprivate static func legacyRoute() -> [String: String] {
+        ["routeId": UUID().uuidString.lowercased(), "manageCredential": String(repeating: "a", count: 64), "wakeCredential": String(repeating: "b", count: 64)]
+    }
+
+    fileprivate static func contexts(_ store: InMemorySecureStore) throws -> [RelayWakeCleanupContext] {
+        guard let data = store.value("relay-wake-cleanup-contexts-v1") else { return [] }
+        return try JSONDecoder().decode([RelayWakeCleanupContext].self, from: data)
+    }
+
+    /// Seeds an active owner enrollment through the production store, then opens the session so
+    /// registration sees the same loaded record a running app would.
+    fileprivate static func enrolledSession(store: InMemorySecureStore, transport: any HTTPTransport) async throws -> (NativeSession, RelayWakeIdentity, String) {
+        let identity = EnrollmentIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased())
+        let record = EnrollmentRecord(identity: identity, role: "owner", keyEpoch: 1, profileJson: "{}", headerJson: "{}")
+        try EnrollmentStore(secure: store).activate(record, token: "device-bearer")
+        let session = NativeSession(secureStore: store, transport: transport,
+                                    databaseDirectory: temporaryDirectory(), allowLoopbackHTTP: false)
+        try await session.open()
+        let wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: "production")
+        return (session, wakeIdentity, "https://relay.example.test")
+    }
+}
+
+private actor WakeWorkProbe {
+    private var runs = 0
+    private var completed = 0
+    private var runWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    var runCount: Int { runs }
+    var completedCount: Int { completed }
+
+    func run() async {
+        runs += 1
+        resumeRunWaiters()
+        await withCheckedContinuation { releaseWaiters.append($0) }
+        completed += 1
+    }
+
+    func waitForRuns(_ count: Int) async {
+        guard runs < count else { return }
+        await withCheckedContinuation { runWaiters.append($0) }
+        await waitForRuns(count)
+    }
+
+    func releaseAll() {
+        let waiters = releaseWaiters
+        releaseWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+
+    private func resumeRunWaiters() {
+        let waiters = runWaiters
+        runWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private final class CapabilityTransport: HTTPTransport, @unchecked Sendable {
+    private let status: Int
+    private let body: [String: Any]
+    private let lock = NSLock()
+    private var captured: HTTPRequest?
+
+    var request: HTTPRequest? { lock.withLock { captured } }
+
+    init(status: Int, body: [String: Any]) {
+        self.status = status
+        self.body = body
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lock.withLock { captured = request }
+        return HTTPResponse(status: status, url: request.url, body: try JSONSerialization.data(withJSONObject: body))
+    }
+}
+
+private final class CleanupTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [HTTPRequest] = []
+    var paths: [String] { lock.withLock { requests.map { "\($0.method) \($0.url.path)" } } }
+    var serverBearer: String? { lock.withLock { requests.first?.headers["Authorization"] } }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        lock.withLock { requests.append(request) }
+        return HTTPResponse(status: 204, url: request.url, body: Data())
+    }
+}
+
+private struct NoopPublisher: RelayWakeRoutePublisher {
+    func publish(routeId: String, wakeCredential: String) async throws {}
+    func remove(routeId: String) async throws {}
+}

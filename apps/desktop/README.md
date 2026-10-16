@@ -82,7 +82,7 @@ Heads are included in normal macOS and Windows builds. Browser fixtures demonstr
 
 ## macOS
 
-Install Node at the version in `../../.node-version`, pnpm 12.8.1, and Rust from `../../rust-toolchain.toml`. From the repository root:
+Install a stable Node 26 release (the major version in `../../.node-version`), pnpm 12.8.1, and Rust from `../../rust-toolchain.toml`. Minor and patch updates within Node 26 are supported. From the repository root:
 
 ```sh
 just desktop-dev
@@ -91,7 +91,9 @@ just desktop-run
 just desktop-open
 ```
 
-`desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory. `desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`.
+`desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory.
+
+`desktop-dev`, `desktop-bundle`, and `desktop-run` run `pnpm install --frozen-lockfile` before building to synchronize dependencies with the selected source tree's lockfile. An install failure stops the build; `desktop-run` does not open an older bundle. These commands do not upgrade packages beyond the lockfile.
 
 On macOS, development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
 
@@ -103,7 +105,7 @@ Production installers use the `tauri.conf.json` configuration (`productName: Pep
 
 ## Windows from WSL
 
-Keep the current checkout and any `CARGO_TARGET_DIR` on a drive-letter NTFS path. The helper rejects ext4 and UNC paths. Install Node at the pinned version, pnpm 12.8.1, Rust at the pinned version, Visual Studio C++ tools with the Windows SDK, WebView2, and native Windows Perl with `IPC::Cmd`. Do not use Git/MSYS Perl.
+Keep the current checkout and any `CARGO_TARGET_DIR` on a drive-letter NTFS path. The helper rejects ext4 and UNC paths. Install a stable Node 26 release, pnpm 12.8.1, Rust at the pinned version, Visual Studio C++ tools with the Windows SDK, WebView2, and native Windows Perl with `IPC::Cmd`. Do not use Git/MSYS Perl.
 
 ```sh
 just desktop-dev

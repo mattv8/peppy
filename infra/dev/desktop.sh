@@ -42,41 +42,57 @@ check_native_pins() {
   node_version=$(node --version)
   pnpm_version=$(pnpm --version)
   rust_version=$(rustc --version)
-  [[ "$node_version" == "v$expected_node" ]] || die "Node $expected_node is required (found $node_version)."
+  node_matches_selector "$expected_node" "$node_version" || die "Node $expected_node is required (found $node_version)."
   [[ "$pnpm_version" == "12.8.1" ]] || die "pnpm 12.8.1 is required (found $pnpm_version)."
   [[ "$rust_version" == "rustc $expected_rust "* ]] || die "Rust $expected_rust is required (found $rust_version)."
 }
 
+node_matches_selector() {
+  local selector="$1" version="$2"
+  [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  if [[ "$selector" =~ ^[0-9]+$ ]]; then
+    [[ "$version" =~ ^v${selector}\.[0-9]+\.[0-9]+$ ]]
+  elif [[ "$selector" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    [[ "$version" =~ ^v${selector}\.[0-9]+$ ]]
+  elif [[ "$selector" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    [[ "$version" == "v$selector" ]]
+  else
+    return 1
+  fi
+}
+
+find_homebrew() {
+  if command -v brew >/dev/null 2>&1; then
+    command -v brew
+  elif [[ -x /opt/homebrew/bin/brew ]]; then
+    printf '%s\n' /opt/homebrew/bin/brew
+  elif [[ -x /usr/local/bin/brew ]]; then
+    printf '%s\n' /usr/local/bin/brew
+  else
+    printf '\n'
+  fi
+}
+
 select_macos_pinned_tools() {
-  local expected_node expected_rust brew prefix
+  local expected_node expected_rust brew prefix major formula
   expected_node=$(tr -d '[:space:]' < "$source_root/.node-version")
   expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$source_root/rust-toolchain.toml")
 
-  if ! command -v node >/dev/null 2>&1 || [[ "$(node --version 2>/dev/null)" != "v$expected_node" ]]; then
-    if command -v brew >/dev/null 2>&1; then
-      brew=$(command -v brew)
-    elif [[ -x /opt/homebrew/bin/brew ]]; then
-      brew=/opt/homebrew/bin/brew
-    elif [[ -x /usr/local/bin/brew ]]; then
-      brew=/usr/local/bin/brew
-    else
-      brew=
-    fi
-    if [[ -n "$brew" ]] && prefix=$("$brew" --prefix node@24 2>/dev/null) && [[ -d "$prefix/bin" ]]; then
-      PATH="$prefix/bin:$PATH"
-      export PATH
-    fi
+  if ! command -v node >/dev/null 2>&1 || ! node_matches_selector "$expected_node" "$(node --version 2>/dev/null)"; then
+    brew=$(find_homebrew)
+    major=${expected_node%%.*}
+    for formula in "node@$major" node; do
+      if [[ -n "$brew" ]] && prefix=$("$brew" --prefix "$formula" 2>/dev/null) && [[ -x "$prefix/bin/node" ]] && node_matches_selector "$expected_node" "$("$prefix/bin/node" --version 2>/dev/null)"; then
+        PATH="$prefix/bin:$PATH"
+        export PATH
+        break
+      fi
+    done
   fi
 
   if ! command -v rustc >/dev/null 2>&1 || [[ "$(rustc --version 2>/dev/null)" != "rustc $expected_rust "* ]]; then
     if [[ -z ${brew:-} ]]; then
-      if command -v brew >/dev/null 2>&1; then
-        brew=$(command -v brew)
-      elif [[ -x /opt/homebrew/bin/brew ]]; then
-        brew=/opt/homebrew/bin/brew
-      elif [[ -x /usr/local/bin/brew ]]; then
-        brew=/usr/local/bin/brew
-      fi
+      brew=$(find_homebrew)
     fi
     if [[ -n ${brew:-} ]] && prefix=$("$brew" --prefix rustup 2>/dev/null) && [[ -d "$prefix/bin" ]]; then
       PATH="$prefix/bin:$PATH"

@@ -4,6 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::DevicePresence;
+
 pub const ENROLLMENT_KEY_BYTES: usize = 32;
 pub const ENROLLMENT_SIGNATURE_BYTES: usize = 64;
 pub const ENROLLMENT_TRANSFER_NONCE_BYTES: usize = 24;
@@ -169,6 +171,10 @@ pub struct EnrollmentDevice {
     pub role: EnrollmentRole,
     pub revoked: bool,
     pub gateway_online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<DevicePresence>,
+    #[serde(default)]
+    pub wake_route: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]

@@ -37,8 +37,22 @@ class DesktopHelperTests(unittest.TestCase):
 
     def configure_macos_tools(self, fake_bin):
         self.fake_command(fake_bin, "uname", "echo Darwin")
-        self.fake_command(fake_bin, "node", "echo v24.21.0")
+        self.fake_command(fake_bin, "node", f"echo v{self.compatible_node_version()}")
         self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+
+    def node_selector(self):
+        return (ROOT / ".node-version").read_text().strip()
+
+    def compatible_node_version(self):
+        return ".".join((self.node_selector().split(".") + ["0", "0"])[:3])
+
+    def selected_source(self, directory, node_selector):
+        source = pathlib.Path(directory) / "selected source"
+        (source / "apps/desktop/src-tauri").mkdir(parents=True)
+        (source / "apps/desktop/src-tauri/tauri.dev.conf.json").write_text("{}")
+        (source / ".node-version").write_text(f"{node_selector}\n")
+        (source / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.98.1"\n')
+        return source
 
     def test_desktop_configs_keep_production_identity_and_define_exact_dev_overlay(self):
         self.assertEqual(
@@ -130,7 +144,7 @@ class DesktopHelperTests(unittest.TestCase):
             fake_bin = pathlib.Path(temporary)
             probe_cwd = fake_bin / "probe-cwd"
             self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", f"pwd > '{probe_cwd}'; echo v24.21.0")
+            self.fake_command(fake_bin, "node", f"pwd > '{probe_cwd}'; echo v{self.compatible_node_version()}")
             self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
             self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             result = self.run_helper(
@@ -296,8 +310,9 @@ class DesktopHelperTests(unittest.TestCase):
             self.fake_command(fake_bin, "node", "echo v20.0.0")
             self.fake_command(fake_bin, "rustc", "echo 'rustc 1.0.0 (test)'")
             self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else command -v node > '{selected}'; fi")
-            self.fake_command(fake_bin, "brew", f"case \"$2\" in node@24) echo '{node_prefix}' ;; rustup) echo '{rust_prefix}' ;; esac")
-            self.fake_command(node_prefix / "bin", "node", "echo v24.21.0")
+            selector_major = self.node_selector().split(".")[0]
+            self.fake_command(fake_bin, "brew", f"case \"$2\" in node@{selector_major}) echo '{node_prefix}' ;; rustup) echo '{rust_prefix}' ;; esac")
+            self.fake_command(node_prefix / "bin", "node", f"echo v{self.compatible_node_version()}")
             self.fake_command(rust_prefix / "bin", "rustc", "echo 'rustc 1.98.1 (test)'")
 
             result = self.run_helper("dev", env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
@@ -309,7 +324,7 @@ class DesktopHelperTests(unittest.TestCase):
             fake_bin = pathlib.Path(temporary)
             brew_called = fake_bin / "brew-called"
             self.fake_command(fake_bin, "uname", "echo Darwin")
-            self.fake_command(fake_bin, "node", "echo v24.21.0")
+            self.fake_command(fake_bin, "node", f"echo v{self.compatible_node_version()}")
             self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
             self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
             self.fake_command(fake_bin, "brew", f"touch '{brew_called}'; exit 1")
@@ -329,7 +344,7 @@ class DesktopHelperTests(unittest.TestCase):
 
             result = self.run_helper("dev", env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Node 24.21.0 is required", result.stderr)
+            self.assertIn(f"Node {self.node_selector()} is required", result.stderr)
 
     def test_macos_build_passes_signing_identity_to_pnpm_environment(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -460,6 +475,7 @@ class DesktopHelperTests(unittest.TestCase):
             target = temporary_path / "caller target"
             command_cwd = temporary_path / "pnpm-cwd"
             self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "node", "echo v24.21.0")
             self.fake_command(
                 fake_bin,
                 "pnpm",
@@ -478,6 +494,130 @@ class DesktopHelperTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(command_cwd.read_text().strip(), str(source))
             self.assertTrue((target / "release/bundle/macos/Peppy_dev.app").is_dir())
+
+    def test_macos_accepts_stable_node_versions_matching_selected_source_selector(self):
+        cases = (
+            ("26", "26.0.0"),
+            ("26", "26.12.3"),
+            ("26.12", "26.12.3"),
+            ("26.12.3", "26.12.3"),
+        )
+        for selector, node_version in cases:
+            with self.subTest(selector=selector, node_version=node_version), tempfile.TemporaryDirectory() as temporary:
+                temporary_path = pathlib.Path(temporary)
+                fake_bin = temporary_path / "bin"
+                fake_bin.mkdir()
+                source = self.selected_source(temporary_path, selector)
+                self.fake_command(fake_bin, "uname", "echo Darwin")
+                self.fake_command(fake_bin, "node", f"echo v{node_version}")
+                self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+                self.fake_command(fake_bin, "brew", "exit 1")
+                self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
+
+                result = self.run_helper(
+                    "dev",
+                    env={"DEBUG": "false", "PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_SOURCE_TREE": str(source)},
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_macos_rejects_incompatible_or_prerelease_node_versions_for_selected_major(self):
+        for node_version in ("25.12.3", "27.0.0", "260.0.0", "26.0.0-rc.1"):
+            with self.subTest(node_version=node_version), tempfile.TemporaryDirectory() as temporary:
+                temporary_path = pathlib.Path(temporary)
+                fake_bin = temporary_path / "bin"
+                fake_bin.mkdir()
+                source = self.selected_source(temporary_path, "26")
+                self.fake_command(fake_bin, "uname", "echo Darwin")
+                self.fake_command(fake_bin, "node", f"echo v{node_version}")
+                self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+                self.fake_command(fake_bin, "pnpm", "if [ \"${1:-}\" = --version ]; then echo 12.8.1; fi")
+                self.fake_command(fake_bin, "brew", "exit 1")
+
+                result = self.run_helper(
+                    "dev",
+                    env={"DEBUG": "false", "PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_SOURCE_TREE": str(source)},
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Node 26 is required", result.stderr)
+                self.assertIn(f"v{node_version}", result.stderr)
+
+    def test_macos_uses_unversioned_homebrew_node_when_versioned_formula_is_incompatible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = pathlib.Path(temporary)
+            fake_bin = temporary_path / "bin"
+            versioned_prefix = temporary_path / "node26"
+            unversioned_prefix = temporary_path / "node"
+            fake_bin.mkdir()
+            (versioned_prefix / "bin").mkdir(parents=True)
+            (unversioned_prefix / "bin").mkdir(parents=True)
+            source = self.selected_source(temporary_path, "26")
+            selected = temporary_path / "selected-node"
+            self.fake_command(fake_bin, "uname", "echo Darwin")
+            self.fake_command(fake_bin, "node", "echo v25.0.0")
+            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+            self.fake_command(fake_bin, "brew", f"case \"$2\" in node@26) echo '{versioned_prefix}' ;; node) echo '{unversioned_prefix}' ;; esac")
+            self.fake_command(versioned_prefix / "bin", "node", "echo v25.0.0")
+            self.fake_command(unversioned_prefix / "bin", "node", "echo v26.12.3")
+            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else command -v node > '{selected}'; fi")
+
+            result = self.run_helper(
+                "dev",
+                env={"DEBUG": "false", "PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_SOURCE_TREE": str(source)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(selected.read_text().strip(), str(unversioned_prefix / "bin" / "node"))
+
+    def test_macos_uses_selected_source_exact_pin_for_homebrew_formula(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = pathlib.Path(temporary)
+            fake_bin = temporary_path / "bin"
+            node_prefix = temporary_path / "node24"
+            fake_bin.mkdir()
+            (node_prefix / "bin").mkdir(parents=True)
+            source = self.selected_source(temporary_path, "24.21.0")
+            selected = temporary_path / "selected-node"
+            self.fake_command(fake_bin, "uname", "echo Darwin")
+            self.fake_command(fake_bin, "node", "echo v26.12.3")
+            self.fake_command(fake_bin, "rustc", "echo 'rustc 1.98.1 (test)'")
+            self.fake_command(fake_bin, "brew", f"case \"$2\" in node@24) echo '{node_prefix}' ;; esac")
+            self.fake_command(node_prefix / "bin", "node", "echo v24.21.0")
+            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else command -v node > '{selected}'; fi")
+
+            result = self.run_helper(
+                "dev",
+                env={"DEBUG": "false", "PATH": f"{fake_bin}:{os.environ['PATH']}", "PEPPY_SOURCE_TREE": str(source)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(selected.read_text().strip(), str(node_prefix / "bin" / "node"))
+
+    def test_macos_installs_dependencies_before_tauri(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_bin = pathlib.Path(temporary)
+            calls = fake_bin / "pnpm-calls"
+            self.configure_macos_tools(fake_bin)
+            self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; else printf '%s ' \"$@\" >> '{calls}'; printf '\\n' >> '{calls}'; fi")
+
+            result = self.run_helper("dev", env={"DEBUG": "false", "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ["install --frozen-lockfile ", "--dir apps/desktop exec tauri dev --config " + str(DEV_CONFIG) + " -- --locked "])
+
+    def test_macos_stops_before_tauri_when_dependency_install_fails(self):
+        for action in ("dev", "build"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temporary:
+                fake_bin = pathlib.Path(temporary)
+                tauri_called = fake_bin / "tauri-called"
+                self.configure_macos_tools(fake_bin)
+                self.fake_command(fake_bin, "pnpm", f"if [ \"${{1:-}}\" = --version ]; then echo 12.8.1; elif [ \"${{1:-}}\" = install ]; then exit 23; else touch '{tauri_called}'; fi")
+
+                result = self.run_helper(action, env={"DEBUG": "false", "PATH": f"{fake_bin}:{os.environ['PATH']}"})
+
+                self.assertEqual(result.returncode, 23)
+                self.assertFalse(tauri_called.exists())
 
 
 if __name__ == "__main__":

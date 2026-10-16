@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import okhttp3.Request
 
 /** One HTTP response. For non-2xx, [body] is the bounded error body (if any). */
 class HttpResult(val code: Int, val body: String?) {
@@ -29,12 +30,33 @@ class GatewayTransportException(message: String) : IOException(message)
  * Authenticated HTTP to the credential's canonical origin. Redirects are disabled so the bearer
  * token can never be forwarded elsewhere; response bodies are bounded like the Rust simulator's.
  */
-class GatewayHttp(private val origin: String, private val bearerToken: String) {
+class GatewayHttp(
+    private val origin: String,
+    private val bearerToken: String,
+    private val observeResponse: ((HttpResult) -> Unit)? = null,
+) {
     fun get(path: String): HttpResult = request("GET", path, null)
 
     fun postJson(path: String, body: String): HttpResult = request("POST", path, body)
 
     fun deleteJson(path: String, body: String): HttpResult = request("DELETE", path, body)
+
+    /** The websocket uses the same credential origin and never accepts a caller-supplied URL. */
+    fun webSocketRequest(): Request {
+        val uri = java.net.URI(origin)
+        val scheme = when (uri.scheme) {
+            "https" -> "wss"
+            "http" -> "ws"
+            else -> throw IllegalArgumentException("unsupported canonical origin")
+        }
+        require(uri.rawPath.isNullOrEmpty() || uri.rawPath == "/")
+        require(uri.rawQuery == null && uri.rawFragment == null && uri.userInfo == null)
+        return Request.Builder()
+            .url("$scheme://${uri.authority}/v1/ws")
+            .header("Authorization", "Bearer $bearerToken")
+            .header("Accept", "application/json")
+            .build()
+    }
 
     fun putFile(path: String, file: File, expectedBytes: Long): HttpResult {
         requireV1ResourcePath(path)
@@ -79,13 +101,7 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
         requireV1JsonPath(path)
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
-            connection.instanceFollowRedirects = false
-            connection.useCaches = false
-            connection.requestMethod = method
-            connection.connectTimeout = TIMEOUT_MS
-            connection.readTimeout = TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
-            connection.setRequestProperty("Accept", "application/json")
+            configureConnection(connection, method)
             if (body != null) {
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 connection.doOutput = true
@@ -101,9 +117,9 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
                 } catch (_: IOException) {
                     null
                 }
-                return HttpResult(code, error)
+                return observed(HttpResult(code, error))
             }
-            return HttpResult(code, connection.inputStream.use { readBounded(it) })
+            return observed(HttpResult(code, connection.inputStream.use { readBounded(it) }))
         } finally {
             connection.disconnect()
         }
@@ -112,36 +128,45 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
     private fun binaryConnection(method: String, path: String, transfer: (HttpURLConnection) -> Unit): HttpResult {
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
-            connection.instanceFollowRedirects = false
-            connection.useCaches = false
-            connection.requestMethod = method
-            connection.connectTimeout = TIMEOUT_MS
-            connection.readTimeout = TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
-            connection.setRequestProperty("Accept", "application/json")
+            configureConnection(connection, method)
             if (method == "PUT") {
                 connection.setRequestProperty("Content-Type", "application/octet-stream")
                 transfer(connection)
-                return result(connection, connection.responseCode)
+                return observed(result(connection, connection.responseCode))
             }
             val code = connection.responseCode
-            if (code !in 200..299) return result(connection, code)
+            if (code !in 200..299) return observed(result(connection, code))
             transfer(connection)
-            return HttpResult(code, null)
+            return observed(HttpResult(code, null))
         } catch (error: GatewayTransportException) {
             throw error
         } catch (error: IOException) {
             // A server can reject before consuming a streaming body; only recover a real rejection.
             val code = try { connection.responseCode } catch (_: IOException) { -1 }
-            if (code > 0 && code !in 200..299) return result(connection, code)
+            if (code > 0 && code !in 200..299) return observed(result(connection, code))
             throw GatewayTransportException("transport failure")
         } finally { connection.disconnect() }
+    }
+
+    private fun configureConnection(connection: HttpURLConnection, method: String) {
+        connection.instanceFollowRedirects = false
+        connection.useCaches = false
+        connection.requestMethod = method
+        connection.connectTimeout = TIMEOUT_MS
+        connection.readTimeout = TIMEOUT_MS
+        connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+        connection.setRequestProperty("Accept", "application/json")
     }
 
     private fun result(connection: HttpURLConnection, code: Int): HttpResult =
         if (code in 200..299) HttpResult(code, null) else HttpResult(code, try {
             connection.errorStream?.use { readBounded(it, MAX_ERROR_BYTES) }
         } catch (_: IOException) { null })
+
+    private fun observed(result: HttpResult): HttpResult {
+        observeResponse?.invoke(result)
+        return result
+    }
 
     private fun requireV1JsonPath(path: String) {
         require(!path.contains("#"))

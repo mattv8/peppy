@@ -77,6 +77,38 @@ describe("IndexedDbCheckpointStore", () => {
     await expect(loaded.checkpoint.readCipher(media)).rejects.toMatchObject({code:"storage-conflict"});
   });
 
+  it("revalidates manifest membership on each lazy read within a generation", async () => {
+    const name = `test-${crypto.randomUUID()}`;
+    const store = new IndexedDbCheckpointStore(name);
+    await store.commit(input(0));
+    const loaded = await store.load(1);
+    if (loaded.kind !== "present") throw new Error("checkpoint missing");
+    store.close();
+    await alterStore(name, (objectStore) => objectStore.put({
+      version: 1,
+      generation: 1,
+      files: ["client.db"],
+      wrappedCredentials: encoder.encode("opaque ciphertext").buffer,
+    }, "manifest"));
+    await expect(loaded.checkpoint.readCipher(media)).rejects.toMatchObject({ code: "invalid-checkpoint" });
+  });
+
+  it("rejects malformed manifest changes even when the generation is unchanged", async () => {
+    const name = `test-${crypto.randomUUID()}`;
+    const store = new IndexedDbCheckpointStore(name);
+    await store.commit(input(0));
+    const loaded = await store.load(1);
+    if (loaded.kind !== "present") throw new Error("checkpoint missing");
+    store.close();
+    await alterStore(name, (objectStore) => objectStore.put({
+      version: 1,
+      generation: 1,
+      files: ["client.db", media, media],
+      wrappedCredentials: encoder.encode("opaque ciphertext").buffer,
+    }, "manifest"));
+    await expect(loaded.checkpoint.readCipher(media)).rejects.toMatchObject({ code: "invalid-checkpoint" });
+  });
+
   it("retains explicitly referenced ciphertext without loading it into the worker", async () => {
     const store = new IndexedDbCheckpointStore(`test-${crypto.randomUUID()}`);
     await store.commit(input(0));

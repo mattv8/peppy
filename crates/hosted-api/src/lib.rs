@@ -123,6 +123,86 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+/// Push delivery provider advertised to enrolled devices.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum PushProvider {
+    Fcm,
+    Apns,
+}
+
+/// APNs environment accepted by the configured relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ApnsEnvironment {
+    Production,
+    Sandbox,
+}
+
+/// Versioned push capability response for enrolled devices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PushConfig {
+    pub version: u8,
+    pub available: bool,
+    pub providers: Vec<PushProvider>,
+    pub apns_environment: Option<ApnsEnvironment>,
+}
+
+impl PushConfig {
+    pub fn validate(&self) -> bool {
+        self.version == 1
+            && validate_push_configuration(self.available, &self.providers, self.apns_environment)
+    }
+}
+
+/// Operator-supplied push capability configuration. The response version is
+/// injected by the server to keep the wire contract stable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushConfigAdvertisement {
+    pub available: bool,
+    pub providers: Vec<PushProvider>,
+    pub apns_environment: Option<ApnsEnvironment>,
+}
+
+impl PushConfigAdvertisement {
+    pub fn validate(&self) -> bool {
+        validate_push_configuration(self.available, &self.providers, self.apns_environment)
+    }
+
+    pub fn response(&self) -> Option<PushConfig> {
+        self.validate().then(|| PushConfig {
+            version: 1,
+            available: self.available,
+            providers: self.providers.clone(),
+            apns_environment: self.apns_environment,
+        })
+    }
+}
+
+fn validate_push_configuration(
+    available: bool,
+    providers: &[PushProvider],
+    apns_environment: Option<ApnsEnvironment>,
+) -> bool {
+    let has_apns = providers.contains(&PushProvider::Apns);
+    let no_duplicates = providers.len()
+        == providers
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+    no_duplicates
+        && match (available, has_apns, apns_environment) {
+            (false, false, None) => providers.is_empty(),
+            (true, true, Some(_)) => !providers.is_empty(),
+            (true, false, None) => !providers.is_empty(),
+            _ => false,
+        }
+}
+
 // ============================================================================
 // Auth DTOs
 // ============================================================================
@@ -283,7 +363,7 @@ pub mod routes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     // ========================================================================
     // Enum Tests
@@ -832,7 +912,37 @@ mod tests {
             "/hosted/v1/provisioning/complete"
         );
     }
+
+    #[test]
+    fn device_roster_roundtrips_nullable_legacy_fields_and_unknown_kind() {
+        let device_id = Uuid::new_v4();
+        let roster: DeviceRosterResponse = serde_json::from_value(json!({
+            "devices": [{
+                "device_id": device_id,
+                "name": null,
+                "kind": "future_client",
+                "role": "device",
+                "revoked": false,
+                "profile_fingerprint": "fingerprint",
+                "key_epoch": 1
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(roster.devices[0].device_id, device_id);
+        assert_eq!(roster.devices[0].name, None);
+        assert_eq!(roster.devices[0].kind.as_deref(), Some("future_client"));
+        assert_eq!(
+            serde_json::to_value(roster).unwrap()["devices"][0]["name"],
+            Value::Null
+        );
+    }
 }
 pub mod auth_web;
 pub mod billing_web;
+pub mod devices;
 pub mod enrollment;
+pub mod presence;
+
+pub use devices::{DeviceRosterDevice, DeviceRosterResponse};
+pub use presence::{DevicePresence, PresenceState};

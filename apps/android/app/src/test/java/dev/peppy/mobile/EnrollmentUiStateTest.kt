@@ -11,30 +11,47 @@ class EnrollmentUiStateTest {
     private val secret = "amber birch cedar dune ember frost"
 
     @Test fun newOwnerClaimNeedsANonBlankGeneratedSecret() {
-        assertFalse(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, "", false))
-        assertTrue(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, secret, false))
-        assertFalse(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, secret, true))
-        assertFalse(canClaimOwner(false, false, "setup-code", true, "short", secret, false))
+        assertFalse(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, strongAdminPassword, "", false))
+        assertTrue(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, strongAdminPassword, secret, false))
+        assertFalse(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, strongAdminPassword, secret, true))
+        assertFalse(canClaimOwner(false, false, "setup-code", true, "short", "short", secret, false))
     }
 
     @Test fun storedResumeSecretNeedsNoEnteredSecret() {
-        assertTrue(canClaimOwner(true, true, "setup-code", true, strongAdminPassword, "", false))
+        assertTrue(canClaimOwner(true, true, "setup-code", true, strongAdminPassword, strongAdminPassword, "", false))
     }
 
     @Test fun legacyResumeWithoutStoredSecretRequiresAnEnteredSecret() {
-        assertFalse(canClaimOwner(true, false, "setup-code", true, strongAdminPassword, "", false))
-        assertTrue(canClaimOwner(true, false, "setup-code", true, strongAdminPassword, secret, false))
+        assertFalse(canClaimOwner(true, false, "setup-code", true, strongAdminPassword, strongAdminPassword, "", false))
+        assertTrue(canClaimOwner(true, false, "setup-code", true, strongAdminPassword, strongAdminPassword, secret, false))
     }
 
     @Test fun protectedResumeStillRequiresSetupCodeAndAdminPassword() {
-        assertFalse(canClaimOwner(true, true, "", true, strongAdminPassword, "", false))
-        assertFalse(canClaimOwner(true, true, "setup-code", true, "short", "", false))
-        assertFalse(canClaimOwner(true, true, "setup-code", true, strongAdminPassword, "", true))
+        assertFalse(canClaimOwner(true, true, "", true, strongAdminPassword, strongAdminPassword, "", false))
+        assertFalse(canClaimOwner(true, true, "setup-code", true, "short", "short", "", false))
+        assertFalse(canClaimOwner(true, true, "setup-code", true, strongAdminPassword, strongAdminPassword, "", true))
     }
 
     @Test fun openOwnerClaimAndResumePermitAnEmptySetupCode() {
-        assertTrue(canClaimOwner(false, false, "", false, strongAdminPassword, secret, false))
-        assertTrue(canClaimOwner(true, true, "", false, strongAdminPassword, "", false))
+        assertTrue(canClaimOwner(false, false, "", false, strongAdminPassword, strongAdminPassword, secret, false))
+        assertTrue(canClaimOwner(true, true, "", false, strongAdminPassword, strongAdminPassword, "", false))
+    }
+
+    @Test fun ownerClaimRequiresMatchingConfirmedAdminPassword() {
+        assertFalse(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, "different password", secret, false))
+        assertTrue(canClaimOwner(false, false, "setup-code", true, strongAdminPassword, strongAdminPassword, secret, false))
+        assertFalse(canClaimOwner(false, false, "setup-code", true, "", "", secret, false))
+    }
+
+    @Test fun adminPasswordUsesUtf8ByteBoundaries() {
+        val twelveBytePassword = "é".repeat(6)
+        val maximumPassword = "a".repeat(1024)
+        val oversizedPassword = "a".repeat(1025)
+
+        assertTrue(hasValidAdminPasswordLength(twelveBytePassword))
+        assertTrue(hasValidAdminPasswordLength(maximumPassword))
+        assertFalse(hasValidAdminPasswordLength("é".repeat(5)))
+        assertFalse(hasValidAdminPasswordLength(oversizedPassword))
     }
 
     @Test fun secretFieldIsShownOnlyWhenResumeHasNoStoredSecret() {
@@ -51,14 +68,19 @@ class EnrollmentUiStateTest {
     }
 
     @Test fun vaultCreateNeedsAnEnteredOrStoredSecretAndNeverProceedsWhenStorageIsUnavailable() {
-        assertTrue(canCreateVault("taylor", strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, false))
-        assertTrue(canCreateVault("taylor", strongAdminPassword, "", EnrollmentHost.ResumeSecret.STORED, false))
-        assertFalse(canCreateVault("taylor", strongAdminPassword, "", EnrollmentHost.ResumeSecret.PROMPT, false))
-        assertTrue(canCreateVault("taylor", strongAdminPassword, secret, EnrollmentHost.ResumeSecret.PROMPT, false))
-        assertFalse(canCreateVault("taylor", strongAdminPassword, secret, EnrollmentHost.ResumeSecret.UNAVAILABLE, false))
-        assertFalse(canCreateVault("", strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, false))
-        assertFalse(canCreateVault("taylor", "short", secret, EnrollmentHost.ResumeSecret.NONE, false))
-        assertFalse(canCreateVault("taylor", strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, true))
+        assertTrue(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, false))
+        assertTrue(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, "", EnrollmentHost.ResumeSecret.STORED, false))
+        assertFalse(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, "", EnrollmentHost.ResumeSecret.PROMPT, false))
+        assertTrue(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, secret, EnrollmentHost.ResumeSecret.PROMPT, false))
+        assertFalse(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, secret, EnrollmentHost.ResumeSecret.UNAVAILABLE, false))
+        assertFalse(canCreateVault("", strongAdminPassword, strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, false))
+        assertFalse(canCreateVault("taylor", "short", "short", secret, EnrollmentHost.ResumeSecret.NONE, false))
+        assertFalse(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, true))
+    }
+
+    @Test fun vaultCreateRequiresMatchingConfirmedAdminPassword() {
+        assertFalse(canCreateVault("taylor", strongAdminPassword, "different password", secret, EnrollmentHost.ResumeSecret.NONE, false))
+        assertTrue(canCreateVault("taylor", strongAdminPassword, strongAdminPassword, secret, EnrollmentHost.ResumeSecret.NONE, false))
     }
 
     @Test fun ownerSecretErrorCodesMapToGeneratedNativeCopy() {

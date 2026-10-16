@@ -2,7 +2,6 @@ package dev.peppy.mobile
 
 import android.app.PendingIntent
 import android.content.Context
-import android.os.Build
 import android.telephony.SmsManager
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClientInterface
@@ -17,12 +16,7 @@ interface SmsCarrier {
 
 class AndroidSmsCarrier(private val context: Context) : SmsCarrier {
     private fun manager(subscriptionId: Int): SmsManager =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            context.getSystemService(SmsManager::class.java).createForSubscriptionId(subscriptionId)
-        } else {
-            @Suppress("DEPRECATION")
-            SmsManager.getSmsManagerForSubscriptionId(subscriptionId)
-        }
+        subscriptionSmsManager(context, subscriptionId)
 
     override fun divide(subscriptionId: Int, body: String): List<String> = manager(subscriptionId).divideMessage(body)
 

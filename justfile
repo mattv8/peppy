@@ -25,7 +25,7 @@ doctor:
     @command -v pnpm >/dev/null || { echo "pnpm is required" >&2; exit 1; }
     @command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
     @expected_rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml); actual_rust=$(rustc -V | awk '{print $2}'); test "$actual_rust" = "$expected_rust" || { echo "rustc $expected_rust is required (found $actual_rust)" >&2; exit 1; }
-    @expected_node=$(cat .node-version); actual_node=$(node -p 'process.versions.node'); test "$actual_node" = "$expected_node" || { echo "Node $expected_node is required (found $actual_node)" >&2; exit 1; }
+    @expected_node=$(tr -d '[:space:]' < .node-version); actual_node=$(node -p 'process.versions.node'); [[ "$actual_node" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ".$actual_node." == ".$expected_node."* ]] || { echo "Node $expected_node is required (found $actual_node)" >&2; exit 1; }
     @test "$(pnpm --version)" = "12.8.1" || { echo "pnpm 12.8.1 is required" >&2; exit 1; }
     @cargo --version && pnpm --version && docker version && docker compose version
     @test -f .env || { echo ".env is required; copy .env.example and set synthetic development credentials" >&2; exit 1; }

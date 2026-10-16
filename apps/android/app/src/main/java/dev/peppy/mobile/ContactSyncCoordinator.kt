@@ -100,18 +100,46 @@ internal class ContactSyncCoordinator(
         if (!granted.read) {
             // Permission loss publishes `unavailable` only; existing contacts are never removed.
             abandonScan(bookId, checkpoint(bookId))
+            reportSyncBlocked(bookId, "permission_denied")
             return ContactPassReport(ContactPassReport.Outcome.NO_ACCESS, bookId)
         }
         val defaultAccountId = defaultAccountId(bookId)
         val checkpoint = checkpoint(bookId)
-        var report = if (forceFull || fullDue(checkpoint, charging)) {
+        val pendingBeforeScan = hasPendingSyncScan(bookId)
+        var report = if (forceFull || pendingBeforeScan || fullDue(checkpoint, charging)) {
             scanPass(book, bookId, checkpoint, defaultAccountId)
         } else {
             incrementalPass(book, bookId, checkpoint, defaultAccountId)
         }
         report = processRequests(book, bookId, defaultAccountId, report)
-        return report
+        // A request received after this scan began remains waiting for the next full scan. Keep a
+        // bounded gateway pass queued, but do not replace the associated scan on every pass.
+        return report.copy(more = report.more || hasPendingSyncScan(bookId))
     }
+
+    /** Reports pending remote scan work that this host cannot execute without touching the OS. */
+    fun reportPendingSyncBlocked(reason: String): Boolean {
+        val book = ownedBook() ?: return false
+        return reportSyncBlocked(book.id, reason).optInt("count") > 0
+    }
+
+    /** Keeps capability publication in the current generation and avoids repeated revisions. */
+    fun setScanRequestCapability(enabled: Boolean): Boolean {
+        val books = core.listBooks().optJSONArray("books") ?: return false
+        val book = (0 until books.length()).map { books.getJSONObject(it) }.firstOrNull {
+            it.optString("owner_device_id") == deviceId && it.optString("state") != "retired"
+        } ?: return false
+        if (book.optJSONObject("capabilities")?.optBoolean("scan_request") == enabled) return false
+        core.setScanRequestCapability(JSONObject().put("book_id", book.getString("id")).put("enabled", enabled))
+        return true
+    }
+
+    private fun hasPendingSyncScan(bookId: String): Boolean =
+        core.pendingSyncScans(JSONObject().put("book_id", bookId))
+            .optJSONArray("requests")?.length()?.let { it > 0 } == true
+
+    private fun reportSyncBlocked(bookId: String, reason: String): JSONObject =
+        core.reportSyncBlocked(JSONObject().put("book_id", bookId).put("reason", reason))
 
     private fun fullDue(checkpoint: JSONObject, charging: Boolean): Boolean {
         if (checkpoint.has("scan_id") || checkpoint.optBoolean("full_requested")) return true
@@ -123,13 +151,15 @@ internal class ContactSyncCoordinator(
 
     private fun scanPass(book: JSONObject, bookId: String, checkpoint: JSONObject, defaultAccountId: String?): ContactPassReport {
         val scanId = checkpoint.optString("scan_id").ifEmpty { null } ?: UUID.randomUUID().toString().also { id ->
-            core.beginScan(
-                JSONObject().put("schema_version", 1).put("scan_id", id).put("book_id", bookId)
-                    .put("generation", book.getString("generation")).put("access", "full").put("authoritative", true),
-            )
             checkpoint.put("scan_id", id).put("scan_started_at", clock()).put("scan_incomplete", false).remove("scan_after")
             saveCheckpoint(bookId, checkpoint)
         }
+        // Persist the native resume identity before claiming in core. Repeating the same begin is
+        // idempotent, so a process death between these two durable writes safely resumes it.
+        core.beginScan(
+            JSONObject().put("schema_version", 1).put("scan_id", scanId).put("book_id", bookId)
+                .put("generation", book.getString("generation")).put("access", "full").put("authoritative", true),
+        )
         var budget = PASS_CONTACTS
         var photoBudget = PASS_PHOTOS
         var observed = 0
@@ -687,7 +717,7 @@ internal class ContactSyncCoordinator(
             .put("id", id).put("owner_device_id", deviceId).put("generation", generation)
             .put("state", state ?: if (granted.read) "active" else "unavailable")
             .put("capabilities", JSONObject().put("read", granted.read).put("write", granted.read && granted.write)
-                .put("photo", true).put("notes", true).put("birthday", true))
+                .put("photo", true).put("notes", true).put("birthday", true).put("scan_request", true))
             .put("accounts", accounts)
         deviceName?.takeIf { it.isNotBlank() }?.let { book.put("device_name", it.take(128)) }
         region?.takeIf { it.length == 2 && it.all(Char::isLetter) }?.let { book.put("region", it.uppercase()) }

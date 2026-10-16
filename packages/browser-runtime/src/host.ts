@@ -5,12 +5,14 @@ import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./o
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
 import { BrowserEnrollment, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
 import { BrowserScheduler } from "./scheduler.js";
-import { OriginTransport } from "./transport.js";
+import { OriginTransport, TransportError } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 
 const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
+const MAX_PREVIEWS_PER_SNAPSHOT = 32;
+const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
 const OWNER_NAME = "peppy-browser-v1";
 
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
@@ -58,8 +60,8 @@ export interface BrowserNetwork {
   enrollmentPendingVaultRequest(): Promise<{ origin: string; requestId: string; displayName: string } | null>;
   enrollmentAddPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
   enrollmentStatus(): Promise<EnrollmentView>;
-  enrollmentApprove(passphrase: string): Promise<EnrollmentView>;
-  enrollmentCancel(): Promise<void>;
+  enrollmentApprove(): Promise<EnrollmentView>;
+  enrollmentCancel(options?: { waitingOnly?: boolean }): Promise<EnrollmentView | undefined>;
   enrollmentSignOut(): Promise<void>;
   enrollmentGenerateSecret(): Promise<string>;
   enrollmentManagement(): Promise<InstanceManagement>;
@@ -71,6 +73,8 @@ export interface BrowserNetwork {
   enrollmentListVaultRequests(): Promise<VaultRequestView[]>;
   enrollmentApproveVaultRequest(requestId: string): Promise<void>;
   enrollmentDenyVaultRequest(requestId: string): Promise<void>;
+  listDevices(): Promise<unknown>;
+  revokeDevice(deviceId: string): Promise<void>;
   subscribeChanges?(listener: () => void): () => void;
   retryAttachment?(id: string): void;
   wake?(): void;
@@ -92,6 +96,7 @@ type Invocation = { coreCommand: string; mutation: boolean };
 
 const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   load_state: { coreCommand: "snapshot", mutation: false },
+  load_history: { coreCommand: "load_history", mutation: false },
   save_draft: { coreCommand: "save_draft", mutation: true },
   send_draft: { coreCommand: "send_draft", mutation: true },
   discard_draft: { coreCommand: "discard_draft", mutation: true },
@@ -108,6 +113,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   list_contact_edits: { coreCommand: "list_contact_edits", mutation: false },
   search_contact_recipients: { coreCommand: "search_contact_recipients", mutation: false },
   request_contact_repair: { coreCommand: "request_contact_repair", mutation: true },
+  request_contact_sync: { coreCommand: "request_contact_sync", mutation: true },
+  get_contact_sync_request: { coreCommand: "get_contact_sync_request", mutation: false },
   list_restorable_contacts: { coreCommand: "list_restorable_contacts", mutation: false },
   restore_contact: { coreCommand: "restore_contact", mutation: true },
   contact_snapshot: { coreCommand: "contact_snapshot", mutation: false },
@@ -158,6 +165,9 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
 }
 
 function errorFor(error: unknown): RpcError {
+  if (error instanceof TransportError) {
+    return { code: error.kind === "offline" ? "offline" : "unavailable", message: "Browser operation failed." };
+  }
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const details = errorDetails(error);
@@ -166,6 +176,18 @@ function errorFor(error: unknown): RpcError {
     return { code, message: "Browser operation failed.", ...details };
   }
   return { code: "unavailable", message: "Browser operation failed." };
+}
+
+function deviceManagementError(error: unknown): RpcError {
+  if (error instanceof TransportError) {
+    if (error.kind === "revoked") {
+      return { code: "invalid_bearer", message: "The server rejected this device credential." };
+    }
+    if (error.kind === "status" && error.code && ["owner_required", "last_active_owner", "device_already_revoked", "device_not_found", "invalid_bearer"].includes(error.code)) {
+      return { code: error.code, message: "The server rejected the device request." };
+    }
+  }
+  return errorFor(error);
 }
 
 function errorDetails(error: object): Pick<RpcError, "conversationId" | "currentRevision" | "draftId"> {
@@ -220,14 +242,20 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
   const { id, command, args } = request;
   try {
     if (command === "load_state" && session.phase !== "ready") return { id, ok: true, value: safeSnapshot(session.phase) };
+    if (command === "load_history" && session.phase !== "ready") throw { code: "locked" };
     if (command === "load_state") {
       // Settings are restored before the Rust snapshot is presented, never as message state.
       const savedPreferences = await settings?.load();
-       const snapshot = await session.query("snapshot", args);
-       if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
-       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
-       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-        return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+      const snapshot = await session.query("snapshot", args);
+      if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
+      const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
+      if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
+      return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+    }
+    if (command === "load_history") {
+      const page = await session.query("load_history", args);
+      if (typeof page !== "object" || page === null || Array.isArray(page)) throw { code: "invalid-request" };
+      return { id, ok: true, value: await addHistoryPreviews(session, page as Record<string, unknown>) };
     }
     if (command === "unlock") {
       const passphrase = secretString(args, "passphrase");
@@ -293,15 +321,25 @@ function contactAddresses(snapshot: Record<string, unknown>): Array<{ address: s
   return [...addresses.values()];
 }
 
-async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function addVisiblePreviews(session: HostSession, snapshot: Record<string, unknown>, budget: number): Promise<Record<string, unknown>> {
   if (!session.previewAttachment || !Array.isArray(snapshot.conversations)) return snapshot;
   const activeId = typeof snapshot.activeConversationId === "string" ? snapshot.activeConversationId : undefined;
   const conversation = snapshot.conversations.find(value => typeof value === "object" && value !== null && (value as Record<string, unknown>).id === activeId);
   if (!conversation || typeof conversation !== "object" || conversation === null) return snapshot;
   const view = conversation as Record<string, unknown>;
   if (!Array.isArray(view.messages)) return snapshot;
-  let remainingPreviews = 32;
-  const messages = await Promise.all(view.messages.map(async message => {
+  const messages = await addMessagePreviews(session, view.messages, budget);
+  return { ...snapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
+}
+
+async function addHistoryPreviews(session: HostSession, page: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (!Array.isArray(page.messages)) return page;
+  return { ...page, messages: await addMessagePreviews(session, page.messages, MAX_PREVIEWS_PER_HISTORY_PAGE) };
+}
+
+async function addMessagePreviews(session: HostSession, messages: unknown[], budget: number): Promise<unknown[]> {
+  let remainingPreviews = budget;
+  const previewedMessages = await Promise.all(messages.map(async message => {
     if (typeof message !== "object" || message === null) return message;
     const messageView = message as Record<string, unknown>;
     if (!Array.isArray(messageView.attachments)) return message;
@@ -312,7 +350,7 @@ async function addVisiblePreviews(session: HostSession, snapshot: Record<string,
     }));
     return { ...messageView, attachments };
   }));
-  return { ...snapshot, conversations: snapshot.conversations.map(value => value === conversation ? { ...view, messages } : value) };
+  return previewedMessages;
 }
 
 async function addAttachmentPreview(session: HostSession, attachment: unknown): Promise<unknown> {
@@ -478,6 +516,12 @@ export class BrowserWorkerHost {
       if (this.owner.owner.phase === "closed") await this.stop("closed");
       return;
     }
+    if (validRequest(request) && (request.command === "list_devices" || request.command === "revoke_device")) {
+      const response = await this.deviceManagement(request);
+      port.postMessage(response);
+      if (response.ok && request.command === "revoke_device") this.changed();
+      return;
+    }
     const generation = this.owner.owner.generation;
     const command = validRequest(request) ? request.command : undefined;
     let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher);
@@ -498,7 +542,7 @@ export class BrowserWorkerHost {
       this.changed();
       if (command === "unlock") await this.dependencies.network?.start();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
-      if (command === "send_draft" || command === "retry_attachment") this.dependencies.network?.wake?.();
+      if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync") this.dependencies.network?.wake?.();
     }
   }
 
@@ -526,6 +570,8 @@ export class BrowserWorkerHost {
       const vaultOwner = typeof request.args.vaultOwner === "string" ? request.args.vaultOwner : undefined;
       const inviteLink = typeof request.args.inviteLink === "string" ? request.args.inviteLink : undefined;
       const displayName = typeof request.args.displayName === "string" ? request.args.displayName : undefined;
+      const waitingOnly = request.args.waitingOnly;
+      if (waitingOnly !== undefined && typeof waitingOnly !== "boolean") throw { code: "invalid-request" };
       const value = request.command === "enrollment_discover" ? await network.enrollmentDiscover(typeof request.args.origin === "string" ? request.args.origin : undefined)
        : request.command === "enrollment_create_owner" && passphrase ? await network.enrollmentCreateOwner({ ...(setupToken ? { setupToken } : {}), ...(adminPassword ? { adminPassword } : {}), passphrase }, username)
           : request.command === "enrollment_sign_in" ? await network.enrollmentSignIn(adminPassword ?? "", username)
@@ -537,8 +583,8 @@ export class BrowserWorkerHost {
                     : request.command === "enrollment_pending_vault_request" ? await network.enrollmentPendingVaultRequest()
               : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
                 : request.command === "enrollment_status" ? await network.enrollmentStatus()
-                  : request.command === "enrollment_approve" && passphrase ? await network.enrollmentApprove(passphrase)
-                    : request.command === "enrollment_cancel" ? (await network.enrollmentCancel(), undefined)
+                   : request.command === "enrollment_approve" ? await network.enrollmentApprove()
+                     : request.command === "enrollment_cancel" ? await network.enrollmentCancel(waitingOnly === true ? { waitingOnly: true } : undefined)
         : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
                         : request.command === "enrollment_generate_secret" ? { passphrase: await network.enrollmentGenerateSecret() }
                           : request.command === "enrollment_management" ? await network.enrollmentManagement()
@@ -556,8 +602,70 @@ export class BrowserWorkerHost {
     } catch (error: unknown) { return { id: request.id, ok: false, error: errorFor(error) }; }
   }
 
+  private async deviceManagement(request: RpcRequest): Promise<RpcResponse> {
+    const network = this.dependencies.network;
+    if (!network) return { id: request.id, ok: false, error: { code: "unavailable", message: "Browser operation failed." } };
+    try {
+      if (request.command === "list_devices") {
+        const identity = object(await this.owner!.owner.query("_worker_identity_metadata", {}));
+        return { id: request.id, ok: true, value: deviceRoster(await network.listDevices(), requiredDeviceId(identity.deviceId)) };
+      }
+      const deviceId = requiredDeviceId(request.args.deviceId);
+      await network.revokeDevice(deviceId);
+      return { id: request.id, ok: true, value: undefined };
+    } catch (error: unknown) {
+      return { id: request.id, ok: false, error: deviceManagementError(error) };
+    }
+  }
+
   private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
 
+}
+
+function deviceRoster(value: unknown, currentDeviceId: string): Record<string, unknown> {
+  const roster = object(value);
+  if (!Array.isArray(roster.devices)) throw new TransportError("invalid");
+  const devices = roster.devices.map(device => {
+    const row = object(device);
+    const id = requiredDeviceId(row.device_id);
+    if (typeof row.role !== "string" || typeof row.revoked !== "boolean") throw new TransportError("invalid");
+    const presence = optionalPresence(row.presence);
+    const wakeRoute = optionalBoolean(row.wake_route);
+    return {
+      id,
+      name: typeof row.name === "string" && row.name.length > 0 ? row.name : "Unnamed device",
+      kind: typeof row.kind === "string" ? row.kind : null,
+      role: row.role,
+      revoked: row.revoked,
+      ...(presence ? { presence } : {}),
+      ...(wakeRoute === undefined ? {} : { wakeRoute }),
+    };
+  });
+  return { currentDeviceId, devices };
+}
+
+function optionalPresence(value: unknown): { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null } | undefined {
+  if (value === undefined) return undefined;
+  const presence = object(value);
+  if (presence.state !== "connected" && presence.state !== "seen" && presence.state !== "never") return undefined;
+  if (presence.last_seen_age_seconds !== null && (!Number.isSafeInteger(presence.last_seen_age_seconds) || (presence.last_seen_age_seconds as number) < 0)) throw new TransportError("invalid");
+  return { state: presence.state, last_seen_age_seconds: presence.last_seen_age_seconds as number | null };
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new TransportError("invalid");
+  return value;
+}
+
+function object(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TransportError("invalid");
+  return value as Record<string, unknown>;
+}
+
+function requiredDeviceId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value)) throw new TransportError("invalid");
+  return value;
 }
 
 function notificationContext(args: Record<string, unknown>): BannerContext | undefined {
@@ -625,7 +733,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
     terminate,
     network: {
       async start() { if (polling || !scheduler) return; polling = true; schedulePoll(); },
-      wake() { void scheduler?.poll(); },
+      wake() { void scheduler?.poll().catch(() => undefined); },
       retryAttachment(id) { scheduler?.retryAttachment(id); },
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
@@ -642,8 +750,8 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentPendingVaultRequest() { return enrollment?.pendingVaultRequest() ?? null; },
       async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentStatus() { return enrollment?.status() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
-      async enrollmentApprove(passphrase) { return enrollment?.approve(passphrase) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
-      async enrollmentCancel() { await enrollment?.cancel(); },
+       async enrollmentApprove() { return enrollment?.approve() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentCancel(options) { return enrollment?.cancel(options); },
       async enrollmentSignOut() { await enrollment?.signOut(); },
       async enrollmentGenerateSecret() { if (!enrollment) throw { code: "unavailable" }; return enrollment.generateSecret(); },
       async enrollmentManagement() { if (!enrollment) throw { code: "unavailable" }; return enrollment.management(); },
@@ -654,8 +762,10 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentRevokeInvite(inviteId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.revokeInvite(inviteId); },
        async enrollmentListVaultRequests() { if (!enrollment) throw { code: "unavailable" }; return enrollment.listVaultRequests(); },
        async enrollmentApproveVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.approveVaultRequest(requestId); },
-       async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
-    },
+        async enrollmentDenyVaultRequest(requestId) { if (!enrollment) throw { code: "unavailable" }; await enrollment.denyVaultRequest(requestId); },
+        async listDevices() { if (!publicTransport) throw new TransportError("invalid"); return publicTransport.json("/v1/devices", { method: "GET" }); },
+        async revokeDevice(deviceId) { if (!publicTransport) throw new TransportError("invalid"); await publicTransport.discard(`/v1/devices/${deviceId}/revoke`, { method: "POST" }); },
+      },
     async boot(_signal, onFatal) {
       const modulePromise = loadBrowserCore();
       const core = new BrowserCore(() => modulePromise);

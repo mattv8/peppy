@@ -1,12 +1,10 @@
 //! Encrypted recovery acceptance over isolated PostgreSQL and SeaweedFS Compose fixtures.
+mod common;
+
+use common::{ADDRESS, NETWORK_TIMEOUT, PHRASE, Paired, VaultFixture, create_vault};
 use peppy_client_core::*;
-use peppy_crypto::{create_vault_check_header, derive_root_key};
 use peppy_gateway_simulator::{drain_media, effects_path, run_one_carrier_effect, upload_pending};
-use peppy_server::{
-    api::{create_owner, router},
-    config::S3Config,
-    storage::Storage,
-};
+use peppy_server::{api::router, config::S3Config, storage::Storage};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -22,17 +20,12 @@ use tempfile::TempDir;
 use tokio::{net::TcpListener, task::JoinHandle};
 use uuid::Uuid;
 
-const PHRASE: &str = "correct horse battery staple";
-const ADDRESS: &str = "+15555550100";
 const PG_IMAGE: &str =
     "postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f";
 const SEAWEED_IMAGE: &str = "chrislusf/seaweedfs:4.09@sha256:353c69c8ddd7e13c85c1290dca9d1690bf3d066237b7ede7920b8fd2864858e7";
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn bounded<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
-    tokio::time::timeout(NETWORK_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("phase={phase} status=timeout"))
+    common::network(phase, future).await
 }
 
 fn checked(output: Output, phase: &str) -> Output {
@@ -240,18 +233,6 @@ impl RouterRuntime {
     }
 }
 
-struct VaultFixture {
-    vault: VaultId,
-    profile: KeyProfile,
-    header: VaultCheckHeader,
-    fingerprint: String,
-}
-
-struct Paired {
-    id: DeviceId,
-    token: String,
-}
-
 fn database_url(fixture: &ComposeFixture) -> String {
     format!(
         "postgres://recovery:recovery_fixture_password@127.0.0.1:{}/recovery",
@@ -316,29 +297,6 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
         pool,
         task,
         url: format!("http://{address}"),
-    }
-}
-
-async fn create_vault(pool: &PgPool) -> VaultFixture {
-    let vault = VaultId::new();
-    let profile = KeyProfile::new(vault.0, 1).unwrap();
-    let fingerprint = profile.fingerprint().unwrap();
-    let root = derive_root_key(PHRASE, &profile).unwrap();
-    let header = create_vault_check_header(&root, profile.clone()).unwrap();
-    create_owner(
-        pool,
-        serde_json::to_value(&profile).unwrap(),
-        serde_json::to_vec(&header).unwrap(),
-        fingerprint.clone(),
-        1,
-    )
-    .await
-    .unwrap();
-    VaultFixture {
-        vault,
-        profile,
-        header,
-        fingerprint,
     }
 }
 

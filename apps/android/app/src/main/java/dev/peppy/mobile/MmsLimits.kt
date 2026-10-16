@@ -1,7 +1,6 @@
 package dev.peppy.mobile
 
 import android.content.Context
-import android.os.Build
 import android.os.Bundle
 import android.telephony.SmsManager
 
@@ -12,8 +11,7 @@ data class MmsLimits(val maximumPduBytes: Long, val maximumRecipients: Int, val 
         const val FALLBACK_PDU_BYTES = 300L * 1024
         fun forSubscription(context: Context, subscriptionId: Int, values: Bundle? = null): MmsLimits {
             val config = values ?: try {
-                val manager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) context.getSystemService(SmsManager::class.java).createForSubscriptionId(subscriptionId)
-                else @Suppress("DEPRECATION") SmsManager.getSmsManagerForSubscriptionId(subscriptionId)
+                val manager = subscriptionSmsManager(context, subscriptionId)
                 manager.carrierConfigValues
             } catch (_: RuntimeException) { null }
             if (config == null || config.isEmpty) return MmsLimits(FALLBACK_PDU_BYTES, 20, true, Source.FALLBACK)

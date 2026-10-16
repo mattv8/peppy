@@ -94,6 +94,11 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
     conn.execute_batch(
         "DROP TABLE gateway_settings; DROP TABLE outbox_attachments; \
          DROP TABLE compose_draft_redirects; ALTER TABLE compose_drafts DROP COLUMN draft_only; \
+         DROP TABLE sms_acquisitions; DROP TABLE sms_provider_aliases; \
+         DROP TABLE sms_scan_checkpoints; DROP TABLE sms_reconciliation_scans; \
+         DROP TABLE sms_broadcast_aliases; DROP INDEX messages_sort; \
+         ALTER TABLE messages DROP COLUMN sort_at_ms; ALTER TABLE messages DROP COLUMN actual_sent_at_ms; \
+         DROP INDEX attempts_time; ALTER TABLE attempts DROP COLUMN attempted_at_ms; \
          UPDATE schema_meta SET version=17;",
     )
     .unwrap();

@@ -330,40 +330,7 @@
   font-size: 12px;
 }
 
-#photo-crop-dialog {
-  position: fixed;
-  inset: 0;
-  padding: 0;
-  margin: auto;
-  max-width: 90vw;
-  max-height: 90vh;
-  width: 500px;
-  height: auto;
-  border: 1px solid var(--peppy-border);
-  border-radius: var(--peppy-radius-md, 8px);
-  background: var(--peppy-glass-surface);
-  backdrop-filter: var(--peppy-glass-backdrop-filter);
-  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
-  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
-  z-index: 1000;
-}
-
-#photo-crop-dialog::backdrop {
-  background: var(--peppy-backdrop, rgba(0, 0, 0, 0.4));
-}
-
-#photo-crop-container {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-}
-
-#photo-crop-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
+.peppy-modal-panel.photo-crop-panel { width: min(500px, 100%); }
 
 #photo-crop-viewport {
   width: 100%;
@@ -396,26 +363,4 @@
   font-size: 11px;
   color: var(--peppy-text-secondary);
   margin: 0;
-}
-
-#photo-crop-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
-#photo-crop-actions button {
-  padding: 6px 12px;
-  font-size: 12px;
-  border: 1px solid var(--peppy-border);
-  border-radius: 4px;
-  background: var(--peppy-surface-input);
-  color: var(--peppy-text-primary);
-  cursor: pointer;
-}
-
-#photo-crop-actions .primary-button {
-  background: var(--peppy-primary);
-  color: var(--peppy-primary-text);
-  border-color: var(--peppy-primary);
 }

@@ -136,6 +136,11 @@ describe("ConnectionDot", () => {
     expect(dot).toHaveAttribute("title", "Connection: Native host unavailable");
     expect(dot).toHaveAttribute("data-connection-state", "missing-native-host");
   });
+
+  it("marks confirmed server outages for the amber presentation", () => {
+    render(<ConnectionDot state="offline" label="Connection: Offline" serverUnreachable />);
+    expect(screen.getByRole("status")).toHaveAttribute("data-server-unreachable");
+  });
 });
 
 function renderRecipientPanel(props: Partial<ComponentProps<typeof RecipientPanel>> = {}, withLayer = false) {

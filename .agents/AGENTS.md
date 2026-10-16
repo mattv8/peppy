@@ -3,7 +3,7 @@
 This reference records non-obvious Peppy domain constraints. Related references:
 
 - [Infrastructure and release boundaries](infra.md): public/private images,
-  source pins, Harbor signing, deployment proof, and native build pitfalls.
+  source pins, Harbor signing, and native/browser build pitfalls.
 - [Desktop frontend](frontend-style-guide.md) and
   [native mobile](mobile-style-guide.md): shared design APIs and platform rules.
 
@@ -31,8 +31,23 @@ This reference records non-obvious Peppy domain constraints. Related references:
   enrollment context and recipient identity before pinning its profile and
   epoch. Import initializes an absent active epoch; it is not an implicit
   cutover from an already-active epoch. See [key lifecycle](../crates/client-core/src/lib.rs).
+- Phone transfer approval on desktop and browser uses the active Rust client's
+  verified root handoff capability, without collecting an approval passphrase.
+  Passphrase/header unlock and owner-role `VerifiedHandoff` import establish it;
+  native purpose-key caches cannot recreate it. Desktop may recover an unavailable
+  capability using only the matching protected binding secret; missing or
+  unreadable stored secrets fail closed, without a prompt. Profile or
+  cryptographic failures do not authorize that fallback. Seal only locally
+  authenticated enrollment contexts, not raw renderer or server input. Mobile
+  approval still uses the stored secret or a verified native fallback prompt.
+  See [shared approval](../crates/hosted-client/src/newenrollment.rs),
+  [desktop approval](../apps/desktop/src-tauri/src/enrollment.rs), and
+  [browser approval](../crates/browser-bindings/src/newenrollment.rs).
 - A published attachment is a separately supplied plaintext derivative, not a
-  publication of the encrypted original. See
+  publication of the encrypted original. The client supplies the image bytes;
+  the server does not decrypt or re-encode the original. Public copies have
+  their own expiry and revocation lifecycle and can outlive private-object
+  deletion. See
   [attachment API](../services/server/src/api/attachments.rs).
 
 ## Commands, delivery, and recovery
@@ -47,6 +62,14 @@ This reference records non-obvious Peppy domain constraints. Related references:
   its received-command ledger. An unfinished attempt reopens as
   `OutcomeUnknown`, never with a second permit. See
   [client-core contract](../crates/client-core/src/lib.rs).
+- Epoch activation is an explicit cutover, not a side effect of unlocking newer
+  keys. Old epochs become decrypt-only; never-attempted older-epoch commands
+  retire as `FailedBeforeSubmission`, while attempted commands keep their
+  recorded outcomes. See [cutover tests](../crates/client-core/tests/c3_additions.rs).
+- Core cannot detect a database rollback. If restore recovers an outbox envelope
+  ID with conflicting bytes, quarantine the conflict rather than resealing or
+  uploading it; preserve the local capture. See
+  [restore conflict tests](../crates/client-core/tests/c5_snapshot.rs).
 - The receive cursor is the highest contiguous journaled cursor; quarantine
   malformed records rather than wedging the stream. Snapshot import is staged
   and monotonic. Snapshot commands are historical and never authorize carrier
@@ -56,6 +79,11 @@ This reference records non-obvious Peppy domain constraints. Related references:
   updated in place; eligible superseded records can be pruned through compaction.
   A snapshot generation fences that changing retained set. Never equate a replay
   cursor with a snapshot generation. See [sync API](../services/server/src/api/sync.rs).
+- Attachment release requires the current nonzero compaction generation, a
+  cutoff no later than the replay floor, and proof that every registered
+  reference was compacted. Empty reference sets, elapsed time, or private-object
+  deletion alone do not establish release authority. See
+  [release proof tests](../services/server/tests/attachments.rs).
 
 ## Protocol contracts
 
@@ -110,8 +138,8 @@ This reference records non-obvious Peppy domain constraints. Related references:
   stored pending secret for that origin when none is entered. After verified
   activation hosts store the secret actually used under the device binding,
   including a user-entered secret from shared-secret admission or a
-  phone-approval fallback prompt that passed the vault-header check; a failed
-  write there does not undo enrollment, and a non-empty stored value is never
+  mobile phone-approval fallback prompt that passed the vault-header check. A
+  failed write there does not undo enrollment, and a non-empty stored value is never
   overwritten. After a successful binding write, remove the matching pending
   secret so a later vault on the same origin cannot reuse it. A storage read
   error fails closed rather than prompting. Mobile reveal is gated by device authentication
@@ -136,6 +164,14 @@ This reference records non-obvious Peppy domain constraints. Related references:
   before accepting any server claim or transcript. Matching a server-supplied
   key to a server-supplied transcript is not authentication. A short SAS does
   not replace either endpoint's out-of-band key/claim verification.
+- Owner-instance claim retries and phone-invitation claim retries differ. An
+  owner claim can replay the same protected operation and request after password
+  verification; repeating a phone invitation claim cannot recover a lost claim
+  secret (`claim_secret_not_replayable`). Consumed phone confirmation can replay,
+  but still checks the original proofs/transcript, current vault epoch and
+  fingerprint, and non-revoked owner. See
+  [instance claims](../services/server/src/api.rs) and
+  [phone invitations](../services/server/src/enrollment/invitations.rs).
 - On an unclaimed community instance, the setup code authorizes claiming; the
   admin password authorizes server management; and the generated or existing
   vault shared secret authorizes vault admission. Keep all three distinct.
@@ -210,6 +246,9 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - Notification identity includes source device, notification key, and lifetime;
   a current OS instance tracks updates/removals. Android guards removal with
   the same key and `postTime` instance, not the key alone.
+- Push relay wakes carry content-free opaque hints. Jobs coalesce and delivery
+  is best-effort; a wake is neither message content nor delivery evidence. See
+  [relay](../services/push-relay/src/lib.rs).
 
 ## Android carrier companion
 
@@ -241,10 +280,6 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - Xcode 27 replaces `$DEVELOPER_DIR/Applications/Simulator.app` with
   `$DEVELOPER_DIR/../Applications/DeviceHub.app`; missing Simulator.app alone
   does not mean Xcode is incomplete. See [iOS helper](../infra/dev/ios.sh).
-- CoreSimulator can list an obsolete MobileAsset image as unusable with
-  `Cryptex Mount Preferred` while a separate Cryptex image is ready and booted.
-  A failed verification of the obsolete UUID does not diagnose the active runtime;
-  a displayed 128-byte Cryptex size can describe metadata, not the runtime payload.
 - Rust's Intel iOS Simulator target is `x86_64-apple-ios` (`target_env="sim"`);
   only the ARM64 simulator target uses the `-sim` suffix: `aarch64-apple-ios-sim`.
 
@@ -267,13 +302,18 @@ This reference records non-obvious Peppy domain constraints. Related references:
   holders. The vault's equal-authority trust model still applies.
 - Rust owns contact state, scan checkpoints, revisions, source mappings, edit
   ledgers and photo references. Native hosts own provider access, scheduling,
-  permission checks and OS effects. Keep raw contact data out of logs.
+  permission checks and OS effects. Provider IDs and provenance stay local and
+  do not enter shared contact projections. Capture requires unlocked active-epoch
+  keys; contacts have no plaintext locked backlog, so providers retry after unlock.
+  See [contact core](../crates/client-core/src/contacts.rs).
 - Snapshot or historical edit requests never authorize OS writes. A durable
   one-use permit precedes each write; interrupted writes require reconciliation,
   never blind retry. An ambiguous create must not create a duplicate.
 - Partial scans, limited contact access, permission revocation and unavailable
   providers never imply contact deletion. Require authoritative complete scope
-  and apply the deletion policy before publishing removals.
+  at the current book generation, fence revisions changed since scan start,
+  and apply the deletion policy before publishing removals. Expired or cancelled
+  background scans preserve progress without authorizing deletion.
 - Contact photo objects are private encrypted attachments. Retain restore data
   and referenced photos for their promised lifetime; a timer alone does not
   establish that every replay or restore reference has been released.
@@ -281,6 +321,10 @@ This reference records non-obvious Peppy domain constraints. Related references:
   A grouping key or newest server cursor is not sufficient deletion authority.
   Changing the retained snapshot set must force an affected import to restart;
   it must not silently merge stale non-owner contact caches into a restored book.
+- Authoritative compaction imports retain the visible view until authenticated
+  promotion. Partial import, reopen, or authentication failure must not clear it;
+  legacy snapshots without a compaction generation merge rather than remove
+  contacts. See [projection tests](../crates/client-core/tests/snapshot_projection.rs).
 
 ## Desktop native boundary
 
@@ -302,6 +346,33 @@ This reference records non-obvious Peppy domain constraints. Related references:
 - Native floating-head click-through needs real input-region/focus evidence;
   CSS rounding or webview hit testing does not establish it. Preserve a usable
   main-window/composer fallback.
+
+## Browser runtime boundary
+
+- The browser host requires SharedWorker, WebAssembly, IndexedDB, Web Locks,
+  and same-origin HTTPS. It is not a native capability fallback. See
+  [web host](../apps/web/README.md).
+- Worker ownership uses an exclusive, non-stealable Web Lock. An older or
+  suspended worker retains ownership; uncertain teardown keeps the lock until
+  worker termination. Do not start a competing sender to recover. See
+  [ownership](../packages/browser-runtime/src/owner.ts).
+- Mutation acknowledgement requires an encrypted IndexedDB checkpoint commit,
+  including handled Rust rejections that changed state. Checkpoint/core failures
+  poison the session and block queued work; recover a fresh worker from the last
+  committed generation without automatically retrying the mutation. Missing or
+  malformed data in an existing checkpoint does not authorize resetting the
+  vault. Browser storage retention remains platform-dependent. See
+  [checkpoint contract](../packages/browser-runtime/README.md#checkpoints).
+- Checkpoints contain SQLCipher state, referenced attachment ciphertext and
+  opaque wrapped identity, not plaintext SQLite or live journals. Rust
+  authenticates restored data; capture checks are not authentication. Lazy
+  attachment hydration must use the matching committed generation. See
+  [filesystem adapter](../packages/browser-runtime/src/filesystem.ts).
+- Renderer RPC exposes an explicit DTO command allowlist, not generic Rust
+  dispatch or worker transport credentials. Approved secret inputs can cross
+  private worker RPC; same-origin JavaScript can access browser secret forms.
+  Do not describe this as the native secure-control boundary. See
+  [worker host](../packages/browser-runtime/src/host.ts).
 
 ## Workspace and evidence boundaries
 

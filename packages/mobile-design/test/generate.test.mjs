@@ -63,18 +63,33 @@ test("CSS and generated tokens retain coral action foreground contrast", () => {
   assert.match(swift, /static let light = PeppyColorScheme\([\s\S]*AccentText: Color\(argb: 0xFFFFFFFF\),[\s\S]*PrimaryText: Color\(argb: 0xFFFFFFFF\)/);
 });
 
+test("native warning tokens composite translucent CSS values over the panel surface", () => {
+  const android = readFileSync(path("apps/android/app/src/main/java/dev/peppy/mobile/ui/theme/PeppyTokens.kt"), "utf8");
+  const swift = readFileSync(path("apps/ios/PeppyMobile/Design/PeppyTokens.swift"), "utf8");
+
+  for (const [name, dark, light] of [
+    ["warningSurface", "FF322E21", "FFEBE7DF"],
+    ["warningBorder", "FF4E4311", "FFE2D6BC"],
+  ]) {
+    const swiftName = name[0].toUpperCase() + name.slice(1);
+    assert.match(android, new RegExp(`val ${name}: Color,[\\s\\S]*val Dark = PeppyColorScheme\\([\\s\\S]*${name} = Color\\(0x${dark}\\),[\\s\\S]*val Light = PeppyColorScheme\\([\\s\\S]*${name} = Color\\(0x${light}\\)`));
+    assert.match(swift, new RegExp(`let ${swiftName}: Color[\\s\\S]*static let dark = PeppyColorScheme\\([\\s\\S]*${swiftName}: Color\\(argb: 0x${dark}\\),[\\s\\S]*static let light = PeppyColorScheme\\([\\s\\S]*${swiftName}: Color\\(argb: 0x${light}\\)`));
+  }
+});
+
 test("android resources preserve canonical mark geometry within the safe zone", () => {
-  const mark = readFileSync(path("packages/mobile-design/assets/peppy-mark.svg"), "utf8");
-  const sourcePath = mark.match(/\bd="\s*([\s\S]*?)"\s*\/>/)?.[1].replace(/\s+/g, " ").trim();
+  const mark = readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8");
+  const sourcePath = mark.match(/<path[^>]*\bd="([^"]+)"/)?.[1].replace(/\s+/g, " ").trim();
   const foreground = readFileSync(path("apps/android/app/src/main/res/drawable/ic_launcher_foreground.xml"), "utf8");
   const logo = readFileSync(path("apps/android/app/src/main/res/drawable/peppy_logo.xml"), "utf8");
   assert.equal(sourcePath, foreground.match(/android:pathData="([^"]+)"/)?.[1]);
   assert.equal(sourcePath, logo.match(/android:pathData="([^"]+)"/)?.[1]);
-  assert.match(logo, /android:scaleY="0.92"/);
   const attribute = name => Number(foreground.match(new RegExp(`android:${name}="([0-9.]+)"`))[1]);
   const sx = attribute("scaleX"), sy = attribute("scaleY");
   const tx = attribute("translateX"), ty = attribute("translateY");
-  assert.equal(sy / sx, 0.92, "canonical aspect must be retained");
+  assert.equal(sy, sx, "canonical aspect must be retained");
+  const [, , markWidth, markHeight] = mark.match(/viewBox="([^"]+)"/)[1].split(/\s+/).map(Number);
+  assert.ok(Math.abs(tx + markWidth * sx / 2 - 54) < 0.01 && Math.abs(ty + markHeight * sy / 2 - 54) < 0.01, "launcher mark is centered");
   // Sample this canonical M/H/V/L/C path's curves, not merely the bounding rectangle.
   const tokens = sourcePath.match(/[A-Z]|-?\d+(?:\.\d+)?/g);
   let i = 0, x = 0, y = 0;
@@ -101,6 +116,58 @@ test("generated copy has both native catalog formats", () => {
   assert.match(readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8"), /peppy_onboarding_headline/);
   const strings = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
   assert.equal(strings.strings["peppy.locked"].localizations.en.stringUnit.value, "Locked");
+});
+
+test("server offline copy is generated for desktop and native clients", () => {
+  const copy = {
+    server_offline_title: "Server offline",
+    server_offline_body: "Peppy will reconnect automatically.",
+  };
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+  const desktop = readFileSync(path("apps/desktop/src/generated/peppyCopy.ts"), "utf8");
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(catalog[key], value);
+    assert.equal(nativeCatalog[key], value);
+    assert.match(android, new RegExp(`<string name="peppy_${key}">${value}</string>`));
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+    assert.ok(desktop.includes(`${key}: ${JSON.stringify(value)},`));
+  }
+});
+
+test("wake status copy maps to both native catalog formats", () => {
+  const copy = {
+    wake_section_title: "Background updates",
+    wake_updates_toggle_label: "Allow background updates",
+    wake_status_label: "Wake registration",
+    wake_status_registered: "Registered",
+    wake_status_pending: "Setting up",
+    wake_status_retrying: "Retrying",
+    wake_status_paused: "Paused",
+    wake_status_unavailable: "Unavailable",
+    wake_footer_registered: "Registered for background updates. Delivery may be delayed by your phone.",
+    wake_footer_pending: "Setting up background updates automatically.",
+    wake_footer_retrying: "Background updates will retry when a connection is available.",
+    wake_footer_paused: "Background wake is paused. Other permitted sync may still run.",
+    wake_footer_unavailable_server: "Background wake is unavailable on this server.",
+    wake_footer_missing_app_support: "This app build does not support background push.",
+    wake_footer_os_restricted: "Your phone is limiting background activity.",
+    wake_footer_keys_locked: "Unlock Peppy to process pending updates.",
+    wake_cleanup_pending: "Background wake is paused. Server cleanup will retry when connected.",
+    wake_os_settings_cta: "Open Settings",
+    wake_community_relay_enabled: "Custom relay enabled. Background delivery may be delayed.",
+    wake_community_relay_disabled: "Custom relay is off.",
+  };
+  const android = readFileSync(path("apps/android/app/src/main/res/values/strings_peppy.xml"), "utf8");
+  const ios = JSON.parse(readFileSync(path("apps/ios/PeppyMobile/Peppy.xcstrings"), "utf8"));
+
+  for (const [key, value] of Object.entries(copy)) {
+    assert.equal(nativeCatalog[key], value);
+    const escapedValue = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(android, new RegExp(`<string name="peppy_${key}">${escapedValue}</string>`));
+    assert.equal(ios.strings[`peppy.${key}`].localizations.en.stringUnit.value, value);
+  }
 });
 
 test("onboarding server mode copy maps to each generated platform format", () => {
@@ -237,10 +304,13 @@ test("generated icons include default, dark, and tinted variants", () => {
   assert.deepEqual([...new Set(variants.map(image => image.appearances[0].value))].sort(), ["dark", "tinted"]);
 });
 
-test("desktop logo and favicon are direct generated copies of the canonical mark", () => {
-  const mark = readFileSync(path("packages/mobile-design/assets/peppy-mark.svg"), "utf8");
-  assert.equal(readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8"), mark);
+test("favicon, iOS logo, and coral logo are generated from the canonical mark", () => {
+  const mark = readFileSync(path("apps/desktop/public/peppy-logo.svg"), "utf8");
   assert.equal(readFileSync(path("apps/desktop/public/favicon.svg"), "utf8"), mark);
+  assert.equal(readFileSync(path("apps/ios/PeppyMobile/Assets.xcassets/PeppyLogo.imageset/peppy-logo.svg"), "utf8"), mark);
+  const coral = readFileSync(path("packages/desktop-ui/src/assets/peppy-logo-coral.svg"), "utf8");
+  const fill = mark.match(/<path[^>]*\bfill="(#[0-9A-Fa-f]{6})"/)[1];
+  assert.equal(coral, mark.replace(fill, "#FF6B57"));
 });
 
 test("android strings properly escape apostrophes and special characters", () => {

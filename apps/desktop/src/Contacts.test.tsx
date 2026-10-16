@@ -75,26 +75,20 @@ describe("ContactsView", () => {
 
   afterEach(cleanup);
 
-  it("allows manual cache repair even when no repair is currently flagged", async () => {
-    vi.mocked(bridge.request_contact_repair).mockResolvedValue({ repairRequired: true });
-    render(<ContactsView sync={{ repairRequired: false }} />);
-    fireEvent.click(await screen.findByLabelText("Repair contact cache"));
-    await waitFor(() => expect(bridge.request_contact_repair).toHaveBeenCalledOnce());
+  it("requests a fresh scan for the selected capable book", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+    vi.mocked(bridge.request_contact_sync).mockResolvedValue({ requestId: "scan-1", bookId: "book-pixel8", state: "waiting" });
+    render(<ContactsView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+    await waitFor(() => expect(bridge.request_contact_sync).toHaveBeenCalledWith("book-pixel8"));
+    expect(bridge.request_contact_repair).not.toHaveBeenCalled();
   });
 
-  it("requires confirmation and prevents duplicate requests while forgetting a book", async () => {
-    let finish!: () => void;
-    vi.mocked(bridge.forget_contact_book).mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
-    const { container } = render(<ContactsView />);
-    fireEvent.click(await screen.findByLabelText("Forget Pixel 8"));
-    expect(bridge.forget_contact_book).not.toHaveBeenCalled();
-    fireEvent.keyDown(screen.getByLabelText("Confirm forget Pixel 8"), { key: "Escape" });
-    fireEvent.click(screen.getByLabelText("Forget Pixel 8"));
-    fireEvent.click(screen.getByLabelText("Confirm forget Pixel 8"));
-    expect(bridge.forget_contact_book).toHaveBeenCalledTimes(1);
-    expect(container.querySelector('[data-book-forget="book-pixel8"]')).toBeDisabled();
-    await act(async () => finish());
-    expect(container.querySelector('[data-book-forget="book-pixel8"]')).toBeNull();
+  it("explains why limited and unready books cannot request a scan", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, state: "limited", capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+    render(<ContactsView sync={{ repairRequired: false, readiness: { state: "backfill_pending", contacts_ready: false, server_active: true, backfill_unreadable: 0 } }} />);
+    expect(await screen.findByRole("button", { name: "Sync now" })).toBeDisabled();
+    expect(screen.getByText("This phone has limited contact access and cannot complete an authoritative scan.")).toBeInTheDocument();
   });
 
   it.each([
@@ -772,6 +766,35 @@ describe("ContactsView", () => {
   });
 
   describe("live updates, paging and honest status", () => {
+    it("keeps requesting state independent from a concurrent status read", async () => {
+      let resolveRequest!: (status: { requestId: string; bookId: string; state: "waiting" }) => void;
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "old", bookId: "book-pixel8", state: "waiting" });
+      vi.mocked(bridge.request_contact_sync).mockImplementation(() => new Promise(resolve => { resolveRequest = resolve; }));
+      render(<ContactsView />);
+      const button = await screen.findByRole("button", { name: "Sync now" });
+      fireEvent.click(button);
+      expect(screen.getByRole("button", { name: "Requesting…" })).toBeDisabled();
+      resolveRequest({ requestId: "new", bookId: "book-pixel8", state: "waiting" });
+      expect(await screen.findByText("Waiting for the phone to scan contacts.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled();
+    });
+
+    it("does not replace the selected book status with a stale status response", async () => {
+      let resolveFirst!: (status: { requestId: string; bookId: string; state: "waiting" } | null) => void;
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone", capabilities: { ...mockContactBook.capabilities, canSync: true } };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }, secondBook]);
+      vi.mocked(bridge.get_contact_sync_request).mockImplementation(bookId => bookId === "book-pixel8"
+        ? new Promise(resolve => { resolveFirst = resolve; })
+        : Promise.resolve({ requestId: "iphone", bookId, state: "scanning" }));
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
+      expect(await screen.findByText("The phone is scanning contacts.")).toBeInTheDocument();
+      resolveFirst({ requestId: "pixel", bookId: "book-pixel8", state: "waiting" });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.queryByText("Waiting for the phone to scan contacts.")).not.toBeInTheDocument();
+    });
+
     it("refreshes the page on native hints without discarding an open editor", async () => {
       let hint: (() => void) | undefined;
       vi.mocked(bridge.subscribe).mockImplementation(listener => {
@@ -794,6 +817,19 @@ describe("ContactsView", () => {
       expect(screen.getByLabelText("Given name")).toHaveValue("Aurelia");
       expect(screen.getByRole("form")).toHaveAccessibleName("Edit contact");
       expect(await screen.findByRole("button", { name: /Waiting for approval on the phone/ })).toBeInTheDocument();
+    });
+
+    it("refreshes a pending scan status from a native hint", async () => {
+      let hint: (() => void) | undefined;
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "waiting" });
+      render(<ContactsView />);
+      await screen.findByText("Pixel 8");
+      await waitFor(() => expect(screen.getByText("Waiting for the phone to scan contacts.")).toBeInTheDocument());
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "completed" });
+      hint?.();
+      expect(await screen.findByText("Scan completed.")).toBeInTheDocument();
     });
 
     it("pages beyond 200 contacts with bounded Previous/Next requests", async () => {
@@ -838,12 +874,30 @@ describe("ContactsView", () => {
       expect(await screen.findByText("Sent to Pixel 8. Waiting for the phone to apply it.")).toBeInTheDocument();
     });
 
-    it("shows contact projection failures with a repair action", async () => {
-      vi.mocked(bridge.request_contact_repair).mockResolvedValue({ repairRequired: true });
+    it("shows contact projection failures without relabeling repair as sync", async () => {
       render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed", reason: "missing_record" } }} />);
       expect(await screen.findByText(/Contacts may be out of date \(rebuild failed: missing record\)/)).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "Repair contact cache" }));
-      await waitFor(() => expect(bridge.request_contact_repair).toHaveBeenCalled());
+      expect(screen.queryByRole("button", { name: "Repair contact cache" })).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ["stale_epoch", "The phone's contact context changed before the scan. Use Sync now to request a fresh scan."],
+      ["superseded_generation", "A newer contact book version replaced this scan. Use Sync now to request a fresh scan."],
+      ["incomplete_scan", "The phone's scan did not finish. Use Sync now to try again."],
+      ["cancelled", "The phone cancelled this scan. Use Sync now to try again."],
+    ])("explains %s without asking for re-enrollment", async (reason, copy) => {
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "failed", reason });
+      render(<ContactsView />);
+      expect(await screen.findByText(`Scan failed. ${copy}`)).toBeInTheDocument();
+      expect(screen.queryByText(/re-?enroll/i)).not.toBeInTheDocument();
+    });
+
+    it("does not claim completion while the local projection is rebuilding", async () => {
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "completed" });
+      render(<ContactsView sync={{ repairRequired: true, projection: { state: "rebuilding" } }} />);
+      expect(await screen.findByText("The phone finished its scan. Contacts are still being repaired locally.")).toBeInTheDocument();
+      expect(screen.queryByText("Scan completed.")).not.toBeInTheDocument();
     });
   });
 });

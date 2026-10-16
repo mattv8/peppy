@@ -21,6 +21,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -44,6 +45,27 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         NativeContactCore(client), os, deviceId, { access }, java.io.File(context.cacheDir, "photos"),
         deviceName = "Pixel Test", region = "us",
     )
+
+    private fun coordinator(core: ContactCore) = ContactSyncCoordinator(
+        core, os, deviceId, { access }, java.io.File(context.cacheDir, "photos"),
+        deviceName = "Pixel Test", region = "us",
+    )
+
+    private class BeginRecordingCore(private val delegate: ContactCore) : ContactCore by delegate {
+        var checkpointSaved = false
+        var failBegin = true
+
+        override fun scanState(input: JSONObject): JSONObject {
+            if (input.optJSONObject("checkpoint")?.optString("scan_id")?.isNotEmpty() == true) checkpointSaved = true
+            return delegate.scanState(input)
+        }
+
+        override fun beginScan(input: JSONObject): JSONObject {
+            check(checkpointSaved) { "scan checkpoint must be durable before core begin" }
+            if (failBegin) throw IllegalStateException("simulated process death")
+            return delegate.beginScan(input)
+        }
+    }
 
     private fun view(client: NativeClient, bookId: String): JSONArray =
         JSONObject(client.contactBookView(JSONObject().put("book_id", bookId).toString())).getJSONArray("contacts")
@@ -75,6 +97,37 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         return gateway to checkNotNull(coordinator(gateway).ownedBook()).id
     }
 
+    /** Delivers owner contact state/results to the desktop core just as the gateway upload would. */
+    private fun deliverGatewayOutboxToDesktop(gateway: NativeClient) {
+        val desktop = SharedVault.desktop
+        desktop.setServerCompactionState(true, true)
+        val cursor = desktop.receiveCursor().toLongOrNull() ?: 0L
+        for ((index, wire) in gateway.pendingOutboxJson().withIndex()) {
+            desktop.ingestRaw(wire.toByteArray(), (cursor + index + 1).toString())
+            gateway.ackOutbox(JSONObject(wire).getString("envelope_id"))
+        }
+        repeat(50) {
+            val report = desktop.applyPending(50uL)
+            if (report.applied + report.quarantined + report.drained + report.superseded == 0uL) return
+        }
+    }
+
+    /** Publishes a desktop request and delivers its live event to the phone core. */
+    private fun requestRemoteScan(gateway: NativeClient, bookId: String): JSONObject {
+        deliverGatewayOutboxToDesktop(gateway)
+        val desktop = SharedVault.desktop
+        val request = JSONObject(desktop.requestContactSync(JSONObject().put("book_id", bookId).toString()))
+        for (wire in desktop.pendingOutboxJson()) {
+            gateway.ingestRaw(wire.toByteArray(), (++cursor).toString())
+            desktop.ackOutbox(JSONObject(wire).getString("envelope_id"))
+        }
+        gateway.applyPending(50uL)
+        return request
+    }
+
+    private fun remoteScanStatus(bookId: String): JSONObject =
+        JSONObject(SharedVault.desktop.contactSyncRequestStatus(JSONObject().put("book_id", bookId).toString()))
+
     @Test fun firstPassScansAndCapturesCommonFieldsWithCoreIds() {
         val (gateway, bookId) = setUpBook()
         val contacts = view(gateway, bookId)
@@ -101,6 +154,85 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         assertFalse(report.scanFinished)
         assertEquals(before, view(gateway, bookId).toString())
         assertEquals(outbox, gateway.pendingOutboxJson().size)
+    }
+
+    @Test fun remotePendingRequestRunsFreshNoChangeFullScanAndCompletes() {
+        val (gateway, bookId) = setUpBook()
+        val before = view(gateway, bookId).toString()
+        val requested = requestRemoteScan(gateway, bookId)
+
+        val report = coordinator(gateway).run(charging = false)
+
+        assertTrue(report.scanComplete)
+        assertEquals(before, view(gateway, bookId).toString())
+        assertEquals(0, JSONObject(gateway.pendingContactSyncScans(JSONObject().put("book_id", bookId).toString()))
+            .getJSONArray("requests").length())
+        deliverGatewayOutboxToDesktop(gateway)
+        val status = remoteScanStatus(bookId)
+        assertEquals(requested.getString("requestId"), status.getString("requestId"))
+        assertEquals("completed", status.getString("state"))
+    }
+
+    @Test fun checkpointIsSavedBeforeBeginAndRestartReclaimsTheScan() {
+        val (gateway, _) = setUpBook()
+        val recording = BeginRecordingCore(NativeContactCore(gateway))
+
+        assertThrows(IllegalStateException::class.java) { coordinator(recording).run(charging = false, forceFull = true) }
+        assertTrue(recording.checkpointSaved)
+
+        val resumed = coordinator(gateway).run(charging = false)
+        assertTrue(resumed.scanComplete)
+    }
+
+    @Test fun requestReceivedDuringScanWaitsForFollowUpFullScan() {
+        val (gateway, bookId) = setUpBook()
+        repeat(601) { index -> os.add((index + 3).toLong(), "Contact $index", "+1202555${index.toString().padStart(4, '0')}") }
+        assertTrue(coordinator(gateway).run(charging = false, forceFull = true).more)
+        val requested = requestRemoteScan(gateway, bookId)
+
+        val oldScan = coordinator(gateway).run(charging = false)
+
+        assertTrue(oldScan.scanComplete)
+        assertTrue(JSONObject(gateway.pendingContactSyncScans(JSONObject().put("book_id", bookId).toString()))
+            .getJSONArray("requests").length() > 0)
+        assertTrue(coordinator(gateway).run(charging = false).more)
+        assertTrue(coordinator(gateway).run(charging = false).scanComplete)
+        deliverGatewayOutboxToDesktop(gateway)
+        assertEquals(requested.getString("requestId"), remoteScanStatus(bookId).getString("requestId"))
+        assertEquals("completed", remoteScanStatus(bookId).getString("state"))
+    }
+
+    @Test fun disabledSyncPublishesBlockedRemoteResultAndKeepsGeneration() {
+        val (gateway, bookId) = setUpBook()
+        val generation = JSONObject(gateway.listContactBooksJson()).getJSONArray("books").getJSONObject(0).getString("generation")
+        val coordinator = coordinator(gateway)
+        coordinator.setScanRequestCapability(false)
+        val disabledBook = JSONObject(gateway.listContactBooksJson()).getJSONArray("books").getJSONObject(0)
+        assertEquals(generation, disabledBook.getString("generation"))
+        assertFalse(disabledBook.getJSONObject("capabilities").getBoolean("scan_request"))
+        coordinator.setScanRequestCapability(true)
+        assertEquals(generation, JSONObject(gateway.listContactBooksJson()).getJSONArray("books").getJSONObject(0).getString("generation"))
+
+        val disabledRequest = requestRemoteScan(gateway, bookId)
+        assertTrue(coordinator.reportPendingSyncBlocked("sync_disabled"))
+        deliverGatewayOutboxToDesktop(gateway)
+        assertEquals(disabledRequest.getString("requestId"), remoteScanStatus(bookId).getString("requestId"))
+        assertEquals("blocked", remoteScanStatus(bookId).getString("state"))
+        assertEquals("sync_disabled", remoteScanStatus(bookId).getString("reason"))
+
+    }
+
+    @Test fun missingReadPermissionPublishesBlockedRemoteResult() {
+        val (gateway, bookId) = setUpBook()
+        val requested = requestRemoteScan(gateway, bookId)
+
+        access = ContactsAccess(read = false, write = false)
+        assertEquals(ContactPassReport.Outcome.NO_ACCESS, coordinator(gateway).run(charging = false).outcome)
+
+        deliverGatewayOutboxToDesktop(gateway)
+        assertEquals(requested.getString("requestId"), remoteScanStatus(bookId).getString("requestId"))
+        assertEquals("blocked", remoteScanStatus(bookId).getString("state"))
+        assertEquals("permission_denied", remoteScanStatus(bookId).getString("reason"))
     }
 
     @Test fun revokedOrFailedScansNeverDeleteAndCompleteScanDoes() {
@@ -231,11 +363,13 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         assertEquals(2, os.contacts.size)
     }
 
-    @Test fun hostPassHonoursConsentAndServerCompatibility() {
+    @Test fun disabledHostDoesNotQueueBackfillWorkAndEnabledHostHonoursServerCompatibility() {
         val gateway = enrollAndUnlock()
         grant(android.Manifest.permission.READ_CONTACTS, android.Manifest.permission.WRITE_CONTACTS)
         val session = checkNotNull(NativeGateway.session(context))
+        gateway.setServerCompactionState(true, true)
         ContactSyncPreferences(context).enabled = false
+        // A disabled contact source never returns more work, including when compaction is enabled.
         assertFalse(ContactSyncHost.pass(context, session))
         ContactSyncPreferences(context).enabled = true
         gateway.setServerCompactionSupported(false)

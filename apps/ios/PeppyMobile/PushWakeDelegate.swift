@@ -6,8 +6,7 @@ import UserNotifications
 import PeppyNative
 #endif
 
-/// App-owned wiring for optional APNs wake hints. Configure once at launch after an explicit user
-/// opt-in. It does not create a socket or promise background execution.
+/// App-owned wiring for bounded APNs wake hints. It does not create a socket or promise execution.
 @MainActor
 final class PushWakeDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private static weak var model: AppModel?
@@ -16,26 +15,29 @@ final class PushWakeDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         self.model = model
     }
 
-    /// Called only after the Settings opt-in created a relay client.
     func registerForRemoteNotifications() {
         UIApplication.shared.registerForRemoteNotifications()
     }
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        if Self.model?.relay != nil { registerForRemoteNotifications() }
+        Task { @MainActor in await Self.model?.reconcileWakeRegistration() }
         return true
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
         let value = token.map { String(format: "%02x", $0) }.joined()
-        guard let relay = Self.model?.relay else { return }
-        Task { @MainActor in _ = try? await relay.beginEnrollment(deviceToken: value) }
+        Task { @MainActor in await Self.model?.receiveAPNSToken(value) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        Self.model?.apnsRegistrationFailed()
     }
 
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
         let callback = BackgroundFetchCallback(completionHandler)
         let completion = OnceCompletion { callback.call($0 ? .newData : .failed) }
-        guard let peppy = userInfo["peppy"] as? [AnyHashable: Any],
+        guard Self.model?.backgroundUpdatesEnabled == true,
+              let peppy = userInfo["peppy"] as? [AnyHashable: Any],
               let kind = peppy["kind"] as? String else { completion.complete(false); return }
         let cancellation = BackgroundWakeCancellation()
         let background = application.beginBackgroundTask(withName: "peppy-push-wake") {
@@ -51,6 +53,9 @@ final class PushWakeDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
             switch kind {
             case "challenge":
                 let value = peppy["value"] as? String ?? ""
+                // A cold APNs launch runs before SwiftUI's startup task. Restore the native
+                // identity/runtime first so an otherwise valid challenge is not discarded.
+                await model?.reconcileWakeRegistration()
                 completion.complete((try? await model?.relay?.confirm(challenge: value)) ?? false)
             case "wake":
                 // Both passes are bounded by their native coordinators; cancellation propagates on expiry.

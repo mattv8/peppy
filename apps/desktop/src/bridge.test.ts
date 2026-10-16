@@ -74,17 +74,25 @@ describe("bridge subscriptions", () => {
   });
 
   it("passes declared arguments to native commands", async () => {
+    await tauriBridge.list_devices();
+    await tauriBridge.revoke_device("device-id");
+    await tauriBridge.request_contact_sync("book-id");
+    await tauriBridge.get_contact_sync_request("book-id");
     await tauriBridge.restore_contact("book", "contact");
     await tauriBridge.enrollment_start_over();
     await tauriBridge.enrollment_rotate_phone("shared_secret");
     await tauriBridge.enrollment_cancel_phone();
     await tauriBridge.reveal_vault_secret();
 
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "restore_contact", { bookId: "book", contactId: "contact" });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "enrollment_start_over", undefined);
-    expect(invokeMock).toHaveBeenNthCalledWith(3, "enrollment_rotate_phone", { method: "shared_secret" });
-    expect(invokeMock).toHaveBeenNthCalledWith(4, "enrollment_cancel_phone", undefined);
-    expect(invokeMock).toHaveBeenNthCalledWith(5, "reveal_vault_secret", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "request_contact_sync", { bookId: "book-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "get_contact_sync_request", { bookId: "book-id" });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, "restore_contact", { bookId: "book", contactId: "contact" });
+    expect(invokeMock).toHaveBeenNthCalledWith(6, "enrollment_start_over", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(7, "enrollment_rotate_phone", { method: "shared_secret" });
+    expect(invokeMock).toHaveBeenNthCalledWith(8, "enrollment_cancel_phone", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(9, "reveal_vault_secret", undefined);
   });
 });
 

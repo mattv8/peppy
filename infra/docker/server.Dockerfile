@@ -7,7 +7,7 @@ ARG BUILDARCH
 ARG BUILDPLATFORM
 ARG EMSDK_VERSION=6.0.11
 ARG EMSDK_REVISION=dd8e25632640cfc1fb570c7fa4cc374e8a5e5a72
-ARG NODE_VERSION=24.21.0
+ARG NODE_VERSION=26.12.0
 ARG PNPM_VERSION=12.8.1
 WORKDIR /src
 RUN apt-get update \
@@ -28,6 +28,7 @@ RUN apt-get update \
     && grep "  ${node_archive}$" SHASUMS256.txt | sha256sum -c - \
     && tar -xJf "$node_archive" --strip-components=1 -C /usr/local \
     && rm -f SHASUMS256.txt "$node_archive" \
+    && npm install --global corepack@0.36.0 \
     && COREPACK_HOME=/root/.cache/corepack corepack enable \
     && COREPACK_HOME=/root/.cache/corepack corepack prepare "pnpm@${PNPM_VERSION}" --activate \
     && rustup target add wasm32-unknown-emscripten
