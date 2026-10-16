@@ -206,6 +206,32 @@ async fn next_sse(response: &mut reqwest::Response) -> String {
     String::from_utf8_lossy(&chunk).into_owned()
 }
 
+async fn wait_for_sse_request(response: &mut reqwest::Response, request_id: Uuid) {
+    const WAIT: Duration = Duration::from_secs(7);
+    let target = request_id.to_string();
+    let mut body = Vec::new();
+    let outcome = timeout(WAIT, async {
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .expect("SSE transport error while waiting for request event")
+                .expect("SSE stream ended before request event");
+            body.extend_from_slice(&chunk);
+            if String::from_utf8_lossy(&body).contains(&target) {
+                break;
+            }
+        }
+    })
+    .await;
+    if outcome.is_err() {
+        panic!(
+            "timed out after {WAIT:?} waiting for SSE event containing request {target}; received {} bytes",
+            body.len()
+        );
+    }
+}
+
 #[tokio::test]
 async fn sse_snapshots_enforce_session_cap_and_release_permits() {
     let fixture = Fixture::new().await;
@@ -223,11 +249,7 @@ async fn sse_snapshots_enforce_session_cap_and_release_permits() {
     let limited = sse(&client, address, &admin).await;
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     let request_id = request(app, &admin, REQUEST_SECRET).await;
-    assert!(
-        next_sse(&mut streams[0])
-            .await
-            .contains(&request_id.to_string())
-    );
+    wait_for_sse_request(&mut streams[0], request_id).await;
     drop(streams);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(sse(&client, address, &admin).await.status(), StatusCode::OK);
@@ -472,11 +494,7 @@ async fn shutdown_ends_only_its_own_sse_stream() {
         .unwrap()
         .unwrap();
     let request_id = request(fixture.app().await, &admin, REQUEST_SECRET).await;
-    assert!(
-        next_sse(&mut second)
-            .await
-            .contains(&request_id.to_string())
-    );
+    wait_for_sse_request(&mut second, request_id).await;
     shutdown_b.send(()).unwrap();
     timeout(Duration::from_secs(2), server_b)
         .await
