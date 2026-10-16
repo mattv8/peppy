@@ -28,9 +28,35 @@ class SmsProviderException(message: String, cause: Throwable? = null) : IllegalS
 /** Read-only, ascending, bounded access to Android's public SMS provider. */
 class SmsProviderReader(context: Context) {
     private val resolver: ContentResolver = context.contentResolver
+    private var diagnosticPass: ProviderDiagnosticPass? = null
 
-    fun highWater(): Long = query(SMS, arrayOf("_id"), null, null, "_id DESC LIMIT 1") { cursor ->
-        if (cursor.moveToFirst()) cursor.long("_id") ?: 0L else 0L
+    internal fun beginDiagnosticPass() {
+        if (SyncDiagnostics.enabled) diagnosticPass = ProviderDiagnosticPass()
+    }
+
+    internal fun finishDiagnosticPass() {
+        val pass = diagnosticPass ?: return
+        diagnosticPass = null
+        SyncDiagnostics.record(
+            SyncTraceEvent.PROVIDER_QUERY,
+            SyncTraceField.DURATION_MS to pass.durationMs,
+            SyncTraceField.COUNT to pass.count,
+            SyncTraceField.ROWS to pass.rows,
+            SyncTraceField.PROVIDER_ERROR to pass.errors,
+            SyncTraceField.SUCCESS to if (pass.errors == 0L) 1 else 0,
+        )
+    }
+
+    fun highWater(): Long {
+        var rows = 0L
+        return diagnosedQuery(rows = { rows }) {
+            query(SMS, arrayOf("_id"), null, null, "_id DESC LIMIT 1") { cursor ->
+                if (cursor.moveToFirst()) {
+                    rows = 1
+                    cursor.long("_id") ?: 0L
+                } else 0L
+            }
+        }
     }
 
     fun page(afterId: Long, limit: Int): SmsProviderPage {
@@ -38,12 +64,14 @@ class SmsProviderReader(context: Context) {
         val capped = limit.coerceIn(1, MAX_PAGE)
         val records = mutableListOf<SmsProviderRecord>()
         var through = afterId
-        query(SMS, COLUMNS, "_id > ?", arrayOf(afterId.toString()), "_id ASC LIMIT $capped") { cursor ->
-            while (cursor.moveToNext() && records.size < capped) {
-                val id = cursor.long("_id") ?: throw SmsProviderException("provider row has no id")
-                if (id <= afterId) continue
-                through = id
-                records += record(cursor, id)
+        diagnosedQuery(rows = { records.size.toLong() }) {
+            query(SMS, COLUMNS, "_id > ?", arrayOf(afterId.toString()), "_id ASC LIMIT $capped") { cursor ->
+                while (cursor.moveToNext() && records.size < capped) {
+                    val id = cursor.long("_id") ?: throw SmsProviderException("provider row has no id")
+                    if (id <= afterId) continue
+                    through = id
+                    records += record(cursor, id)
+                }
             }
         }
         records.sortBy { it.id }
@@ -53,8 +81,10 @@ class SmsProviderReader(context: Context) {
 
     fun read(id: Long): SmsProviderRecord? {
         require(id > 0)
-        return query(Uri.withAppendedPath(SMS, id.toString()), COLUMNS, null, null, null) { cursor ->
-            if (cursor.moveToFirst()) record(cursor, id) else null
+        return diagnosedQuery(rows = { row: SmsProviderRecord? -> if (row == null) 0 else 1 }) {
+            query(Uri.withAppendedPath(SMS, id.toString()), COLUMNS, null, null, null) { cursor ->
+                if (cursor.moveToFirst()) record(cursor, id) else null
+            }
         }
     }
 
@@ -97,6 +127,43 @@ class SmsProviderReader(context: Context) {
         throw SmsProviderException("SMS provider query failed", error)
     }
 
+    private fun <T> diagnosedQuery(rows: (T) -> Long, block: () -> T): T {
+        if (!SyncDiagnostics.enabled) return block()
+        diagnosticPass?.let { pass ->
+            pass.count++
+            val startedMs = SyncDiagnostics.nowMs()
+            return try {
+                block().also {
+                    pass.rows += rows(it)
+                    pass.durationMs += (SyncDiagnostics.nowMs() - startedMs).coerceAtLeast(0)
+                }
+            } catch (error: Exception) {
+                pass.errors++
+                pass.durationMs += (SyncDiagnostics.nowMs() - startedMs).coerceAtLeast(0)
+                throw error
+            }
+        }
+        val startedMs = SyncDiagnostics.nowMs()
+        return try {
+            block().also { result ->
+                SyncDiagnostics.record(
+                    SyncTraceEvent.PROVIDER_QUERY,
+                    SyncTraceField.DURATION_MS to (SyncDiagnostics.nowMs() - startedMs).coerceAtLeast(0),
+                    SyncTraceField.SUCCESS to 1,
+                    SyncTraceField.ROWS to rows(result),
+                )
+            }
+        } catch (error: Exception) {
+            SyncDiagnostics.record(
+                SyncTraceEvent.PROVIDER_QUERY,
+                SyncTraceField.DURATION_MS to (SyncDiagnostics.nowMs() - startedMs).coerceAtLeast(0),
+                SyncTraceField.SUCCESS to 0,
+                SyncTraceField.ROWS to 0,
+            )
+            throw error
+        }
+    }
+
     private fun android.database.Cursor.string(name: String): String? =
         getColumnIndex(name).takeIf { it >= 0 && !isNull(it) }?.let(::getString)
 
@@ -109,4 +176,11 @@ class SmsProviderReader(context: Context) {
         const val MAX_PAGE = 50
         const val MAX_STRING = 32 * 1024
     }
+
+    private class ProviderDiagnosticPass(
+        var count: Long = 0,
+        var rows: Long = 0,
+        var errors: Long = 0,
+        var durationMs: Long = 0,
+    )
 }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Telephony
 import androidx.core.content.ContextCompat
 
@@ -15,6 +16,27 @@ internal fun shouldObserveSmsProvider(readGranted: Boolean): Boolean = readGrant
 
 internal fun needsSmsReadSettingsRecovery(hasRequested: Boolean, granted: Boolean, shouldShowRationale: Boolean): Boolean =
     hasRequested && !granted && !shouldShowRationale
+
+internal data class SmsCaptureDebouncePolicy(val quietMs: Long, val maximumWaitMs: Long? = null)
+
+internal fun smsCaptureDebouncePolicy(fastMode: Boolean): SmsCaptureDebouncePolicy =
+    if (fastMode) SmsCaptureDebouncePolicy(FAST_QUIET_MS, FAST_MAX_WAIT_MS) else SmsCaptureDebouncePolicy(BASELINE_QUIET_MS)
+
+/** Tracks a provider-notification burst using Handler's uptime clock. */
+internal class SmsCaptureDebouncer(private val policy: SmsCaptureDebouncePolicy) {
+    private var firstNotificationUptimeMs: Long? = null
+
+    fun nextDelayMs(nowUptimeMs: Long): Long {
+        val first = firstNotificationUptimeMs ?: nowUptimeMs.also { firstNotificationUptimeMs = it }
+        val quietDeadline = nowUptimeMs + policy.quietMs
+        val deadline = policy.maximumWaitMs?.let { minOf(quietDeadline, first + it) } ?: quietDeadline
+        return (deadline - nowUptimeMs).coerceAtLeast(0)
+    }
+
+    fun reset() {
+        firstNotificationUptimeMs = null
+    }
+}
 
 internal object SmsReadPermissionRecovery {
     private const val NAME = "peppy-sms-permission"
@@ -58,7 +80,7 @@ internal fun readSmsHistoryState(context: Context, fallback: SmsHistoryState): S
 /** Schedules scanner work after provider changes; it never reads provider rows on the main thread. */
 internal object SmsCaptureLifecycle {
     private val lock = Any()
-    private var observer: ContentObserver? = null
+    private var observer: SmsProviderObserver? = null
 
     fun ensureObserver(context: Context) {
         val app = context.applicationContext
@@ -69,6 +91,7 @@ internal object SmsCaptureLifecycle {
             if (wanted && observer == null) {
                 observer = observer(app).also { app.contentResolver.registerContentObserver(SMS_URI, true, it) }
             } else if (!wanted && observer != null) {
+                observer!!.cancel()
                 app.contentResolver.unregisterContentObserver(observer!!)
                 observer = null
             }
@@ -83,18 +106,67 @@ internal object SmsCaptureLifecycle {
         }
     }
 
-    private fun observer(context: Context): ContentObserver {
+    internal fun observer(context: Context, policy: SmsCaptureDebouncePolicy = smsCaptureDebouncePolicy(BuildConfig.PEPPY_SMS_FAST_CAPTURE), onDispatch: (() -> Unit)? = null): SmsProviderObserver {
         val debounceHandler = Handler(Looper.getMainLooper())
-        return object : ContentObserver(debounceHandler) {
-            private val enqueue = Runnable { onPermissionOrForeground(context) }
+        val debouncer = SmsCaptureDebouncer(policy)
+        return object : SmsProviderObserver(debounceHandler) {
+            private val enqueue = Runnable {
+                if (!isActive()) return@Runnable
+                debouncer.reset()
+                val hintCount = pendingHints
+                pendingHints = 0
+                if (onDispatch == null && !smsReadGranted(context)) {
+                    SmsCaptureLifecycle.ensureObserver(context)
+                    return@Runnable
+                }
+                if (onDispatch != null) onDispatch() else {
+                    if (SyncDiagnostics.enabled) {
+                        SyncDiagnostics.withTrace(SyncDiagnostics.newTraceId()) {
+                            SyncDiagnostics.record(SyncTraceEvent.OBSERVER_DISPATCH, SyncTraceField.COUNT to hintCount.toLong(), SyncTraceField.FAST_MODE to if (BuildConfig.PEPPY_SMS_FAST_CAPTURE) 1 else 0)
+                            SmsCaptureWork.enqueueObserver(context)
+                            SmsCaptureWork.ensurePeriodic(context)
+                        }
+                    } else {
+                        SmsCaptureWork.enqueueObserver(context)
+                        SmsCaptureWork.ensurePeriodic(context)
+                    }
+                }
+            }
+
+            private var pendingHints = 0
 
             override fun onChange(selfChange: Boolean) {
+                if (!isActive()) return
+                if (pendingHints == 0 && SyncDiagnostics.enabled) SyncDiagnostics.record(SyncTraceEvent.OBSERVER_HINT)
+                pendingHints++
                 debounceHandler.removeCallbacks(enqueue)
-                debounceHandler.postDelayed(enqueue, DEBOUNCE_MS)
+                debounceHandler.postDelayed(enqueue, debouncer.nextDelayMs(SystemClock.uptimeMillis()))
+            }
+
+            override fun cancelPending() {
+                debounceHandler.removeCallbacks(enqueue)
+                debouncer.reset()
+                pendingHints = 0
             }
         }
     }
 
-    private const val DEBOUNCE_MS = 15_000L
     private val SMS_URI = Telephony.Sms.CONTENT_URI
 }
+
+internal abstract class SmsProviderObserver(handler: Handler) : ContentObserver(handler) {
+    private var active = true
+
+    fun isActive(): Boolean = active
+
+    fun cancel() {
+        active = false
+        cancelPending()
+    }
+
+    protected abstract fun cancelPending()
+}
+
+private const val BASELINE_QUIET_MS = 15_000L
+private const val FAST_QUIET_MS = 1_000L
+private const val FAST_MAX_WAIT_MS = 3_000L

@@ -14,6 +14,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import uniffi.peppy_mobile_bindings.NativeClient
+import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativePermitState
 import uniffi.peppy_mobile_bindings.NativeSnapshotProjectionState
@@ -80,7 +81,7 @@ class GatewaySyncTest : GatewayTestBase() {
     private fun record(cursor: Int, wire: String) = JSONObject().put("cursor", cursor.toString()).put("envelope", JSONObject(wire))
 
     private fun sync(
-        client: NativeClient,
+        client: NativeClientInterface,
         carrier: FakeCarrier = FakeCarrier(),
         media: () -> MmsTransferResult = { MmsTransferResult(false, 0, 0, emptyList()) },
         contacts: () -> Boolean = { false },
@@ -405,6 +406,85 @@ class GatewaySyncTest : GatewayTestBase() {
         assertEquals("no retry loop", 0, uploads())
         assertEquals("invalid_envelope", NativeGateway.status(context).outboxRejection)
     }
+
+    @Test fun diagnosticsAckIsRecordedOnlyAfterSuccessfulDurableAck() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550009991", "ack success", "diag-ack", false))
+        val traces = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) {
+            assertNull(sync(client).run().failure)
+        }
+        assertTrue(client.pendingOutboxJsonBatch(10uL).isEmpty())
+        assertEquals(1, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
+    }
+
+    @Test fun diagnosticsAckIsAbsentForTransientUpload() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550009992", "ack rejected", "diag-ack-500", false))
+        uploadResponse = LoopbackHttpServer.Response(500, "{\"code\":\"rejected\"}")
+        val traces = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(client).run() }
+        assertEquals(0, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
+        assertTrue(client.pendingOutboxJsonBatch(10uL).isNotEmpty())
+    }
+
+    @Test fun diagnosticsAckIsAbsentWhenDurableAckThrowsAndOriginalFailureEscapes() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550009993", "ack throw", "diag-ack-throw", false))
+        val failure = IllegalStateException("durable ack failed")
+        val throwingClient = object : NativeClientInterface by client {
+            override fun ackOutbox(envelopeId: String) = throw failure
+        }
+        val traces = mutableListOf<String>()
+
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) {
+            try {
+                sync(throwingClient).run()
+                throw AssertionError("expected durable ack failure")
+            } catch (caught: IllegalStateException) {
+                assertTrue(caught === failure)
+            }
+        }
+
+        assertEquals(0, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
+        assertTrue(client.pendingOutboxJsonBatch(10uL).isNotEmpty())
+    }
+
+    @Test fun diagnosticsAckIsAbsentForIdempotencyConflict() {
+        val traces = mutableListOf<String>()
+        val conflictClient = live()
+        conflictClient.captureIncoming(NativeIncomingSms(null, "+15550009994", "conflict", "diag-ack-409", false))
+        uploadResponse = LoopbackHttpServer.Response(409, "{\"code\":\"idempotency_conflict\"}")
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(conflictClient).run() }
+        assertEquals(SyncPhase.RECOVERY_REQUIRED, state.phase)
+        assertTrue(conflictClient.pendingOutboxJsonBatch(10uL).isNotEmpty())
+        assertEquals(0, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
+    }
+
+    @Test fun diagnosticsAckIsAbsentForPermanentRejection() {
+        val traces = mutableListOf<String>()
+        val rejectionClient = live()
+        rejectionClient.captureIncoming(NativeIncomingSms(null, "+15550009995", "rejection", "diag-ack-422", false))
+        uploadResponse = LoopbackHttpServer.Response(422, "{\"code\":\"invalid_envelope\"}")
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(rejectionClient).run() }
+        assertEquals("invalid_envelope", state.outboxRejection)
+        assertTrue(rejectionClient.pendingOutboxJsonBatch(10uL).isNotEmpty())
+        assertEquals(0, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
+    }
+
+    @Test fun diagnosticsAckIsAbsentForBadRequestRejection() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550009996", "bad request", "diag-ack-400", false))
+        uploadResponse = LoopbackHttpServer.Response(400, "{\"code\":\"invalid_envelope\"}")
+        val traces = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) { sync(client).run() }
+        assertEquals("invalid_envelope", state.outboxRejection)
+        assertTrue(client.pendingOutboxJsonBatch(10uL).isNotEmpty())
+        assertEquals(0, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
+    }
+
+    private fun traceEvent(line: String): Long? = line.split(' ').firstOrNull { it.startsWith("event=") }
+        ?.substringAfter('=')?.toLongOrNull()
 
     @Test
     fun livePassReplaysUploadsAndDispatchesOnce() {
