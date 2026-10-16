@@ -596,8 +596,16 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                 if (hostPolicy.decision(smsAvailable = sendGranted)?.transferMedia == true) {
                     val http = GatewayHttp(session.origin, session.bearerToken)
                     val tracked = ContactPhotoTransfer(session.client, http).trackedUploadIds()
-                    MmsMediaTransfer(session.client, http, applicationContext.noBackupFilesDir) { it in tracked }
-                        .run()
+                    val remoteQuota = MmsRemoteQuota(applicationContext, session.client)
+                    MmsMediaTransfer(
+                        session.client,
+                        http,
+                        applicationContext.noBackupFilesDir,
+                        { it in tracked },
+                        remoteQuota.uploadsAllowed(http),
+                        { remoteQuota.pause() },
+                        { remoteQuota.confirmUploadCapacity() },
+                    ).run()
                         .also { MmsTransferHealth(applicationContext).record(it.failures) }
                 } else {
                     MmsTransferResult(more = false, uploaded = 0, downloaded = 0, failures = emptyList())

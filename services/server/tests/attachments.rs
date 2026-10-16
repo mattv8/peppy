@@ -27,6 +27,13 @@ struct TestServer {
 }
 
 impl TestServer {
+    async fn usage(&self) -> Response {
+        self.auth(Client::new().get(format!("{}/v1/attachments/usage", self.base_url)))
+            .send()
+            .await
+            .unwrap()
+    }
+
     async fn start() -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
@@ -1661,5 +1668,143 @@ async fn spool_files_are_removed_on_every_failure_and_cancellation_path() {
         spool_entries() == 0
     })
     .await;
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn attachment_usage_is_authenticated_scoped_and_matches_admission_accounting() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let finalized = b"finalized";
+    let attachment = server.finalized_attachment(finalized).await;
+    let reserved = b"reserved";
+    let reservation = server.reserve_id(reserved).await;
+    let public_bytes = png(12);
+    let public_copy = server.public_copy(attachment, public_bytes.clone()).await;
+    assert_eq!(public_copy.status(), StatusCode::OK);
+    let public_copy: Value = public_copy.json().await.unwrap();
+    let share_id: Uuid = public_copy["share_id"].as_str().unwrap().parse().unwrap();
+
+    let usage = server.usage().await;
+    assert_eq!(usage.status(), StatusCode::OK);
+    let usage: Value = usage.json().await.unwrap();
+    assert_eq!(
+        usage["used_bytes"],
+        json!((finalized.len() + reserved.len() + public_bytes.len()) as i64)
+    );
+    assert_eq!(usage["limit_bytes"], json!(512 * 1024 * 1024_i64));
+
+    assert_eq!(
+        Client::new()
+            .get(format!("{}/v1/attachments/usage", server.base_url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let foreign = foreign_owner(&server.pool).await;
+    let foreign_usage = Client::new()
+        .get(format!("{}/v1/attachments/usage", server.base_url))
+        .bearer_auth(foreign)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign_usage.status(), StatusCode::OK);
+    assert_eq!(
+        foreign_usage.json::<Value>().await.unwrap()["used_bytes"],
+        json!(0)
+    );
+
+    sqlx::query("UPDATE upload_reservations SET expires_at=now()-interval '1 second' WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(server.vault)
+        .bind(reservation)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE public_attachment_copies SET purged_at=now() WHERE share_id=$1")
+        .bind(share_id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM attachments WHERE vault_id=$1 AND attachment_id=$2")
+        .bind(server.vault)
+        .bind(attachment)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        server.usage().await.json::<Value>().await.unwrap()["used_bytes"],
+        json!(0)
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn private_attachment_downloads_validate_and_serve_single_byte_ranges() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let ciphertext = b"0123456789";
+    let attachment = server.finalized_attachment(ciphertext).await;
+    let url = format!("{}/v1/attachments/{attachment}", server.base_url);
+
+    assert_eq!(
+        Client::new()
+            .get(&url)
+            .header("range", "bytes=0-1")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let foreign = foreign_owner(&server.pool).await;
+    assert_eq!(
+        Client::new()
+            .get(&url)
+            .bearer_auth(foreign)
+            .header("range", "bytes=0-1")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    for (range, expected_range, expected_bytes) in [
+        ("bytes=2-5", "bytes 2-5/10", &b"2345"[..]),
+        ("bytes=7-", "bytes 7-9/10", &b"789"[..]),
+        ("bytes=-3", "bytes 7-9/10", &b"789"[..]),
+    ] {
+        let response = server
+            .auth(Client::new().get(&url))
+            .header("range", range)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-range"], expected_range);
+        assert_eq!(
+            response.headers()["content-length"].to_str().unwrap(),
+            expected_bytes.len().to_string()
+        );
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(response.bytes().await.unwrap().as_ref(), expected_bytes);
+    }
+
+    for range in ["bytes=", "bytes=5-4", "bytes=10-", "bytes=0-1,3-4"] {
+        let response = server
+            .auth(Client::new().get(&url))
+            .header("range", range)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()["content-range"], "bytes */10");
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "invalid_range"
+        );
+    }
     server.shutdown().await;
 }

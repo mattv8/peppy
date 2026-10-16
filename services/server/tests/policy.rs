@@ -299,6 +299,52 @@ fn assert_called_by(
 }
 
 #[tokio::test]
+async fn attachment_usage_uses_policy_quota_and_requires_read_permission() {
+    let _guard = TEST_LOCK.lock().await;
+    let policy = Arc::new(Policy {
+        allowed: vec![Operation::Read],
+        quota: Some(123_456),
+        ..Policy::default()
+    });
+    let server = TestServer::start(policy.clone()).await;
+    let owner = server.owner().await;
+    let (status, usage) = server
+        .request(
+            "GET",
+            "/v1/attachments/usage",
+            &owner.device_token,
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(usage, json!({"used_bytes": 0, "limit_bytes": 123_456}));
+    let calls = policy.calls().await;
+    assert_called_by(&calls, &owner, Operation::Read);
+    assert_called_by(&calls, &owner, Operation::Upload);
+    server.shutdown().await;
+
+    let denied = Arc::new(Policy {
+        quota: Some(123_456),
+        ..Policy::default()
+    });
+    let server = TestServer::start(denied).await;
+    let owner = server.owner().await;
+    assert_eq!(
+        server
+            .request(
+                "GET",
+                "/v1/attachments/usage",
+                &owner.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn policy_receives_verified_principals_and_cannot_be_tricked_by_foreign_envelopes() {
     let _guard = TEST_LOCK.lock().await;
     let policy = Arc::new(Policy::allowing([

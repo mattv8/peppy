@@ -14,6 +14,7 @@ pub mod routes {
     pub const CANCEL: &str = "/hosted/v1/web/billing/cancel";
     pub const RESUME: &str = "/hosted/v1/web/billing/resume";
     pub const INVOICES: &str = "/hosted/v1/web/billing/invoices";
+    pub const STORAGE_PACK: &str = "/hosted/v1/web/billing/storage-pack";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,16 @@ pub struct SubscribeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
+pub struct StoragePackRequest {
+    pub operation_id: Uuid,
+    /// Reconciled quantity displayed to the user when this edit was made.
+    pub expected_quantity: i64,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct InvoiceSummary {
     pub id: String,
     pub status: String,
@@ -82,6 +93,21 @@ pub struct BillingSummary {
     pub price_id: String,
     pub plan: PlanSummary,
     pub invoices: Vec<InvoiceSummary>,
+    pub storage: StorageSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSummary {
+    pub used_bytes: i64,
+    pub limit_bytes: i64,
+    pub base_bytes: i64,
+    pub pack_quantity: i64,
+    pub pack_bytes: i64,
+    pub pack_max_quantity: Option<i64>,
+    pub pack_pending: bool,
+    pub pack_mutation_blocked_reason: Option<String>,
+    pub pack: Option<PlanSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

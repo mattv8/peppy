@@ -54,6 +54,20 @@ The unlocked **Contacts** tab is the home of contact sync. Contact sync is separ
 
 Experimental MMS requires participating clients that advertise MMS content version 2 or later. The existing messaging app downloads carrier MMS; Peppy scans available provider parts and uploads completed encrypted records. The phone validates encoded size against the reported carrier limit or a conservative 300 KiB fallback. Confirmed send is distinct from delivery, uncertain attempts are not automatically resent, and carrier MMS remains outside Peppy's encryption boundary.
 
+Enabling MMS capture also starts resumable history capture. Rust stores each
+vault's history baseline and progress; turning capture off does not erase its
+checkpoint. History includes downloaded provider-visible sent and received MMS,
+not RCS or attachments the default messaging app has never downloaded. Status
+distinguishes captured history from pending parts, storage capacity, and uploads.
+Media transfers retain the Wi-Fi-only preference.
+
+Version-3 captures include separately encrypted image previews and, where the
+device supports extraction, video posters and media duration. Preview generation
+failure does not discard the original. Desktop and browser clients can browse
+previews and request originals on demand. A stock emulator cannot establish real
+carrier MMS delivery; use fixture tests for acquisition and a SIM-backed device
+for carrier acceptance.
+
 For group MMS replies, the app reads the default SMS SIM's own number from the carrier (via `READ_PHONE_NUMBERS` on Android 13+, or the existing `READ_SMS` on older releases) solely so replies to a group MMS go to everyone except this phone. If the carrier does not provide the number, the MMS settings offer manual entry.
 
 ## Build configuration

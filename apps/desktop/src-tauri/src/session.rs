@@ -13,8 +13,8 @@ use crate::{
     secure_store::SecretStore,
 };
 use peppy_client_core::{
-    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, DraftId, Message,
-    MessageId, NativeKeyCache, VaultId,
+    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, DraftId,
+    MediaCursor, Message, MessageId, NativeKeyCache, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -241,7 +241,11 @@ impl Session {
     }
 
     pub fn revoked_devices(&self) -> HashSet<String> {
-        self.status.lock().unwrap_or_else(|poison| poison.into_inner()).revoked_device_ids.clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .revoked_device_ids
+            .clone()
     }
 
     /// CAS draft save. Text, recipients, attachments and route are persisted together.
@@ -478,29 +482,40 @@ impl Session {
                         retryable: None,
                     };
                 };
+                let preview_info = self
+                    .client
+                    .message_attachment_media_metadata(message.payload.record.message_id, id)
+                    .ok()
+                    .flatten()
+                    .and_then(|metadata| metadata.thumbnail)
+                    .unwrap_or_else(|| info.clone());
                 let mut preview = None;
-                if media::is_previewable(&info.media_type) && info.state.is_local() {
+                if media::is_previewable(&preview_info.media_type) && preview_info.state.is_local()
+                {
+                    let preview_id = preview_info.attachment_id;
                     let cached = self
                         .previews
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
-                        .get(&id)
+                        .get(&preview_id)
                         .cloned();
                     preview = match cached {
                         Some(value) => value,
-                        None if eligible.is_none_or(|ids| ids.contains(&id)) && *budget > 0 => {
+                        None if eligible.is_none_or(|ids| ids.contains(&preview_id))
+                            && *budget > 0 =>
+                        {
                             *budget -= 1;
                             let value = self
                                 .client
-                                .open_native_plaintext(id)
+                                .open_native_plaintext(preview_id)
                                 .ok()
                                 .and_then(|file| media::read_capped(file.path()))
                                 .and_then(|bytes| media::preview_data_url(&bytes));
-                            self.cache_preview(id, value.clone());
+                            self.cache_preview(preview_id, value.clone());
                             value
                         }
                         None => {
-                            if eligible.is_none_or(|ids| ids.contains(&id)) {
+                            if eligible.is_none_or(|ids| ids.contains(&preview_id)) {
                                 *deferred = true;
                             }
                             None
@@ -550,6 +565,66 @@ impl Session {
             messages,
             has_more: page.has_more,
         })
+    }
+
+    pub fn media_page(
+        &self,
+        conversation: ConversationId,
+        cursor: Option<&MediaCursor>,
+        limit: usize,
+    ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+        if !(1..=100).contains(&limit) {
+            return Err(BridgeError::new(
+                "invalid-request",
+                "The media page size is invalid.",
+            ));
+        }
+        let page = self
+            .client
+            .media_page(conversation, cursor, limit.min(MAX_PREVIEWS_PER_SNAPSHOT))
+            .map_err(core_error)?;
+        let mut view = peppy_desktop_api::media_page_view(page);
+        let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
+        for item in &mut view.items {
+            let Some(thumbnail) = item
+                .media_meta
+                .as_mut()
+                .and_then(|meta| meta.thumbnail.as_mut())
+            else {
+                continue;
+            };
+            if budget == 0
+                || !media::is_previewable(&thumbnail.media_type)
+                || thumbnail.state != "ready"
+            {
+                continue;
+            }
+            let Ok(id) = AttachmentId::from_str(&thumbnail.id) else {
+                continue;
+            };
+            let cached = self
+                .previews
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .get(&id)
+                .cloned();
+            let preview = match cached {
+                Some(value) => value,
+                None => {
+                    budget -= 1;
+                    let value = self
+                        .client
+                        .open_native_plaintext(id)
+                        .ok()
+                        .and_then(|file| media::read_capped(file.path()))
+                        .and_then(|bytes| media::preview_data_url(&bytes));
+                    self.cache_preview(id, value.clone());
+                    value
+                }
+            };
+            thumbnail.preview_url = preview;
+        }
+        Ok(view)
     }
 
     /// Builds the sanitized UI snapshot from core state. Returns whether previews were deferred
@@ -885,9 +960,13 @@ mod tests {
             "availability": "offline", "lastSeenAgeSeconds": 12,
             "presence": { "state": "connected", "last_seen_age_seconds": 12 },
             "wakeRoute": true
-        })).unwrap();
+        }))
+        .unwrap();
         let cached = sanitize_cached_gateways(vec![gateway]);
-        assert_eq!(cached[0].availability, peppy_desktop_api::GatewayAvailability::Unknown);
+        assert_eq!(
+            cached[0].availability,
+            peppy_desktop_api::GatewayAvailability::Unknown
+        );
         assert_eq!(cached[0].last_seen_age_seconds, None);
         assert_eq!(cached[0].presence, None);
         assert!(!cached[0].online);

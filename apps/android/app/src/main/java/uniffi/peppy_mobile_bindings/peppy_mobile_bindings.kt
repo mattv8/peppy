@@ -723,6 +723,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_activate_verified_epoch(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_advance_mms_backfill_page(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_apply_pending(
@@ -791,9 +793,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_dispose(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_export_native_key_cache_for_native_storage(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_contact_scan(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_mms_backfill_phase(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_snapshot(
     ): Int
@@ -827,9 +833,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_messages(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_migrate_mms_backfill_state(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_acquisition_parts(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_acquisitions(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_backfill_recheck_requests(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_backfill_status(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_own_address(
     ): Int
@@ -851,6 +863,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_command_attachment_count(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_commands(
@@ -866,6 +880,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_outbox_json_batch(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_mms_backfill_scans(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_reconciliation(
     ): Int
@@ -884,6 +900,12 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_remove_notification(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_mms_backfill_remote_capacity(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_mms_backfill_vault_quota_exceeded(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_download(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit(
     ): Int
@@ -908,6 +930,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_part(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_part_metadata(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_state(
     ): Int
@@ -1071,6 +1095,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_activate_verified_epoch(`ptr`: Long,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_advance_mms_backfill_page(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`phase`: RustBuffer.ByValue,`providerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_append_snapshot_raw_page(`ptr`: Long,`generation`: Long,`records`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_apply_pending(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1139,10 +1165,14 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_dispose(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_evict_attachment_ciphertext(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_export_native_key_cache_for_native_storage(`ptr`: Long,`epoch`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_finish_contact_scan(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_finish_mms_backfill_phase(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`phase`: RustBuffer.ByValue,`bound`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_finish_snapshot(`ptr`: Long,`generation`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_forget_contact_book(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1175,9 +1205,15 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_messages(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_migrate_mms_backfill_state(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`legacy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_acquisition_parts(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_acquisitions(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_backfill_recheck_requests(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_backfill_status(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_own_address(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1199,6 +1235,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_native_plaintext_file(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pause_mms_backfill_for_local_capacity(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_command_attachment_count(`ptr`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_commands(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1214,6 +1252,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_outbox_json_batch(`ptr`: Long,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_mms_backfill_scans(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`observedMaxId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_reconciliation(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`observedHighWater`: RustBuffer.ByValue,`liveAnchorFingerprint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1233,6 +1273,12 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_contact_sync_blocked(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_remote_capacity(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,`hasCapacity`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_vault_quota_exceeded(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_download(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_edit(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_contact_repair(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1256,6 +1302,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_gateway_settings(`ptr`: Long,`settings`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part(`ptr`: Long,`id`: RustBuffer.ByValue,`providerPartId`: RustBuffer.ByValue,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part_metadata(`ptr`: Long,`id`: RustBuffer.ByValue,`providerPartId`: RustBuffer.ByValue,`width`: RustBuffer.ByValue,`height`: RustBuffer.ByValue,`durationMs`: RustBuffer.ByValue,`thumbnailAttachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_state(`ptr`: Long,`id`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1638,6 +1686,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_activate_verified_epoch() and 0xFFFF) != 46637) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_advance_mms_backfill_page() and 0xFFFF) != 31337) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_append_snapshot_raw_page() and 0xFFFF) != 34355) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1740,10 +1791,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_dispose() and 0xFFFF) != 18253) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext() and 0xFFFF) != 53494) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_export_native_key_cache_for_native_storage() and 0xFFFF) != 64914) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_contact_scan() and 0xFFFF) != 10388) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_mms_backfill_phase() and 0xFFFF) != 49718) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_finish_snapshot() and 0xFFFF) != 3982) {
@@ -1794,10 +1851,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_messages() and 0xFFFF) != 31771) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_migrate_mms_backfill_state() and 0xFFFF) != 22328) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_acquisition_parts() and 0xFFFF) != 29904) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_acquisitions() and 0xFFFF) != 23295) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_backfill_recheck_requests() and 0xFFFF) != 60907) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_backfill_status() and 0xFFFF) != 23749) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_own_address() and 0xFFFF) != 38713) {
@@ -1830,6 +1896,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() and 0xFFFF) != 2659) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pause_mms_backfill_for_local_capacity() and 0xFFFF) != 20629) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_command_attachment_count() and 0xFFFF) != 13128) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1852,6 +1921,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() and 0xFFFF) != 38265) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_mms_backfill_scans() and 0xFFFF) != 16952) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_reconciliation() and 0xFFFF) != 11405) {
@@ -1879,6 +1951,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_contact_sync_blocked() and 0xFFFF) != 17812) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_mms_backfill_remote_capacity() and 0xFFFF) != 13469) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_report_mms_backfill_vault_quota_exceeded() and 0xFFFF) != 57164) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_attachment_download() and 0xFFFF) != 39338) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_request_contact_edit() and 0xFFFF) != 41512) {
@@ -1915,6 +1996,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_part() and 0xFFFF) != 20155) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_part_metadata() and 0xFFFF) != 1571) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_state() and 0xFFFF) != 9497) {
@@ -2549,6 +2633,8 @@ public interface NativeClientInterface {
      */
     fun `activateVerifiedEpoch`(`epoch`: kotlin.UInt)
     
+    fun `advanceMmsBackfillPage`(`generation`: kotlin.String, `scope`: kotlin.String, `phase`: NativeMmsBackfillPhase, `providerId`: kotlin.String)
+    
     fun `appendSnapshotRawPage`(`generation`: kotlin.ULong, `records`: List<NativeRawSnapshotRecord>): NativeSnapshotProgress
     
     fun `applyPending`(`limit`: kotlin.ULong): NativeApplyReport
@@ -2650,6 +2736,8 @@ public interface NativeClientInterface {
      */
     fun `dispose`()
     
+    fun `evictAttachmentCiphertext`(`attachmentId`: kotlin.String): kotlin.Boolean
+    
     /**
      * Sensitive bytes for Android Keystore/iOS Keychain/native secure storage only.
      * This API is deliberately not represented in a view record.
@@ -2657,6 +2745,8 @@ public interface NativeClientInterface {
     fun `exportNativeKeyCacheForNativeStorage`(`epoch`: kotlin.UInt): kotlin.ByteArray
     
     fun `finishContactScan`(`inputJson`: kotlin.String): kotlin.String
+    
+    fun `finishMmsBackfillPhase`(`generation`: kotlin.String, `scope`: kotlin.String, `phase`: NativeMmsBackfillPhase, `bound`: kotlin.String, `exhausted`: kotlin.Boolean): kotlin.Boolean
     
     /**
      * Publishes only. Host work loops must drain with `apply_pending` until
@@ -2707,9 +2797,15 @@ public interface NativeClientInterface {
     
     fun `messages`(`conversationId`: kotlin.String): List<NativeMessage>
     
+    fun `migrateMmsBackfillState`(`generation`: kotlin.String, `scope`: kotlin.String, `legacy`: NativeMmsLegacyBackfillState)
+    
     fun `mmsAcquisitionParts`(`id`: kotlin.String): List<NativeMmsAcquisitionPart>
     
     fun `mmsAcquisitions`(`limit`: kotlin.ULong): List<NativeMmsAcquisition>
+    
+    fun `mmsBackfillRecheckRequests`(`generation`: kotlin.String, `scope`: kotlin.String): NativeMmsBackfillRecheck
+    
+    fun `mmsBackfillStatus`(`generation`: kotlin.String, `scope`: kotlin.String): NativeMmsBackfillStatus
     
     fun `mmsOwnAddress`(`subscriptionId`: kotlin.String): kotlin.String?
     
@@ -2733,6 +2829,8 @@ public interface NativeClientInterface {
     fun `observeContactScan`(`inputJson`: kotlin.String): kotlin.String
     
     fun `openNativePlaintextFile`(`attachmentId`: kotlin.String): NativePlaintextHandle
+    
+    fun `pauseMmsBackfillForLocalCapacity`(`generation`: kotlin.String, `scope`: kotlin.String)
     
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
@@ -2768,6 +2866,8 @@ public interface NativeClientInterface {
     
     fun `pendingUploads`(): List<NativeCipherObject>
     
+    fun `planMmsBackfillScans`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): List<NativeMmsBackfillScanPlan>
+    
     fun `planSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String, `liveAnchorFingerprint`: kotlin.String?): NativeSmsReconciliationPlan?
     
     fun `planSmsScans`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String): List<NativeSmsScanPlan>
@@ -2785,6 +2885,12 @@ public interface NativeClientInterface {
     fun `removeNotification`(`notificationKey`: kotlin.String, `instance`: kotlin.String)
     
     fun `reportContactSyncBlocked`(`inputJson`: kotlin.String): kotlin.String
+    
+    fun `reportMmsBackfillRemoteCapacity`(`generation`: kotlin.String, `scope`: kotlin.String, `hasCapacity`: kotlin.Boolean)
+    
+    fun `reportMmsBackfillVaultQuotaExceeded`(`generation`: kotlin.String, `scope`: kotlin.String)
+    
+    fun `requestAttachmentDownload`(`attachmentId`: kotlin.String)
     
     fun `requestContactEdit`(`inputJson`: kotlin.String): kotlin.String
     
@@ -2813,6 +2919,8 @@ public interface NativeClientInterface {
     fun `setGatewaySettings`(`settings`: NativeGatewaySettings)
     
     fun `setMmsAcquisitionPart`(`id`: kotlin.String, `providerPartId`: kotlin.String, `attachmentId`: kotlin.String)
+    
+    fun `setMmsAcquisitionPartMetadata`(`id`: kotlin.String, `providerPartId`: kotlin.String, `width`: kotlin.UInt?, `height`: kotlin.UInt?, `durationMs`: kotlin.ULong?, `thumbnailAttachmentId`: kotlin.String?)
     
     fun `setMmsAcquisitionState`(`id`: kotlin.String, `state`: NativeMmsAcquisitionState, `reason`: kotlin.String?)
     
@@ -3029,6 +3137,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterUInt.lower(`epoch`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `advanceMmsBackfillPage`(`generation`: kotlin.String, `scope`: kotlin.String, `phase`: NativeMmsBackfillPhase, `providerId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_advance_mms_backfill_page(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterTypeNativeMmsBackfillPhase.lower(`phase`),
+        FfiConverterString.lower(`providerId`),_status)
 }
     }
     
@@ -3581,6 +3706,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `evictAttachmentCiphertext`(`attachmentId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_evict_attachment_ciphertext(
+        it,
+        
+        FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     /**
      * Sensitive bytes for Android Keystore/iOS Keychain/native secure storage only.
      * This API is deliberately not represented in a view record.
@@ -3608,6 +3748,25 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `finishMmsBackfillPhase`(`generation`: kotlin.String, `scope`: kotlin.String, `phase`: NativeMmsBackfillPhase, `bound`: kotlin.String, `exhausted`: kotlin.Boolean): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_finish_mms_backfill_phase(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterTypeNativeMmsBackfillPhase.lower(`phase`),
+        FfiConverterString.lower(`bound`),
+        FfiConverterBoolean.lower(`exhausted`),_status)
 }
     }
     )
@@ -3870,6 +4029,22 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `migrateMmsBackfillState`(`generation`: kotlin.String, `scope`: kotlin.String, `legacy`: NativeMmsLegacyBackfillState)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_migrate_mms_backfill_state(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterTypeNativeMmsLegacyBackfillState.lower(`legacy`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `mmsAcquisitionParts`(`id`: kotlin.String): List<NativeMmsAcquisitionPart> {
             return FfiConverterSequenceTypeNativeMmsAcquisitionPart.lift(
     callWithHandle {
@@ -3893,6 +4068,38 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterULong.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `mmsBackfillRecheckRequests`(`generation`: kotlin.String, `scope`: kotlin.String): NativeMmsBackfillRecheck {
+            return FfiConverterTypeNativeMmsBackfillRecheck.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_backfill_recheck_requests(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `mmsBackfillStatus`(`generation`: kotlin.String, `scope`: kotlin.String): NativeMmsBackfillStatus {
+            return FfiConverterTypeNativeMmsBackfillStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_backfill_status(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),_status)
 }
     }
     )
@@ -4052,6 +4259,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `pauseMmsBackfillForLocalCapacity`(`generation`: kotlin.String, `scope`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pause_mms_backfill_for_local_capacity(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),_status)
+}
+    }
+    
+    
+
+    
     /**
      * Lets an SMS-only adapter reject an immutable pending MMS command before
      * requesting a carrier permit. It exposes no attachment metadata or keys.
@@ -4179,6 +4401,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `planMmsBackfillScans`(`generation`: kotlin.String, `scope`: kotlin.String, `observedMaxId`: kotlin.String): List<NativeMmsBackfillScanPlan> {
+            return FfiConverterSequenceTypeNativeMmsBackfillScanPlan.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_mms_backfill_scans(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterString.lower(`observedMaxId`),_status)
 }
     }
     )
@@ -4325,6 +4564,51 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `reportMmsBackfillRemoteCapacity`(`generation`: kotlin.String, `scope`: kotlin.String, `hasCapacity`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_remote_capacity(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),
+        FfiConverterBoolean.lower(`hasCapacity`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `reportMmsBackfillVaultQuotaExceeded`(`generation`: kotlin.String, `scope`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_report_mms_backfill_vault_quota_exceeded(
+        it,
+        
+        FfiConverterString.lower(`generation`),
+        FfiConverterString.lower(`scope`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `requestAttachmentDownload`(`attachmentId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_request_attachment_download(
+        it,
+        
+        FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    
     
 
     
@@ -4510,6 +4794,25 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`id`),
         FfiConverterString.lower(`providerPartId`),
         FfiConverterString.lower(`attachmentId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setMmsAcquisitionPartMetadata`(`id`: kotlin.String, `providerPartId`: kotlin.String, `width`: kotlin.UInt?, `height`: kotlin.UInt?, `durationMs`: kotlin.ULong?, `thumbnailAttachmentId`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part_metadata(
+        it,
+        
+        FfiConverterString.lower(`id`),
+        FfiConverterString.lower(`providerPartId`),
+        FfiConverterOptionalUInt.lower(`width`),
+        FfiConverterOptionalUInt.lower(`height`),
+        FfiConverterOptionalULong.lower(`durationMs`),
+        FfiConverterOptionalString.lower(`thumbnailAttachmentId`),_status)
 }
     }
     
@@ -8394,6 +8697,14 @@ data class NativeMmsAcquisitionPart (
     var `providerPartId`: kotlin.String
     , 
     var `attachmentId`: kotlin.String
+    , 
+    var `width`: kotlin.UInt?
+    , 
+    var `height`: kotlin.UInt?
+    , 
+    var `durationMs`: kotlin.ULong?
+    , 
+    var `thumbnailAttachmentId`: kotlin.String?
     
 ){
     
@@ -8412,17 +8723,279 @@ public object FfiConverterTypeNativeMmsAcquisitionPart: FfiConverterRustBuffer<N
         return NativeMmsAcquisitionPart(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: NativeMmsAcquisitionPart) = (
             FfiConverterString.allocationSize(value.`providerPartId`) +
-            FfiConverterString.allocationSize(value.`attachmentId`)
+            FfiConverterString.allocationSize(value.`attachmentId`) +
+            FfiConverterOptionalUInt.allocationSize(value.`width`) +
+            FfiConverterOptionalUInt.allocationSize(value.`height`) +
+            FfiConverterOptionalULong.allocationSize(value.`durationMs`) +
+            FfiConverterOptionalString.allocationSize(value.`thumbnailAttachmentId`)
     )
 
     override fun write(value: NativeMmsAcquisitionPart, buf: ByteBuffer) {
             FfiConverterString.write(value.`providerPartId`, buf)
             FfiConverterString.write(value.`attachmentId`, buf)
+            FfiConverterOptionalUInt.write(value.`width`, buf)
+            FfiConverterOptionalUInt.write(value.`height`, buf)
+            FfiConverterOptionalULong.write(value.`durationMs`, buf)
+            FfiConverterOptionalString.write(value.`thumbnailAttachmentId`, buf)
+    }
+}
+
+
+
+data class NativeMmsBackfillRecheck (
+    var `requests`: List<NativeMmsBackfillRecheckRequest>
+    , 
+    var `cursor`: kotlin.String?
+    , 
+    var `budget`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillRecheck: FfiConverterRustBuffer<NativeMmsBackfillRecheck> {
+    override fun read(buf: ByteBuffer): NativeMmsBackfillRecheck {
+        return NativeMmsBackfillRecheck(
+            FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillRecheck) = (
+            FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.allocationSize(value.`requests`) +
+            FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterULong.allocationSize(value.`budget`)
+    )
+
+    override fun write(value: NativeMmsBackfillRecheck, buf: ByteBuffer) {
+            FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.write(value.`requests`, buf)
+            FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterULong.write(value.`budget`, buf)
+    }
+}
+
+
+
+data class NativeMmsBackfillRecheckRequest (
+    var `providerMessageId`: kotlin.String
+    , 
+    var `direction`: NativeMmsBackfillDirection
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillRecheckRequest: FfiConverterRustBuffer<NativeMmsBackfillRecheckRequest> {
+    override fun read(buf: ByteBuffer): NativeMmsBackfillRecheckRequest {
+        return NativeMmsBackfillRecheckRequest(
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeMmsBackfillDirection.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillRecheckRequest) = (
+            FfiConverterString.allocationSize(value.`providerMessageId`) +
+            FfiConverterTypeNativeMmsBackfillDirection.allocationSize(value.`direction`)
+    )
+
+    override fun write(value: NativeMmsBackfillRecheckRequest, buf: ByteBuffer) {
+            FfiConverterString.write(value.`providerMessageId`, buf)
+            FfiConverterTypeNativeMmsBackfillDirection.write(value.`direction`, buf)
+    }
+}
+
+
+
+data class NativeMmsBackfillScanPlan (
+    var `phase`: NativeMmsBackfillPhase
+    , 
+    var `sourceGeneration`: kotlin.String
+    , 
+    var `subscriptionId`: kotlin.String
+    , 
+    var `cursor`: kotlin.String?
+    , 
+    var `historyUpperBound`: kotlin.String?
+    , 
+    var `historyComplete`: kotlin.Boolean
+    , 
+    var `pause`: NativeMmsBackfillPause?
+    , 
+    var `budget`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<NativeMmsBackfillScanPlan> {
+    override fun read(buf: ByteBuffer): NativeMmsBackfillScanPlan {
+        return NativeMmsBackfillScanPlan(
+            FfiConverterTypeNativeMmsBackfillPhase.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeNativeMmsBackfillPause.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillScanPlan) = (
+            FfiConverterTypeNativeMmsBackfillPhase.allocationSize(value.`phase`) +
+            FfiConverterString.allocationSize(value.`sourceGeneration`) +
+            FfiConverterString.allocationSize(value.`subscriptionId`) +
+            FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
+            FfiConverterBoolean.allocationSize(value.`historyComplete`) +
+            FfiConverterOptionalTypeNativeMmsBackfillPause.allocationSize(value.`pause`) +
+            FfiConverterULong.allocationSize(value.`budget`)
+    )
+
+    override fun write(value: NativeMmsBackfillScanPlan, buf: ByteBuffer) {
+            FfiConverterTypeNativeMmsBackfillPhase.write(value.`phase`, buf)
+            FfiConverterString.write(value.`sourceGeneration`, buf)
+            FfiConverterString.write(value.`subscriptionId`, buf)
+            FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
+            FfiConverterBoolean.write(value.`historyComplete`, buf)
+            FfiConverterOptionalTypeNativeMmsBackfillPause.write(value.`pause`, buf)
+            FfiConverterULong.write(value.`budget`, buf)
+    }
+}
+
+
+
+data class NativeMmsBackfillStatus (
+    var `baselineInitialized`: kotlin.Boolean
+    , 
+    var `historyUpperBound`: kotlin.String?
+    , 
+    var `historyComplete`: kotlin.Boolean
+    , 
+    var `pause`: NativeMmsBackfillPause?
+    , 
+    var `pendingCount`: kotlin.ULong
+    , 
+    var `recheckCursor`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillStatus: FfiConverterRustBuffer<NativeMmsBackfillStatus> {
+    override fun read(buf: ByteBuffer): NativeMmsBackfillStatus {
+        return NativeMmsBackfillStatus(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeNativeMmsBackfillPause.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillStatus) = (
+            FfiConverterBoolean.allocationSize(value.`baselineInitialized`) +
+            FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
+            FfiConverterBoolean.allocationSize(value.`historyComplete`) +
+            FfiConverterOptionalTypeNativeMmsBackfillPause.allocationSize(value.`pause`) +
+            FfiConverterULong.allocationSize(value.`pendingCount`) +
+            FfiConverterOptionalString.allocationSize(value.`recheckCursor`)
+    )
+
+    override fun write(value: NativeMmsBackfillStatus, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`baselineInitialized`, buf)
+            FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
+            FfiConverterBoolean.write(value.`historyComplete`, buf)
+            FfiConverterOptionalTypeNativeMmsBackfillPause.write(value.`pause`, buf)
+            FfiConverterULong.write(value.`pendingCount`, buf)
+            FfiConverterOptionalString.write(value.`recheckCursor`, buf)
+    }
+}
+
+
+
+data class NativeMmsLegacyBackfillState (
+    var `historyBaseline`: kotlin.String?
+    , 
+    var `importHistory`: kotlin.Boolean?
+    , 
+    var `recheckCursor`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsLegacyBackfillState: FfiConverterRustBuffer<NativeMmsLegacyBackfillState> {
+    override fun read(buf: ByteBuffer): NativeMmsLegacyBackfillState {
+        return NativeMmsLegacyBackfillState(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeMmsLegacyBackfillState) = (
+            FfiConverterOptionalString.allocationSize(value.`historyBaseline`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`importHistory`) +
+            FfiConverterOptionalString.allocationSize(value.`recheckCursor`)
+    )
+
+    override fun write(value: NativeMmsLegacyBackfillState, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`historyBaseline`, buf)
+            FfiConverterOptionalBoolean.write(value.`importHistory`, buf)
+            FfiConverterOptionalString.write(value.`recheckCursor`, buf)
     }
 }
 
@@ -10356,6 +10929,110 @@ public object FfiConverterTypeNativeMmsAcquisitionState: FfiConverterRustBuffer<
 
 
 
+enum class NativeMmsBackfillDirection {
+    
+    INCOMING,
+    OUTGOING;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillDirection: FfiConverterRustBuffer<NativeMmsBackfillDirection> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeMmsBackfillDirection.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillDirection) = 4UL
+
+    override fun write(value: NativeMmsBackfillDirection, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeMmsBackfillPause {
+    
+    RECOVERY_CAPACITY,
+    LOCAL_CAPACITY,
+    REMOTE_STORAGE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer<NativeMmsBackfillPause> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeMmsBackfillPause.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillPause) = 4UL
+
+    override fun write(value: NativeMmsBackfillPause, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class NativeMmsBackfillPhase {
+    
+    LIVE,
+    HISTORY,
+    RECHECK;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeMmsBackfillPhase: FfiConverterRustBuffer<NativeMmsBackfillPhase> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeMmsBackfillPhase.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillPhase) = 4UL
+
+    override fun write(value: NativeMmsBackfillPhase, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class NativeNotificationCaptureOutcome {
     
     CAPTURED,
@@ -10656,6 +11333,70 @@ public object FfiConverterTypeSyncStepState: FfiConverterRustBuffer<SyncStepStat
 /**
  * @suppress
  */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
     override fun read(buf: ByteBuffer): kotlin.Long? {
         if (buf.get().toInt() == 0) {
@@ -10678,6 +11419,38 @@ public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
         } else {
             buf.put(1)
             FfiConverterLong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
         }
     }
 }
@@ -10902,6 +11675,38 @@ public object FfiConverterOptionalTypeNativeEnrollmentMethod: FfiConverterRustBu
         } else {
             buf.put(1)
             FfiConverterTypeNativeEnrollmentMethod.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeMmsBackfillPause: FfiConverterRustBuffer<NativeMmsBackfillPause?> {
+    override fun read(buf: ByteBuffer): NativeMmsBackfillPause? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeMmsBackfillPause.read(buf)
+    }
+
+    override fun allocationSize(value: NativeMmsBackfillPause?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeMmsBackfillPause.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeMmsBackfillPause?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeMmsBackfillPause.write(value, buf)
         }
     }
 }
@@ -11210,6 +12015,62 @@ public object FfiConverterSequenceTypeNativeMmsAcquisitionPart: FfiConverterRust
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeMmsAcquisitionPart.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest: FfiConverterRustBuffer<List<NativeMmsBackfillRecheckRequest>> {
+    override fun read(buf: ByteBuffer): List<NativeMmsBackfillRecheckRequest> {
+        val len = buf.getInt()
+        return List<NativeMmsBackfillRecheckRequest>(len) {
+            FfiConverterTypeNativeMmsBackfillRecheckRequest.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeMmsBackfillRecheckRequest>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeMmsBackfillRecheckRequest.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeMmsBackfillRecheckRequest>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeMmsBackfillRecheckRequest.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<List<NativeMmsBackfillScanPlan>> {
+    override fun read(buf: ByteBuffer): List<NativeMmsBackfillScanPlan> {
+        val len = buf.getInt()
+        return List<NativeMmsBackfillScanPlan>(len) {
+            FfiConverterTypeNativeMmsBackfillScanPlan.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeMmsBackfillScanPlan>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeMmsBackfillScanPlan.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeMmsBackfillScanPlan>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeMmsBackfillScanPlan.write(it, buf)
         }
     }
 }

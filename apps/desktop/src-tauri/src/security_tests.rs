@@ -181,6 +181,19 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     assert!(main.contains("allow-load-history"));
     assert!(composer.contains("allow-load-history"));
     for command in [
+        "request_attachment_download",
+        "media_page",
+        "open_media",
+        "load_media",
+        "close_media",
+    ] {
+        assert!(commands.contains(&command.to_owned()));
+        assert!(handler.contains(&format!("\n        {command},")));
+        assert!(crate::COMPOSER_COMMANDS.contains(&command));
+        assert!(main.contains(&allow(command)));
+        assert!(composer.contains(&allow(command)));
+    }
+    for command in [
         "enrollment_begin_vault_request",
         "enrollment_vault_request_status",
         "enrollment_create_vault",

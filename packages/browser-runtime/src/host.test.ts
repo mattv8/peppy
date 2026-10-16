@@ -25,16 +25,18 @@ async function eventually(predicate: () => boolean): Promise<void> {
 
 class FakeSession implements HostSession {
   public phase: "unenrolled" | "locked" | "ready" | "closed" = "ready";
+  public generation = 0;
   public readonly calls: Array<{ command: string; args: Record<string, unknown>; mutation: boolean }> = [];
   public snapshot: Record<string, unknown> = {};
   public previewAttachment?: (id: string) => Promise<string | undefined>;
+  public exportAttachment?: (id: string) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
   public async query(command: string, args: Record<string, unknown>) {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
     if (command === "_worker_identity_metadata") return { deviceId: "00000000-0000-0000-0000-000000000001" };
     return command === "snapshot" ? this.snapshot : { command };
   }
-  public async mutate(command: string, args: Record<string, unknown>) { this.calls.push({ command, args, mutation: true }); return { command }; }
+  public async mutate(command: string, args: Record<string, unknown>) { this.calls.push({ command, args, mutation: true }); this.generation += 1; return { command }; }
   public async unlock(_passphrase: string) { this.phase = "ready"; }
   public async enroll(_metadata: unknown, _deviceToken: string, _passphrase: string) { this.phase = "ready"; }
   public shutdown() { this.phase = "closed"; }
@@ -58,6 +60,71 @@ describe("browser host RPC", () => {
         .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
     }
     expect(session.calls).toEqual([]);
+  });
+
+  it("checkpoints media demand and eviction instead of exposing generic core dispatch", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "request_attachment_download", args: { id } }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "close_media", args: { id } }))
+      .resolves.toMatchObject({ ok: true });
+    expect(session.calls).toEqual([
+      { command: "attachment_info", args: { id }, mutation: false },
+      { command: "request_attachment_download", args: { id }, mutation: true },
+      { command: "evict_attachment_ciphertext", args: { id }, mutation: true },
+    ]);
+  });
+
+  it("makes Save a durable demand while a remote original is pending", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_attachment", args: { id } }))
+      .resolves.toMatchObject({ ok: false, error: { code: "media-pending" } });
+    expect(session.calls).toEqual([
+      { command: "attachment_info", args: { id }, mutation: false },
+      { command: "attachment_info", args: { id }, mutation: false },
+      { command: "request_attachment_download", args: { id }, mutation: true },
+    ]);
+  });
+
+  it("does not checkpoint a repeated demand that core already recorded", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return { downloadRequested: true };
+    };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "request_attachment_download", args: { id } }))
+      .resolves.toMatchObject({ ok: true, value: { demanded: false } });
+    expect(session.calls).toEqual([{ command: "attachment_info", args: { id }, mutation: false }]);
+  });
+
+  it("exports a verified local original through Save without demanding it again", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "attachment_info" ? { state: "ready" } : { command };
+    };
+    session.exportAttachment = async () => ({ bytes: new Uint8Array([1]), displayName: "file.pdf", type: "application/pdf" });
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "save_attachment", args: { id } }))
+      .resolves.toMatchObject({ ok: true, value: { displayName: "file.pdf" } });
+    expect(session.calls).toEqual([{ command: "attachment_info", args: { id }, mutation: false }]);
+  });
+
+  it("enriches a media page from its eager thumbnail without opening the original", async () => {
+    const session = new FakeSession();
+    const thumbnail = "00000000-0000-0000-0000-000000000002";
+    session.previewAttachment = vi.fn(async () => "data:image/png;base64,cHJldmlldw==");
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "media_page") return { items: [{ mediaMeta: { thumbnail: { id: thumbnail, mediaType: "image/png", state: "ready" } } }] };
+      return { command };
+    };
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "media_page", args: { conversationId: "00000000-0000-0000-0000-000000000001" } });
+    expect(response).toMatchObject({ ok: true, value: { items: [{ mediaMeta: { thumbnail: { previewUrl: "data:image/png;base64,cHJldmlldw==" } } }] } });
+    expect(session.previewAttachment).toHaveBeenCalledWith(thumbnail);
   });
 
   it.each([
@@ -132,6 +199,28 @@ describe("browser host RPC", () => {
     attached.emit({ id: 2, command: "request_contact_sync", args: { bookId: "book" } });
     await eventually(() => wake.mock.calls.length === 1);
     expect(attached.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("emits one wake and change for an initial demand, then stays quiet for an already-demanded retry", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    let demanded = false;
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "attachment_info" ? { downloadRequested: demanded } : { command };
+    };
+    session.mutate = async (command, args) => { session.calls.push({ command, args, mutation: true }); demanded = true; session.generation += 1; return { command }; };
+    const wake = vi.fn();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session, network: { start: async () => undefined, stop: async () => undefined, wake } as unknown as import("./host.js").BrowserNetwork });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "request_attachment_download", args: { id } });
+    await eventually(() => wake.mock.calls.length === 1);
+    expect(attached.messages.filter(message => JSON.stringify(message) === JSON.stringify({ event: "changed" }))).toHaveLength(1);
+    attached.emit({ id: 2, command: "request_attachment_download", args: { id } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(attached.messages.filter(message => JSON.stringify(message) === JSON.stringify({ event: "changed" }))).toHaveLength(1);
   });
 
   it("forwards history pages as a read-only core request", async () => {

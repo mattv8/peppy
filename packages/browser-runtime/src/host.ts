@@ -101,6 +101,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   send_draft: { coreCommand: "send_draft", mutation: true },
   discard_draft: { coreCommand: "discard_draft", mutation: true },
   mark_seen: { coreCommand: "mark_seen", mutation: true },
+  evict_attachment_ciphertext: { coreCommand: "evict_attachment_ciphertext", mutation: true },
   dismiss_notification: { coreCommand: "dismiss_notification", mutation: true },
   dismiss_all_notifications: { coreCommand: "dismiss_all_notifications", mutation: true },
   set_app_muted: { coreCommand: "set_app_muted", mutation: true },
@@ -121,7 +122,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
 };
 
 const NATIVE_ONLY = new Set([
-  "configure_server", "get_app_lock_status", "set_app_lock", "unlock_app", "pick_attachments", "save_attachment",
+  "configure_server", "get_app_lock_status", "set_app_lock", "unlock_app", "pick_attachments",
   "open_composer", "set_start_at_login", "popout_conversation", "hide_head",
   "close_composer", "close_head_panel", "window", "request_notification_permission", "set_notification_context",
   "subscribe_lifecycle", "subscribe_lifecycle_finished", "acknowledge_lifecycle", "hosted_account",
@@ -171,7 +172,7 @@ function errorFor(error: unknown): RpcError {
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const details = errorDetails(error);
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed"]);
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed"]);
     const code = codes.has(error.code) ? error.code : "unavailable";
     return { code, message: "Browser operation failed.", ...details };
   }
@@ -264,7 +265,33 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
       return { id, ok: true, value: undefined };
     }
     if (command === "prepare_attachment") return { id, ok: true, value: await addAttachmentPreview(session, await prepareAttachment(session, args)) };
+    if (command === "media_page") {
+      const page = await session.query("media_page", mediaPageArgs(args));
+      return { id, ok: true, value: await addMediaPagePreviews(session, page) };
+    }
+    if (command === "open_media") return { id, ok: true, value: await openMedia(session, args) };
+    if (command === "request_attachment_download") {
+      return { id, ok: true, value: { demanded: await demandAttachmentIfNeeded(session, requiredId(args)) } };
+    }
+    if (command === "load_media") {
+      await demandAttachmentIfNeeded(session, requiredId(args));
+      return { id, ok: true, value: await openMedia(session, args) };
+    }
+    if (command === "close_media") {
+      const attachmentId = requiredId(args);
+      await session.mutate("evict_attachment_ciphertext", { id: attachmentId });
+      return { id, ok: true, value: undefined };
+    }
     if (command === "export_attachment") return { id, ok: true, value: await exportAttachment(session, args) };
+    if (command === "save_attachment") {
+      const attachmentId = requiredId(args);
+      const info = await session.query("attachment_info", { id: attachmentId });
+      if (typeof info !== "object" || info === null || Array.isArray(info) || (info as Record<string, unknown>).state !== "ready") {
+        await demandAttachmentIfNeeded(session, attachmentId);
+        throw { code: "media-pending" };
+      }
+      return { id, ok: true, value: await exportAttachment(session, args) };
+    }
     if (command === "retry_attachment") { await session.query("attachment_info", { id: requiredId(args) }); return { id, ok: true, value: undefined }; }
     if (command === "publish_attachment") {
       if (!publisher) throw { code: "unavailable" };
@@ -365,6 +392,52 @@ function previewableAttachment(attachment: unknown): boolean {
   if (typeof attachment !== "object" || attachment === null || Array.isArray(attachment)) return false;
   const view = attachment as Record<string, unknown>;
   return typeof view.id === "string" && typeof view.mediaType === "string" && /^image\/(jpeg|png|webp|gif)$/.test(view.mediaType) && view.state === "ready";
+}
+function mediaPageArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const conversationId = args.conversationId;
+  const requestedLimit = args.limit;
+  const limit = requestedLimit === undefined ? 50 : requestedLimit;
+  if (typeof conversationId !== "string" || !/^[0-9a-f-]{36}$/.test(conversationId) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw { code: "invalid-request" };
+  if (args.cursor !== undefined && (!isMediaCursor(args.cursor))) throw { code: "invalid-request" };
+  return { conversationId, limit, ...(args.cursor === undefined ? {} : { cursor: args.cursor }) };
+}
+function isMediaCursor(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const cursor = value as Record<string, unknown>;
+  return typeof cursor.sortAtMs === "string" && /^[0-9]+$/.test(cursor.sortAtMs)
+    && typeof cursor.localOrder === "string" && /^[0-9]+$/.test(cursor.localOrder)
+    && typeof cursor.messageId === "string" && /^[0-9a-f-]{36}$/.test(cursor.messageId)
+    && Number.isSafeInteger(cursor.attachmentPosition) && (cursor.attachmentPosition as number) >= 0;
+}
+async function addMediaPagePreviews(session: HostSession, value: CoreResult): Promise<CoreResult> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
+  const page = value as Record<string, unknown>;
+  if (!Array.isArray(page.items)) throw { code: "invalid-request" };
+  const items = await Promise.all(page.items.map(async item => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return item;
+    const view = item as Record<string, unknown>;
+    const meta = typeof view.mediaMeta === "object" && view.mediaMeta !== null && !Array.isArray(view.mediaMeta) ? view.mediaMeta as Record<string, unknown> : undefined;
+    const thumbnail = meta?.thumbnail;
+    if (!thumbnail || !previewableAttachment(thumbnail)) return item;
+    return { ...view, mediaMeta: { ...meta, thumbnail: await addAttachmentPreview(session, thumbnail) } };
+  }));
+  return { ...page, items };
+}
+async function openMedia(session: HostSession, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const id = requiredId(args);
+  const info = await session.query("attachment_info", { id });
+  if (typeof info !== "object" || info === null || Array.isArray(info)) throw { code: "invalid-request" };
+  if ((info as Record<string, unknown>).state !== "ready") return { state: "pending" };
+  if (!session.exportAttachment) throw { code: "unavailable" };
+  const output = await session.exportAttachment(id);
+  return { state: "ready", bytes: output.bytes.buffer.slice(output.bytes.byteOffset, output.bytes.byteOffset + output.bytes.byteLength), mediaType: output.type, byteSize: output.bytes.byteLength };
+}
+async function demandAttachmentIfNeeded(session: HostSession, id: string): Promise<boolean> {
+  const info = await session.query("attachment_info", { id });
+  if (typeof info !== "object" || info === null || Array.isArray(info)) throw { code: "invalid-request" };
+  if ((info as Record<string, unknown>).downloadRequested === true) return false;
+  await session.mutate("request_attachment_download", { id });
+  return true;
 }
 
 function attachmentBytes(args: Record<string, unknown>): Uint8Array {
@@ -542,7 +615,7 @@ export class BrowserWorkerHost {
       this.changed();
       if (command === "unlock") await this.dependencies.network?.start();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
-      if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync") this.dependencies.network?.wake?.();
+      if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
     }
   }
 

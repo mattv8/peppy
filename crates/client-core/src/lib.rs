@@ -33,6 +33,7 @@ mod conversation_match;
 mod gateway_settings;
 mod media;
 mod mms;
+mod mms_backfill;
 mod mms_identity;
 mod notifications;
 mod sms_acquisition;
@@ -48,6 +49,10 @@ pub use media::{
 pub use mms::{
     MAX_MMS_ACQUISITIONS, MAX_PENDING_MMS_MEDIA_BYTES, MmsAcquisition, MmsAcquisitionInput,
     MmsAcquisitionPart, MmsAcquisitionState, MmsContext, MmsReplyContext, MmsSource,
+};
+pub use mms_backfill::{
+    MAX_MMS_BACKFILL_RECHECK, MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck,
+    MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBackfillStatus, MmsLegacyBackfillState,
 };
 use peppy_crypto::FileKey;
 use peppy_crypto::enrollment::{
@@ -81,9 +86,9 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 /// Shared encrypted MMS content format understood by upgraded gateways.
-pub const MMS_CONTENT_VERSION: u32 = 2;
+pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
 pub const MAX_SNAPSHOT_PAGE: usize = 500;
 /// Records per staged snapshot generation.
@@ -100,6 +105,8 @@ pub const MAX_APPLY_BATCH: usize = 1_000;
 pub const MAX_SEAL_BATCH: usize = 256;
 /// Maximum messages returned by one bounded history query.
 pub const MAX_HISTORY_PAGE: usize = 500;
+/// Legacy originals at or below this plaintext size remain eager downloads.
+pub const EAGER_MEDIA_PLAINTEXT_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Read-only scheduler readiness. Hosts use this before a checkpointed work mutation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -275,6 +282,9 @@ pub enum PrivatePayload {
     MmsMessage {
         message: MessagePayload,
         media: Vec<MediaDescriptor>,
+        /// v3 capture metadata. Thumbnails are independent encrypted objects, never attachments.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media_meta: Vec<MmsMediaMeta>,
     },
     SendMmsCommand {
         message: MessagePayload,
@@ -334,6 +344,20 @@ pub enum PrivatePayload {
     ContactScanResult {
         result: serde_json::Value,
     },
+}
+
+/// Additive v3 MMS capture metadata. `attachment_id` identifies a visible original.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MmsMediaMeta {
+    pub attachment_id: AttachmentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<MediaDescriptor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -496,6 +520,33 @@ pub struct Message {
 pub struct MessagePage {
     pub messages: Vec<Message>,
     pub has_more: bool,
+}
+/// Exclusive, durable newest-first media-page anchor. Attachment position disambiguates a MMS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaCursor {
+    pub sort_at_ms: i64,
+    pub local_order: i64,
+    pub message_id: MessageId,
+    pub attachment_position: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaPageItem {
+    pub message: MessagePayload,
+    pub attachment: AttachmentInfo,
+    pub media_meta: Option<MediaMetadata>,
+    pub cursor: MediaCursor,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaMetadata {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub thumbnail: Option<AttachmentInfo>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaPage {
+    pub items: Vec<MediaPageItem>,
+    pub next_cursor: Option<MediaCursor>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
@@ -1576,6 +1627,7 @@ fn capture_in(
         PrivatePayload::MmsMessage {
             message: payload,
             media: Vec::new(),
+            media_meta: Vec::new(),
         }
     };
     enqueue(tx, ctx, EnvelopePurpose::Event, None, None, &private)?;
@@ -2550,6 +2602,85 @@ impl Client {
         Ok(MessagePage { messages, has_more })
     }
 
+    /// Newest-first visible media with a chronological composite cursor; never uses SQL offsets.
+    pub fn media_page(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<&MediaCursor>,
+        limit: usize,
+    ) -> Result<MediaPage, Error> {
+        if !(1..=MAX_HISTORY_PAGE).contains(&limit) {
+            return Err(Error::InvalidRequest("media page size"));
+        }
+        let store = self.lock()?;
+        let mut query = store.conn.prepare(
+            "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms=?2 AND (m.local_order < ?3 OR (m.local_order=?3 AND (m.id < ?4 OR (m.id=?4 AND ma.position < ?5)))))) ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
+        )?;
+        let rows = query
+            .query_map(
+                params![
+                    conversation_id.to_string(),
+                    cursor.map(|value| value.sort_at_ms),
+                    cursor.map(|value| value.local_order),
+                    cursor.map(|value| value.message_id.to_string()),
+                    cursor.map(|value| i64::from(value.attachment_position)),
+                    i64::try_from(limit + 1)
+                        .map_err(|_| Error::InvalidRequest("media page size"))?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        let items = rows
+            .into_iter()
+            .take(limit)
+            .map(
+                |(payload, sort_at_ms, local_order, message_id, position, attachment_id)| {
+                    let attachment_id = parse(&attachment_id)?;
+                    let media_meta =
+                        media_metadata_for(&store.conn, parse(&message_id)?, attachment_id)?;
+                    Ok(MediaPageItem {
+                        message: decode(payload.as_bytes())?,
+                        attachment: attachment_row(&store.conn, attachment_id)?
+                            .ok_or(Error::Database)?
+                            .info(attachment_id),
+                        media_meta,
+                        cursor: MediaCursor {
+                            sort_at_ms,
+                            local_order,
+                            message_id: parse(&message_id)?,
+                            attachment_position: u32::try_from(position)
+                                .map_err(|_| Error::Database)?,
+                        },
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, Error>>()?;
+        let next_cursor = has_more
+            .then(|| items.last().map(|item| item.cursor.clone()))
+            .flatten();
+        Ok(MediaPage { items, next_cursor })
+    }
+
+    /// Sanitized v3 metadata for one visible message attachment, if the message supplied it.
+    pub fn message_attachment_media_metadata(
+        &self,
+        message_id: MessageId,
+        attachment_id: AttachmentId,
+    ) -> Result<Option<MediaMetadata>, Error> {
+        let store = self.lock()?;
+        media_metadata_for(&store.conn, message_id, attachment_id)
+    }
+
     /// Returns the scoped anchor and every newer message in chronological order.
     pub fn messages_since(
         &self,
@@ -2810,8 +2941,8 @@ impl Client {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = attachment_id.to_string();
         let referenced: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=? UNION SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?) > 0)",
-            params![id, id, id], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=? UNION SELECT 1 FROM message_media_meta WHERE thumbnail_attachment_id=? UNION SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? OR thumbnail_attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?) > 0)",
+            params![id, id, id, id, id], |row| row.get(0),
         )?;
         if referenced || contact_media::blocks_discard(&tx, attachment_id)? {
             return Ok(false);
@@ -2832,7 +2963,7 @@ impl Client {
     /// (see `contact_photo_transfer_state_json`).
     pub fn pending_uploads(&self) -> Result<Vec<CipherObject>, Error> {
         let sql = format!(
-            "SELECT attachment_id FROM attachments WHERE attachment_id IN (SELECT m.attachment_id FROM attachments a JOIN message_attachments m ON m.attachment_id=a.attachment_id WHERE a.state='pending_upload' UNION {}) ORDER BY rowid",
+            "SELECT attachment_id FROM attachments WHERE attachment_id IN (SELECT m.attachment_id FROM attachments a JOIN message_attachments m ON m.attachment_id=a.attachment_id WHERE a.state='pending_upload' UNION SELECT thumbnail_attachment_id FROM message_media_meta JOIN attachments a ON a.attachment_id=thumbnail_attachment_id WHERE a.state='pending_upload' UNION {}) ORDER BY rowid",
             contact_media::UPLOAD_IDS_SQL
         );
         self.cipher_objects(&sql)
@@ -2884,10 +3015,82 @@ impl Client {
     pub fn pending_downloads(&self) -> Result<Vec<CipherObject>, Error> {
         self.cipher_objects(
             &format!(
-                "SELECT attachment_id FROM attachments WHERE state='pending_download' AND attachment_id NOT IN ({}) ORDER BY rowid",
-                contact_media::REJECTED_DOWNLOADS_SQL
+                "SELECT attachment_id FROM attachments WHERE state='pending_download' AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))) ORDER BY rowid",
+                contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ),
         )
+    }
+
+    /// Reports whether a remote original has durable download demand.
+    pub fn attachment_download_requested(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<bool, Error> {
+        let guard = self.lock()?;
+        if attachment_row(&guard.conn, attachment_id)?.is_none() {
+            return Err(Error::NotFound);
+        }
+        guard
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM attachment_demand WHERE attachment_id=?)",
+                params![attachment_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
+    }
+
+    /// Durably opts a remote original into the core-owned download queue.
+    pub fn request_attachment_download(&self, attachment_id: AttachmentId) -> Result<(), Error> {
+        let guard = self.lock()?;
+        if attachment_row(&guard.conn, attachment_id)?.is_none() {
+            return Err(Error::NotFound);
+        }
+        guard.conn.execute(
+            "INSERT INTO attachment_demand(attachment_id,requested_at) VALUES(?,CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(attachment_id) DO NOTHING",
+            params![attachment_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Evicts a verified remote download; local uploads are never eligible.
+    ///
+    /// The durable state transition happens before deleting ciphertext. If file removal fails, the
+    /// object remains pending download and the orphaned ciphertext may be cleaned by a later
+    /// filesystem retry; this method returns `Storage` and never claims successful reclamation.
+    pub fn evict_attachment_ciphertext(&self, attachment_id: AttachmentId) -> Result<bool, Error> {
+        let mut guard = self.lock()?;
+        let row = attachment_row(&guard.conn, attachment_id)?.ok_or(Error::NotFound)?;
+        if row.state != AttachmentState::Available {
+            return Ok(false);
+        }
+        let id = attachment_id.to_string();
+        let protected: bool = guard.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? OR thumbnail_attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?)>0 UNION SELECT 1 FROM commands c JOIN message_attachments m ON m.message_id=c.message_id WHERE m.attachment_id=?)",
+            params![id, id, id, id],
+            |row| row.get(0),
+        )?;
+        if protected {
+            return Ok(false);
+        }
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE attachments SET state=? WHERE attachment_id=?",
+            params![
+                AttachmentState::PendingDownload.code(),
+                attachment_id.to_string()
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM attachment_demand WHERE attachment_id=?",
+            params![attachment_id.to_string()],
+        )?;
+        tx.commit()?;
+        let path = media::cipher_path(&guard.media_dir, attachment_id);
+        std::fs::remove_file(path).map_err(|_| Error::Storage)?;
+        Ok(true)
     }
 
     /// Native-only path to verified local ciphertext (for upload). Never hand it to a web view.
@@ -3439,6 +3642,44 @@ impl Client {
     }
 }
 
+fn media_metadata_for(
+    conn: &Connection,
+    message_id: MessageId,
+    attachment_id: AttachmentId,
+) -> Result<Option<MediaMetadata>, Error> {
+    let row: Option<(Option<i64>, Option<i64>, Option<i64>, Option<String>)> = conn.query_row(
+        "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
+        params![message_id.to_string(), attachment_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional()?;
+    let Some((width, height, duration_ms, thumbnail)) = row else {
+        return Ok(None);
+    };
+    let thumbnail = thumbnail
+        .map(|id| {
+            let id = parse(&id)?;
+            attachment_row(conn, id)?
+                .ok_or(Error::Database)
+                .map(|row| row.info(id))
+        })
+        .transpose()?;
+    Ok(Some(MediaMetadata {
+        width: width
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| Error::Database)?,
+        height: height
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| Error::Database)?,
+        duration_ms: duration_ms
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| Error::Database)?,
+        thumbnail,
+    }))
+}
+
 /// Raises the receive cursor to at least `floor`, then over any contiguous journaled cursors.
 fn advance_frontier(conn: &Connection, floor: u64) -> Result<u64, Error> {
     let start = receive_cursor(conn)?;
@@ -3947,9 +4188,22 @@ ALTER TABLE sms_reconciliation_scans ADD COLUMN completed_at_ms INTEGER;
 const MIGRATION_26: &str = "
 ALTER TABLE send_status ADD COLUMN status_at_ms INTEGER;
 ";
+/// Version 26 -> 27: v3 MMS metadata and separate thumbnail linkage.
+const MIGRATION_27: &str = "
+CREATE TABLE message_media_meta(message_id TEXT NOT NULL, attachment_id TEXT NOT NULL,
+  width INTEGER, height INTEGER, duration_ms INTEGER, thumbnail_attachment_id TEXT,
+  PRIMARY KEY(message_id, attachment_id));
+CREATE INDEX message_media_meta_thumbnail ON message_media_meta(thumbnail_attachment_id)
+  WHERE thumbnail_attachment_id IS NOT NULL;
+CREATE TABLE attachment_demand(attachment_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL);
+ALTER TABLE mms_acquisition_parts ADD COLUMN width INTEGER;
+ALTER TABLE mms_acquisition_parts ADD COLUMN height INTEGER;
+ALTER TABLE mms_acquisition_parts ADD COLUMN duration_ms INTEGER;
+ALTER TABLE mms_acquisition_parts ADD COLUMN thumbnail_attachment_id TEXT;
+";
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
-const DECODER_REVISION: &str = "3";
+const DECODER_REVISION: &str = "4";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -3987,6 +4241,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     contact_media::initialize(conn)?;
     snapshot_projection::initialize(conn)?;
     initialize_compaction_state(conn)?;
+    mms_backfill::initialize(conn)?;
     let version: Option<i64> = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .optional()?;
@@ -4015,6 +4270,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_24)?;
             tx.execute_batch(MIGRATION_25)?;
             tx.execute_batch(MIGRATION_26)?;
+            tx.execute_batch(MIGRATION_27)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4023,7 +4279,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=25)) => {
+        Some(version @ (4..=26)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4088,6 +4344,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 25 {
                 tx.execute_batch(MIGRATION_26)?;
+            }
+            if version <= 26 {
+                tx.execute_batch(MIGRATION_27)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -4185,7 +4444,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                 continue;
             };
             match (status.as_str(), payload) {
-                ("quarantined", PrivatePayload::MmsMessage { message, media })
+                ("quarantined", PrivatePayload::MmsMessage { message, media, .. })
                     if valid_message(&message, envelope.producer_device_id)
                         && media_matches(&message, &media) =>
                 {
@@ -4224,7 +4483,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         revision,
                     )?;
                 }
-                ("applied", PrivatePayload::MmsMessage { message, media })
+                ("applied", PrivatePayload::MmsMessage { message, media, .. })
                     if valid_message(&message, envelope.producer_device_id)
                         && media_matches(&message, &media) =>
                 {
@@ -4434,23 +4693,35 @@ fn apply_record(
     // An authenticated checkpoint repeats current state only to fold a frontier: history.
     let historical = historical || envelope.compaction.as_ref().is_some_and(|c| c.checkpoint);
     // MMS variants share the SMS rules plus private media metadata.
-    let (payload, media) = match payload {
-        PrivatePayload::MmsMessage { message, media } => (PrivatePayload::Message(message), media),
+    let (payload, media, media_meta) = match payload {
+        PrivatePayload::MmsMessage {
+            message,
+            media,
+            media_meta,
+        } => (PrivatePayload::Message(message), media, media_meta),
         PrivatePayload::SendMmsCommand { message, media } => {
-            (PrivatePayload::SendCommand { message }, media)
+            (PrivatePayload::SendCommand { message }, media, Vec::new())
         }
-        other => (other, Vec::new()),
+        other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
         (EnvelopePurpose::Event, PrivatePayload::Message(message)) => {
-            if !valid_message(&message, producer) || !media_matches(&message, &media) {
+            if !valid_message(&message, producer)
+                || !media_matches(&message, &media)
+                || !media_meta_matches(&message, &media_meta)
+            {
                 return Ok(Some(Q::InvalidPayload));
             }
-            if !store_remote_media(conn, &media)? {
+            if !store_remote_media(conn, &media)?
+                || !store_remote_media(conn, &thumbnail_descriptors(&media_meta))?
+            {
                 return Ok(Some(Q::PayloadConflict));
             }
             let inserted = insert_message(conn, &message)?;
             if inserted == Inserted::Conflict {
+                return Ok(Some(Q::PayloadConflict));
+            }
+            if !store_message_media_meta(conn, message.record.message_id, &media_meta)? {
                 return Ok(Some(Q::PayloadConflict));
             }
             if inserted == Inserted::New
@@ -4482,6 +4753,13 @@ fn apply_record(
                 )?
             {
                 return Ok(Some(Q::PayloadConflict));
+            }
+            // A gateway must receive command media even if it is larger than the legacy eager cap.
+            for descriptor in &media {
+                conn.execute(
+                    "INSERT OR IGNORE INTO attachment_demand(attachment_id,requested_at) VALUES(?,0)",
+                    params![descriptor.attachment_id.to_string()],
+                )?;
             }
             if route.gateway_device_id == ctx.device_id {
                 let encoded = json(&message)?;
@@ -4904,17 +5182,34 @@ fn enqueue(
 }
 
 fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
-    let message = match payload {
-        PrivatePayload::MmsMessage { message, .. }
-        | PrivatePayload::SendMmsCommand { message, .. } => message,
+    let (message, thumbnails) = match payload {
+        PrivatePayload::MmsMessage {
+            message,
+            media_meta,
+            ..
+        } => (message, media_meta),
+        PrivatePayload::SendMmsCommand { message, .. } => {
+            return message
+                .record
+                .attachments
+                .iter()
+                .map(|item| item.attachment_id)
+                .collect();
+        }
         _ => return Vec::new(),
     };
-    message
+    let mut ids: Vec<_> = message
         .record
         .attachments
         .iter()
         .map(|item| item.attachment_id)
-        .collect()
+        .collect();
+    ids.extend(thumbnails.iter().filter_map(|meta| {
+        meta.thumbnail
+            .as_ref()
+            .map(|thumbnail| thumbnail.attachment_id)
+    }));
+    ids
 }
 
 /// Allocates the next producer sequence and stores one unsealed outbox row.
@@ -5572,15 +5867,19 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
             let plain = match decode::<PrivatePayload>(&plain)? {
                 PrivatePayload::MmsMessage { message, .. } => {
                     match resolve_media(conn, &message)? {
-                        Some(media) => {
-                            serde_json::to_vec(&PrivatePayload::MmsMessage { message, media })
+                        Some((media, media_meta)) => {
+                            serde_json::to_vec(&PrivatePayload::MmsMessage {
+                                message,
+                                media,
+                                media_meta,
+                            })
                         }
                         None => continue,
                     }
                 }
                 PrivatePayload::SendMmsCommand { message, .. } => {
                     match resolve_media(conn, &message)? {
-                        Some(media) => {
+                        Some((media, _)) => {
                             serde_json::to_vec(&PrivatePayload::SendMmsCommand { message, media })
                         }
                         None => continue,
@@ -5818,6 +6117,100 @@ fn media_matches(message: &MessagePayload, media: &[MediaDescriptor]) -> bool {
             .zip(&ids)
             .all(|(descriptor, id)| descriptor.attachment_id == *id && descriptor.is_valid())
 }
+
+fn media_meta_matches(message: &MessagePayload, media_meta: &[MmsMediaMeta]) -> bool {
+    let visible: HashSet<_> = message
+        .record
+        .attachments
+        .iter()
+        .map(|attachment| attachment.attachment_id)
+        .collect();
+    let mut represented = HashSet::new();
+    let mut thumbnails = HashSet::new();
+    media_meta.iter().all(|meta| {
+        visible.contains(&meta.attachment_id)
+            && represented.insert(meta.attachment_id)
+            && meta.width.is_none_or(|value| value > 0)
+            && meta.height.is_none_or(|value| value > 0)
+            && meta
+                .duration_ms
+                .is_none_or(|value| value > 0 && value <= i64::MAX as u64)
+            && meta.thumbnail.as_ref().is_none_or(|thumbnail| {
+                !visible.contains(&thumbnail.attachment_id)
+                    && thumbnail.attachment_id != meta.attachment_id
+                    && thumbnails.insert(thumbnail.attachment_id)
+                    && thumbnail.is_valid()
+            })
+    })
+}
+
+fn thumbnail_descriptors(media_meta: &[MmsMediaMeta]) -> Vec<MediaDescriptor> {
+    media_meta
+        .iter()
+        .filter_map(|meta| meta.thumbnail.clone())
+        .collect()
+}
+
+fn store_message_media_meta(
+    conn: &Connection,
+    message_id: MessageId,
+    media_meta: &[MmsMediaMeta],
+) -> Result<bool, Error> {
+    for meta in media_meta {
+        let thumbnail = meta
+            .thumbnail
+            .as_ref()
+            .map(|value| value.attachment_id.to_string());
+        let values = (
+            meta.width.map(i64::from),
+            meta.height.map(i64::from),
+            meta.duration_ms.map(to_i64).transpose()?,
+            thumbnail,
+        );
+        let existing: Option<(Option<i64>, Option<i64>, Option<i64>, Option<String>)> = conn
+            .query_row(
+                "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
+                params![message_id.to_string(), meta.attachment_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing != values {
+                return Ok(false);
+            }
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO message_media_meta(message_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,?)",
+            params![message_id.to_string(), meta.attachment_id.to_string(), values.0, values.1, values.2, values.3],
+        )?;
+    }
+    Ok(true)
+}
+
+fn store_local_message_media_meta(
+    conn: &Connection,
+    message_id: MessageId,
+    media_meta: &[MmsMediaMeta],
+    acquisition_id: &str,
+) -> Result<(), Error> {
+    for meta in media_meta {
+        let thumbnail: Option<String> = conn.query_row(
+            "SELECT thumbnail_attachment_id FROM mms_acquisition_parts WHERE acquisition_id=? AND attachment_id=?",
+            params![acquisition_id, meta.attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if let Some(ref thumbnail) = thumbnail {
+            let thumbnail_id: AttachmentId = parse(thumbnail)?;
+            local_references(conn, &[thumbnail_id])?;
+        }
+        conn.execute(
+            "INSERT INTO message_media_meta(message_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,?)",
+            params![message_id.to_string(), meta.attachment_id.to_string(), meta.width.map(i64::from), meta.height.map(i64::from), meta.duration_ms.map(to_i64).transpose()?, thumbnail],
+        )?;
+    }
+    Ok(())
+}
 fn require_address(address: &str) -> Result<(), Error> {
     if address.is_empty() || address.len() > MAX_ADDRESS_BYTES {
         return Err(Error::InvalidRequest("address"));
@@ -5999,29 +6392,77 @@ fn local_references(
         .collect())
 }
 /// Private descriptors for a message, or `None` while any object still lacks a remote ID.
+fn descriptor_for_attachment(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<Option<MediaDescriptor>, Error> {
+    let row = attachment_row(conn, attachment_id)?.ok_or(Error::Database)?;
+    let Some(remote_object_id) = row.remote_object_id.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(MediaDescriptor {
+        attachment_id,
+        remote_object_id,
+        media_type: row.media_type.clone(),
+        display_name: row.display_name.clone(),
+        plaintext_bytes: row.plaintext_bytes,
+        ciphertext_bytes: row.ciphertext_bytes,
+        ciphertext_sha256: row.ciphertext_sha256.clone(),
+        stream_version: STREAM_VERSION,
+        file_key: *row.file_key,
+    }))
+}
+
+/// Private descriptors for a message, or `None` while any original or thumbnail lacks a remote ID.
 fn resolve_media(
     conn: &Connection,
     message: &MessagePayload,
-) -> Result<Option<Vec<MediaDescriptor>>, Error> {
+) -> Result<Option<(Vec<MediaDescriptor>, Vec<MmsMediaMeta>)>, Error> {
     let mut media = Vec::with_capacity(message.record.attachments.len());
     for reference in &message.record.attachments {
-        let row = attachment_row(conn, reference.attachment_id)?.ok_or(Error::Database)?;
-        let Some(remote_object_id) = row.remote_object_id.clone() else {
+        let Some(descriptor) = descriptor_for_attachment(conn, reference.attachment_id)? else {
             return Ok(None);
         };
-        media.push(MediaDescriptor {
-            attachment_id: reference.attachment_id,
-            remote_object_id,
-            media_type: row.media_type.clone(),
-            display_name: row.display_name.clone(),
-            plaintext_bytes: row.plaintext_bytes,
-            ciphertext_bytes: row.ciphertext_bytes,
-            ciphertext_sha256: row.ciphertext_sha256.clone(),
-            stream_version: STREAM_VERSION,
-            file_key: *row.file_key,
+        media.push(descriptor);
+    }
+    let mut statement = conn.prepare("SELECT attachment_id,width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? ORDER BY rowid")?;
+    let rows = statement.query_map(params![message.record.message_id.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut metadata = Vec::new();
+    for row in rows {
+        let (attachment_id, width, height, duration_ms, thumbnail) = row?;
+        let thumbnail = match thumbnail {
+            Some(id) => match descriptor_for_attachment(conn, parse(&id)?)? {
+                Some(value) => Some(value),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        metadata.push(MmsMediaMeta {
+            attachment_id: parse(&attachment_id)?,
+            width: width
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| Error::Database)?,
+            height: height
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| Error::Database)?,
+            duration_ms: duration_ms
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| Error::Database)?,
+            thumbnail,
         });
     }
-    Ok(Some(media))
+    Ok(Some((media, metadata)))
 }
 /// Records received metadata as `pending_download`; false if an ID is bound to other metadata.
 fn store_remote_media(conn: &Connection, media: &[MediaDescriptor]) -> Result<bool, Error> {
@@ -6565,6 +7006,45 @@ mod tests {
             Err(Error::InvalidDatabaseKey)
         ));
         assert!(DatabaseKey::new(&[7; 32]).is_ok());
+    }
+
+    #[test]
+    fn eviction_keeps_available_ciphertext_when_metadata_transaction_fails() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        let attachment_id = AttachmentId::new();
+        let path;
+        {
+            let guard = client.lock().unwrap();
+            guard.conn.execute(
+                "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params![attachment_id.to_string(), AttachmentState::Available.code(), "image/jpeg", "received.jpg", 1_i64, 1_i64, "hash", STREAM_VERSION, vec![0_u8; 32], uuid::Uuid::new_v4().to_string()],
+            ).unwrap();
+            path = media::cipher_path(&guard.media_dir, attachment_id);
+            std::fs::write(&path, b"ciphertext").unwrap();
+            guard
+                .conn
+                .execute_batch("DROP TABLE attachment_demand")
+                .unwrap();
+        }
+
+        assert!(matches!(
+            client.evict_attachment_ciphertext(attachment_id),
+            Err(Error::Database)
+        ));
+        assert!(path.exists());
+        assert_eq!(
+            client.attachment_info(attachment_id).unwrap().state,
+            AttachmentState::Available
+        );
     }
 
     #[test]
@@ -7137,31 +7617,37 @@ mod tests {
             seal(PrivatePayload::MmsMessage {
                 message: message(&[a]),
                 media: vec![descriptor(a, &r1, &sha)],
+                media_meta: vec![],
             }),
             // Rebinding an existing attachment ID to different metadata.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[a]),
                 media: vec![descriptor(a, &r2, &other_sha)],
+                media_meta: vec![],
             }),
             // Descriptor count mismatch.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[b, c]),
                 media: vec![descriptor(b, &r1, &sha)],
+                media_meta: vec![],
             }),
             // Descriptor order mismatch.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[b, c]),
                 media: vec![descriptor(c, &r1, &sha), descriptor(b, &r2, &sha)],
+                media_meta: vec![],
             }),
             // Invalid descriptor (digest not 64 lowercase hex).
             seal(PrivatePayload::MmsMessage {
                 message: message(&[d]),
                 media: vec![descriptor(d, &r1, "zz")],
+                media_meta: vec![],
             }),
             // MMS payload missing media.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[e]),
                 media: vec![],
+                media_meta: vec![],
             }),
             // MMS transport smuggled through the SMS variant.
             seal(PrivatePayload::Message(message(&[e]))),

@@ -167,6 +167,75 @@ internal abstract class SmsProviderObserver(handler: Handler) : ContentObserver(
     protected abstract fun cancelPending()
 }
 
+/**
+ * Observes MMS-provider changes as hints only. The worker rechecks provider rows off the main
+ * thread; registration is fenced by both the user's MMS setting and current permissions.
+ */
+internal object MmsCaptureLifecycle {
+    private val lock = Any()
+    private var observer: MmsProviderObserver? = null
+
+    fun ensureObserver(context: Context) {
+        val app = context.applicationContext
+        val wanted = MmsPreferences(app).enabled && mmsReceiveGranted(app)
+        synchronized(lock) {
+            if (wanted && observer == null) {
+                observer = observer(app).also { app.contentResolver.registerContentObserver(MMS_URI, true, it) }
+            } else if (!wanted && observer != null) {
+                observer!!.cancel()
+                app.contentResolver.unregisterContentObserver(observer!!)
+                observer = null
+            }
+        }
+    }
+
+    internal fun observer(
+        context: Context,
+        policy: SmsCaptureDebouncePolicy = SmsCaptureDebouncePolicy(BASELINE_QUIET_MS),
+        onDispatch: (() -> Unit)? = null,
+    ): MmsProviderObserver {
+        val handler = Handler(Looper.getMainLooper())
+        val debouncer = SmsCaptureDebouncer(policy)
+        return object : MmsProviderObserver(handler) {
+            private val enqueue = Runnable {
+                if (!isActive()) return@Runnable
+                debouncer.reset()
+                if (onDispatch != null) onDispatch()
+                else if (MmsPreferences(context).enabled && mmsReceiveGranted(context)) {
+                    MmsCaptureWork.enqueue(context.applicationContext)
+                    MmsCaptureWork.ensurePeriodic(context.applicationContext)
+                }
+            }
+
+            override fun onChange(selfChange: Boolean) {
+                if (!isActive()) return
+                handler.removeCallbacks(enqueue)
+                handler.postDelayed(enqueue, debouncer.nextDelayMs(SystemClock.uptimeMillis()))
+            }
+
+            override fun cancelPending() {
+                handler.removeCallbacks(enqueue)
+                debouncer.reset()
+            }
+        }
+    }
+
+    private val MMS_URI = android.net.Uri.parse("content://mms")
+}
+
+internal abstract class MmsProviderObserver(handler: Handler) : ContentObserver(handler) {
+    private var active = true
+
+    fun isActive(): Boolean = active
+
+    fun cancel() {
+        active = false
+        cancelPending()
+    }
+
+    protected abstract fun cancelPending()
+}
+
 private const val BASELINE_QUIET_MS = 15_000L
 private const val FAST_QUIET_MS = 1_000L
 private const val FAST_MAX_WAIT_MS = 3_000L

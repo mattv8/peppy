@@ -2,7 +2,7 @@ import type {
   AttachmentView, BridgeError, ContactBookView, ContactEditOutcome, ContactEditRequestInput,
   ContactEditStatus, ContactSyncStatus, ContactView, DesktopBridge, DesktopSnapshot, Draft, HistoryPage,
   AppLockStatus, DraftInput, NotificationPreferences, NotificationTarget, PublicCopy,
-  RecipientSuggestion, RestorableContact, SendDraftInput, ContactScanStatus, DeviceRosterView,
+  RecipientSuggestion, RestorableContact, SendDraftInput, ContactScanStatus, DeviceRosterView, MediaCursor, MediaOpen, MediaPage,
 } from "../../desktop/src/bridge";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
@@ -23,6 +23,8 @@ type VaultClaimDraft = { username: string; adminPassword: string; passphrase: st
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_OPEN_MEDIA_URLS = 4;
+const MAX_OPEN_MEDIA_BYTES = 64 * 1024 * 1024;
 const MIN_ADMIN_PASSWORD_BYTES = 12;
 const MAX_ADMIN_PASSWORD_BYTES = 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
@@ -281,6 +283,7 @@ export class BrowserBridge implements DesktopBridge {
   private readonly readyListeners = new Set<() => void>();
   private readonly stoppedListeners = new Set<(reason: string) => void>();
   private readonly blobUrls = new Set<string>();
+  private readonly mediaBlobUrls = new Map<string, { attachmentId: string; byteSize: number }>();
   private readonly banners = new Set<Notification>();
   private notificationContext?: { view: "conversations" | "notifications" | "settings" | "contacts"; conversationId?: string };
   private accountUrl?: string;
@@ -364,7 +367,24 @@ export class BrowserBridge implements DesktopBridge {
     });
   }
 
-  private revokeBlobUrls(): void { this.blobUrls.forEach((url) => URL.revokeObjectURL(url)); this.blobUrls.clear(); }
+  private revokeBlobUrls(): void {
+    this.blobUrls.forEach((url) => URL.revokeObjectURL(url));
+    this.blobUrls.clear();
+    this.mediaBlobUrls.forEach((_, url) => URL.revokeObjectURL(url));
+    this.mediaBlobUrls.clear();
+  }
+  private revokeMediaUrl(url: string): void {
+    if (!this.mediaBlobUrls.delete(url)) return;
+    URL.revokeObjectURL(url);
+  }
+  private async releaseMediaUrl(url: string): Promise<void> {
+    const media = this.mediaBlobUrls.get(url);
+    if (!media) return;
+    this.revokeMediaUrl(url);
+    if (![...this.mediaBlobUrls.values()].some((candidate) => candidate.attachmentId === media.attachmentId)) {
+      await this.call("close_media", { id: media.attachmentId, url });
+    }
+  }
   private readonly refreshNotificationContext = (): void => {
     if (!this.notificationContext || this.stopped) return;
     void this.call("set_notification_context", this.notificationContextArgs()).catch(() => undefined);
@@ -436,7 +456,37 @@ export class BrowserBridge implements DesktopBridge {
     return Promise.all(files.map(async (file) => { const bytes = await file.arrayBuffer(); return this.call<AttachmentView>("prepare_attachment", { bytes, displayName: file.name, mediaType: file.type || "application/octet-stream" }, [bytes]); }));
   }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
-  public async save_attachment(id: string): Promise<boolean> { const file = await this.call<{ bytes: ArrayBuffer; displayName: string; mediaType: string }>("export_attachment", { id }); const url = URL.createObjectURL(new Blob([file.bytes], { type: file.mediaType })); this.blobUrls.add(url); const link = document.createElement("a"); link.href = url; link.download = file.displayName; link.click(); window.setTimeout(() => { URL.revokeObjectURL(url); this.blobUrls.delete(url); }, 0); return true; }
+  public request_attachment_download(id: string): Promise<void> { return this.call("request_attachment_download", { id }); }
+  public media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage> { return this.call("media_page", { conversationId, cursor, limit }); }
+  private async mediaOpen(command: "open_media" | "load_media", id: string): Promise<MediaOpen> {
+    const result = await this.call<{ state: unknown; bytes?: unknown; mediaType?: unknown; byteSize?: unknown }>(command, { id });
+    if (this.stopped) throw new BrowserBridgeError("stopped", "Peppy locked or stopped. Reconnect to continue.");
+    if (result.state === "pending") return { state: "pending" };
+    const bytes = result.bytes;
+    const byteSize = result.byteSize;
+    if (result.state !== "ready" || !(bytes instanceof ArrayBuffer) || typeof result.mediaType !== "string" || typeof byteSize !== "number" || !Number.isSafeInteger(byteSize) || byteSize <= 0 || byteSize !== bytes.byteLength || byteSize > MAX_FILE_BYTES) throw new BrowserBridgeError("unavailable", "The media response was invalid.");
+    while (this.mediaBlobUrls.size >= MAX_OPEN_MEDIA_URLS || [...this.mediaBlobUrls.values()].reduce((total, media) => total + media.byteSize, 0) + byteSize > MAX_OPEN_MEDIA_BYTES) {
+      const oldest = this.mediaBlobUrls.keys().next().value as string | undefined;
+      if (!oldest) break;
+      await this.releaseMediaUrl(oldest);
+    }
+    const url = URL.createObjectURL(new Blob([bytes], { type: result.mediaType }));
+    this.mediaBlobUrls.set(url, { attachmentId: id, byteSize });
+    return { state: "ready", url, mediaType: result.mediaType, byteSize };
+  }
+  public open_media(id: string): Promise<MediaOpen> { return this.mediaOpen("open_media", id); }
+  public load_media(id: string): Promise<MediaOpen> { return this.mediaOpen("load_media", id); }
+  public async close_media(id: string, url?: string): Promise<void> {
+    if (url) {
+      const media = this.mediaBlobUrls.get(url);
+      if (!media || media.attachmentId !== id) return;
+      await this.releaseMediaUrl(url);
+      return;
+    }
+    else [...this.mediaBlobUrls.entries()].filter(([, media]) => media.attachmentId === id).forEach(([ownedUrl]) => this.revokeMediaUrl(ownedUrl));
+    await this.call("close_media", { id, ...(url ? { url } : {}) });
+  }
+  public async save_attachment(id: string): Promise<boolean> { const file = await this.call<{ bytes: ArrayBuffer; displayName: string; mediaType: string }>("save_attachment", { id }); const url = URL.createObjectURL(new Blob([file.bytes], { type: file.mediaType })); this.blobUrls.add(url); const link = document.createElement("a"); link.href = url; link.download = file.displayName; link.click(); window.setTimeout(() => { URL.revokeObjectURL(url); this.blobUrls.delete(url); }, 0); return true; }
   public async publish_attachment(id: string): Promise<PublicCopy | null> { if (!window.confirm("Create a public plaintext copy of this attachment? Anyone with the link may access it.")) return null; return this.call("publish_attachment", { id, confirmed: true }); }
   public pick_contact_photo(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null> { return readContactPhoto(); }
   public async enrollment_discover(): Promise<EnrollmentView> {

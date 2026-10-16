@@ -36,7 +36,7 @@ use super::{
     authorize_resolved, database_unavailable, insert_error,
 };
 use crate::scope;
-use crate::storage::{Storage, StorageError};
+use crate::storage::{ObjectRange, Storage, StorageError};
 
 const MAX_ATTACHMENT_BYTES: i64 = 64 * 1024 * 1024;
 const MAX_PUBLIC_COPY_BYTES: i64 = 10 * 1024 * 1024;
@@ -168,6 +168,37 @@ async fn quota_used(tx: &mut Transaction<'_, Postgres>, vault: Uuid) -> ApiResul
         .fetch_one(&mut **tx)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_quota_sum"))
+}
+
+#[derive(Serialize)]
+pub(super) struct AttachmentUsage {
+    used_bytes: i64,
+    limit_bytes: i64,
+}
+
+/// Returns quota consumption without taking the upload-admission lock. `used`
+/// includes finalized private attachments, live reservations and unpurged public
+/// derivatives, matching admission accounting.
+pub(super) async fn attachment_usage(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+) -> ApiResult<Json<AttachmentUsage>> {
+    let principal = auth_with_mode(&s, &h).await?;
+    authorize(&s, &principal, Operation::Read).await?;
+    let limit_bytes = attachment_quota(&s, &principal)
+        .await
+        .unwrap_or(s.vault_attachment_quota_bytes);
+    let mut tx = scope::begin(&s.db, principal.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_usage_begin"))?;
+    let used_bytes = quota_used(&mut tx, principal.vault).await?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "attachment_usage_commit"))?;
+    Ok(Json(AttachmentUsage {
+        used_bytes,
+        limit_bytes,
+    }))
 }
 
 async fn lock_vault(tx: &mut Transaction<'_, Postgres>, vault: Uuid) -> ApiResult<()> {
@@ -540,8 +571,8 @@ pub(super) async fn download_attachment(
     let mut tx = scope::begin(&s.db, principal.vault)
         .await
         .map_err(|error| database_unavailable(&error, "attachment_download_lookup_begin"))?;
-    let key: String = sqlx::query_scalar(
-        "SELECT object_key FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
+    let row = sqlx::query(
+        "SELECT object_key,ciphertext_bytes FROM attachments WHERE vault_id=$1 AND attachment_id=$2",
     )
     .bind(principal.vault)
     .bind(attachment_id)
@@ -549,7 +580,42 @@ pub(super) async fn download_attachment(
     .await
     .map_err(|error| database_unavailable(&error, "attachment_download_lookup"))?
     .ok_or(ApiError(StatusCode::NOT_FOUND, "attachment_not_found"))?;
+    let key: String = row.get("object_key");
+    let total: i64 = row.get("ciphertext_bytes");
     drop(tx);
+    let range = parse_range_headers(&h, total);
+    if range == ByteRange::Invalid {
+        return Ok(range_not_satisfiable(total));
+    }
+    if let ByteRange::Partial { start, end } = range {
+        let stream = store
+            .get_range(
+                &key,
+                ObjectRange {
+                    start,
+                    end,
+                    total: total as u64,
+                },
+            )
+            .await
+            .map_err(|error| {
+                storage_failure(
+                    error,
+                    ApiError(StatusCode::CONFLICT, "attachment_unavailable"),
+                    "attachment_range_download",
+                )
+            })?;
+        return Ok(Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("content-type", "application/octet-stream")
+            .header("content-disposition", "attachment")
+            .header("x-content-type-options", "nosniff")
+            .header("accept-ranges", "bytes")
+            .header("content-length", end - start + 1)
+            .header("content-range", format!("bytes {start}-{end}/{total}"))
+            .body(Body::from_stream(stream))
+            .expect("validated range response headers"));
+    }
     let stream = store.get(&key).await.map_err(|error| {
         storage_failure(
             error,
@@ -564,6 +630,79 @@ pub(super) async fn download_attachment(
         .header("x-content-type-options", "nosniff")
         .body(Body::from_stream(stream))
         .expect("static response headers"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ByteRange {
+    Full,
+    Partial { start: u64, end: u64 },
+    Invalid,
+}
+
+fn parse_range_headers(headers: &HeaderMap, total: i64) -> ByteRange {
+    let mut values = headers.get_all("range").iter();
+    let Some(value) = values.next() else {
+        return ByteRange::Full;
+    };
+    if values.next().is_some() {
+        return ByteRange::Invalid;
+    }
+    value
+        .to_str()
+        .map_or(ByteRange::Invalid, |value| parse_single_range(value, total))
+}
+
+fn parse_single_range(value: &str, total: i64) -> ByteRange {
+    let Some((unit, spec)) = value.split_once('=') else {
+        return ByteRange::Invalid;
+    };
+    if unit.is_empty() {
+        return ByteRange::Invalid;
+    }
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return ByteRange::Full;
+    }
+    if total <= 0 || spec.contains(',') {
+        return ByteRange::Invalid;
+    }
+    let Some((start, end)) = spec.split_once('-') else {
+        return ByteRange::Invalid;
+    };
+    if end.contains('-') {
+        return ByteRange::Invalid;
+    }
+    let total = total as u64;
+    match (parse_ascii_u64(start), parse_ascii_u64(end)) {
+        (Ok(start), Ok(end)) if start <= end && start < total => ByteRange::Partial {
+            start,
+            end: end.min(total - 1),
+        },
+        (Ok(start), Err(_)) if end.is_empty() && start < total => ByteRange::Partial {
+            start,
+            end: total - 1,
+        },
+        (Err(_), Ok(suffix)) if start.is_empty() && suffix > 0 => ByteRange::Partial {
+            start: total.saturating_sub(suffix),
+            end: total - 1,
+        },
+        _ => ByteRange::Invalid,
+    }
+}
+
+fn parse_ascii_u64(value: &str) -> Result<u64, ()> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    value.parse().map_err(|_| ())
+}
+
+fn range_not_satisfiable(total: i64) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header("content-range", format!("bytes */{total}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"code":"invalid_range"}"#))
+        .expect("static range error response")
 }
 
 #[derive(Deserialize)]
@@ -1137,6 +1276,51 @@ pub(super) async fn storage_maintenance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_single_byte_ranges() {
+        assert_eq!(
+            parse_single_range("bytes=2-5", 10),
+            ByteRange::Partial { start: 2, end: 5 }
+        );
+        assert_eq!(
+            parse_single_range("bytes=7-", 10),
+            ByteRange::Partial { start: 7, end: 9 }
+        );
+        assert_eq!(
+            parse_single_range("bytes=-3", 10),
+            ByteRange::Partial { start: 7, end: 9 }
+        );
+        assert_eq!(
+            parse_single_range("Bytes=2-5", 10),
+            ByteRange::Partial { start: 2, end: 5 }
+        );
+        assert_eq!(parse_single_range("items=2-5", 10), ByteRange::Full);
+    }
+
+    #[test]
+    fn rejects_invalid_or_unsatisfiable_byte_ranges() {
+        for value in [
+            "bytes=",
+            "bytes=3-2",
+            "bytes=10-",
+            "bytes=-0",
+            "bytes=+2-+5",
+            "bytes=-+3",
+            "bytes=0-1,3-4",
+        ] {
+            assert_eq!(parse_single_range(value, 10), ByteRange::Invalid);
+        }
+        assert_eq!(parse_single_range("bytes=0-0", 0), ByteRange::Invalid);
+    }
+
+    #[test]
+    fn rejects_repeated_range_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append("range", "bytes=0-1".parse().unwrap());
+        headers.append("range", "bytes=3-4".parse().unwrap());
+        assert_eq!(parse_range_headers(&headers, 10), ByteRange::Invalid);
+    }
 
     #[test]
     fn delete_backoff_grows_and_is_capped() {

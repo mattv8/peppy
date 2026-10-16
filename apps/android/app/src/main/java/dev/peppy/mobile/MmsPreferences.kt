@@ -9,11 +9,7 @@ class MmsPreferences(context: Context) {
 
     var enabled: Boolean
         get() = prefs.getBoolean(ENABLED, false)
-        set(value) {
-            val edit = prefs.edit().putBoolean(ENABLED, value)
-            if (value && !enabled) edit.remove(historyBaselineKey())
-            edit.apply()
-        }
+        set(value) { prefs.edit().putBoolean(ENABLED, value).apply() }
 
     var importHistory: Boolean
         get() = prefs.getBoolean(IMPORT_HISTORY, false)
@@ -36,6 +32,10 @@ class MmsPreferences(context: Context) {
         prefs.edit().apply {
             if (value == null) remove(RECHECK_CURSOR) else putString(RECHECK_CURSOR, value)
         }.apply()
+    }
+
+    internal fun clearLegacyBackfillState() {
+        prefs.edit().remove(IMPORT_HISTORY).remove(RECHECK_CURSOR).remove(historyBaselineKey()).apply()
     }
 
     private fun historyBaselineKey() = "history-baseline:$sourceGeneration:${MmsCapture.PROVIDER_SCOPE}"

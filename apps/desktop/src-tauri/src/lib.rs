@@ -2,11 +2,13 @@
 //! state-change hints; credentials, keys, passphrases, tokens and file paths stay in Rust.
 use std::{
     collections::HashMap,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::PathBuf,
     str::FromStr,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
 };
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
@@ -17,8 +19,8 @@ mod app_lock;
 mod composer_scope;
 mod contacts;
 mod credentials;
-mod dialogs;
 mod devices;
+mod dialogs;
 mod dto;
 mod enrollment;
 mod error;
@@ -52,22 +54,36 @@ mod window_chrome;
 mod windows;
 
 use credentials::{
-    HostConfig, check_origin_binding, ensure_database_key, load_config, parse_credential,
-    save_config, store_credential,
+    check_origin_binding, ensure_database_key, load_config, parse_credential, save_config,
+    store_credential, HostConfig,
 };
 use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot};
-use error::{BridgeError, BridgeResult, core_error};
+use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
-use peppy_client_core::{AttachmentId, ConversationId, NotificationTarget};
+use peppy_client_core::{
+    AttachmentId, AttachmentInfo, ConversationId, NativePlaintextFile, NotificationTarget,
+};
 use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
-use session::{DraftInput, Notifier, Session, VaultSummary, open_session};
+use session::{open_session, DraftInput, Notifier, Session, VaultSummary};
 use sync::{blocking, fetch_vault, vault_header};
 
 pub const STATE_EVENT: &str = "peppy://state";
 static TRAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+const MAX_OPEN_MEDIA_CAPABILITIES: usize = 8;
+const MAX_OPEN_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_MEDIA_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+
+struct MediaCapability {
+    session: Arc<Session>,
+    attachment_id: AttachmentId,
+    window_label: String,
+    media_type: String,
+    plaintext_bytes: u64,
+    plaintext: NativePlaintextFile,
+}
 
 pub struct AppState {
     root: PathBuf,
@@ -89,6 +105,7 @@ pub struct AppState {
     app_locked: AtomicBool,
     app_lock_storage_available: AtomicBool,
     app_lock_attempts: Arc<app_lock::Attempts>,
+    media_capabilities: Mutex<HashMap<String, MediaCapability>>,
 }
 
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
@@ -101,6 +118,11 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "pick_attachments",
     "retry_attachment",
     "save_attachment",
+    "request_attachment_download",
+    "media_page",
+    "open_media",
+    "load_media",
+    "close_media",
     "search_contact_recipients",
     "close_composer",
     "close_head_panel",
@@ -216,6 +238,7 @@ impl AppState {
             app_locked: AtomicBool::new(true),
             app_lock_storage_available: AtomicBool::new(true),
             app_lock_attempts: Arc::new(app_lock::Attempts::default()),
+            media_capabilities: Mutex::new(HashMap::new()),
         }
     }
 
@@ -243,7 +266,9 @@ impl AppState {
                 generation.invalidate();
             }
         }
-        if let Some(session) = self.session.lock().await.take() {
+        let session = self.session.lock().await.take();
+        self.revoke_media_capabilities();
+        if let Some(session) = session {
             session.cancel.cancel();
         }
     }
@@ -261,6 +286,7 @@ impl AppState {
             if let Some(old) = guard.take() {
                 old.cancel.cancel();
             }
+            self.revoke_media_capabilities();
             return Ok(None);
         };
         if let Some(existing) = guard.as_ref() {
@@ -269,6 +295,7 @@ impl AppState {
             }
             existing.cancel.cancel();
             *guard = None;
+            self.revoke_media_capabilities();
         }
         if let Ok(mut scopes) = self.composer_scopes.lock() {
             composer_scope::clear_for_binding(&mut scopes, &binding);
@@ -285,6 +312,12 @@ impl AppState {
         sync::start(&session);
         *guard = Some(session.clone());
         Ok(Some(session))
+    }
+
+    fn revoke_media_capabilities(&self) {
+        if let Ok(mut capabilities) = self.media_capabilities.lock() {
+            capabilities.clear();
+        }
     }
 
     async fn require_session(&self) -> BridgeResult<Arc<Session>> {
@@ -1041,13 +1074,19 @@ async fn request_contact_repair(state: State<'_, AppState>) -> BridgeResult<serd
 }
 
 #[tauri::command]
-async fn request_contact_sync(state: State<'_, AppState>, book_id: String) -> BridgeResult<serde_json::Value> {
+async fn request_contact_sync(
+    state: State<'_, AppState>,
+    book_id: String,
+) -> BridgeResult<serde_json::Value> {
     let session = state.require_session().await?;
     blocking(move || contacts::request_sync(&session, &book_id)).await
 }
 
 #[tauri::command]
-async fn get_contact_sync_request(state: State<'_, AppState>, book_id: String) -> BridgeResult<serde_json::Value> {
+async fn get_contact_sync_request(
+    state: State<'_, AppState>,
+    book_id: String,
+) -> BridgeResult<serde_json::Value> {
     let session = state.require_session().await?;
     blocking(move || contacts::sync_request_status(&session, &book_id)).await
 }
@@ -1222,6 +1261,31 @@ async fn check_attachment_window_scope(
     belongs.then_some(()).ok_or_else(window_error)
 }
 
+async fn demand_attachment_if_needed(
+    session: &Arc<Session>,
+    attachment: AttachmentId,
+) -> BridgeResult<bool> {
+    let client = session.client.clone();
+    let demanded = blocking(move || {
+        if client
+            .attachment_download_requested(attachment)
+            .map_err(core_error)?
+        {
+            return Ok(false);
+        }
+        client
+            .request_attachment_download(attachment)
+            .map_err(core_error)?;
+        Ok(true)
+    })
+    .await?;
+    if demanded {
+        session.request_work();
+        session.notify();
+    }
+    Ok(demanded)
+}
+
 #[tauri::command]
 async fn retry_attachment(
     window: tauri::WebviewWindow,
@@ -1250,9 +1314,10 @@ async fn save_attachment(
     let s = session.clone();
     let info = blocking(move || s.client.attachment_info(attachment).map_err(core_error)).await?;
     if !info.state.is_local() {
+        demand_attachment_if_needed(&session, attachment).await?;
         return Err(BridgeError::new(
-            "attachment-unavailable",
-            "This attachment is not verified and ready to save.",
+            "media-pending",
+            "The attachment is downloading. Try Save again when it is ready.",
         ));
     }
     let Some(destination) = dialogs::save_file(
@@ -1266,6 +1331,499 @@ async fn save_attachment(
     };
     blocking(move || session.save_attachment(&id, &destination)).await?;
     Ok(true)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenMediaView {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_size: Option<u64>,
+}
+
+#[cfg(target_os = "windows")]
+fn media_capability_url(token: &str) -> String {
+    format!("http://peppy-media.localhost/{token}")
+}
+#[cfg(not(target_os = "windows"))]
+fn media_capability_url(token: &str) -> String {
+    format!("peppy-media://localhost/{token}")
+}
+
+fn media_capability_token(url: &str) -> Option<&str> {
+    let prefix = if cfg!(target_os = "windows") {
+        "http://peppy-media.localhost/"
+    } else {
+        "peppy-media://localhost/"
+    };
+    let token = url.strip_prefix(prefix)?;
+    (!token.is_empty() && !token.contains('/')).then_some(token)
+}
+
+fn inline_media_type(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "image/jpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "video/mp4" => Some("video/mp4"),
+        "video/3gpp" => Some("video/3gpp"),
+        "audio/mpeg" => Some("audio/mpeg"),
+        "audio/amr" => Some("audio/amr"),
+        _ => None,
+    }
+}
+
+fn store_media_capability(
+    state: &AppState,
+    session: Arc<Session>,
+    window_label: &str,
+    info: AttachmentInfo,
+    plaintext: NativePlaintextFile,
+) -> BridgeResult<OpenMediaView> {
+    let media_type = inline_media_type(&info.media_type).ok_or_else(|| {
+        BridgeError::new(
+            "unsupported",
+            "Save this media to open it in another application.",
+        )
+    })?;
+    if info.plaintext_bytes > MAX_OPEN_MEDIA_BYTES {
+        return Err(BridgeError::new(
+            "media-too-large",
+            "This media item is too large to open safely.",
+        ));
+    }
+    let mut capabilities = state
+        .media_capabilities
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    while capabilities.len() >= MAX_OPEN_MEDIA_CAPABILITIES
+        || capabilities
+            .values()
+            .map(|capability| capability.plaintext_bytes)
+            .sum::<u64>()
+            + info.plaintext_bytes
+            > MAX_OPEN_MEDIA_BYTES
+    {
+        let Some(token) = capabilities.keys().next().cloned() else {
+            break;
+        };
+        capabilities.remove(&token);
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    capabilities.insert(
+        token.clone(),
+        MediaCapability {
+            session,
+            attachment_id: info.attachment_id,
+            window_label: window_label.to_owned(),
+            media_type: media_type.to_owned(),
+            plaintext_bytes: info.plaintext_bytes,
+            plaintext,
+        },
+    );
+    Ok(OpenMediaView {
+        state: "ready",
+        url: Some(media_capability_url(&token)),
+        media_type: Some(media_type.to_owned()),
+        byte_size: Some(info.plaintext_bytes),
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaCursorInput {
+    sort_at_ms: String,
+    local_order: String,
+    message_id: String,
+    attachment_position: u32,
+}
+
+impl TryFrom<MediaCursorInput> for peppy_client_core::MediaCursor {
+    type Error = BridgeError;
+
+    fn try_from(value: MediaCursorInput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            sort_at_ms: value
+                .sort_at_ms
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-request", "The media cursor is invalid."))?,
+            local_order: value
+                .local_order
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-request", "The media cursor is invalid."))?,
+            message_id: value
+                .message_id
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-request", "The media cursor is invalid."))?,
+            attachment_position: value.attachment_position,
+        })
+    }
+}
+
+#[tauri::command]
+async fn request_attachment_download(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<()> {
+    let session = state.require_session().await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    demand_attachment_if_needed(&session, attachment).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn media_page(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    cursor: Option<MediaCursorInput>,
+    limit: Option<usize>,
+) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+    let session = state.require_session().await?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    if window.label() != tray::MAIN {
+        let scoped = effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&conversation_id),
+        )?;
+        if scoped != Some(conversation) {
+            return Err(window_error());
+        }
+    }
+    let cursor = cursor
+        .map(peppy_client_core::MediaCursor::try_from)
+        .transpose()?;
+    blocking(move || session.media_page(conversation, cursor.as_ref(), limit.unwrap_or(50))).await
+}
+
+#[tauri::command]
+async fn open_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<OpenMediaView> {
+    let session = state.require_session().await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let acquired_session = session.clone();
+    let ready = blocking(move || {
+        let info = acquired_session
+            .client
+            .attachment_info(attachment)
+            .map_err(core_error)?;
+        if !info.state.is_local() {
+            return Ok(None);
+        }
+        acquired_session
+            .client
+            .open_native_plaintext(attachment)
+            .map(|plaintext| Some((info, plaintext)))
+            .map_err(core_error)
+    })
+    .await?;
+    match ready {
+        Some((info, plaintext)) => {
+            let active = state.session.lock().await;
+            if state.app_locked.load(Ordering::Acquire)
+                || !active
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(BridgeError::new("locked", "Peppy is locked."));
+            }
+            store_media_capability(&state, session.clone(), window.label(), info, plaintext)
+        }
+        None => Ok(OpenMediaView {
+            state: "pending",
+            url: None,
+            media_type: None,
+            byte_size: None,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn load_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<OpenMediaView> {
+    request_attachment_download(window.clone(), state.clone(), id.clone()).await?;
+    open_media(window, state, id).await
+}
+
+#[tauri::command]
+async fn close_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    url: Option<String>,
+) -> BridgeResult<()> {
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let (released_session, has_remaining_lease) = {
+        let mut capabilities = state
+            .media_capabilities
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let mut released_session = None;
+        if let Some(url) = url {
+            let token = media_capability_token(&url)
+                .ok_or_else(|| BridgeError::new("invalid-request", "The media URL is invalid."))?;
+            if capabilities.get(token).is_some_and(|capability| {
+                capability.window_label == window.label() && capability.attachment_id == attachment
+            }) {
+                released_session = capabilities
+                    .remove(token)
+                    .map(|capability| capability.session);
+            }
+        } else {
+            released_session = capabilities
+                .values()
+                .find(|capability| {
+                    capability.window_label == window.label()
+                        && capability.attachment_id == attachment
+                })
+                .map(|capability| capability.session.clone());
+            capabilities.retain(|_, capability| {
+                capability.window_label != window.label() || capability.attachment_id != attachment
+            });
+        }
+        (
+            released_session,
+            capabilities
+                .values()
+                .any(|capability| capability.attachment_id == attachment),
+        )
+    };
+    if let Some(session) = released_session.filter(|_| !has_remaining_lease) {
+        let active = state.session.lock().await;
+        let current = !state.app_locked.load(Ordering::Acquire)
+            && active
+                .as_ref()
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+        drop(active);
+        if current {
+            blocking(move || {
+                session
+                    .client
+                    .evict_attachment_ciphertext(attachment)
+                    .map_err(core_error)
+            })
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn media_range(value: Option<&tauri::http::HeaderValue>, total: u64) -> Result<(u64, u64), ()> {
+    if total == 0 {
+        return Err(());
+    }
+    let Some(value) = value else {
+        return Ok((0, total.saturating_sub(1)));
+    };
+    let value = value.to_str().map_err(|_| ())?;
+    let range = value.strip_prefix("bytes=").ok_or(())?;
+    if range.contains(',') {
+        return Err(());
+    }
+    let (start, end) = range.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        if end.is_empty() || !end.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(());
+        }
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        let start = total.saturating_sub(suffix);
+        return Ok((start, (start + MAX_MEDIA_RANGE_BYTES - 1).min(total - 1)));
+    }
+    if !start.bytes().all(|byte| byte.is_ascii_digit())
+        || (!end.is_empty() && !end.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(());
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(total - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok((start, end.min(start + MAX_MEDIA_RANGE_BYTES - 1)))
+}
+
+fn media_protocol_response<R: tauri::Runtime>(
+    context: tauri::UriSchemeContext<'_, R>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let token = request
+        .uri()
+        .path()
+        .strip_prefix('/')
+        .filter(|value| !value.is_empty() && !value.contains('/'));
+    let Some(token) = token else {
+        return tauri::http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap();
+    };
+    let state = context.app_handle().state::<AppState>();
+    if state.app_locked.load(Ordering::Acquire) {
+        return tauri::http::Response::builder()
+            .status(403)
+            .body(Vec::new())
+            .unwrap();
+    }
+    let active = match state.session.try_lock() {
+        Ok(value) => value,
+        Err(_) => {
+            return tauri::http::Response::builder()
+                .status(503)
+                .body(Vec::new())
+                .unwrap();
+        }
+    };
+    let capabilities = match state.media_capabilities.lock() {
+        Ok(value) => value,
+        Err(_) => {
+            return tauri::http::Response::builder()
+                .status(503)
+                .body(Vec::new())
+                .unwrap();
+        }
+    };
+    let Some(capability) = capabilities.get(token) else {
+        return tauri::http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap();
+    };
+    if !active
+        .as_ref()
+        .is_some_and(|session| Arc::ptr_eq(session, &capability.session))
+        || capability.window_label != context.webview_label()
+        || request.method() != tauri::http::Method::GET
+    {
+        return tauri::http::Response::builder()
+            .status(403)
+            .body(Vec::new())
+            .unwrap();
+    }
+    if request
+        .headers()
+        .get_all(tauri::http::header::RANGE)
+        .iter()
+        .count()
+        != 1
+        && request.headers().contains_key(tauri::http::header::RANGE)
+    {
+        return tauri::http::Response::builder()
+            .status(416)
+            .body(Vec::new())
+            .unwrap();
+    }
+    let had_range = request.headers().contains_key(tauri::http::header::RANGE);
+    let (start, end) = match media_range(
+        request.headers().get(tauri::http::header::RANGE),
+        capability.plaintext_bytes,
+    ) {
+        Ok(range) => range,
+        Err(()) => {
+            return tauri::http::Response::builder()
+                .status(416)
+                .header(
+                    tauri::http::header::CONTENT_RANGE,
+                    format!("bytes */{}", capability.plaintext_bytes),
+                )
+                .body(Vec::new())
+                .unwrap();
+        }
+    };
+    let length = usize::try_from(end - start + 1).unwrap_or(0);
+    let mut bytes = vec![0; length];
+    let read = File::open(capability.plaintext.path()).and_then(|mut file| {
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut bytes)
+    });
+    if read.is_err() {
+        return tauri::http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap();
+    }
+    let partial = had_range || start != 0 || end + 1 != capability.plaintext_bytes;
+    let mut response = tauri::http::Response::builder()
+        .status(if partial { 206 } else { 200 })
+        .header(tauri::http::header::CONTENT_TYPE, &capability.media_type)
+        .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(tauri::http::header::CONTENT_LENGTH, bytes.len());
+    if partial {
+        response = response.header(
+            tauri::http::header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{}", capability.plaintext_bytes),
+        );
+    }
+    response.body(bytes).unwrap()
+}
+
+#[cfg(test)]
+mod media_protocol_tests {
+    use super::{media_range, MAX_MEDIA_RANGE_BYTES};
+    use tauri::http::HeaderValue;
+
+    #[test]
+    fn accepts_video_ranges_and_rejects_ambiguous_or_invalid_ones() {
+        assert_eq!(media_range(None, 10).unwrap(), (0, 9));
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=2-5")), 10).unwrap(),
+            (2, 5)
+        );
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=7-")), 10).unwrap(),
+            (7, 9)
+        );
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=-3")), 10).unwrap(),
+            (7, 9)
+        );
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=7-100")), 10).unwrap(),
+            (7, 9)
+        );
+        assert!(media_range(Some(&HeaderValue::from_static("bytes=0-1,3-4")), 10).is_err());
+        assert!(media_range(Some(&HeaderValue::from_static("bytes=10-11")), 10).is_err());
+        let oversized = format!("bytes=0-{}", MAX_MEDIA_RANGE_BYTES);
+        assert_eq!(
+            media_range(
+                Some(&HeaderValue::from_str(&oversized).unwrap()),
+                MAX_MEDIA_RANGE_BYTES + 1
+            )
+            .unwrap(),
+            (0, MAX_MEDIA_RANGE_BYTES - 1)
+        );
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1689,6 +2247,7 @@ async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -
 pub fn run() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let builder = tauri::Builder::default()
+        .register_uri_scheme_protocol("peppy-media", media_protocol_response)
         .on_page_load(|webview, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
@@ -1893,6 +2452,11 @@ pub fn run() {
         pick_attachments,
         retry_attachment,
         save_attachment,
+        request_attachment_download,
+        media_page,
+        open_media,
+        load_media,
+        close_media,
         publish_attachment,
         open_composer,
         dismiss_notification,

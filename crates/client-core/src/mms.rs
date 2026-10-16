@@ -82,6 +82,10 @@ pub struct MmsAcquisition {
 pub struct MmsAcquisitionPart {
     pub provider_part_id: String,
     pub attachment_id: AttachmentId,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub thumbnail_attachment_id: Option<AttachmentId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,8 +109,13 @@ impl Client {
         if let Some(acquisition) = existing.as_ref()
             && acquisition.state == MmsAcquisitionState::Complete
         {
+            if same_provider_identity(&acquisition.input, &input) {
+                tx.commit()?;
+                return Ok(acquisition.clone());
+            }
+            super::mms_backfill::record_provider_identity_conflict(&tx, &input)?;
             tx.commit()?;
-            return Ok(acquisition.clone());
+            return Err(Error::Conflict);
         }
 
         let reconciliation = if unavailable_reason.is_none() {
@@ -544,7 +553,8 @@ impl Client {
         }
         let input: MmsAcquisitionInput = super::decode(encoded_input.as_bytes())?;
         validate_complete_input(&input)?;
-        let attachments = acquisition_parts(&tx, id)?;
+        let parts = acquisition_part_mappings(&tx, id)?;
+        let attachments: Vec<_> = parts.iter().map(|part| part.attachment_id).collect();
         if input.body.is_empty() && attachments.is_empty() {
             return Err(Error::InvalidRequest("MMS requires text or parts"));
         }
@@ -614,8 +624,23 @@ impl Client {
             Inserted::Conflict => return Err(Error::Conflict),
             Inserted::Same => return Err(Error::Database),
         }
+        let thumbnail_ids: Vec<_> = parts
+            .iter()
+            .filter_map(|part| part.thumbnail_attachment_id)
+            .collect();
+        let media_meta = parts
+            .iter()
+            .map(|part| super::MmsMediaMeta {
+                attachment_id: part.attachment_id,
+                width: part.width,
+                height: part.height,
+                duration_ms: part.duration_ms,
+                thumbnail: None,
+            })
+            .collect::<Vec<_>>();
+        super::store_local_message_media_meta(&tx, message_id, &media_meta, id)?;
         super::queue_message_banner(&tx, &payload)?;
-        super::enqueue(
+        let (envelope_id, _) = super::enqueue(
             &tx,
             &ctx,
             crate::EnvelopePurpose::Event,
@@ -624,8 +649,15 @@ impl Client {
             &PrivatePayload::MmsMessage {
                 message: payload,
                 media: Vec::new(),
+                media_meta: Vec::new(),
             },
         )?;
+        for thumbnail_id in thumbnail_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO outbox_attachments(envelope_id,attachment_id) VALUES(?,?)",
+                params![envelope_id.to_string(), thumbnail_id.to_string()],
+            )?;
+        }
         tx.execute(
             "UPDATE mms_acquisitions SET state='complete',reason=NULL WHERE acquisition_id=?",
             params![id],
@@ -687,6 +719,79 @@ impl Client {
     pub fn mms_pending_media_bytes(&self) -> Result<u64, Error> {
         let guard = self.lock()?;
         pending_media_bytes(&guard.conn)
+    }
+
+    pub fn set_mms_acquisition_part_metadata(
+        &self,
+        id: &str,
+        provider_part_id: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+        duration_ms: Option<u64>,
+        thumbnail_attachment_id: Option<AttachmentId>,
+    ) -> Result<(), Error> {
+        if width.is_some_and(|value| value == 0)
+            || height.is_some_and(|value| value == 0)
+            || duration_ms.is_some_and(|value| value == 0)
+        {
+            return Err(Error::InvalidRequest("MMS media metadata"));
+        }
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (original, state, current): (AttachmentId, String, (Option<i64>, Option<i64>, Option<i64>, Option<String>)) = tx.query_row(
+            "SELECT p.attachment_id,a.state,p.width,p.height,p.duration_ms,p.thumbnail_attachment_id FROM mms_acquisition_parts p JOIN mms_acquisitions a ON a.acquisition_id=p.acquisition_id WHERE p.acquisition_id=? AND p.provider_part_id=?",
+            params![id, provider_part_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get(1)?, (row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))),
+        ).optional()?.ok_or(Error::NotFound).and_then(|(original, state, current)| Ok((super::parse(&original)?, state, current)))?;
+        if state == "complete" {
+            return Err(Error::Conflict);
+        }
+        let requested = (
+            width.map(i64::from),
+            height.map(i64::from),
+            duration_ms.map(super::to_i64).transpose()?,
+            thumbnail_attachment_id.map(|value| value.to_string()),
+        );
+        if current == requested {
+            return Ok(());
+        }
+        if let Some(thumbnail) = thumbnail_attachment_id {
+            if thumbnail == original {
+                return Err(Error::InvalidRequest("thumbnail equals original"));
+            }
+            let visible: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM mms_acquisition_parts WHERE acquisition_id=? AND attachment_id=?)",
+                params![id, thumbnail.to_string()],
+                |row| row.get(0),
+            )?;
+            if visible {
+                return Err(Error::InvalidRequest("thumbnail is visible part"));
+            }
+            let owned_elsewhere: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM mms_acquisition_parts WHERE thumbnail_attachment_id=? AND (acquisition_id<>? OR provider_part_id<>?))",
+                params![thumbnail.to_string(), id, provider_part_id],
+                |row| row.get(0),
+            )?;
+            if owned_elsewhere {
+                return Err(Error::Conflict);
+            }
+            super::local_references(&tx, &[thumbnail])?;
+        }
+        tx.execute(
+            "UPDATE mms_acquisition_parts SET width=?,height=?,duration_ms=?,thumbnail_attachment_id=? WHERE acquisition_id=? AND provider_part_id=?",
+            params![requested.0, requested.1, requested.2, requested.3, id, provider_part_id],
+        )?;
+        if pending_media_bytes(&tx)? > MAX_PENDING_MMS_MEDIA_BYTES {
+            return Err(Error::MmsMediaQuota);
+        }
+        let detached = current.3.map(|value| super::parse(&value)).transpose()?;
+        tx.commit()?;
+        if let Some(detached) = detached {
+            self.discard_unreferenced_attachment(detached)?;
+        }
+        Ok(())
     }
 }
 
@@ -750,6 +855,19 @@ fn validate_complete_input(input: &MmsAcquisitionInput) -> Result<(), Error> {
     }
 }
 
+/// Provider capture provenance (`imported`) and body enrichment are not immutable identity: a
+/// row can be revisited live or gain decoded text parts. Other provider evidence must agree before
+/// a completed immutable message is treated as the same source row.
+fn same_provider_identity(existing: &MmsAcquisitionInput, candidate: &MmsAcquisitionInput) -> bool {
+    existing.source == candidate.source
+        && existing.direction == candidate.direction
+        && existing.observed_at_ms == candidate.observed_at_ms
+        && existing.sender_address == candidate.sender_address
+        && existing.recipients == candidate.recipients
+        && existing.subject == candidate.subject
+        && existing.transaction_id == candidate.transaction_id
+}
+
 fn validate_checkpoint_scope(source_generation: &str, subscription_id: &str) -> Result<(), Error> {
     if source_generation.is_empty()
         || source_generation.len() > super::MAX_PROVIDER_ID_BYTES
@@ -807,20 +925,51 @@ fn acquisition_part_mappings(
     id: &str,
 ) -> Result<Vec<MmsAcquisitionPart>, Error> {
     let mut query = conn.prepare(
-        "SELECT provider_part_id,attachment_id FROM mms_acquisition_parts WHERE acquisition_id=? ORDER BY position",
+        "SELECT provider_part_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id FROM mms_acquisition_parts WHERE acquisition_id=? ORDER BY position",
     )?;
     query
         .query_map(params![id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|(provider_part_id, attachment_id)| {
-            Ok(MmsAcquisitionPart {
+        .map(
+            |(
                 provider_part_id,
-                attachment_id: super::parse(&attachment_id)?,
-            })
-        })
+                attachment_id,
+                width,
+                height,
+                duration_ms,
+                thumbnail_attachment_id,
+            )| {
+                Ok(MmsAcquisitionPart {
+                    provider_part_id,
+                    attachment_id: super::parse(&attachment_id)?,
+                    width: width
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(|_| Error::Database)?,
+                    height: height
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(|_| Error::Database)?,
+                    duration_ms: duration_ms
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| Error::Database)?,
+                    thumbnail_attachment_id: thumbnail_attachment_id
+                        .map(|value| super::parse(&value))
+                        .transpose()?,
+                })
+            },
+        )
         .collect()
 }
 
@@ -938,7 +1087,7 @@ fn next_acquisition_sequence(
 
 fn pending_media_bytes(conn: &rusqlite::Connection) -> Result<u64, Error> {
     let bytes: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(a.plaintext_bytes),0) FROM mms_acquisition_parts p JOIN attachments a ON a.attachment_id=p.attachment_id WHERE a.state != 'uploaded'",
+        "SELECT COALESCE(SUM(a.plaintext_bytes),0) FROM attachments a WHERE a.state != 'uploaded' AND a.attachment_id IN (SELECT attachment_id FROM mms_acquisition_parts UNION SELECT thumbnail_attachment_id FROM mms_acquisition_parts WHERE thumbnail_attachment_id IS NOT NULL)",
         [], |row| row.get(0),
     )?;
     u64::try_from(bytes).map_err(|_| Error::Database)
@@ -1046,7 +1195,20 @@ fn unlink_acquisition_parts(
     conn: &rusqlite::Connection,
     acquisition_id: &str,
 ) -> Result<Vec<AttachmentId>, Error> {
-    let attachments = acquisition_parts(conn, acquisition_id)?;
+    let mut attachments = acquisition_parts(conn, acquisition_id)?;
+    let mut thumbnails = conn.prepare(
+        "SELECT thumbnail_attachment_id FROM mms_acquisition_parts WHERE acquisition_id=? AND thumbnail_attachment_id IS NOT NULL",
+    )?;
+    attachments.extend(
+        thumbnails
+            .query_map(params![acquisition_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|id| super::parse::<AttachmentId>(&id))
+            .collect::<Result<Vec<_>, Error>>()?,
+    );
+    attachments.sort();
+    attachments.dedup();
     conn.execute(
         "DELETE FROM mms_acquisition_parts WHERE acquisition_id=?",
         params![acquisition_id],
@@ -1149,7 +1311,7 @@ fn checkpoint_number(value: &str) -> Result<u64, Error> {
         .map_err(|_| Error::InvalidRequest("MMS checkpoint"))
 }
 
-fn direction_code(direction: Direction) -> &'static str {
+pub(crate) fn direction_code(direction: Direction) -> &'static str {
     match direction {
         Direction::Incoming => "incoming",
         Direction::Outgoing => "outgoing",

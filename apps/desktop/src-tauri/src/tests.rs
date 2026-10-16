@@ -221,6 +221,39 @@ fn completed_mms(
         .conversation_id
 }
 
+#[test]
+fn media_pages_do_not_omit_items_when_preview_budget_is_exhausted() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let source = fixture.dir.path().join("media-page.png");
+    std::fs::write(&source, sample_png(1, 1)).unwrap();
+    let mut conversation = None;
+    for index in 0..13 {
+        let attachment = session.prepare_attachment(&source).unwrap();
+        conversation = Some(completed_mms(
+            &session,
+            &format!("media-page-{index}"),
+            "media-page-thread",
+            Direction::Incoming,
+            Some("+12025550123"),
+            &[],
+            vec![attachment.id.parse().unwrap()],
+        ));
+    }
+    let first = session.media_page(conversation.unwrap(), None, 40).unwrap();
+    assert_eq!(first.items.len(), 12);
+    let cursor = first.next_cursor.as_ref().map(|cursor| peppy_client_core::MediaCursor {
+            sort_at_ms: cursor.sort_at_ms.parse().unwrap(),
+            local_order: cursor.local_order.parse().unwrap(),
+            message_id: cursor.message_id.parse().unwrap(),
+            attachment_position: cursor.attachment_position,
+        });
+    let second = session.media_page(conversation.unwrap(), cursor.as_ref(), 40).unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+}
+
 fn set_gateway(session: &Session, mut route: GatewayView) {
     route.sim_id = "sim-1".into();
     session.set_status(|status| {

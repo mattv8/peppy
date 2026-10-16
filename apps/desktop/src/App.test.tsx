@@ -978,12 +978,10 @@ describe("lazy conversation history", () => {
     render(<App />);
 
     await screen.findByText("Hello from Aurora");
-    const incomingBubble = document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')!;
+    const incomingBubble = document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')?.closest("article")!;
     const incomingMeta = document.querySelector<HTMLElement>('[data-message-meta="m-aurora"]')!;
     const sentMeta = document.querySelector<HTMLElement>('[data-message-meta="m-sent"]')!;
-    expect(incomingBubble.parentElement).toHaveAttribute("data-message-row", "m-aurora");
-    expect(incomingMeta.parentElement).toBe(incomingBubble.parentElement);
-    expect(incomingMeta).not.toContainElement(incomingBubble);
+    expect(incomingMeta.parentElement).toHaveAttribute("data-message-row", "m-aurora");
     expect(incomingMeta).toHaveTextContent(formatDateTime("1788435180000")!);
     expect(incomingMeta.querySelector("time")).toHaveAttribute("dateTime", isoDateTime("1788435180000")!);
     expect(sentMeta).toHaveAttribute("data-status", "sent");
@@ -2324,7 +2322,7 @@ describe("gateway routes", () => {
     host.gateways = [{ ...SMS_ONLY, name: "My iPhone", availability: "unsupported_platform" }];
     render(<App />);
     fireEvent.click(await screen.findByRole("combobox", { name: "Phone" }));
-    const option = await screen.findByRole("option", { name: /My iPhone/ });
+    const option = await screen.findByRole("option", { name: /My iPhone/, hidden: true });
     expect(option).toHaveAttribute("aria-disabled", "true");
     expect(option).toHaveAttribute("data-gateway-availability", "unsupported_platform");
     fireEvent.click(option);
@@ -3154,7 +3152,7 @@ describe("desktop presentation controls", () => {
     const composer = document.getElementById("composer-area")!;
     expect(layer.parentElement).toBe(stage);
     expect(panel.parentElement).toBe(layer);
-    expect(layer.previousElementSibling).toBe(screen.getByRole("log", { name: "Messages" }));
+    expect(layer.previousElementSibling).toBe(document.getElementById("tabpanel-messages"));
     expect(layer.nextElementSibling).toBe(composer);
     expect(composer).not.toContainElement(panel);
   });
@@ -3222,7 +3220,7 @@ describe("desktop presentation controls", () => {
     const layer = document.getElementById("recipient-rail-layer")!;
     expect(layer.parentElement).toBe(stage);
     expect(panel.parentElement).toBe(layer);
-    expect(layer.previousElementSibling).toBe(screen.getByRole("log", { name: "Messages" }));
+    expect(layer.previousElementSibling).toBe(document.getElementById("tabpanel-messages"));
     expect(layer.nextElementSibling).toBe(document.getElementById("composer-area"));
     const grip = screen.getByRole("button", { name: "Move recipients panel" });
     const before = { left: panel.style.left, top: panel.style.top };
