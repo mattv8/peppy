@@ -12,8 +12,9 @@ else
 fi
 AVD_NAME=${PEPPY_ANDROID_AVD:-}
 BOOT_TIMEOUT=${PEPPY_ANDROID_BOOT_TIMEOUT:-180}
+unset PEPPY_ANDROID_CONTAINER_ARTIFACTS
 
-usage() { echo "Usage: bash infra/dev/android.sh {build|test|emulator|forward|deploy|open|smoke|sms} [args...]" >&2; }
+usage() { echo "Usage: bash infra/dev/android.sh {build|test|run-fast|emulator|forward|deploy|open|smoke|sms} [args...]" >&2; }
 die() { echo "android: $*" >&2; exit 1; }
 is_wsl() { [[ -n ${WSL_INTEROP:-} ]] || grep -qi microsoft /proc/sys/kernel/osrelease /proc/version 2>/dev/null; }
 absolute_path() {
@@ -27,6 +28,29 @@ normalize_build_paths() {
     if [[ -n ${CARGO_TARGET_DIR:-} ]]; then CARGO_TARGET_DIR=$(absolute_path "$CARGO_TARGET_DIR")
     else CARGO_TARGET_DIR="$ROOT/target"; fi
     export CARGO_TARGET_DIR
+}
+validate_android_abi() {
+    PEPPY_ANDROID_ABI=${PEPPY_ANDROID_ABI:-all}
+    case $PEPPY_ANDROID_ABI in all|arm64-v8a|x86_64) ;; *) die "PEPPY_ANDROID_ABI must be all, arm64-v8a, or x86_64" ;; esac
+    export PEPPY_ANDROID_ABI
+}
+validate_native_clean_selector() {
+    case ${PEPPY_ANDROID_FORCE_NATIVE_CLEAN:-0} in ''|0|1) ;; *) die "PEPPY_ANDROID_FORCE_NATIVE_CLEAN must be 0 or 1" ;; esac
+}
+validate_build_options() {
+    validate_android_abi
+    validate_native_clean_selector
+    case ${PEPPY_ANDROID_BUILD_BACKEND:-auto} in auto|native|docker) ;; *) die "PEPPY_ANDROID_BUILD_BACKEND must be auto, native, or docker" ;; esac
+}
+selected_rust_targets() {
+    case $PEPPY_ANDROID_ABI in
+        all) printf '%s\n' aarch64-linux-android x86_64-linux-android ;;
+        arm64-v8a) printf '%s\n' aarch64-linux-android ;;
+        x86_64) printf '%s\n' x86_64-linux-android ;;
+    esac
+}
+gradle_abi_argument() {
+    [[ $PEPPY_ANDROID_ABI == all ]] || printf '%s\n' "-PpeppyAndroidAbi=$PEPPY_ANDROID_ABI"
 }
 
 windows_sdk_root() {
@@ -83,7 +107,7 @@ prepare_debug_tls() {
     fi
 }
 ensure_debug_loopback() {
-    local serial=$1 server host port certificate
+    local serial=$1 require_http_health=${2:-false} server host port certificate
     prepare_debug_tls
     if [[ -n ${PEPPY_DEBUG_SERVER:-} ]]; then server=$PEPPY_DEBUG_SERVER
     else server=$(python3 "$ROOT/infra/dev/dev_port.py" smoke-url "$ROOT/.env"); fi
@@ -100,26 +124,30 @@ ensure_debug_loopback() {
         if [[ $scheme == https ]]; then windows_certificate=$(wslpath -w "$certificate"); fi
         # shellcheck disable=SC2016 # PowerShell expands its own environment variables.
         PEPPY_HEALTH_URL="$scheme://$host:$port/healthz" PEPPY_TLS_CERT="$windows_certificate" WSLENV="${wslenv}PEPPY_HEALTH_URL/w:PEPPY_TLS_CERT/w" powershell.exe -NoProfile -Command 'if ($env:PEPPY_TLS_CERT) { curl.exe --fail --silent --show-error --ssl-revoke-best-effort --cacert $env:PEPPY_TLS_CERT $env:PEPPY_HEALTH_URL } else { curl.exe --fail --silent --show-error $env:PEPPY_HEALTH_URL }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' >/dev/null || die "Windows localhost server is not reachable from Windows: $scheme://$host:$port/healthz"
-    elif [[ $scheme == https ]]; then
+    elif [[ $scheme == https || $require_http_health == true ]]; then
         local curl_args=(--fail --silent --show-error)
-        curl_args+=(--cacert "$certificate")
+        if [[ $scheme == https ]]; then curl_args+=(--cacert "$certificate"); fi
         curl "${curl_args[@]}" "$scheme://$host:$port/healthz" >/dev/null || die "local server is not reachable: $scheme://$host:$port/healthz"
     fi
     adb -s "$serial" reverse "tcp:$port" "tcp:$port"
 }
 container_run() {
     local cmd=$1
+    local -a compose_run=(compose --profile android run --build --rm)
     command -v docker >/dev/null || die "docker is required for android-$cmd"
     docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required for android-$cmd"
     test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
     mkdir -p "$ARTIFACTS"; chmod 0700 "$ARTIFACTS"
+    if [[ -n ${PEPPY_ANDROID_CONTAINER_ARTIFACTS:-} ]]; then
+        compose_run+=(-v "$ARTIFACTS:$PEPPY_ANDROID_CONTAINER_ARTIFACTS")
+    fi
     local uid gid volume
     uid=$(id -u); gid=$(id -g)
     for volume in android-sdk android-gradle android-cargo android-target android-debug-keystore; do
         docker volume create "peppy-$volume-$uid-$gid" >/dev/null
     done
     prepare_debug_tls
-    DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" compose --profile android run --build --rm android run "$cmd"
+    DEV_UID=$uid DEV_GID=$gid PEPPY_SOURCE_TREE=$SOURCE_ROOT python3 "$ROOT/infra/dev/dev_tls.py" "${compose_run[@]}" android run "$cmd"
 }
 accept_licenses() {
     local status
@@ -204,22 +232,34 @@ native_preflight() {
     command -v rustup >/dev/null || die "rustup is required; install Rust with rustup"
     (
         cd "$SOURCE_ROOT"
-        for target in aarch64-linux-android x86_64-linux-android; do
+        while IFS= read -r target; do
             rustup target list --installed | grep -Fx "$target" >/dev/null || die "Rust target $target is missing; run 'rustup target add $target'"
-        done
+        done < <(selected_rust_targets)
     )
     command -v pkg-config >/dev/null || die "pkg-config and libsodium are required; run 'brew install pkg-config libsodium'"
     pkg-config --exists libsodium || die "libsodium is required; run 'brew install libsodium'"
 }
 run_build_body() {
-    local command=$1
+    local command=$1 gradle_abi
+    local -a gradle_args=()
+    if [[ $command == test || ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 || ${CI:-} == 1 || ${CI:-} == true ]]; then gradle_args+=(--no-daemon); fi
+    gradle_abi=$(gradle_abi_argument)
+    if [[ -n $gradle_abi ]]; then gradle_args+=("$gradle_abi"); fi
     bash "$SOURCE_ROOT/infra/compose/verify-android-native.sh"
     if [[ $command == build ]]; then
-        (cd "$SOURCE_ROOT/apps/android" && ./gradlew --no-daemon :app:assembleDebug)
+        if (( ${#gradle_args[@]} )); then
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew "${gradle_args[@]}" :app:assembleDebug)
+        else
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew :app:assembleDebug)
+        fi
         mkdir -p "$ARTIFACTS"
         install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/debug/app-debug.apk" "$ARTIFACTS/app-debug.apk"
     else
-        (cd "$SOURCE_ROOT/apps/android" && ./gradlew --no-daemon :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
+        if (( ${#gradle_args[@]} )); then
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew "${gradle_args[@]}" :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
+        else
+            (cd "$SOURCE_ROOT/apps/android" && ./gradlew :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest)
+        fi
         mkdir -p "$ARTIFACTS"
         install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/debug/app-debug.apk" "$ARTIFACTS/app-debug.apk"
         install -m 0644 "$SOURCE_ROOT/apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" "$ARTIFACTS/app-debug-androidTest.apk"
@@ -236,6 +276,7 @@ run_native() {
 }
 run_android() {
     local command=$1 backend host
+    validate_build_options
     if [[ ${RUNNING_IN_CONTAINER:-${PEPPY_ANDROID_CONTAINER:-}} == 1 ]]; then
         echo "android: using in-container Android backend" >&2
         prepare_sdk
@@ -244,7 +285,6 @@ run_android() {
     fi
     normalize_build_paths
     backend=${PEPPY_ANDROID_BUILD_BACKEND:-auto}
-    case $backend in auto|native|docker) ;; *) die "PEPPY_ANDROID_BUILD_BACKEND must be auto, native, or docker" ;; esac
     host=$(uname -s)
     if [[ $backend == auto ]]; then [[ $host == Darwin ]] && backend=native || backend=docker; fi
     if [[ $backend == native ]]; then
@@ -384,12 +424,13 @@ ensure_supported_abi() {
     local abi
     abi=$(adb -s "$1" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')
     [[ $abi == arm64-v8a || $abi == x86_64 ]] || die "emulator ABI '$abi' is unsupported; select an arm64-v8a or x86_64 AVD"
+    printf '%s\n' "$abi"
 }
-deploy() { local serial; serial=$(adb_serial); test -f "$(apk app-debug.apk)" || die "APK missing; run android-build first"; ensure_supported_abi "$serial"; ensure_debug_loopback "$serial"; adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"; }
+deploy() { local serial; serial=$(adb_serial); test -f "$(apk app-debug.apk)" || die "APK missing; run android-build first"; ensure_supported_abi "$serial" >/dev/null; ensure_debug_loopback "$serial"; adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"; }
 open() {
     local serial output_file output status
     serial=$(adb_serial)
-    ensure_supported_abi "$serial"
+    ensure_supported_abi "$serial" >/dev/null
     ensure_debug_loopback "$serial"
     output_file=$(mktemp)
     set +e
@@ -407,7 +448,7 @@ smoke() {
     local serial output status
     serial=$(adb_serial)
     if ! test -f "$(apk app-debug.apk)" || ! test -f "$(apk app-debug-androidTest.apk)"; then die "APK(s) missing; run 'bash infra/dev/android.sh test' to build test APKs first"; fi
-    ensure_supported_abi "$serial"
+    ensure_supported_abi "$serial" >/dev/null
     ensure_debug_loopback "$serial"
     adb -s "$serial" install -r "$(apk_for_adb app-debug.apk)"
     adb -s "$serial" install -r "$(apk_for_adb app-debug-androidTest.apk)"
@@ -419,8 +460,39 @@ smoke() {
     if (( status != 0 )) || grep -Eq 'FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed|INSTRUMENTATION_CODE: (0|-[2-9][0-9]*|[1-9][0-9]*)' <<<"$output" || ! grep -Eq '^OK \([1-9][0-9]* tests?\)' <<<"$output" || ! grep -Eq '^INSTRUMENTATION_CODE: -1$' <<<"$output"; then die "instrumentation smoke failed"; fi
 }
 sms() { local serial; serial=$(adb_serial); [[ $# == 2 && -n $1 && -n $2 ]] || die "Usage: android.sh sms <number> <message>"; echo "Synthetic emulator SMS simulation only; no carrier message is sent." >&2; adb -s "$serial" emu sms send "$1" "$2"; }
+validate_pinned_emulator() {
+    local expected_abi=$1 serial current_abi
+    serial=$(adb_serial)
+    current_abi=$(ensure_supported_abi "$serial")
+    [[ $current_abi == "$expected_abi" ]] || die "selected emulator ABI changed from $expected_abi to $current_abi"
+}
+run_fast() {
+    local serial abi configured_abi
+    require_license_approval
+    test -f "$ROOT/.env" || die "missing .env; run bash infra/dev/dev.sh dev-setup first"
+    validate_build_options
+    configured_abi=$PEPPY_ANDROID_ABI
+    serial=$(adb_serial)
+    abi=$(ensure_supported_abi "$serial")
+    [[ $configured_abi == all || $configured_abi == "$abi" ]] || die "PEPPY_ANDROID_ABI=$configured_abi does not match running emulator ABI $abi"
+    PEPPY_ANDROID_SERIAL=$serial
+    PEPPY_ANDROID_ABI=$abi
+    export PEPPY_ANDROID_SERIAL PEPPY_ANDROID_ABI
+    normalize_build_paths
+    ARTIFACTS="$ARTIFACTS/fast/$abi"
+    PEPPY_ANDROID_ARTIFACTS=$ARTIFACTS
+    PEPPY_ANDROID_CONTAINER_ARTIFACTS="/artifacts/android/fast/$abi"
+    export PEPPY_ANDROID_ARTIFACTS PEPPY_ANDROID_CONTAINER_ARTIFACTS
+    ensure_debug_loopback "$serial" true
+    rm -f "$(apk app-debug.apk)"
+    run_android build
+    validate_pinned_emulator "$abi"
+    deploy
+    validate_pinned_emulator "$abi"
+    open
+}
 
 case ${1:-} in
-    build) build ;; test) test_android ;;
+    build) build ;; test) test_android ;; run-fast) run_fast ;;
     emulator) emulator ;; forward) forward ;; deploy) deploy ;; open) open ;; smoke) smoke ;; sms) shift; sms "$@" ;; *) usage; exit 64 ;;
 esac

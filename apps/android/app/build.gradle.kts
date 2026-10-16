@@ -20,6 +20,11 @@ fun debugEnabled(): Boolean {
     }
 }
 
+val selectedAndroidAbi = providers.gradleProperty("peppyAndroidAbi").orNull?.let { value ->
+    value.takeIf { it in setOf("arm64-v8a", "x86_64") }
+        ?: throw GradleException("peppyAndroidAbi must be arm64-v8a or x86_64; got '$value'")
+}
+
 private val certificatePemPattern = Regex(
     """\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----\s*\z""",
 )
@@ -93,7 +98,10 @@ android {
         ).orNull.orEmpty()
         buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
-        ndk { abiFilters += setOf("arm64-v8a", "x86_64") }
+        ndk {
+            abiFilters.clear()
+            abiFilters.addAll(selectedAndroidAbi?.let(::setOf) ?: setOf("arm64-v8a", "x86_64"))
+        }
     }
 
     buildFeatures {

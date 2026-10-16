@@ -20,18 +20,20 @@ just dev-down
 
 `just dev-up` stops and removes obsolete `api` and `migrate` containers from the former development topology (without removing volumes), rebuilds the web assets into a named volume, then merges the development overlay with Compose and starts PostgreSQL, SeaweedFS, and the `dev` service. The `dev` service synchronizes the source, builds `cargo build --locked -p peppy-server`, runs pending migrations against PostgreSQL, and serves the browser UI and API on `127.0.0.1:7000` (internal binding `0.0.0.0:8080`). It waits for PostgreSQL, SeaweedFS, and successful asset population before starting, with a cold-startup timeout of 1800 seconds; cold-build compilation may take several minutes. Build or migration failure exits nonzero and never serves. `just dev-down` stops and removes the `dev`, web, PostgreSQL, and SeaweedFS containers and cleans up obsolete `api` and `migrate` containers without removing any database or cache volumes. Run it before base-stack checks such as `just smoke-infra` or `just storage-contract`, which share this project and host port. Production deployments retain a separate small release image with independent `api` and `migrate` services.
 
-After first-run setup, OpenChamber and VS Code offer these six everyday shortcuts:
+After first-run setup, OpenChamber and VS Code offer these eight everyday shortcuts. Run `just dev-actions` to refresh the ignored local OpenChamber configuration after pulling these actions.
 
 | Shortcut | What it does |
 | --- | --- |
 | Dev: Start development | Preserves `.env`, starts and waits for the backend, readies the emulator, and opens the latest desktop build; it does not build Android. |
+| Desktop: Develop (hot reload) | Runs the desktop development server with hot reload. |
 | Desktop: Rebuild and open | Builds before opening a fresh desktop instance; it does not open a stale app after a build failure. |
 | Android: Rebuild and open | Requires `PEPPY_ACCEPT_ANDROID_LICENSES=1` before any effect, then starts the backend, builds, readies the emulator, deploys, and opens the app. |
+| Android: Rebuild and open (fast) | Requires `PEPPY_ACCEPT_ANDROID_LICENSES=1`, `.env`, a reachable existing backend, and one supported running emulator. It rebuilds, deploys, and opens without starting or rebuilding the backend or booting an emulator. |
 | iOS: Rebuild and open | macOS only: starts the backend, boots an iPhone simulator, rebuilds the Debug Rust library and iOS app, then installs and launches it. Requires full Xcode and an iOS 26+ simulator runtime. |
 | CI: Run all tests | macOS only: runs every locally executable CI test and check family, including disposable integration infrastructure, Android checks, and host Swift checks. It does not package or publish artifacts. |
 | Dev: Stop backend | Stops backend containers while preserving data and caches; native apps and the emulator remain running. |
 
-The shortcuts require a running Docker daemon, installed native desktop tools, and a configured Android SDK/AVD where applicable. They do not reload a healthy backend; restart it to apply backend source changes. SDK license approval is always explicit. Granular `just` commands remain available, including `just dev-actions`, `just dev-setup`, `just dev-demo`, testing commands, and `just android-sms`; SMS is CLI-only. Retired editor actions are removed only when their original released command is unchanged, so customized actions are preserved. Reselect the project to review OpenChamber trust prompts after refreshing actions.
+The shortcuts require a running Docker daemon, installed native desktop tools, and a configured Android SDK/AVD where applicable. They do not reload a healthy backend; restart it to apply backend source changes. SDK license approval is always explicit. Granular `just` commands remain available, including `just dev-actions`, `just dev-setup`, `just dev-demo`, testing commands, and `just android-sms`; SMS is CLI-only. Retired editor actions are removed only when their original released command is unchanged. A customized command on a managed action ID, including `peppy.desktop-dev`, blocks the refresh atomically; rename the local action to retain it, then refresh. Reselect the project to review OpenChamber trust prompts after refreshing actions.
 
 ### Worktree source selection
 
@@ -145,6 +147,16 @@ Native host tooling avoids Linux QEMU. Some Android NDK tools can still require 
 `just android-build` produces only `app-debug.apk`. `just android-test` routes through the Android helper and uses the same backend selector. It runs the native verifier and five Gradle tasks (`:jvm-smoke:run`, `:app:testDebugUnitTest`, `:app:lintDebug`, `:app:assembleDebug`, and `:app:assembleDebugAndroidTest`), then copies `app-debug.apk` and `app-debug-androidTest.apk` for `just android-smoke`.
 
 Outputs default to `.opencode/dev/artifacts/android/`; set `PEPPY_ANDROID_ARTIFACTS` to override that path. The native backend uses the checkout's `target` directory by default (or an explicit `CARGO_TARGET_DIR`), separate from Docker's named volumes but shared with other native FFI builds. A native build regenerates tracked Rust-owned Kotlin and ignored JNI libraries in the checkout; inspect generated diffs afterwards. Docker generates these files in its private workspace.
+
+### Fast Android rebuilds
+
+Use `just android-run` for the full workflow: it starts the backend, readies an emulator, rebuilds the default two Android ABIs, deploys, and opens the app. Use `PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-run-fast` only when `.env` exists, the backend is already reachable over its configured HTTP or HTTPS URL, and one supported Android emulator is already running. The fast command does not start, rebuild, or restart the backend and does not create or boot an emulator. It selects the running emulator ABI, rebuilds only that ABI, then deploys and opens it.
+
+Normal builds keep their APK at `.opencode/dev/artifacts/android/app-debug.apk` by default. Fast builds use `.opencode/dev/artifacts/android/fast/<abi>/app-debug.apk`, so normal deploy and smoke commands cannot consume a fast APK. Set `PEPPY_ANDROID_ARTIFACTS` to an absolute alternate artifact root.
+
+`PEPPY_ANDROID_ABI` accepts only `all`, `arm64-v8a`, or `x86_64`; unset or empty means `all`. `PEPPY_ANDROID_FORCE_NATIVE_CLEAN=1` requests targeted native recovery; unset, empty, or `0` uses normal validation. Other values fail before native tool effects. A fast selected-ABI build can leave unselected JNI libraries on disk stale until a full verifier run. Do not use a bare Gradle invocation as a replacement for the maintained Android helper: it bypasses required native verification and generated-binding checks.
+
+On macOS the native Android path can reuse the Gradle daemon when `JAVA_HOME` remains stable, and Gradle's global build cache is enabled. Docker and test/CI invocations remain one-shot without daemon reuse, although the cache can still help. Healthy native caches are retained; cache validation and targeted recovery protect against incomplete native artifacts, but no measured benchmark is available.
 
 ## Android emulator workflow
 
