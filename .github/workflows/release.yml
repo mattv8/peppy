@@ -117,6 +117,8 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       android_version_code: ${{ needs.prepare.outputs.android_version_code }}
       wix_version: ${{ needs.prepare.outputs.wix_version }}
+      trusted_update_build: true
+      update_channel: stable
   container:
     needs: prepare
     uses: ./.github/workflows/build-container.yml
@@ -133,6 +135,7 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       channel: stable
       sha: ${{ needs.prepare.outputs.sha }}
+      trusted_update_build: true
   publish-server-image:
     if: ${{ !inputs.dry_run }}
     needs: [prepare, container]

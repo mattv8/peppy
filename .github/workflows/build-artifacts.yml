@@ -27,6 +27,16 @@ on:
         required: false
         type: string
         default: ''
+      trusted_update_build:
+        description: Build signed updater artifacts from a protected release caller
+        required: false
+        type: boolean
+        default: false
+      update_channel:
+        description: Trusted updater channel
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       ref:
@@ -126,6 +136,7 @@ jobs:
           compression-level: 0
 
   desktop-development-artifacts:
+    environment: "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     strategy:
       fail-fast: false
       matrix:
@@ -140,8 +151,9 @@ jobs:
             bundles: app,dmg
             posix_bundles: macos
             path: |
-              dist/desktop-macos-bundles.tar.gz
+              apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz
               apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+              dist/desktop-macos-app.tar.gz
           - os: windows-2025
             name: windows
             bundles: nsis,msi
@@ -151,6 +163,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
+      - name: Reject untrusted updater build context
+        if: inputs.trusted_update_build
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.update_channel }}
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted updater build ref must equal the triggering SHA' >&2; exit 1; }
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
+            workflow_dispatch:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
+            *) echo 'trusted updater builds require production Release dispatch or staging push' >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.ref || github.sha }}
@@ -164,9 +188,9 @@ jobs:
         if: runner.os == 'Windows'
         run: npm uninstall --global yarn pnpm
       - run: npm install --global corepack@0.36.0
-      - run: corepack enable && pnpm install --frozen-lockfile
+      - run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop --ignore-scripts
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev rpm
+        run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev rpm rpmrebuild
       - if: runner.os == 'Windows'
         name: Select native Windows Perl
         shell: pwsh
@@ -184,13 +208,51 @@ jobs:
             throw "Native Perl at $perl cannot load IPC::Cmd"
           }
           "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - if: runner.os == 'Windows' && inputs.trusted_update_build
+        name: Import protected Authenticode certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ inputs.trusted_update_build && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ inputs.trusted_update_build && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -or [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) { throw 'Windows Authenticode certificate inputs are required for trusted builds' }
+          $path = Join-Path $env:RUNNER_TEMP 'peppy-authenticode.pfx'
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item -LiteralPath $path -Force
+          "PEPPY_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build Tauri bundles
         shell: bash
         env:
           BUNDLES: ${{ matrix.bundles }}
           VERSION: ${{ inputs.version }}
           WIX_VERSION: ${{ inputs.wix_version }}
+          TRUSTED_UPDATE_BUILD: ${{ inputs.trusted_update_build }}
+          PEPPY_UPDATE_CHANNEL: ${{ inputs.update_channel }}
+          PEPPY_UPDATE_PUBLIC_KEY: ${{ inputs.trusted_update_build && vars.PEPPY_UPDATE_PUBLIC_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD || '' }}
+          APPLE_CERTIFICATE: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
         run: |
+          config=''
+          if [ "$TRUSTED_UPDATE_BUILD" = true ]; then
+            case "$PEPPY_UPDATE_CHANNEL" in stable|staging) ;; *) echo 'trusted update builds require stable or staging channel' >&2; exit 1 ;; esac
+            for required in VERSION PEPPY_UPDATE_PUBLIC_KEY TAURI_SIGNING_PRIVATE_KEY; do
+              [ -n "${!required}" ] || { echo "$required is required for trusted update builds" >&2; exit 1; }
+            done
+            if [ "$RUNNER_OS" = macOS ]; then
+              for required in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+                [ -n "${!required}" ] || { echo "$required is required for trusted macOS builds" >&2; exit 1; }
+              done
+            fi
+            config=$(node -e 'process.stdout.write(JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.PEPPY_UPDATE_PUBLIC_KEY}}}))')
+          fi
           if [[ -n "$VERSION" ]]; then
             if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
               echo "version must match X.Y.Z or X.Y.Z-prerelease" >&2
@@ -205,20 +267,50 @@ jobs:
               json="$json$(printf ',"bundle":{"windows":{"wix":{"version":"%s"}}}' "$WIX_VERSION")"
             fi
             json="$json}"
+            # shellcheck disable=SC2016
+            if [ -n "$config" ]; then json=$(node -e 'const [base, overlay] = process.argv.slice(1).map(JSON.parse); const bundle={...base.bundle,...overlay.bundle}; if (process.env.RUNNER_OS === "Windows") { const script = `${process.env.GITHUB_WORKSPACE}\\infra\\release\\sign-windows-artifact.ps1`; bundle.windows={...(base.bundle?.windows ?? {}),signCommand:`powershell -NoProfile -ExecutionPolicy Bypass -File \"${script}\" %1`}; } console.log(JSON.stringify({...base,...overlay,bundle}));' "$json" "$config"); fi
             pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --config "$json" -- --locked
           else
             pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" -- --locked
           fi
-      - if: runner.os != 'Windows'
+          if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
+            while IFS= read -r -d '' application; do
+              codesign --verify --deep --strict --verbose=2 "$application"
+              spctl --assess --type execute --verbose=4 "$application"
+              xcrun stapler validate "$application"
+            done < <(find apps/desktop/src-tauri/target/release/bundle/macos -name '*.app' -type d -print0)
+          fi
+      - if: always() && runner.os == 'Windows' && inputs.trusted_update_build
+        name: Remove protected Authenticode certificate
+        shell: pwsh
+        run: |
+          if ($env:PEPPY_WINDOWS_CERT_THUMBPRINT) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:PEPPY_WINDOWS_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue }
+      - if: runner.os == 'Linux' && inputs.trusted_update_build
+        name: Normalize and sign trusted Linux package metadata
+        env:
+          CANONICAL_VERSION: ${{ inputs.version }}
+          PEPPY_RELEASE_RPM_GPG_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_RELEASE_RPM_GPG_KEY || '' }}
+          PEPPY_RELEASE_RPM_GPG_KEY_ID: ${{ inputs.trusted_update_build && vars.PEPPY_RELEASE_RPM_GPG_KEY_ID || '' }}
+        run: |
+          infra/release/normalize-linux-package-metadata.sh "$CANONICAL_VERSION" apps/desktop/src-tauri/target/release/bundle
+          infra/release/sign-rpm.sh apps/desktop/src-tauri/target/release/bundle/rpm
+      - if: runner.os == 'Linux'
         name: Preserve POSIX bundle permissions
         shell: bash
         run: |
           mkdir -p dist
           tar -C apps/desktop/src-tauri/target/release/bundle \
-            -czf "dist/desktop-${{ matrix.name }}-bundles.tar.gz" ${{ matrix.posix_bundles }}
+             -czf "dist/desktop-${{ matrix.name }}-bundles.tar.gz" ${{ matrix.posix_bundles }}
+      - if: runner.os == 'macOS'
+        name: Preserve development macOS app archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C apps/desktop/src-tauri/target/release/bundle/macos \
+            -czf dist/desktop-macos-app.tar.gz -- *.app
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: desktop-${{ matrix.name }}-development-artifacts
+          name: desktop-${{ matrix.name }}-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
           path: ${{ matrix.path }}
           if-no-files-found: error
           retention-days: 14

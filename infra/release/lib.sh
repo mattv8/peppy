@@ -47,3 +47,35 @@ release_die() {
     printf '%s\n' "$1" >&2
     exit "${2:-1}"
 }
+
+release_update_targets() {
+    local version=$1
+    cat <<EOF
+linux-x86_64-appimage|peppy-$version-linux-x86_64.AppImage
+linux-x86_64-deb|peppy-$version-linux-x86_64.deb
+linux-x86_64-rpm|peppy-$version-linux-x86_64.rpm
+darwin-aarch64-app|peppy-$version-darwin-aarch64.app.tar.gz
+windows-x86_64-nsis|peppy-$version-windows-x86_64-setup.exe
+windows-x86_64-msi|peppy-$version-windows-x86_64.msi
+EOF
+}
+
+release_linux_package_version() {
+    local version=$1
+    case "$version" in
+        *-staging.*)
+            [[ "$version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-staging\.([0-9]+)$ ]] || return 2
+            printf '%s~staging.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+            ;;
+        *)
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 2
+            printf '%s\n' "$version"
+            ;;
+    esac
+}
+
+release_linux_rpm_release() {
+    local version=$1
+    release_linux_package_version "$version" >/dev/null || return
+    printf '1\n'
+}

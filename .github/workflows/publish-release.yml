@@ -12,6 +12,9 @@ on:
       sha:
         required: true
         type: string
+      trusted_update_build:
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -22,6 +25,7 @@ defaults:
 
 jobs:
   publish:
+    environment: "${{ inputs.channel == 'stable' && 'updates-stable' || inputs.channel == 'staging' && 'updates-staging' || 'invalid-update-channel' }}"
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -30,12 +34,33 @@ jobs:
       group: release-publish
       cancel-in-progress: false
     steps:
+      - name: Reject untrusted publish context
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_SHA: ${{ inputs.sha }}
+        run: |
+          [ "$REQUESTED_SHA" = "$GITHUB_SHA" ] || { echo 'release SHA must equal the triggering SHA' >&2; exit 1; }
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
+            workflow_dispatch:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
+            *) echo 'release publishing requires production Release dispatch or staging push' >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - run: npm install --global corepack@0.36.0
+      - run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop --ignore-scripts
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
       - run: infra/release/install-git-cliff.sh "$RUNNER_TEMP/bin"
       - run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Build the read-only manifest verifier before signing credentials are mapped
+        run: cargo build --quiet --locked --manifest-path infra/release/manifest-verifier/Cargo.toml
       - id: guard
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -44,12 +69,12 @@ jobs:
         run: |
           case "$CHANNEL" in
             stable) regex='^[0-9]+\.[0-9]+\.[0-9]+$' ;;
-            prerelease) regex='^[0-9]+\.[0-9]+\.[0-9]+-staging\.[0-9]+$' ;;
+            staging) regex='^[0-9]+\.[0-9]+\.[0-9]+-staging\.[0-9]+$' ;;
             *) echo "invalid channel: $CHANNEL" >&2; exit 1 ;;
           esac
           [[ "$VERSION" =~ $regex ]] || { echo "invalid version: $VERSION" >&2; exit 1; }
           git fetch --tags --force origin
-          if [ "$CHANNEL" = prerelease ]; then
+          if [ "$CHANNEL" = staging ]; then
             computed_output=$(infra/release/compute-version.sh --channel prerelease)
             computed=$(printf '%s\n' "$computed_output" | sed -n 's/^version=//p')
             if [ "$computed" != "$VERSION" ]; then
@@ -80,13 +105,39 @@ jobs:
       - if: steps.guard.outputs.skip != 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: '{android-release-artifacts,desktop-*-development-artifacts}'
+          pattern: '{android-release-artifacts,desktop-*-release-artifacts}'
           path: dist/download
       - if: steps.guard.outputs.skip != 'true'
         env:
           CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
         run: infra/release/stage-assets.sh "$VERSION" "$CHANNEL" dist/download dist/release
+      - if: steps.guard.outputs.skip != 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD || '' }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: infra/release/sign-update-assets.sh "$VERSION" "$CHANNEL" dist/release
+      - if: steps.guard.outputs.skip != 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: infra/release/generate-update-manifest.sh "$VERSION" "$CHANNEL" dist/release
+      - if: steps.guard.outputs.skip != 'true'
+        env:
+          PEPPY_UPDATE_PUBLIC_KEY: ${{ vars.PEPPY_UPDATE_PUBLIC_KEY }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: infra/release/verify-update-assets.sh "$VERSION" "$CHANNEL" dist/release
+      - if: steps.guard.outputs.skip != 'true'
+        run: infra/release/write-checksums.sh dist/release
+      - if: steps.guard.outputs.skip != 'true'
+        env:
+          PEPPY_RELEASE_GPG_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_RELEASE_GPG_KEY || '' }}
+          PEPPY_RELEASE_GPG_KEY_ID: ${{ inputs.trusted_update_build && vars.PEPPY_RELEASE_GPG_KEY_ID || '' }}
+          PEPPY_RELEASE_GPG_PASSPHRASE: ${{ inputs.trusted_update_build && secrets.PEPPY_RELEASE_GPG_PASSPHRASE || '' }}
+        run: infra/release/sign-checksums.sh dist/release
       - if: steps.guard.outputs.skip != 'true'
         env:
           VERSION: ${{ inputs.version }}
@@ -99,9 +150,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           prerelease=()
-          if [ "$CHANNEL" = prerelease ]; then prerelease=(--prerelease); fi
+          if [ "$CHANNEL" = staging ]; then prerelease=(--prerelease); fi
           gh release create "v$VERSION" --draft --target "$SHA" --title "Peppy v$VERSION" --notes-file dist/notes.md "${prerelease[@]}" dist/release/*
-      - if: steps.guard.outputs.skip != 'true' && inputs.channel == 'prerelease'
+      - if: steps.guard.outputs.skip != 'true' && inputs.channel == 'staging'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -129,7 +180,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "v$VERSION" '.[] | select(.tag_name == $tag and .draft) | .id' | while IFS= read -r id; do
             [ -z "$id" ] || gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
           done
-      - if: steps.guard.outputs.skip != 'true' && inputs.channel == 'prerelease'
+      - if: steps.guard.outputs.skip != 'true' && inputs.channel == 'staging'
         env:
           GH_TOKEN: ${{ github.token }}
         run: infra/release/prune-prereleases.sh --keep 10

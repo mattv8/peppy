@@ -312,9 +312,12 @@ jobs:
     needs: [changes, version]
     if: needs.changes.outputs.development_artifacts == 'true'
     with:
+      ref: ${{ github.sha }}
       version: ${{ needs.version.outputs.version }}
       android_version_code: ${{ needs.version.outputs.android_version_code }}
       wix_version: ${{ needs.version.outputs.wix_version }}
+      trusted_update_build: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' }}
+      update_channel: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' && 'staging' || '' }}
 
   container-image:
     uses: ./.github/workflows/build-container.yml
@@ -368,8 +371,9 @@ jobs:
     uses: ./.github/workflows/publish-release.yml
     with:
       version: ${{ needs.version.outputs.version }}
-      channel: prerelease
+      channel: staging
       sha: ${{ github.sha }}
+      trusted_update_build: true
   publish-staging-server:
     if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'
     needs: gate
