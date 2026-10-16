@@ -282,9 +282,17 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   text-align: left;
 }
 #no-selection-notice { color: var(--peppy-text-secondary); }
+.message-row {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+.message-row.self { align-items: flex-end; }
+.message-row.other { align-items: flex-start; }
 .message-bubble {
   max-width: min(76%, 620px);
-  margin: 0 0 12px;
+  margin: 0;
   padding: 8px 12px;
   border: 1px solid var(--peppy-border-strong);
   border-radius: var(--peppy-radius-md, 8px);
@@ -293,7 +301,6 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-primary);
 }
 .message-bubble.self {
-  margin-left: auto;
   background: var(--peppy-accent);
   color: var(--peppy-accent-text);
   border-color: var(--peppy-accent);
@@ -305,27 +312,36 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.bubble-footer {
+.message-bubble > :last-child { margin-bottom: 0; }
+.message-meta {
   display: flex;
+  max-width: min(76%, 620px);
+  margin-top: 3px;
   gap: 5px;
   font-size: 11px;
   color: var(--peppy-text-muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  flex-wrap: wrap;
 }
-.message-bubble.self .bubble-footer {
-  color: var(--peppy-accent-text);
-}
-.message-bubble.self .bubble-footer svg {
-  color: currentColor;
-}
-.bubble-footer span {
+.message-meta-status {
   display: flex;
   align-items: center;
   gap: 2px;
 }
-.message-bubble .message-mms-details {
+.message-meta[data-status="failed-before-submit"],
+.message-meta[data-status="failed-confirmed"] { color: var(--peppy-error-text); }
+.message-meta[data-status="unknown"] { color: var(--peppy-warning-text); }
+.message-meta-separator { color: var(--peppy-text-muted); }
+.message-bubble .message-subject {
   color: var(--peppy-text-secondary);
   font-size: 11px;
-  margin-bottom: 4px;
+}
+.message-bubble.self .message-subject { color: var(--peppy-accent-text); }
+@media (forced-colors: active) {
+  .message-meta[data-status="failed-before-submit"],
+  .message-meta[data-status="failed-confirmed"],
+  .message-meta[data-status="unknown"] { color: CanvasText; }
 }
 .header-copy-details {
   display: grid;

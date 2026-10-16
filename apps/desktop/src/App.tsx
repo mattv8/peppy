@@ -52,6 +52,8 @@ import {
   isRecipientPosition,
   isNavigationPosition,
   formatPhoneNumber,
+  formatDateTime,
+  isoDateTime,
   type RecipientPosition,
   type RecipientSuggestion,
 } from "@peppy/desktop-ui";
@@ -148,6 +150,13 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   "failed-confirmed": "Failed",
   unknown: "Unknown delivery state — not retried",
 };
+
+const TIMELESS_OUTGOING_STATUSES = new Set<MessageStatus>(["queued-local", "server-accepted"]);
+
+function messageTime(message: MessageView): string | undefined {
+  if (message.sender === "other" || !message.status) return message.timestamp;
+  return TIMELESS_OUTGOING_STATUSES.has(message.status) ? undefined : message.statusAt;
+}
 
 const COMPOSER_MIN_HEIGHT = 96;
 const COMPOSER_ATTACHMENT_MIN_HEIGHT = 132;
@@ -535,35 +544,34 @@ function MessageList({
       <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
         {historyExhausted && <p id="history-beginning-marker">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
-        {conversation.messages.map((message) => (
-          <article
-            ref={(row) => registerRow(message.id, row)}
-            key={message.id}
-            data-message-id={message.id}
-            className={`message-bubble ${message.sender}`}
-          >
-            <p>{message.body}</p>
-            {(message.transport || message.subject || message.participants?.length) && (
-              <p
-                className="message-mms-details"
-                data-message-transport={message.transport}
-                aria-label={[message.transport && `Transport: ${message.transport.toUpperCase()}`, message.subject && `Subject: ${message.subject}`, message.participants?.length && `Participants: ${message.participants.join(", ")}`].filter(Boolean).join(". ")}
+        {conversation.messages.map((message) => {
+          const displayedTime = messageTime(message);
+          const formattedTime = formatDateTime(displayedTime);
+          const isoTime = isoDateTime(displayedTime);
+          return (
+            <div
+              key={message.id}
+              className={`message-row ${message.sender}`}
+              data-message-row={message.id}
+              data-sender={message.sender}
+            >
+              <article
+                ref={(row) => registerRow(message.id, row)}
+                data-message-id={message.id}
+                className={`message-bubble ${message.sender}`}
               >
-                {message.transport && `Transport: ${message.transport.toUpperCase()}`}
-                {message.subject && `${message.transport ? " · " : ""}Subject: ${message.subject}`}
-                {message.participants?.length ? `${message.transport || message.subject ? " · " : ""}Participants: ${message.participants.join(", ")}` : ""}
-              </p>
-            )}
-            {message.attachments.map((file) => {
-              const copy = publicCopies[file.id];
-              const shareable =
-                file.state === "ready" && file.mediaType.startsWith("image/");
-              return (
-                <div
-                  key={file.id}
-                  data-attachment-id={file.id}
-                  className="file-card"
-                >
+                {message.body && <p>{message.body}</p>}
+                {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
+                {message.attachments.map((file) => {
+                  const copy = publicCopies[file.id];
+                  const shareable =
+                    file.state === "ready" && file.mediaType.startsWith("image/");
+                  return (
+                    <div
+                      key={file.id}
+                      data-attachment-id={file.id}
+                      className="file-card"
+                    >
                   {file.previewUrl && (
                     <img
                       src={file.previewUrl}
@@ -619,32 +627,37 @@ function MessageList({
                       <small>{expiryText(copy.expiresInSeconds)}</small>
                     </div>
                   )}
+                    </div>
+                  );
+                })}
+              </article>
+              {(message.status || formattedTime) && (
+                <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
+                  {message.status && (
+                    <span className="message-meta-status">
+                      {["failed-before-submit", "failed-confirmed"].includes(
+                        message.status,
+                      ) ? (
+                        <X size={10} aria-hidden />
+                      ) : message.status === "unknown" ? (
+                        <TriangleAlert size={10} aria-hidden />
+                      ) : message.status === "delivery-confirmed" ? (
+                        <CheckCheck size={10} aria-hidden />
+                      ) : message.status === "sent" ? (
+                        <Check size={10} aria-hidden />
+                      ) : (
+                        <Clock size={10} aria-hidden />
+                      )}
+                      {STATUS_LABEL[message.status]}
+                    </span>
+                  )}
+                  {message.status && formattedTime && <span className="message-meta-separator" aria-hidden>·</span>}
+                  {formattedTime && isoTime && <time dateTime={isoTime}>{formattedTime}</time>}
                 </div>
-              );
-            })}
-            <footer className="bubble-footer">
-              <time>{message.timestamp}</time>
-              {message.status && (
-                <span data-status={message.status}>
-                  {["failed-before-submit", "failed-confirmed"].includes(
-                    message.status,
-                  ) ? (
-                    <X size={10} aria-hidden />
-                  ) : message.status === "unknown" ? (
-                    <TriangleAlert size={10} aria-hidden />
-                  ) : message.status === "delivery-confirmed" ? (
-                    <CheckCheck size={10} aria-hidden />
-                  ) : message.status === "sent" ? (
-                    <Check size={10} aria-hidden />
-                  ) : (
-                    <Clock size={10} aria-hidden />
-                  )}{" "}
-                  {STATUS_LABEL[message.status]}
-                </span>
               )}
-            </footer>
-          </article>
-        ))}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

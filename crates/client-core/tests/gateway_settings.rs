@@ -77,6 +77,59 @@ fn policy_is_not_a_destructive_sms_operation() {
 }
 
 #[test]
+fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new();
+    let config = config(&dir, "gateway-v25-upgrade", &vault);
+    let client = unlocked(&config, &vault);
+    let command_id = CommandId::new();
+    let producer_device_id = DeviceId::new();
+    drop(client);
+
+    let conn = rusqlite::Connection::open(&config.database_path).unwrap();
+    conn.execute_batch(
+        "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state) VALUES(?,?,?,?)",
+        rusqlite::params![
+            command_id.to_string(),
+            producer_device_id.to_string(),
+            42_i64,
+            "sent",
+        ],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "ALTER TABLE send_status DROP COLUMN status_at_ms; UPDATE schema_meta SET version=25;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let upgraded = open(&config);
+    drop(upgraded);
+
+    let conn = rusqlite::Connection::open(&config.database_path).unwrap();
+    conn.execute_batch(
+        "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";",
+    )
+    .unwrap();
+    let version: i64 = conn
+        .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+        .unwrap();
+    let status: (i64, String, Option<i64>) = conn
+        .query_row(
+            "SELECT producer_sequence,state,status_at_ms FROM send_status WHERE command_id=? AND producer_device_id=?",
+            rusqlite::params![command_id.to_string(), producer_device_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(version, 26);
+    assert_eq!(status, (42, "sent".into(), None));
+}
+
+#[test]
 fn version_17_upgrade_seeds_legacy_policy_only_once() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new();
@@ -96,7 +149,7 @@ fn version_17_upgrade_seeds_legacy_policy_only_once() {
          DROP TABLE compose_draft_redirects; ALTER TABLE compose_drafts DROP COLUMN draft_only; \
          DROP TABLE sms_acquisitions; DROP TABLE sms_provider_aliases; \
          DROP TABLE sms_scan_checkpoints; DROP TABLE sms_reconciliation_scans; \
-         DROP TABLE sms_broadcast_aliases; DROP INDEX messages_sort; \
+         DROP TABLE sms_broadcast_aliases; ALTER TABLE send_status DROP COLUMN status_at_ms; DROP INDEX messages_sort; \
          ALTER TABLE messages DROP COLUMN sort_at_ms; ALTER TABLE messages DROP COLUMN actual_sent_at_ms; \
          DROP INDEX attempts_time; ALTER TABLE attempts DROP COLUMN attempted_at_ms; \
          UPDATE schema_meta SET version=17;",

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FamilyVaults } from "./FamilyVaults";
+import { FamilyVaults, type FamilyVaultsBridge } from "./FamilyVaults";
 
 vi.mock("qrcode", () => ({ default: { toDataURL: vi.fn(async () => "data:image/png;base64,qr") } }));
 
@@ -18,7 +18,7 @@ const sources: FakeEventSource[] = [];
 vi.stubGlobal("EventSource", class extends FakeEventSource { public constructor() { super(); sources.push(this); } });
 
 const bridge = () => ({
-  enrollment_list_vaults: vi.fn(async () => []), enrollment_create_invite: vi.fn(), enrollment_list_invites: vi.fn(async () => []), enrollment_revoke_invite: vi.fn(),
+  enrollment_list_vaults: vi.fn<FamilyVaultsBridge["enrollment_list_vaults"]>(async () => []), enrollment_create_invite: vi.fn(), enrollment_list_invites: vi.fn(async () => []), enrollment_revoke_invite: vi.fn(),
   enrollment_list_vault_requests: vi.fn(async () => []), enrollment_approve_vault_request: vi.fn(), enrollment_deny_vault_request: vi.fn(),
 });
 
@@ -57,5 +57,20 @@ describe("FamilyVaults", () => {
     expect(create).toHaveProperty("disabled", true);
     resolveInvite({ inviteId: "invite-1", inviteLink: "https://example.test/#invite=token", expiresInSeconds: 60 });
     expect(await screen.findByText("Share this invite link")).toBeTruthy();
+  });
+
+  it("shows an em dash when a vault creation timestamp is nonpositive", async () => {
+    const mockedBridge = bridge();
+    mockedBridge.enrollment_list_vaults.mockResolvedValue([{
+      vaultId: "vault-1",
+      username: "Avery",
+      isAdmin: false,
+      deviceCount: 1,
+      storageBytes: 0,
+      createdAt: "-1",
+    }]);
+    render(<FamilyVaults bridge={mockedBridge} />);
+    const vault = await screen.findByText("Avery");
+    expect(vault.closest("tr")?.textContent).toContain("—");
   });
 });

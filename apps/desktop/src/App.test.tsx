@@ -10,6 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { formatDateTime, isoDateTime } from "@peppy/desktop-ui";
 import { App, DraftStore, shouldConfirmPostFlushDelete } from "./App";
 import {
   bridge,
@@ -807,6 +808,100 @@ afterEach(() => {
 });
 
 describe("lazy conversation history", () => {
+  it("renders receipt and status evidence below their bubbles without exposing routing metadata", async () => {
+    const incoming = host.conversations[0].messages[0];
+    Object.assign(incoming, {
+      timestamp: "1788435180000",
+      subject: "Estimate",
+      transport: "mms",
+      participants: ["+12025550123"],
+    });
+    host.conversations[0].messages.push(
+      {
+        ...incoming,
+        id: "m-sent",
+        sender: "self",
+        body: "Sent from status evidence",
+        timestamp: "1788435100000",
+        status: "sent",
+        statusAt: "1788435180000",
+        subject: undefined,
+        transport: undefined,
+        participants: undefined,
+        attachments: [],
+      },
+      {
+        ...incoming,
+        id: "m-queued",
+        sender: "self",
+        body: "Queued locally",
+        status: "queued-local",
+        statusAt: "1788435180000",
+        attachments: [],
+      },
+      {
+        ...incoming,
+        id: "m-sent-without-status-time",
+        sender: "self",
+        body: "Sent without a status time",
+        timestamp: "1788435180000",
+        status: "sent",
+        statusAt: undefined,
+        attachments: [],
+      },
+      {
+        ...incoming,
+        id: "m-provider-history",
+        sender: "self",
+        body: "Provider history",
+        timestamp: "1788435180000",
+        status: undefined,
+        statusAt: undefined,
+        attachments: [],
+      },
+      {
+        ...incoming,
+        id: "m-invalid",
+        sender: "other",
+        body: "Invalid timestamp",
+        timestamp: "not-a-date",
+        status: undefined,
+        attachments: [],
+      },
+      {
+        ...incoming,
+        id: "m-attachment-only",
+        body: "",
+        subject: undefined,
+        attachments: incoming.attachments,
+      },
+    );
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    const incomingBubble = document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')!;
+    const incomingMeta = document.querySelector<HTMLElement>('[data-message-meta="m-aurora"]')!;
+    const sentMeta = document.querySelector<HTMLElement>('[data-message-meta="m-sent"]')!;
+    expect(incomingBubble.parentElement).toHaveAttribute("data-message-row", "m-aurora");
+    expect(incomingMeta.parentElement).toBe(incomingBubble.parentElement);
+    expect(incomingMeta).not.toContainElement(incomingBubble);
+    expect(incomingMeta).toHaveTextContent(formatDateTime("1788435180000")!);
+    expect(incomingMeta.querySelector("time")).toHaveAttribute("dateTime", isoDateTime("1788435180000")!);
+    expect(sentMeta).toHaveAttribute("data-status", "sent");
+    expect(sentMeta).toHaveTextContent(formatDateTime("1788435180000")!);
+    expect(sentMeta).not.toHaveTextContent(formatDateTime("1788435100000")!);
+    expect(document.querySelector('[data-message-meta="m-queued"] time')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-meta="m-sent-without-status-time"] time')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveTextContent(formatDateTime("1788435180000")!);
+    expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveAttribute("dateTime", isoDateTime("1788435180000")!);
+    expect(document.querySelector('[data-message-meta="m-invalid"]')).not.toBeInTheDocument();
+    expect(within(incomingBubble).getByText("Subject: Estimate")).toBeInTheDocument();
+    expect(screen.queryByText(/Transport: MMS/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Participants:/)).not.toBeInTheDocument();
+    expect(incomingBubble.querySelector('[data-attachment-id="photo-1"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-message-id="m-attachment-only"] p')).not.toBeInTheDocument();
+  });
+
   it("retains only valid loaded image previews across an anchored state refresh", async () => {
     const conversation = host.conversations[0];
     conversation.messages[0].attachments = [

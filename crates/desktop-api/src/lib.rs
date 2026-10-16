@@ -214,6 +214,9 @@ pub struct MessageView {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<&'static str>,
+    /// Gateway-recorded time of `status`, as positive decimal epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_at: Option<String>,
     pub attachments: Vec<AttachmentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<&'static str>,
@@ -350,13 +353,9 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             "other"
         },
         body: message.payload.body.clone(),
-        timestamp: message
-            .payload
-            .sent_at_ms
-            .filter(|value| *value > 0)
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
+        timestamp: positive_ms_to_decimal(message.payload.sent_at_ms).unwrap_or_default(),
         status: message.send_state.map(send_state_label),
+        status_at: positive_ms_to_decimal(message.status_at_ms),
         attachments,
         transport: match message.payload.transport {
             Transport::Sms => Some("sms"),
@@ -374,6 +373,12 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             (!values.is_empty()).then_some(values)
         },
     }
+}
+
+fn positive_ms_to_decimal(value: Option<i64>) -> Option<String> {
+    value
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
 }
 
 pub fn draft_view(draft: &ComposeDraft) -> DraftView {
@@ -402,7 +407,10 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_client_core::{AttachmentId, ConversationId, DraftId};
+    use peppy_client_core::{
+        AttachmentId, ConversationId, DeviceId, DraftId, MessageId, MessagePayload, MessageRecord,
+        SourceSequence,
+    };
     use serde_json::json;
 
     #[test]
@@ -460,6 +468,50 @@ mod tests {
             "pending"
         );
         assert_eq!(attachment_state_label(AttachmentState::Available), "ready");
+    }
+
+    #[test]
+    fn message_status_time_serializes_as_optional_decimal_milliseconds() {
+        let message = Message {
+            payload: MessagePayload {
+                record: MessageRecord {
+                    message_id: MessageId::new(),
+                    conversation_id: ConversationId::new(),
+                    source_sequence: SourceSequence(1),
+                    attachments: vec![],
+                },
+                source_device_id: DeviceId::new(),
+                provider_message_id: None,
+                sender_address: None,
+                recipients: vec![],
+                subject: None,
+                body: "Hello".into(),
+                transport: Transport::Sms,
+                direction: Direction::Outgoing,
+                imported: false,
+                sent_at_ms: Some(2),
+                ordered_at_ms: None,
+                mms_context: None,
+            },
+            seen: true,
+            send_state: Some(SendState::Sent),
+            status_at_ms: Some(1_725_363_180_000),
+        };
+
+        let view = message_view(&message, vec![]);
+        let with_status_time = serde_json::to_value(&view).unwrap();
+        assert_eq!(with_status_time["statusAt"], "1725363180000");
+
+        let without_status_time = MessageView {
+            status_at: None,
+            ..view
+        };
+        assert!(
+            serde_json::to_value(without_status_time)
+                .unwrap()
+                .get("statusAt")
+                .is_none()
+        );
     }
 
     #[test]
