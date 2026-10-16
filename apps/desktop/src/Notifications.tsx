@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Bell, Lock, X } from "@peppy/desktop-ui";
+import { Bell, formatElapsedShort, isoDateTime, Lock, X } from "@peppy/desktop-ui";
 import type {
   AppFilter,
   MirroredNotification,
@@ -19,22 +19,6 @@ export function notificationSourceName(id: string, sources: Source[], knownIds: 
   return sources.find(source => source.id === id)?.name ??
     `Phone ${[...new Set(knownIds)].sort().indexOf(id) + 1}`;
 }
-
-const relativeTime = (time: number) => {
-  if (!Number.isFinite(time)) return "Unknown time";
-  const minutes = Math.max(0, Math.round((Date.now() - time) / 60_000));
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
-  if (minutes < 1440) return `${Math.round(minutes / 60)}h`;
-  return `${Math.round(minutes / 1440)}d`;
-};
-
-const safeDateTime = (time: number) => {
-  const date = new Date(time);
-  return Number.isFinite(time) && !Number.isNaN(date.getTime())
-    ? date.toISOString()
-    : undefined;
-};
 
 export function NotificationsView({
   notifications,
@@ -222,7 +206,7 @@ function NotificationRow({ notification, title, onDismiss }: { notification: Mir
       <span className="notif-row-text">{notification.text}</span>
       {pending && <span className="notif-pending" role="status">Dismissal pending — will apply on your phone&apos;s next sync.</span>}
     </div>
-    <time className="notif-row-time" dateTime={safeDateTime(notification.postedAt)}>{relativeTime(notification.postedAt)}</time>
+    <time className="notif-row-time" dateTime={isoDateTime(notification.postedAt)}>{formatElapsedShort(notification.postedAt) ?? "Unknown time"}</time>
     <button className="notif-dismiss-btn" disabled={pending || !notification.dismissible} title={pending ? "Dismissal pending — will apply on your phone's next sync." : "Dismiss"} aria-label={`Dismiss ${title || notification.appName || "notification"}`} onClick={() => onDismiss(notification.target)}>
       <X size={14} aria-hidden />
     </button>

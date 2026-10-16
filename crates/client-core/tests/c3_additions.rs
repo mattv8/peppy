@@ -478,6 +478,7 @@ fn authenticated_status_with_out_of_range_sequence_is_quarantined_not_stalled() 
     let plain = serde_json::to_vec(&PrivatePayload::SendStatus {
         command_id: CommandId::new(),
         state: SendState::Sent,
+        at_ms: None,
     })
     .unwrap();
     let sealed = encrypt(&key, &envelope.aad_bytes().unwrap(), &plain).unwrap();

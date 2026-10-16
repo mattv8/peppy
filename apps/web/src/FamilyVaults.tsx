@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // qrcode does not ship TypeScript declarations.
 // @ts-expect-error qrcode's runtime API is declared locally for this use.
 import QRCode from "qrcode";
+import { formatDateTime, formatRelativeTime } from "@peppy/desktop-ui";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { formatBytes } from "./InstanceManagement";
 import { parseVaultRequestSnapshot, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./browser-bridge";
@@ -25,20 +26,12 @@ function duration(seconds: number): string {
   return seconds >= 3_600 ? `${Math.ceil(seconds / 3_600)}h` : `${Math.ceil(seconds / 60)}m`;
 }
 
-function parseDate(value: string): Date | undefined {
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date : undefined;
-}
-
 function age(createdAt: string): string {
-  const date = parseDate(createdAt);
-  if (!date) return unknownDate;
-  return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(Math.round((date.getTime() - Date.now()) / 60_000), "minute");
+  return formatRelativeTime(createdAt) ?? unknownDate;
 }
 
 function formattedDate(value: string): string {
-  const date = parseDate(value);
-  return date ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date) : unknownDate;
+  return formatDateTime(value) ?? unknownDate;
 }
 
 function inviteState(state: VaultInviteView["state"]): string {

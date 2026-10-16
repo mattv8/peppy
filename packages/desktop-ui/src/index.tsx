@@ -40,6 +40,15 @@ export {
 import "./styles.css";
 export { ContactAvatar } from "./ContactAvatar";
 export {
+  formatDateTime,
+  formatElapsedShort,
+  formatRelativeTime,
+  isoDateTime,
+  toDate,
+  type DateTimeFormatOptions,
+  type DateTimeInput,
+} from "./datetime";
+export {
   Bell,
   Check,
   CheckCheck,

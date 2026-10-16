@@ -81,7 +81,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 2;
 /// Records per `append_snapshot_page` call.
@@ -283,6 +283,8 @@ pub enum PrivatePayload {
     SendStatus {
         command_id: CommandId,
         state: SendState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<i64>,
     },
     ReadState {
         message_id: MessageId,
@@ -486,6 +488,8 @@ pub struct Message {
     pub seen: bool,
     /// `None` for messages that are not send commands.
     pub send_state: Option<SendState>,
+    /// Gateway-recorded time of the displayed status, when supplied by an updated gateway.
+    pub status_at_ms: Option<i64>,
 }
 /// A chronological, bounded conversation-history window.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2486,15 +2490,7 @@ impl Client {
         let s = self.lock()?;
         let mut query = s.conn.prepare(MESSAGE_FULL_SELECT)?;
         let rows = query
-            .query_map(params![conversation_id.to_string()], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, bool>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, bool>(4)?,
-                ))
-            })?
+            .query_map(params![conversation_id.to_string()], message_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
             .map(|row| message_from_row(&s.conn, row))
@@ -3467,11 +3463,10 @@ fn advance_frontier(conn: &Connection, floor: u64) -> Result<u64, Error> {
 macro_rules! message_select {
     ($suffix:literal) => {
         concat!(
-            "SELECT m.payload, m.seen, ",
-            "(SELECT st.state FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id), ",
+            "SELECT m.payload, m.seen, selected_status.state, selected_status.status_at_ms, ",
             "(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id), ",
             "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) ",
-            "FROM messages m ",
+            "FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) ",
             $suffix,
         )
     };
@@ -3490,7 +3485,14 @@ const MESSAGE_SINCE_SELECT: &str = message_select!(
     "WHERE m.conversation_id=?1 AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
 );
 
-type StoredMessage = (String, bool, Option<String>, Option<String>, bool);
+type StoredMessage = (
+    String,
+    bool,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    bool,
+);
 
 fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
     Ok((
@@ -3499,11 +3501,12 @@ fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
 fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
-    let (payload, seen, status, outbox, is_command) = row;
+    let (payload, seen, status, status_at_ms, outbox, is_command) = row;
     let send_state = if !is_command {
         None
     } else if let Some(status) = status {
@@ -3518,6 +3521,7 @@ fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Er
         payload: localize(conn, decode(payload.as_bytes())?)?.0,
         seen,
         send_state,
+        status_at_ms,
     })
 }
 
@@ -3939,6 +3943,10 @@ CREATE INDEX sms_broadcast_aliases_message ON sms_broadcast_aliases(message_id);
 CREATE INDEX sms_broadcast_aliases_time ON sms_broadcast_aliases(smsc_at_ms);
 ALTER TABLE sms_reconciliation_scans ADD COLUMN completed_at_ms INTEGER;
 ";
+/// Version 25 -> 26: optional gateway-recorded timestamp for each durable send status.
+const MIGRATION_26: &str = "
+ALTER TABLE send_status ADD COLUMN status_at_ms INTEGER;
+";
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
 const DECODER_REVISION: &str = "3";
@@ -4006,6 +4014,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_23)?;
             tx.execute_batch(MIGRATION_24)?;
             tx.execute_batch(MIGRATION_25)?;
+            tx.execute_batch(MIGRATION_26)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4014,7 +4023,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=24)) => {
+        Some(version @ (4..=25)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4076,6 +4085,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 24 {
                 tx.execute_batch(MIGRATION_25)?;
+            }
+            if version <= 25 {
+                tx.execute_batch(MIGRATION_26)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -4492,7 +4504,14 @@ fn apply_record(
                 }
             }
         }
-        (EnvelopePurpose::Event, PrivatePayload::SendStatus { command_id, state }) => {
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SendStatus {
+                command_id,
+                state,
+                at_ms,
+            },
+        ) => {
             // Statuses are ordered by producer sequence, stored as SQLite INTEGER.
             if !gateway_reportable(state) || i64::try_from(envelope.producer_sequence.0).is_err() {
                 return Ok(Some(Q::InvalidPayload));
@@ -4503,6 +4522,7 @@ fn apply_record(
                 producer,
                 envelope.producer_sequence.0,
                 state,
+                valid_status_timestamp(at_ms),
             )?;
         }
         (EnvelopePurpose::Event, PrivatePayload::ReadState { message_id }) => {
@@ -4740,6 +4760,11 @@ fn record_seen(conn: &Connection, message_id: MessageId) -> Result<(), Error> {
     Ok(())
 }
 
+/// Rejects absent, zero, and pre-epoch wire timestamps.
+fn valid_status_timestamp(value: Option<i64>) -> Option<i64> {
+    value.filter(|value| *value > 0)
+}
+
 /// Later statuses from the same producer win, ordered by its durable producer sequence.
 fn upsert_status(
     conn: &Connection,
@@ -4747,16 +4772,18 @@ fn upsert_status(
     producer: DeviceId,
     producer_sequence: u64,
     state: SendState,
+    status_at_ms: Option<i64>,
 ) -> Result<(), Error> {
     conn.execute(
-        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state) VALUES(?,?,?,?)
-         ON CONFLICT(command_id,producer_device_id) DO UPDATE SET producer_sequence=excluded.producer_sequence, state=excluded.state
+        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state,status_at_ms) VALUES(?,?,?,?,?)
+         ON CONFLICT(command_id,producer_device_id) DO UPDATE SET producer_sequence=excluded.producer_sequence, state=excluded.state, status_at_ms=excluded.status_at_ms
          WHERE excluded.producer_sequence > send_status.producer_sequence",
         params![
             command_id.to_string(),
             producer.to_string(),
             to_i64(producer_sequence)?,
-            state_code(state)
+            state_code(state),
+            status_at_ms,
         ],
     )?;
     Ok(())
@@ -4768,15 +4795,27 @@ fn emit_status(
     command_id: CommandId,
     state: SendState,
 ) -> Result<(), Error> {
+    let status_at_ms = valid_status_timestamp(Some(notifications::now_ms()));
     let (_, sequence) = enqueue(
         conn,
         ctx,
         EnvelopePurpose::Event,
         None,
         None,
-        &PrivatePayload::SendStatus { command_id, state },
+        &PrivatePayload::SendStatus {
+            command_id,
+            state,
+            at_ms: status_at_ms,
+        },
     )?;
-    upsert_status(conn, command_id, ctx.device_id, sequence, state)
+    upsert_status(
+        conn,
+        command_id,
+        ctx.device_id,
+        sequence,
+        state,
+        status_at_ms,
+    )
 }
 
 /// Allocates the durable producer sequence and envelope ID, stores the private payload, and seals
@@ -6368,6 +6407,7 @@ fn to_i64(value: u64) -> Result<i64, Error> {
 mod tests {
     use super::*;
     use peppy_crypto::enrollment::EnrollmentContext;
+    use serde_json::json;
     use uuid::Uuid;
 
     #[test]
@@ -6375,6 +6415,147 @@ mod tests {
         assert!(is_known_private_payload_kind("contact_scan_request"));
         assert!(is_known_private_payload_kind("contact_scan_result"));
         assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn send_status_timestamp_is_optional_on_the_private_wire() {
+        let command_id = CommandId::new();
+        let legacy: PrivatePayload = serde_json::from_value(json!({
+            "kind": "send_status",
+            "command_id": command_id,
+            "state": "sent",
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            PrivatePayload::SendStatus { at_ms: None, .. }
+        ));
+
+        let encoded = serde_json::to_value(PrivatePayload::SendStatus {
+            command_id,
+            state: SendState::Sent,
+            at_ms: Some(1_725_363_180_000),
+        })
+        .unwrap();
+        assert_eq!(encoded["at_ms"], 1_725_363_180_000_i64);
+
+        let encoded = serde_json::to_value(PrivatePayload::SendStatus {
+            command_id,
+            state: SendState::Sent,
+            at_ms: None,
+        })
+        .unwrap();
+        assert!(encoded.get("at_ms").is_none());
+    }
+
+    #[test]
+    fn status_timestamp_accepts_only_positive_values() {
+        assert_eq!(valid_status_timestamp(Some(1)), Some(1));
+        assert_eq!(valid_status_timestamp(Some(0)), None);
+        assert_eq!(valid_status_timestamp(Some(-1)), None);
+        assert_eq!(valid_status_timestamp(None), None);
+    }
+
+    #[test]
+    fn newer_status_without_time_clears_while_duplicate_and_older_events_preserve_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, PRIMARY KEY(command_id, producer_device_id));",
+        )
+        .unwrap();
+        let command_id = CommandId::new();
+        let producer = DeviceId::new();
+
+        upsert_status(&conn, command_id, producer, 2, SendState::Sent, Some(20)).unwrap();
+        upsert_status(&conn, command_id, producer, 2, SendState::Delivered, None).unwrap();
+        upsert_status(
+            &conn,
+            command_id,
+            producer,
+            1,
+            SendState::FailedBeforeSubmission,
+            Some(10),
+        )
+        .unwrap();
+        let stored: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT state,status_at_ms FROM send_status WHERE command_id=? AND producer_device_id=?",
+                params![command_id.to_string(), producer.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (state_code(SendState::Sent).into(), Some(20)));
+
+        upsert_status(&conn, command_id, producer, 3, SendState::Delivered, None).unwrap();
+        let stored: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT state,status_at_ms FROM send_status WHERE command_id=? AND producer_device_id=?",
+                params![command_id.to_string(), producer.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (state_code(SendState::Delivered).into(), None));
+    }
+
+    #[test]
+    fn message_status_select_pairs_earliest_command_state_and_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(local_order INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL, payload TEXT NOT NULL, seen INTEGER NOT NULL, sort_at_ms INTEGER NOT NULL); \
+             CREATE TABLE commands(command_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, gateway_device_id TEXT NOT NULL); \
+             CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, PRIMARY KEY(command_id, producer_device_id)); \
+             CREATE TABLE outbox(command_id TEXT UNIQUE, state TEXT NOT NULL);",
+        )
+        .unwrap();
+        let conversation_id = ConversationId::new();
+        let message_id = MessageId::new();
+        let gateway_id = DeviceId::new();
+        conn.execute(
+            "INSERT INTO messages(local_order,id,conversation_id,payload,seen,sort_at_ms) VALUES(1,?,?, '{}',1,1)",
+            params![message_id.to_string(), conversation_id.to_string()],
+        )
+        .unwrap();
+        for (command_id, state, status_at_ms) in [
+            ("first", state_code(SendState::Sent), 10_i64),
+            ("second", state_code(SendState::Delivered), 20_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO commands(command_id,message_id,gateway_device_id) VALUES(?,?,?)",
+                params![command_id, message_id.to_string(), gateway_id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state,status_at_ms) VALUES(?,?,1,?,?)",
+                params![command_id, gateway_id.to_string(), state, status_at_ms],
+            )
+            .unwrap();
+        }
+
+        let selected = conn
+            .query_row(
+                MESSAGE_FULL_SELECT,
+                params![conversation_id.to_string()],
+                message_row,
+            )
+            .unwrap();
+        assert_eq!(selected.2.as_deref(), Some(state_code(SendState::Sent)));
+        assert_eq!(selected.3, Some(10));
+    }
+
+    #[test]
+    fn v25_migration_adds_null_status_timestamps_without_backfill() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(command_id, producer_device_id)); \
+             INSERT INTO send_status VALUES('command','device',1,'sent');",
+        )
+        .unwrap();
+
+        conn.execute_batch(MIGRATION_26).unwrap();
+        let timestamp: Option<i64> = conn
+            .query_row("SELECT status_at_ms FROM send_status", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timestamp, None);
     }
 
     #[test]

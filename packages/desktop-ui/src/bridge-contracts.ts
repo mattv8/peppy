@@ -6,7 +6,7 @@ export type ConnectionState = "connected" | "offline" | "missing-native-host" | 
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean };
-export type MessageView = { id: string; revision: string; sender: "self" | "other"; body: string; timestamp: string; status?: MessageStatus; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
+export type MessageView = { id: string; revision: string; sender: "self" | "other"; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
 export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
