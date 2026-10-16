@@ -122,7 +122,17 @@ export function DevicesSettings({ serverOffline = false }: { serverOffline?: boo
   };
   const rows = (revoked: boolean) => roster?.devices.filter(device => device.revoked === revoked) ?? [];
   const row = (device: ManagedDeviceView) => <li key={device.id} data-device-id={device.id}>
-    <div><strong>{deviceName(device)}</strong><span data-presence-state={device.revoked ? undefined : presenceState(device)}>{deviceKind(device.kind)} · {deviceRole(device.role)} · {device.revoked ? "Removed" : "Active"}{device.id === roster?.currentDeviceId ? " · This device" : ""}{!device.revoked && ` · ${presenceLabel(device)}`}</span>{device.kind === "ios" && !device.revoked && <small data-ios-sms-note>Can't send SMS through Peppy on iPhone</small>}</div>
+    <div data-device-details={device.id}>
+      <strong>{deviceName(device)}</strong>
+      <span data-device-metadata={device.id}>
+        <span data-device-badge="platform">{deviceKind(device.kind)}</span>
+        <span data-device-badge="role">{deviceRole(device.role)}</span>
+        <span data-device-badge="enrollment">{device.revoked ? "Removed" : "Active"}</span>
+        {device.id === roster?.currentDeviceId && <span data-device-badge="current">This device</span>}
+        {!device.revoked && <span data-device-badge="presence" data-presence-state={presenceState(device)}>{presenceLabel(device)}</span>}
+      </span>
+      {device.kind === "ios" && !device.revoked && <small data-ios-sms-note>Can't send SMS through Peppy on iPhone</small>}
+    </div>
     {canRemove(device) ? offline ? <small data-remove-offline>Unavailable while offline</small> : <button className="secondary-button" type="button" aria-label={`Remove ${deviceName(device)}`} disabled={pending} onClick={event => { invoker.current = event.currentTarget; setTarget(device); }}>Remove</button> : !device.revoked && <small>{restriction(device)}</small>}
   </li>;
 
