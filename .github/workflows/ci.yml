@@ -89,6 +89,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - run: npm install --global corepack@0.36.0
+      - run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop --ignore-scripts
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
       - run: shellcheck infra/release/*.sh
       - run: infra/release/install-git-cliff.sh "$RUNNER_TEMP/bin"
       - run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
