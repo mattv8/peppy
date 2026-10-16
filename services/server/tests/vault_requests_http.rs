@@ -355,20 +355,31 @@ async fn instance_maintenance_removes_terminal_records_after_thirty_days() {
     // The first maintenance interval tick is immediate once the assembled server starts.
     let mut server = fixture.server().await;
     server.start_maintenance().unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM vault_requests WHERE id=$1)")
+    // Maintenance deletes the request and invite in separate statements, so wait until both
+    // target rows are gone instead of assuming a fixed delay covers the whole sweep.
+    let mut remaining = (true, true);
+    let swept = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            remaining = sqlx::query_as::<_, (bool, bool)>(
+                "SELECT EXISTS(SELECT 1 FROM vault_requests WHERE id=$1), EXISTS(SELECT 1 FROM vault_invites WHERE id=$2)",
+            )
             .bind(request_id)
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM vault_invites WHERE id=$1)")
             .bind(invite_id)
             .fetch_one(&fixture.pool)
             .await
-            .unwrap()
+            .expect("query maintenance target rows");
+            if remaining == (false, false) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        swept.is_ok(),
+        "maintenance did not remove both target rows within 5s: request_present={}, invite_present={}",
+        remaining.0,
+        remaining.1
     );
     drop(admin);
     fixture.cleanup().await;
