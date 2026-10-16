@@ -25,6 +25,17 @@ val selectedAndroidAbi = providers.gradleProperty("peppyAndroidAbi").orNull?.let
         ?: throw GradleException("peppyAndroidAbi must be arm64-v8a or x86_64; got '$value'")
 }
 
+fun strictDebugBoolean(name: String): Boolean = providers.gradleProperty(name).orNull?.let { value ->
+    when (value) {
+        "true" -> true
+        "false" -> false
+        else -> throw GradleException("$name must be true or false; got '$value'")
+    }
+} ?: false
+
+val peppySmsDiagnostics = strictDebugBoolean("peppySmsDiagnostics")
+val peppySmsFastCapture = strictDebugBoolean("peppySmsFastCapture")
+
 private val certificatePemPattern = Regex(
     """\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----\s*\z""",
 )
@@ -97,6 +108,8 @@ android {
             providers.environmentVariable("PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID"),
         ).orNull.orEmpty()
         buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
+        buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
+        buildConfigField("boolean", "PEPPY_SMS_FAST_CAPTURE", "false")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
         ndk {
             abiFilters.clear()
@@ -108,6 +121,17 @@ android {
         compose = true
         // BuildConfig.DEBUG gates the loopback-only cleartext development origin.
         buildConfig = true
+    }
+
+    buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", peppySmsDiagnostics.toString())
+            buildConfigField("boolean", "PEPPY_SMS_FAST_CAPTURE", peppySmsFastCapture.toString())
+        }
+        getByName("release") {
+            buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
+            buildConfigField("boolean", "PEPPY_SMS_FAST_CAPTURE", "false")
+        }
     }
 
     compileOptions {

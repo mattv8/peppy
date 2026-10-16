@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -75,14 +76,40 @@ class SmsProviderReaderTest {
         assertThrows(SmsProviderException::class.java) { reader.page(0, 1) }
     }
 
+    @Test fun diagnosticPassAggregatesQueryTimeWithoutIncludingWorkBetweenQueries() {
+        provider.rows += row(1)
+        var now = 100L
+        provider.onQuery = { now += 7 }
+        val events = mutableListOf<String>()
+
+        SyncDiagnostics.withTestConfiguration(true, { now }, { 0L }, events::add) {
+            reader.beginDiagnosticPass()
+            assertEquals(1L, reader.read(1)?.id)
+            now += 500 // Core/crypto work between queries is not provider-query time.
+            provider.deny = true
+            assertThrows(SmsProviderException::class.java) { reader.read(2) }
+            reader.finishDiagnosticPass()
+        }
+
+        val summaries = events.filter { it.contains("event=${SyncTraceEvent.PROVIDER_QUERY.code}") }
+        assertEquals(1, summaries.size)
+        val summary = summaries.single()
+        assertTrue(summary.contains("${SyncTraceField.COUNT.code}=2"))
+        assertTrue(summary.contains("${SyncTraceField.ROWS.code}=1"))
+        assertTrue(summary.contains("${SyncTraceField.PROVIDER_ERROR.code}=1"))
+        assertTrue(summary.contains("${SyncTraceField.DURATION_MS.code}=14"))
+    }
+
     private fun row(id: Long): Array<Any?> = arrayOf(id, 1L, 1L, "+15551234", "body", id * 1000, id * 1000 + 1, 1L, 1L, 1L, 0L, null)
 
     class FakeSmsProvider : ContentProvider() {
         val rows = mutableListOf<Array<Any?>>()
         var deny = false
         var returnNull = false
+        var onQuery: (() -> Unit)? = null
         override fun onCreate() = true
         override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
+            onQuery?.invoke()
             if (deny) throw SecurityException("denied")
             if (returnNull) return null
             val cursor = MatrixCursor(COLUMNS)

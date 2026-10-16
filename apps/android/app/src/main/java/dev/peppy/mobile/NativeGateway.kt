@@ -121,7 +121,13 @@ object NativeGateway {
     fun databaseFile(context: Context) = File(context.noBackupFilesDir, DATABASE_NAME)
 
     /** Opens (once) the SQLCipher database. Does not imply the shared vault keys are available. */
-    fun open(context: Context): NativeClient? = synchronized(lock) {
+    fun open(context: Context): NativeClient? {
+        if (!SyncDiagnostics.enabled) return openUnchecked(context)
+        val cold = synchronized(lock) { client == null }
+        return SyncDiagnostics.measureNativeOpen(cold, succeeded = { it != null }) { openUnchecked(context) }
+    }
+
+    private fun openUnchecked(context: Context): NativeClient? = synchronized(lock) {
         client?.let { return it }
         generation++
         val prefs = prefs(context)

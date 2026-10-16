@@ -3,12 +3,14 @@ package dev.peppy.mobile
 import android.content.Context
 import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
+import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.annotation.VisibleForTesting
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -121,21 +123,31 @@ object SmsCaptureWork {
     const val PERIODIC_NAME = "peppy-sms-capture-periodic"
 
     @Volatile internal var runner: SmsCaptureRunner? = null
+    @VisibleForTesting
+    @Volatile internal var fastModeOverride: Boolean? = null
     private val executionMutex = Mutex()
     /** A hint that arrived while a pass may already be past the provider rows it changed. */
-    private val hintPending = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val hintCount = java.util.concurrent.atomic.AtomicInteger(0)
 
     /** Coalesced hint: KEEP drops it while a pass runs, so the running pass re-checks [hintPending]. */
     fun enqueue(context: Context) {
-        hintPending.set(true)
-        schedule(context, ExistingWorkPolicy.KEEP, delayed = true)
+        hintCount.incrementAndGet()
+        schedule(context, ExistingWorkPolicy.KEEP, SmsCaptureRequestSource.DEFAULT)
     }
 
-    internal fun takeHint(): Boolean = hintPending.getAndSet(false)
+    /** Provider-observer path only: fast debug builds request immediate unique work. */
+    internal fun enqueueObserver(context: Context) {
+        hintCount.incrementAndGet()
+        schedule(context, ExistingWorkPolicy.KEEP, SmsCaptureRequestSource.OBSERVER)
+    }
+
+    internal fun takeHint(): Boolean = takeHintCount() > 0
+
+    internal fun takeHintCount(): Int = hintCount.getAndSet(0)
 
     /** Append a bounded pass behind the active worker: KEEP would discard this continuation. */
     internal fun enqueueContinuation(context: Context) =
-        schedule(context, ExistingWorkPolicy.APPEND_OR_REPLACE, delayed = false)
+        schedule(context, ExistingWorkPolicy.APPEND_OR_REPLACE, SmsCaptureRequestSource.CONTINUATION)
 
     internal suspend fun <T> serialized(block: suspend () -> T): T = executionMutex.withLock { block() }
 
@@ -149,27 +161,171 @@ object SmsCaptureWork {
         )
     }
 
-    private fun schedule(context: Context, policy: ExistingWorkPolicy, delayed: Boolean) {
-        val request = OneTimeWorkRequestBuilder<SmsCaptureWorker>()
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .apply { if (delayed) setInitialDelay(15, TimeUnit.SECONDS) }
-            .build()
+    private fun schedule(context: Context, policy: ExistingWorkPolicy, source: SmsCaptureRequestSource) {
+        val fastMode = fastModeOverride ?: BuildConfig.PEPPY_SMS_FAST_CAPTURE
+        val delayMs = smsCaptureInitialDelayMs(source, fastMode)
+        val diagnostic = captureDiagnosticRequest(source, delayMs, fastMode)
+        val request = createRequest(source, fastMode, diagnostic?.data())
         WorkManager.getInstance(context).enqueueUniqueWork(NAME, policy, request)
     }
+
+    internal fun createRequest(source: SmsCaptureRequestSource, fastMode: Boolean, diagnosticData: Data? = null) =
+        OneTimeWorkRequestBuilder<SmsCaptureWorker>()
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .apply { smsCaptureInitialDelayMs(source, fastMode).takeIf { it > 0 }?.let { setInitialDelay(it, TimeUnit.MILLISECONDS) } }
+            .apply { if (diagnosticData != null) setInputData(diagnosticData) }
+            .build()
+
+    private fun captureDiagnosticRequest(source: SmsCaptureRequestSource, delayMs: Long, fastMode: Boolean): CaptureDiagnosticRequest? {
+        if (!SyncDiagnostics.enabled) return null
+        val parent = SyncDiagnostics.currentTraceId()
+        val traceId = SyncDiagnostics.newTraceId()
+        val enqueuedMs = SyncDiagnostics.nowMs()
+        SyncDiagnostics.withTrace(traceId) {
+            SyncDiagnostics.record(
+                SyncTraceEvent.CAPTURE_ENQUEUE,
+                SyncTraceField.PARENT_ID to parent,
+                SyncTraceField.SOURCE to source.code,
+                SyncTraceField.DELAY_MS to delayMs,
+                SyncTraceField.FAST_MODE to if (fastMode) 1 else 0,
+                SyncTraceField.ENQUEUED_MS to enqueuedMs,
+            )
+        }
+        return CaptureDiagnosticRequest(traceId, SyncDiagnostics.currentSessionToken(), enqueuedMs, source.code)
+    }
+
+    internal const val DIAGNOSTIC_TRACE_ID = "peppy-sms-capture-trace"
+    internal const val DIAGNOSTIC_ENQUEUED_MS = "peppy-sms-capture-enqueued-ms"
+    internal const val DIAGNOSTIC_SESSION = "peppy-sms-capture-session"
+    internal const val DIAGNOSTIC_SOURCE = "peppy-sms-capture-source"
+}
+
+internal enum class SmsCaptureRequestSource(val code: Long) { DEFAULT(0), OBSERVER(1), CONTINUATION(2), UNKNOWN(3) }
+
+internal fun smsCaptureInitialDelayMs(source: SmsCaptureRequestSource, fastMode: Boolean): Long = when (source) {
+    SmsCaptureRequestSource.OBSERVER -> if (fastMode) 0 else CAPTURE_DELAY_MS
+    SmsCaptureRequestSource.DEFAULT -> CAPTURE_DELAY_MS
+    SmsCaptureRequestSource.CONTINUATION -> 0
+    SmsCaptureRequestSource.UNKNOWN -> CAPTURE_DELAY_MS
+}
+
+private const val CAPTURE_DELAY_MS = 15_000L
+
+private data class CaptureDiagnosticRequest(val traceId: Long, val session: Long, val enqueuedMs: Long, val source: Long) {
+    fun data(): Data = Data.Builder()
+        .putLong(SmsCaptureWork.DIAGNOSTIC_TRACE_ID, traceId)
+        .putLong(SmsCaptureWork.DIAGNOSTIC_SESSION, session)
+        .putLong(SmsCaptureWork.DIAGNOSTIC_ENQUEUED_MS, enqueuedMs)
+        .putLong(SmsCaptureWork.DIAGNOSTIC_SOURCE, source)
+        .build()
 }
 
 class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         SmsCaptureWork.serialized {
-            SmsCaptureWork.takeHint()
-            val summary = SmsCaptureWork.runner?.run(applicationContext) ?: return@serialized Result.retry()
-            // Provider and core failures retry with WorkManager's exponential backoff, never a tight append.
-            if (summary.providerError || summary.coreError) return@serialized Result.retry()
-            // One bounded follow-up covers every hint that arrived during this pass.
-            if (summary.more || SmsCaptureWork.takeHint()) SmsCaptureWork.enqueueContinuation(applicationContext)
-            Result.success()
+            val consumedHints = SmsCaptureWork.takeHintCount()
+            val diagnostic = if (SyncDiagnostics.enabled) captureDiagnosticInput() else null
+            val traceId = diagnostic?.traceId ?: if (SyncDiagnostics.enabled) SyncDiagnostics.newTraceId() else 0L
+            var succeeded = false
+            var outcome = WORK_OUTCOME_THROW
+            try {
+                val runner = SmsCaptureWork.runner
+                if (runner == null) {
+                    if (diagnostic != null) SyncDiagnostics.withTrace(traceId) {
+                        SyncDiagnostics.record(SyncTraceEvent.CAPTURE_RETRY, SyncTraceField.UNAVAILABLE to 1L)
+                    }
+                    outcome = WORK_OUTCOME_RETRY
+                    return@serialized Result.retry()
+                }
+                val summary = if (diagnostic != null) {
+                    SyncDiagnostics.withTrace(traceId) {
+                        SyncDiagnostics.record(
+                            SyncTraceEvent.CAPTURE_START,
+                            SyncTraceField.ATTEMPT to runAttemptCount.toLong(),
+                            SyncTraceField.SOURCE to diagnostic.source,
+                            SyncTraceField.ENQUEUED_MS to (diagnostic.enqueuedMs ?: 0L),
+                            SyncTraceField.COUNT to consumedHints.toLong(),
+                            *(diagnostic.delayFields()),
+                        )
+                        runner.run(applicationContext)
+                    }
+                } else {
+                    runner.run(applicationContext)
+                }
+                if (diagnostic != null) {
+                    SyncDiagnostics.withTrace(traceId) {
+                        SyncDiagnostics.record(
+                            SyncTraceEvent.CAPTURE_SUMMARY,
+                            SyncTraceField.CAPTURED to summary.captured.toLong(),
+                            SyncTraceField.PENDING to summary.pending.toLong(),
+                            SyncTraceField.UNAVAILABLE to summary.unavailable.toLong(),
+                            SyncTraceField.PAUSED to summary.paused.toLong(),
+                            SyncTraceField.MORE to if (summary.more) 1 else 0,
+                            SyncTraceField.PROVIDER_ERROR to if (summary.providerError) 1 else 0,
+                            SyncTraceField.CORE_ERROR to if (summary.coreError) 1 else 0,
+                        )
+                    }
+                }
+                // Provider and core failures retry with WorkManager's exponential backoff, never a tight append.
+                if (summary.providerError || summary.coreError) {
+                    if (diagnostic != null) SyncDiagnostics.withTrace(traceId) {
+                        SyncDiagnostics.record(SyncTraceEvent.CAPTURE_RETRY)
+                    }
+                    outcome = WORK_OUTCOME_RETRY
+                    return@serialized Result.retry()
+                }
+                // One bounded follow-up covers every hint that arrived during this pass.
+                if (summary.more || SmsCaptureWork.takeHint()) {
+                    if (diagnostic != null) {
+                        SyncDiagnostics.withTrace(traceId) {
+                            SyncDiagnostics.record(SyncTraceEvent.CAPTURE_CONTINUATION)
+                            SmsCaptureWork.enqueueContinuation(applicationContext)
+                        }
+                    } else {
+                        SmsCaptureWork.enqueueContinuation(applicationContext)
+                    }
+                }
+                succeeded = true
+                outcome = WORK_OUTCOME_SUCCESS
+                Result.success()
+            } finally {
+                if (diagnostic != null) SyncDiagnostics.withTrace(traceId) {
+                    SyncDiagnostics.record(SyncTraceEvent.CAPTURE_END, SyncTraceField.SUCCESS to if (succeeded) 1 else 0, SyncTraceField.OUTCOME to outcome)
+                }
+            }
         }
     }
+}
+
+private const val WORK_OUTCOME_SUCCESS = 1L
+private const val WORK_OUTCOME_RETRY = 2L
+private const val WORK_OUTCOME_FAILURE = 3L
+private const val WORK_OUTCOME_THROW = 4L
+
+private data class CaptureWorkerDiagnostic(val traceId: Long, val enqueuedMs: Long?, val source: Long, val unavailable: Boolean) {
+    fun delayFields(): Array<Pair<SyncTraceField, Long>> = when {
+        unavailable || enqueuedMs == null -> arrayOf(SyncTraceField.UNAVAILABLE to 1L)
+        else -> {
+            val delay = SyncDiagnostics.nowMs() - enqueuedMs
+            if (delay < 0) arrayOf(SyncTraceField.UNAVAILABLE to 1L)
+            else arrayOf(SyncTraceField.DELAY_MS to delay)
+        }
+    }
+}
+
+private fun SmsCaptureWorker.captureDiagnosticInput(): CaptureWorkerDiagnostic {
+    val data = inputData
+    val sameSession = data.keyValueMap.containsKey(SmsCaptureWork.DIAGNOSTIC_SESSION) &&
+        data.getLong(SmsCaptureWork.DIAGNOSTIC_SESSION, 0L) == SyncDiagnostics.currentSessionToken()
+    val hasTimestamp = data.keyValueMap.containsKey(SmsCaptureWork.DIAGNOSTIC_ENQUEUED_MS)
+    val source = if (data.keyValueMap.containsKey(SmsCaptureWork.DIAGNOSTIC_SOURCE))
+        data.getLong(SmsCaptureWork.DIAGNOSTIC_SOURCE, SmsCaptureRequestSource.UNKNOWN.code) else SmsCaptureRequestSource.UNKNOWN.code
+    return CaptureWorkerDiagnostic(
+        traceId = if (sameSession && data.keyValueMap.containsKey(SmsCaptureWork.DIAGNOSTIC_TRACE_ID)) data.getLong(SmsCaptureWork.DIAGNOSTIC_TRACE_ID, 0L).takeIf { it != 0L } ?: SyncDiagnostics.newTraceId() else SyncDiagnostics.newTraceId(),
+        enqueuedMs = if (sameSession && hasTimestamp) data.getLong(SmsCaptureWork.DIAGNOSTIC_ENQUEUED_MS, 0L) else null,
+        source = source,
+        unavailable = !sameSession || !hasTimestamp,
+    )
 }
 
 /**

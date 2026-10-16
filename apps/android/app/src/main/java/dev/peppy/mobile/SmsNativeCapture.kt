@@ -17,13 +17,20 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         if (!smsReadGranted(context) || !GatewayPolicyHost(context).permitsSmsCapture()) return SmsCaptureSummary()
         val client = NativeGateway.open(context) ?: return SmsCaptureSummary()
         val summary = capture(client, AndroidSmsCaptureProvider(context), MmsPreferences(context).sourceGeneration)
-        if (shouldScheduleGatewayUpload(summary)) GatewayWork.enqueue(context.applicationContext)
+        if (shouldScheduleGatewayUpload(summary)) {
+            if (SyncDiagnostics.enabled) {
+                GatewayWork.enqueue(context.applicationContext, diagnosticParent = SyncDiagnostics.currentTraceId())
+            } else {
+                GatewayWork.enqueue(context.applicationContext)
+            }
+        }
         return summary
     }
 
     /** One bounded pass over the live/history plans and, when due, the reconciliation sweep. */
     internal fun capture(client: NativeClientInterface, reader: AndroidSmsCaptureProvider, generation: String): SmsCaptureSummary {
         val scope = SmsCapture.PROVIDER_SCOPE
+        reader.beginDiagnosticPass()
         return try {
             val highWater = reader.highWater().toString()
             val plans = client.planSmsScans(generation, scope, highWater)
@@ -45,6 +52,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
                     client.ackSmsScanExhausted(plan.sourceGeneration, plan.subscriptionId, plan.imported, bound)
                 }
                 summary += result
+                recordPlanCompletion(if (plan.imported) PLAN_HISTORY else PLAN_LIVE, plan.imported, result)
                 if (result.providerError) {
                     client.setSmsProviderError(generation, scope, true)
                     return summary
@@ -59,6 +67,7 @@ internal object SmsNativeCapture : SmsCaptureRunner {
             if (reconciliation != null) {
                 val result = SmsCapture.reconcile(reconciliation.toCapturePlan(), core, reader)
                 summary += result.summary
+                recordPlanCompletion(PLAN_RECONCILIATION, imported = false, result.summary)
                 if (result.summary.providerError) {
                     client.setSmsProviderError(generation, scope, true)
                     return summary
@@ -80,9 +89,31 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         } catch (_: MobileBindingsException) {
             // Database/core failure: not an Android provider outage. WorkManager backs off.
             SmsCaptureSummary(coreError = true)
+        } finally {
+            reader.finishDiagnosticPass()
         }
     }
 }
+
+private fun recordPlanCompletion(category: Long, imported: Boolean, summary: SmsCaptureSummary) {
+    if (!SyncDiagnostics.enabled) return
+    SyncDiagnostics.record(
+        SyncTraceEvent.CAPTURE_PLAN,
+        SyncTraceField.SOURCE to category,
+        SyncTraceField.IMPORTED to if (imported) 1 else 0,
+        SyncTraceField.CAPTURED to summary.captured.toLong(),
+        SyncTraceField.PENDING to summary.pending.toLong(),
+        SyncTraceField.UNAVAILABLE to summary.unavailable.toLong(),
+        SyncTraceField.PAUSED to summary.paused.toLong(),
+        SyncTraceField.MORE to if (summary.more) 1 else 0,
+        SyncTraceField.PROVIDER_ERROR to if (summary.providerError) 1 else 0,
+        SyncTraceField.CORE_ERROR to if (summary.coreError) 1 else 0,
+    )
+}
+
+private const val PLAN_LIVE = 0L
+private const val PLAN_HISTORY = 1L
+private const val PLAN_RECONCILIATION = 2L
 
 internal fun shouldScheduleGatewayUpload(summary: SmsCaptureSummary): Boolean = summary.captured > 0
 
@@ -131,6 +162,10 @@ internal class AndroidSmsCaptureProvider(context: Context) : SmsCaptureProvider 
     private val reader = SmsProviderReader(context)
 
     fun highWater(): Long = reader.highWater()
+
+    fun beginDiagnosticPass() = reader.beginDiagnosticPass()
+
+    fun finishDiagnosticPass() = reader.finishDiagnosticPass()
 
     override fun page(afterId: Long, limit: Int) = reader.page(afterId, limit)
 
