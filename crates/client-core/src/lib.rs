@@ -35,6 +35,8 @@ mod media;
 mod mms;
 mod mms_identity;
 mod notifications;
+mod sms_acquisition;
+mod sms_reconciliation;
 mod snapshot_projection;
 pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
@@ -79,7 +81,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 25;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 2;
 /// Records per `append_snapshot_page` call.
@@ -208,6 +210,10 @@ pub enum Error {
     MmsAcquisitionLimit,
     #[error("MMS pending media quota exceeded")]
     MmsMediaQuota,
+    /// SMS provider capture is backpressured: the bounded pending queue is full, or imported
+    /// history would exceed recovery capacity (then durably paused in the imported scan scope).
+    #[error("SMS acquisition capacity reached")]
+    SmsCapacity,
 }
 impl From<rusqlite::Error> for Error {
     fn from(_: rusqlite::Error) -> Self {
@@ -232,6 +238,14 @@ pub struct MessagePayload {
     pub direction: Direction,
     /// Imported provider history starts read; live captures start unread.
     pub imported: bool,
+    /// Provider timestamp when known. It is deliberately distinct from local ordering.
+    #[serde(default)]
+    pub sent_at_ms: Option<i64>,
+    /// Origin ordering time, set once by the device that created the record (queue or capture)
+    /// when no actual provider time is known. Every client sorts by `sent_at_ms`, then this, so
+    /// synced and snapshot-restored histories agree. Never displayed as a sent time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordered_at_ms: Option<i64>,
     /// Provider/SIM provenance for immutable MMS identity; absent on pre-MMS records.
     #[serde(default)]
     pub mms_context: Option<MmsContext>,
@@ -417,6 +431,12 @@ pub struct IncomingSms {
     pub provider_message_id: Option<String>,
     pub imported: bool,
 }
+pub use sms_acquisition::{
+    MAX_PENDING_SMS_ACQUISITION_BYTES, MAX_PENDING_SMS_ACQUISITIONS, SMS_REASON_AMBIGUOUS,
+    SMS_REASON_DRAFT, SMS_REASON_FAILED, SMS_REASON_INVALID, SMS_RECONCILIATION_INTERVAL_MS,
+    SmsAcquisition, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
+    SmsReconciliationPlan, SmsScanPlan, SmsScanStatus, SmsSource,
+};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Captured {
     pub message_id: MessageId,
@@ -1360,6 +1380,59 @@ impl Client {
         self.capture(sms, &[], Transport::Sms, Vec::new(), None)
     }
 
+    /// Durably captures an `SMS_RECEIVED` broadcast with its timestamps. `smsc_at_ms` is the
+    /// carrier timestamp the provider later stores as `date_sent`; it is retained only as
+    /// reconciliation evidence. `received_at_ms` is the local receipt time shown to users.
+    /// A provider row captured first for the same message is reused rather than duplicated.
+    pub fn capture_incoming_broadcast(
+        &self,
+        sms: IncomingSms,
+        smsc_at_ms: Option<i64>,
+        received_at_ms: Option<i64>,
+    ) -> Result<Captured, Error> {
+        validate_capture(&sms)?;
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let smsc_at_ms = smsc_at_ms.filter(|time| *time > 0);
+        if let Some(broadcast_id) = sms.provider_message_id.as_deref()
+            && let Some(existing) = sms_acquisition::broadcast_duplicate(
+                &tx,
+                &ctx.device_id,
+                broadcast_id,
+                &sms,
+                smsc_at_ms,
+            )?
+        {
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let broadcast_id = sms.provider_message_id.clone();
+        let sent_at_ms = received_at_ms.filter(|time| *time > 0).or(smsc_at_ms);
+        let captured = capture_in(
+            &tx,
+            &ctx,
+            sms,
+            &[],
+            Transport::Sms,
+            Vec::new(),
+            None,
+            sent_at_ms,
+        )?;
+        if let Some(broadcast_id) = broadcast_id
+            && !captured.duplicate
+        {
+            sms_acquisition::record_broadcast_alias(
+                &tx,
+                &broadcast_id,
+                captured.message_id,
+                smsc_at_ms,
+            )?;
+        }
+        tx.commit()?;
+        Ok(captured)
+    }
+
     /// Durably captures a carrier MMS whose parts were already passed to `prepare_attachment`.
     /// The event stays unsealed until every attachment is uploaded.
     pub fn capture_incoming_mms(&self, mms: IncomingMms) -> Result<Captured, Error> {
@@ -1407,76 +1480,109 @@ impl Client {
         recipients: Vec<String>,
         subject: Option<String>,
     ) -> Result<Captured, Error> {
-        require_address(&sms.sender_address)?;
-        require_body(&sms.body, true)?;
-        if let Some(id) = &sms.provider_message_id
-            && (id.is_empty() || id.len() > MAX_PROVIDER_ID_BYTES)
-        {
-            return Err(Error::InvalidRequest("provider message id"));
-        }
+        validate_capture(&sms)?;
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(provider_id) = &sms.provider_message_id {
-            let existing: Option<(String, String)> = tx
+        let captured = capture_in(
+            &tx,
+            &ctx,
+            sms,
+            attachments,
+            transport,
+            recipients,
+            subject,
+            None,
+        )?;
+        tx.commit()?;
+        Ok(captured)
+    }
+}
+
+fn validate_capture(sms: &IncomingSms) -> Result<(), Error> {
+    require_address(&sms.sender_address)?;
+    require_body(&sms.body, true)?;
+    if let Some(id) = &sms.provider_message_id
+        && (id.is_empty() || id.len() > MAX_PROVIDER_ID_BYTES)
+    {
+        return Err(Error::InvalidRequest("provider message id"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_in(
+    tx: &Connection,
+    ctx: &Ctx<'_>,
+    sms: IncomingSms,
+    attachments: &[AttachmentId],
+    transport: Transport,
+    recipients: Vec<String>,
+    subject: Option<String>,
+    sent_at_ms: Option<i64>,
+) -> Result<Captured, Error> {
+    if let Some(provider_id) = &sms.provider_message_id {
+        let existing: Option<(String, String)> = tx
                 .query_row(
                     "SELECT id,conversation_id FROM messages WHERE source_device_id=? AND provider_message_id=?",
                     params![ctx.device_id.to_string(), provider_id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            if let Some((message_id, conversation_id)) = existing {
-                return Ok(Captured {
-                    message_id: parse(&message_id)?,
-                    conversation_id: parse(&conversation_id)?,
-                    duplicate: true,
-                });
-            }
+        if let Some((message_id, conversation_id)) = existing {
+            return Ok(Captured {
+                message_id: parse(&message_id)?,
+                conversation_id: parse(&conversation_id)?,
+                duplicate: true,
+            });
         }
-        let conversation_id = match sms.conversation_id {
-            Some(id) => id,
-            None => conversation_match::address_conversation(&tx, &sms.sender_address)?
-                .unwrap_or_else(ConversationId::new),
-        };
-        let payload = MessagePayload {
-            record: MessageRecord {
-                message_id: MessageId::new(),
-                conversation_id,
-                source_sequence: next_source_sequence(&tx, conversation_id, ctx.device_id)?,
-                attachments: local_references(&tx, attachments)?,
-            },
-            source_device_id: ctx.device_id,
-            provider_message_id: sms.provider_message_id,
-            sender_address: Some(sms.sender_address),
-            recipients,
-            body: sms.body,
-            transport,
-            direction: Direction::Incoming,
-            imported: sms.imported,
-            subject,
-            mms_context: None,
-        };
-        if insert_message(&tx, &payload)? != Inserted::New {
-            return Err(Error::Database);
-        }
-        let message_id = payload.record.message_id;
-        let private = if transport == Transport::Sms {
-            PrivatePayload::Message(payload)
-        } else {
-            PrivatePayload::MmsMessage {
-                message: payload,
-                media: Vec::new(),
-            }
-        };
-        enqueue(&tx, &ctx, EnvelopePurpose::Event, None, None, &private)?;
-        tx.commit()?;
-        Ok(Captured {
-            message_id,
-            conversation_id,
-            duplicate: false,
-        })
     }
+    let conversation_id = match sms.conversation_id {
+        Some(id) => id,
+        None => conversation_match::address_conversation(tx, &sms.sender_address)?
+            .unwrap_or_else(ConversationId::new),
+    };
+    let payload = MessagePayload {
+        record: MessageRecord {
+            message_id: MessageId::new(),
+            conversation_id,
+            source_sequence: next_source_sequence(tx, conversation_id, ctx.device_id)?,
+            attachments: local_references(tx, attachments)?,
+        },
+        source_device_id: ctx.device_id,
+        provider_message_id: sms.provider_message_id,
+        sender_address: Some(sms.sender_address),
+        recipients,
+        body: sms.body,
+        transport,
+        direction: Direction::Incoming,
+        imported: sms.imported,
+        ordered_at_ms: sent_at_ms.is_none().then(notifications::now_ms),
+        sent_at_ms,
+        subject,
+        mms_context: None,
+    };
+    if insert_message(tx, &payload)? != Inserted::New {
+        return Err(Error::Database);
+    }
+    let message_id = payload.record.message_id;
+    let private = if transport == Transport::Sms {
+        PrivatePayload::Message(payload)
+    } else {
+        PrivatePayload::MmsMessage {
+            message: payload,
+            media: Vec::new(),
+        }
+    };
+    enqueue(tx, ctx, EnvelopePurpose::Event, None, None, &private)?;
+    Ok(Captured {
+        message_id,
+        conversation_id,
+        duplicate: false,
+    })
+}
 
+impl Client {
     /// Queues an encrypted send command pinned to one gateway and subscription.
     pub fn queue_send(&self, sms: OutgoingSms, route: GatewayRoute) -> Result<QueuedSend, Error> {
         validate_outgoing(&sms, &route)?;
@@ -1843,7 +1949,7 @@ impl Client {
         // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
         let latest_transport: Option<Transport> = tx
             .query_row(
-                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY local_order DESC LIMIT 1",
+                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
                 params![draft.conversation_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
@@ -1985,6 +2091,8 @@ fn queue_message(
         transport,
         direction: Direction::Outgoing,
         imported: false,
+        sent_at_ms: None,
+        ordered_at_ms: Some(notifications::now_ms()),
         subject,
         mms_context: None,
     };
@@ -2307,11 +2415,14 @@ impl Client {
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
+        // The attempt time is the gateway's best evidence for the provider row the platform
+        // writes when it submits this text; queue time on another device is not.
         tx.execute(
-            "INSERT INTO attempts(command_id,state) VALUES(?,?)",
+            "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
             params![
                 command_id.to_string(),
-                state_code(SendState::AttemptRecorded)
+                state_code(SendState::AttemptRecorded),
+                notifications::now_ms()
             ],
         )?;
         tx.commit()?;
@@ -2352,11 +2463,11 @@ impl Client {
         Ok(next)
     }
 
-    /// Conversations ordered by most recent local arrival.
+    /// Conversations ordered by their most recent deterministic chronological message.
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            "SELECT conversation_id,SUM(seen=0) FROM messages GROUP BY conversation_id ORDER BY MAX(local_order) DESC",
+            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread FROM newest c ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
         )?;
         let rows = query
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
@@ -2390,7 +2501,7 @@ impl Client {
             .collect()
     }
 
-    /// The most recently arrived message in a conversation, if it has one.
+    /// The newest deterministic chronological message in a conversation, if it has one.
     pub fn latest_message(
         &self,
         conversation_id: ConversationId,
@@ -2424,7 +2535,8 @@ impl Client {
             .query_map(
                 params![
                     conversation_id.to_string(),
-                    before_order,
+                    before_order.as_ref().map(|anchor| anchor.sort_at_ms),
+                    before_order.as_ref().map(|anchor| anchor.local_order),
                     to_i64((limit + 1) as u64)?
                 ],
                 message_row,
@@ -2453,7 +2565,11 @@ impl Client {
         let mut query = s.conn.prepare(MESSAGE_SINCE_SELECT)?;
         let rows = query
             .query_map(
-                params![conversation_id.to_string(), from_order],
+                params![
+                    conversation_id.to_string(),
+                    from_order.sort_at_ms,
+                    from_order.local_order
+                ],
                 message_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -3360,15 +3476,19 @@ macro_rules! message_select {
         )
     };
 }
+// Every history read uses one total order: the non-null `sort_at_ms` key (actual provider time
+// when known, otherwise local insertion time), then `local_order` as a deterministic tiebreak.
 const MESSAGE_FULL_SELECT: &str =
-    message_select!("WHERE m.conversation_id=? ORDER BY m.local_order");
-const LATEST_MESSAGE_SELECT: &str =
-    message_select!("WHERE m.conversation_id=? ORDER BY m.local_order DESC LIMIT 1");
-const MESSAGE_PAGE_SELECT: &str = message_select!(
-    "WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.local_order < ?2) ORDER BY m.local_order DESC LIMIT ?3"
+    message_select!("WHERE m.conversation_id=? ORDER BY m.sort_at_ms,m.local_order");
+const LATEST_MESSAGE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=? ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
 );
-const MESSAGE_SINCE_SELECT: &str =
-    message_select!("WHERE m.conversation_id=?1 AND m.local_order >= ?2 ORDER BY m.local_order");
+const MESSAGE_PAGE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
+);
+const MESSAGE_SINCE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=?1 AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
+);
 
 type StoredMessage = (String, bool, Option<String>, Option<String>, bool);
 
@@ -3401,15 +3521,25 @@ fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Er
     })
 }
 
+struct HistoryAnchor {
+    sort_at_ms: i64,
+    local_order: i64,
+}
+
 fn history_anchor_order(
     conn: &Connection,
     conversation_id: ConversationId,
     message_id: MessageId,
-) -> Result<i64, Error> {
+) -> Result<HistoryAnchor, Error> {
     conn.query_row(
-        "SELECT local_order FROM messages WHERE id=? AND conversation_id=?",
+        "SELECT sort_at_ms,local_order FROM messages WHERE id=? AND conversation_id=?",
         params![message_id.to_string(), conversation_id.to_string()],
-        |row| row.get(0),
+        |row| {
+            Ok(HistoryAnchor {
+                sort_at_ms: row.get(0)?,
+                local_order: row.get(1)?,
+            })
+        },
     )
     .optional()?
     .ok_or(Error::InvalidRequest("history anchor"))
@@ -3623,8 +3753,8 @@ CREATE TABLE outbox(seq INTEGER PRIMARY KEY, envelope_id TEXT NOT NULL UNIQUE, c
    purpose TEXT NOT NULL CHECK(purpose IN ('command','event')), route TEXT, plain BLOB, wire BLOB,
    state TEXT NOT NULL CHECK(state IN ('unsealed','queued','acknowledged')));
 CREATE TABLE messages(local_order INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-  conversation_id TEXT NOT NULL, source_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL,
-  provider_message_id TEXT, payload TEXT NOT NULL, seen INTEGER NOT NULL,
+   conversation_id TEXT NOT NULL, source_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL,
+   provider_message_id TEXT, payload TEXT NOT NULL, seen INTEGER NOT NULL,
   UNIQUE(conversation_id, source_device_id, source_sequence));
 CREATE UNIQUE INDEX messages_provider ON messages(source_device_id, provider_message_id) WHERE provider_message_id IS NOT NULL;
 CREATE INDEX messages_conversation ON messages(conversation_id, local_order);
@@ -3772,6 +3902,43 @@ const MIGRATION_21: &str = "
 ALTER TABLE compose_draft_redirects ADD COLUMN forward_conversation INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX compose_draft_redirects_conversation ON compose_draft_redirects(conversation_id, forward_conversation);
 ";
+/// Version 21 -> 22: durable SMS provider acquisition and resumable provider scans.
+const MIGRATION_22: &str = "
+CREATE TABLE sms_acquisitions(acquisition_id TEXT PRIMARY KEY, source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, provider_message_id TEXT NOT NULL, source_row_fingerprint TEXT NOT NULL, direction TEXT NOT NULL, conversation_id TEXT NOT NULL, input TEXT NOT NULL, state TEXT NOT NULL, reason TEXT, message_id TEXT NOT NULL, source_sequence INTEGER NOT NULL, local_order INTEGER NOT NULL UNIQUE, UNIQUE(source_generation,subscription_id,source_row_fingerprint,direction));
+CREATE TABLE sms_provider_aliases(source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, alias TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(source_generation,subscription_id,alias));
+CREATE TABLE sms_scan_checkpoints(source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, imported INTEGER NOT NULL, provider_message_id TEXT NOT NULL, history_upper_bound TEXT, history_complete INTEGER NOT NULL DEFAULT 0, pending_recheck_cursor TEXT, paused_reason TEXT, provider_error INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source_generation,subscription_id,imported));
+CREATE INDEX sms_acquisitions_pending ON sms_acquisitions(state) WHERE state!='complete';
+";
+const MIGRATION_23: &str = "
+ALTER TABLE messages ADD COLUMN actual_sent_at_ms INTEGER;
+UPDATE messages SET actual_sent_at_ms=json_extract(payload, '$.sent_at_ms');
+CREATE INDEX messages_chronological ON messages(conversation_id, actual_sent_at_ms, local_order);
+";
+/// Version 23 -> 24: durable bounded full-provider sweeps for reused/decreased SMS IDs.
+const MIGRATION_24: &str = "
+CREATE TABLE sms_reconciliation_scans(source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, scan_cursor TEXT, upper_bound TEXT NOT NULL, PRIMARY KEY(source_generation,subscription_id));
+";
+/// Version 24 -> 25: one non-null chronological sort key (actual provider time when known,
+/// otherwise local insertion time; legacy undated rows take the migration time and keep their
+/// arrival order), gateway attempt times, broadcast aliases, and indexed SMS reconciliation.
+const MIGRATION_25: &str = "
+UPDATE messages SET actual_sent_at_ms=NULL WHERE actual_sent_at_ms<=0;
+ALTER TABLE messages ADD COLUMN sort_at_ms INTEGER NOT NULL DEFAULT 0;
+UPDATE messages SET sort_at_ms=COALESCE(actual_sent_at_ms, CAST(strftime('%s','now') AS INTEGER)*1000);
+DROP INDEX IF EXISTS messages_chronological;
+CREATE INDEX messages_sort ON messages(conversation_id, sort_at_ms, local_order);
+ALTER TABLE attempts ADD COLUMN attempted_at_ms INTEGER;
+CREATE INDEX attempts_time ON attempts(attempted_at_ms);
+ALTER TABLE sms_acquisitions ADD COLUMN evidence_time_ms INTEGER;
+CREATE INDEX sms_acquisitions_message ON sms_acquisitions(message_id);
+CREATE INDEX sms_acquisitions_provider ON sms_acquisitions(source_generation, provider_message_id);
+CREATE INDEX sms_acquisitions_sequence ON sms_acquisitions(conversation_id, source_sequence);
+CREATE INDEX sms_acquisitions_incoming_evidence ON sms_acquisitions(evidence_time_ms) WHERE direction='incoming' AND state='complete';
+CREATE TABLE sms_broadcast_aliases(broadcast_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, smsc_at_ms INTEGER);
+CREATE INDEX sms_broadcast_aliases_message ON sms_broadcast_aliases(message_id);
+CREATE INDEX sms_broadcast_aliases_time ON sms_broadcast_aliases(smsc_at_ms);
+ALTER TABLE sms_reconciliation_scans ADD COLUMN completed_at_ms INTEGER;
+";
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
 const DECODER_REVISION: &str = "3";
@@ -3835,6 +4002,10 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_19)?;
             tx.execute_batch(MIGRATION_20)?;
             tx.execute_batch(MIGRATION_21)?;
+            tx.execute_batch(MIGRATION_22)?;
+            tx.execute_batch(MIGRATION_23)?;
+            tx.execute_batch(MIGRATION_24)?;
+            tx.execute_batch(MIGRATION_25)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -3843,7 +4014,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=20)) => {
+        Some(version @ (4..=24)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -3893,6 +4064,18 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 20 {
                 tx.execute_batch(MIGRATION_21)?;
+            }
+            if version <= 21 {
+                tx.execute_batch(MIGRATION_22)?;
+            }
+            if version <= 22 {
+                tx.execute_batch(MIGRATION_23)?;
+            }
+            if version <= 23 {
+                tx.execute_batch(MIGRATION_24)?;
+            }
+            if version <= 24 {
+                tx.execute_batch(MIGRATION_25)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -4436,8 +4619,15 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         .optional()?
         .is_some();
     let seen = read_elsewhere || message.imported || message.direction == Direction::Outgoing;
+    // Provider timestamps of zero or less mean "unknown"; unknown rows sort at local insertion.
+    let actual_sent_at_ms = message.sent_at_ms.filter(|time| *time > 0);
+    // Actual time, else the origin's ordering time (identical on every client), else local
+    // insertion time for legacy records that predate origin ordering.
+    let sort_at_ms = actual_sent_at_ms
+        .or(message.ordered_at_ms.filter(|time| *time > 0))
+        .unwrap_or_else(notifications::now_ms);
     let inserted = conn.execute(
-        "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,provider_message_id,payload,seen) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,provider_message_id,payload,actual_sent_at_ms,sort_at_ms,seen) VALUES(?,?,?,?,?,?,?,?,?)",
         params![
             id,
             message.record.conversation_id.to_string(),
@@ -4445,6 +4635,8 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
             to_i64(message.record.source_sequence.0)?,
             message.provider_message_id,
             encoded,
+            actual_sent_at_ms,
+            sort_at_ms,
             seen
         ],
     );
@@ -5470,8 +5662,9 @@ fn next_source_sequence(
     device_id: DeviceId,
 ) -> Result<SourceSequence, Error> {
     let last: i64 = conn.query_row(
-        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=? AND source_device_id=? UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=? AND state!='complete')",
-        params![conversation_id.to_string(), device_id.to_string(), conversation_id.to_string()], |r| r.get(0),
+        // Pending MMS/SMS provider acquisitions reserve their sequence before publication.
+        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')",
+        params![conversation_id.to_string(), device_id.to_string()], |r| r.get(0),
     )?;
     let last = u64::try_from(last).map_err(|_| Error::Database)?;
     Ok(SourceSequence(last.checked_add(1).ok_or(Error::Database)?))
@@ -6714,6 +6907,8 @@ mod tests {
                 transport: Transport::Mms,
                 direction: Direction::Incoming,
                 imported: false,
+                sent_at_ms: None,
+                ordered_at_ms: None,
                 mms_context: None,
             }
         };
@@ -6978,6 +7173,8 @@ mod tests {
             transport: Transport::Mms,
             direction: Direction::Incoming,
             imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
             mms_context: Some(MmsContext {
                 source_generation: "generation".into(),
                 subscription_id: "sim-1".into(),

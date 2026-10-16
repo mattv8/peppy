@@ -210,7 +210,7 @@ pub struct MessageView {
     pub revision: String,
     pub sender: &'static str,
     pub body: String,
-    /// Core records carry no wall-clock time; an empty string is shown rather than a fake time.
+    /// Empty only when the provider did not supply a timestamp; never synthesized from arrival.
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<&'static str>,
@@ -350,7 +350,12 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             "other"
         },
         body: message.payload.body.clone(),
-        timestamp: String::new(),
+        timestamp: message
+            .payload
+            .sent_at_ms
+            .filter(|value| *value > 0)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
         status: message.send_state.map(send_state_label),
         attachments,
         transport: match message.payload.transport {

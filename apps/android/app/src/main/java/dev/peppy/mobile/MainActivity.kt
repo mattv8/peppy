@@ -2,6 +2,7 @@ package dev.peppy.mobile
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -59,6 +60,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
@@ -67,6 +69,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.theme.PeppyTheme
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -77,7 +81,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val systemBars = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = systemBars, navigationBarStyle = systemBars)
-        setContent { PeppyTheme { Surface { CompanionScreen() } } }
+        setContent { PeppyTheme { Surface { CompanionScreen(this@MainActivity) } } }
     }
 
     override fun onResume() {
@@ -85,10 +89,11 @@ class MainActivity : ComponentActivity() {
         // A challenge can expire while the process remains alive; foreground re-enters the
         // serialized relay reconciliation path without doing network work on the activity.
         RelayWakeRuntime.enrollmentChanged(applicationContext)
+        SmsCaptureLifecycle.onPermissionOrForeground(applicationContext)
     }
 }
 
-private val SMS_PERMISSIONS = arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS)
+private val SMS_PERMISSIONS = arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS)
 private val MMS_PERMISSIONS = arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_MMS)
 
 private fun granted(context: Context, permission: String) =
@@ -150,15 +155,18 @@ internal fun syncMessage(status: GatewayStatus): String = when {
 
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun CompanionScreen() {
+private fun CompanionScreen(activity: ComponentActivity) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<GatewayStatus?>(null) }
+    var smsHistory by remember { mutableStateOf(SmsHistoryState.WAITING_FOR_VAULT) }
     var refresh by remember { mutableIntStateOf(0) }
+    var permissionRefresh by remember { mutableIntStateOf(0) }
     var unlockBusy by remember { mutableStateOf(false) }
     var unlockResult by remember { mutableStateOf<UnlockResult?>(null) }
     var passphrase by remember { mutableStateOf("") }
-    var smsCaptureEnabled by remember { mutableStateOf(GatewayPolicyHost(context).smsCaptureEnabled) }
+    // Null until the core-backed policy is read off the main thread; the switch stays disabled.
+    var smsCaptureEnabled by remember { mutableStateOf<Boolean?>(null) }
     var destination by remember { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
     var appFiltersOpen by remember { mutableStateOf(false) }
@@ -172,6 +180,7 @@ private fun CompanionScreen() {
         description = stringResource(R.string.peppy_owner_phone_secret_saved_hint),
     )
     val ownerPhoneActions = remember(ownerPhoneHost) { ownerPhoneHost?.actions() }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val leavingOwnerPhoneHost = ownerPhoneHost
     // Leaving the flow (done, cancel, back, or recreation) closes the client and cancels any waiting invitation.
     DisposableEffect(leavingOwnerPhoneHost) {
@@ -185,14 +194,31 @@ private fun CompanionScreen() {
         }
     }
 
-    LaunchedEffect(refresh) {
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionRefresh++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(refresh, permissionRefresh) {
         val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
         if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
         if (current.sharedKeysReady) RemoteMessagingService.resumeOrEnqueue(context)
         if (MmsPreferences(context).enabled) MmsCaptureWork.ensurePeriodic(context)
         status = current
+        smsCaptureEnabled = withContext(Dispatchers.IO) { GatewayPolicyHost(context).smsCaptureEnabled }
         ownerPhoneAvailable = current.sharedKeysReady &&
             GatewayAccountHost.load(context)?.self?.let { it.role == "owner" && !it.revoked } == true
+        smsHistory = withContext(Dispatchers.IO) {
+            val fallback = smsHistoryState(
+                readGranted = smsReadGranted(context),
+                capturePermitted = GatewayPolicyHost(context).permitsSmsCapture(),
+                databaseOpen = current.databaseOpen,
+            )
+            readSmsHistoryState(context, fallback)
+        }
     }
 
     LaunchedEffect(status?.enrolled) {
@@ -218,7 +244,9 @@ private fun CompanionScreen() {
     }
 
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        SmsReadPermissionRecovery.recordResult(context, granted(context, Manifest.permission.READ_SMS))
         refresh++
+        SmsCaptureLifecycle.onPermissionOrForeground(context)
         if (status?.sharedKeysReady == true) GatewayWork.enqueue(context)
     }
     val mmsPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -382,8 +410,8 @@ private fun CompanionScreen() {
 
         Section("permissions-section", "SMS permissions") {
             Text(
-                "Receive SMS lets this phone save incoming texts, encrypted, to your Peppy server. Send SMS lets it send texts you queue from " +
-                    "your other devices, only after this phone's vault confirms each one. The SMS inbox, contacts, and calls are not read, " +
+                "Receive SMS lets this phone save incoming texts, encrypted, to your Peppy vault. Read phone messages lets it capture sent and received SMS available in Android's message storage. Send SMS lets it send texts you queue from " +
+                    "your other devices, only after this phone's vault confirms each one. Contacts and calls are not read, " +
                     "and Peppy never becomes the default SMS app.",
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -408,12 +436,31 @@ private fun CompanionScreen() {
                     Text("Enable SMS capture")
                     Text("Stops new incoming carrier captures without changing pending or unknown send permits.", style = MaterialTheme.typography.bodySmall)
                 }
-                Switch(smsCaptureEnabled, { value ->
-                    GatewayPolicyHost(context).smsCaptureEnabled = value
-                    smsCaptureEnabled = value
+                Switch(smsCaptureEnabled == true, enabled = smsCaptureEnabled != null, onCheckedChange = { value ->
+                    scope.launch {
+                        val enabled = withContext(Dispatchers.IO) {
+                            GatewayPolicyHost(context).smsCaptureEnabled = value
+                            GatewayPolicyHost(context).smsCaptureEnabled
+                        }
+                        smsCaptureEnabled = enabled
+                        refresh++
+                    }
                 })
             }
         }
+
+        SmsSettings(
+            context = context,
+            historyState = smsHistory,
+            needsPermissionSettings = SmsReadPermissionRecovery.needsSettingsRecovery(
+                context,
+                activity.shouldShowRequestPermissionRationale(Manifest.permission.READ_SMS),
+            ),
+            requestPermission = { permissionRequest.launch(arrayOf(Manifest.permission.READ_SMS)) },
+            openPermissionSettings = {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+            },
+        )
 
         MmsSettings(
             context = context,

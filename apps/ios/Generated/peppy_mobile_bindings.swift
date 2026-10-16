@@ -605,6 +605,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func ackOutbox(envelopeId: String) throws 
     
+    func ackSmsScanExhausted(sourceGeneration: String, providerScope: String, imported: Bool, frozenUpperBound: String) throws 
+    
     func acknowledgeContactPhotoReclaimJson(inputJson: String) throws  -> String
     
     func acknowledgeContactPhotoReferenceJson(inputJson: String) throws  -> String
@@ -633,6 +635,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      */
     func beginSendAttempt(commandId: String) throws  -> NativePermit
     
+    func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput) throws  -> NativeSmsAcquisition
+    
     func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose) throws  -> NativeSnapshotProgress
     
     func beginSnapshotWithCompaction(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose, serverCompactionGeneration: String?) throws  -> NativeSnapshotProgress
@@ -643,6 +647,14 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func captureContactBook(inputJson: String) throws  -> String
     
     func captureIncoming(sms: NativeIncomingSms) throws  -> NativeCaptured
+    
+    /**
+     * Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
+     * identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
+     * reconciliation evidence, and `received_at_ms` is the local receipt time users see. A
+     * provider row captured first for the same message is reused, never duplicated.
+     */
+    func captureIncomingTimed(sms: NativeIncomingSms, smscAtMs: Int64?, receivedAtMs: Int64?) throws  -> NativeCaptured
     
     func captureNotification(input: NativeNotificationCapture) throws  -> NativeNotificationCaptureOutcome
     
@@ -656,6 +668,10 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func completeMmsAcquisition(id: String) throws  -> NativeCaptured
     
     func completeNotificationDismissal(id: String) throws 
+    
+    func completeSmsAcquisition(id: String) throws  -> NativeCaptured
+    
+    func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool) throws 
     
     func composeDrafts() throws  -> [NativeComposeDraft]
     
@@ -823,6 +839,10 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func pendingUploads() throws  -> [NativeCipherObject]
     
+    func planSmsReconciliation(sourceGeneration: String, providerScope: String, observedHighWater: String, liveAnchorFingerprint: String?) throws  -> NativeSmsReconciliationPlan?
+    
+    func planSmsScans(sourceGeneration: String, providerScope: String, observedHighWater: String) throws  -> [NativeSmsScanPlan]
+    
     func prepareAttachment(sourcePath: String, mediaType: String, displayName: String) throws  -> NativeAttachmentInfo
     
     func prepareContactPhoto(path: String) throws  -> NativeAttachmentInfo
@@ -878,6 +898,20 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func setServerCompactionState(supported: Bool, active: Bool) throws  -> String
     
     func setServerCompactionSupported(supported: Bool) throws 
+    
+    func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?) throws 
+    
+    func setSmsPendingRecheckCursor(sourceGeneration: String, providerScope: String, imported: Bool, acquisitionId: String?) throws 
+    
+    func setSmsProviderError(sourceGeneration: String, providerScope: String, providerError: Bool) throws 
+    
+    func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String) throws 
+    
+    func smsAcquisitionsAfter(afterId: String?, limit: UInt64) throws  -> [NativeSmsAcquisition]
+    
+    func smsHistoryStatus(sourceGeneration: String, providerScope: String) throws  -> NativeSmsHistoryStatus
+    
+    func smsScanStatus(sourceGeneration: String, subscriptionId: String, imported: Bool) throws  -> NativeSmsScanStatus
     
     func snapshotProgress() throws  -> NativeSnapshotProgress?
     
@@ -944,6 +978,18 @@ open func ackOutbox(envelopeId: String)throws   {try rustCallWithError(FfiConver
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_outbox(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(envelopeId),uniffiCallStatus
+    )
+}
+}
+    
+open func ackSmsScanExhausted(sourceGeneration: String, providerScope: String, imported: Bool, frozenUpperBound: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_sms_scan_exhausted(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterBool.lower(imported),
+        FfiConverterString.lower(frozenUpperBound),uniffiCallStatus
     )
 }
 }
@@ -1048,6 +1094,16 @@ open func beginSendAttempt(commandId: String)throws  -> NativePermit  {
 })
 }
     
+open func beginSmsProviderAcquisition(input: NativeSmsProviderAcquisitionInput)throws  -> NativeSmsAcquisition  {
+    return try  FfiConverterTypeNativeSmsAcquisition_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_sms_provider_acquisition(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeSmsProviderAcquisitionInput_lower(input),uniffiCallStatus
+    )
+})
+}
+    
 open func beginSnapshot(highWater: String, recordCount: UInt64, purpose: NativeSnapshotPurpose)throws  -> NativeSnapshotProgress  {
     return try  FfiConverterTypeNativeSnapshotProgress_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1092,6 +1148,24 @@ open func captureIncoming(sms: NativeIncomingSms)throws  -> NativeCaptured  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_incoming(
             self.uniffiCloneHandle(),
         FfiConverterTypeNativeIncomingSms_lower(sms),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
+     * identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
+     * reconciliation evidence, and `received_at_ms` is the local receipt time users see. A
+     * provider row captured first for the same message is reused, never duplicated.
+     */
+open func captureIncomingTimed(sms: NativeIncomingSms, smscAtMs: Int64?, receivedAtMs: Int64?)throws  -> NativeCaptured  {
+    return try  FfiConverterTypeNativeCaptured_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_incoming_timed(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNativeIncomingSms_lower(sms),
+        FfiConverterOptionInt64.lower(smscAtMs),
+        FfiConverterOptionInt64.lower(receivedAtMs),uniffiCallStatus
     )
 })
 }
@@ -1144,6 +1218,29 @@ open func completeNotificationDismissal(id: String)throws   {try rustCallWithErr
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_notification_dismissal(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
+open func completeSmsAcquisition(id: String)throws  -> NativeCaptured  {
+    return try  FfiConverterTypeNativeCaptured_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_acquisition(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+open func completeSmsReconciliation(sourceGeneration: String, providerScope: String, upperBound: String, cursor: String?, exhausted: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_reconciliation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterString.lower(upperBound),
+        FfiConverterOptionString.lower(cursor),
+        FfiConverterBool.lower(exhausted),uniffiCallStatus
     )
 }
 }
@@ -1724,6 +1821,31 @@ open func pendingUploads()throws  -> [NativeCipherObject]  {
 })
 }
     
+open func planSmsReconciliation(sourceGeneration: String, providerScope: String, observedHighWater: String, liveAnchorFingerprint: String?)throws  -> NativeSmsReconciliationPlan?  {
+    return try  FfiConverterOptionTypeNativeSmsReconciliationPlan.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_reconciliation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterString.lower(observedHighWater),
+        FfiConverterOptionString.lower(liveAnchorFingerprint),uniffiCallStatus
+    )
+})
+}
+    
+open func planSmsScans(sourceGeneration: String, providerScope: String, observedHighWater: String)throws  -> [NativeSmsScanPlan]  {
+    return try  FfiConverterSequenceTypeNativeSmsScanPlan.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterString.lower(observedHighWater),uniffiCallStatus
+    )
+})
+}
+    
 open func prepareAttachment(sourcePath: String, mediaType: String, displayName: String)throws  -> NativeAttachmentInfo  {
     return try  FfiConverterTypeNativeAttachmentInfo_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1979,6 +2101,86 @@ open func setServerCompactionSupported(supported: Bool)throws   {try rustCallWit
         FfiConverterBool.lower(supported),uniffiCallStatus
     )
 }
+}
+    
+open func setSmsAcquisitionState(id: String, state: NativeSmsAcquisitionState, reason: String?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_acquisition_state(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterTypeNativeSmsAcquisitionState_lower(state),
+        FfiConverterOptionString.lower(reason),uniffiCallStatus
+    )
+}
+}
+    
+open func setSmsPendingRecheckCursor(sourceGeneration: String, providerScope: String, imported: Bool, acquisitionId: String?)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_pending_recheck_cursor(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterBool.lower(imported),
+        FfiConverterOptionString.lower(acquisitionId),uniffiCallStatus
+    )
+}
+}
+    
+open func setSmsProviderError(sourceGeneration: String, providerScope: String, providerError: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_provider_error(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterBool.lower(providerError),uniffiCallStatus
+    )
+}
+}
+    
+open func setSmsScanCheckpoint(sourceGeneration: String, subscriptionId: String, imported: Bool, providerMessageId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_scan_checkpoint(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(subscriptionId),
+        FfiConverterBool.lower(imported),
+        FfiConverterString.lower(providerMessageId),uniffiCallStatus
+    )
+}
+}
+    
+open func smsAcquisitionsAfter(afterId: String?, limit: UInt64)throws  -> [NativeSmsAcquisition]  {
+    return try  FfiConverterSequenceTypeNativeSmsAcquisition.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_acquisitions_after(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(afterId),
+        FfiConverterUInt64.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+open func smsHistoryStatus(sourceGeneration: String, providerScope: String)throws  -> NativeSmsHistoryStatus  {
+    return try  FfiConverterTypeNativeSmsHistoryStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_history_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),uniffiCallStatus
+    )
+})
+}
+    
+open func smsScanStatus(sourceGeneration: String, subscriptionId: String, imported: Bool)throws  -> NativeSmsScanStatus  {
+    return try  FfiConverterTypeNativeSmsScanStatus_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_scan_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(subscriptionId),
+        FfiConverterBool.lower(imported),uniffiCallStatus
+    )
+})
 }
     
 open func snapshotProgress()throws  -> NativeSnapshotProgress?  {
@@ -4602,10 +4804,11 @@ public struct NativeMessage: Equatable, Hashable {
     public var incoming: Bool
     public var seen: Bool
     public var sendState: String?
+    public var sentAtMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, conversationId: String, senderAddress: String?, recipients: [String], body: String, subject: String?, transport: String, attachmentIds: [String], incoming: Bool, seen: Bool, sendState: String?) {
+    public init(messageId: String, conversationId: String, senderAddress: String?, recipients: [String], body: String, subject: String?, transport: String, attachmentIds: [String], incoming: Bool, seen: Bool, sendState: String?, sentAtMs: Int64?) {
         self.messageId = messageId
         self.conversationId = conversationId
         self.senderAddress = senderAddress
@@ -4617,6 +4820,7 @@ public struct NativeMessage: Equatable, Hashable {
         self.incoming = incoming
         self.seen = seen
         self.sendState = sendState
+        self.sentAtMs = sentAtMs
     }
 
     
@@ -4645,7 +4849,8 @@ public struct FfiConverterTypeNativeMessage: FfiConverterRustBuffer {
                 attachmentIds: FfiConverterSequenceString.read(from: &buf), 
                 incoming: FfiConverterBool.read(from: &buf), 
                 seen: FfiConverterBool.read(from: &buf), 
-                sendState: FfiConverterOptionString.read(from: &buf)
+                sendState: FfiConverterOptionString.read(from: &buf), 
+                sentAtMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -4661,6 +4866,7 @@ public struct FfiConverterTypeNativeMessage: FfiConverterRustBuffer {
         FfiConverterBool.write(value.incoming, into: &buf)
         FfiConverterBool.write(value.seen, into: &buf)
         FfiConverterOptionString.write(value.sendState, into: &buf)
+        FfiConverterOptionInt64.write(value.sentAtMs, into: &buf)
     }
 }
 
@@ -5786,6 +5992,504 @@ public func FfiConverterTypeNativeRawSnapshotRecord_lower(_ value: NativeRawSnap
 }
 
 
+public struct NativeSmsAcquisition: Equatable, Hashable {
+    public var acquisitionId: String
+    public var conversationId: String
+    public var input: NativeSmsProviderAcquisitionInput
+    public var state: NativeSmsAcquisitionState
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(acquisitionId: String, conversationId: String, input: NativeSmsProviderAcquisitionInput, state: NativeSmsAcquisitionState, reason: String?) {
+        self.acquisitionId = acquisitionId
+        self.conversationId = conversationId
+        self.input = input
+        self.state = state
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsAcquisition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsAcquisition: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsAcquisition {
+        return
+            try NativeSmsAcquisition(
+                acquisitionId: FfiConverterString.read(from: &buf), 
+                conversationId: FfiConverterString.read(from: &buf), 
+                input: FfiConverterTypeNativeSmsProviderAcquisitionInput.read(from: &buf), 
+                state: FfiConverterTypeNativeSmsAcquisitionState.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsAcquisition, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.acquisitionId, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterTypeNativeSmsProviderAcquisitionInput.write(value.input, into: &buf)
+        FfiConverterTypeNativeSmsAcquisitionState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsAcquisition_lift(_ buf: RustBuffer) throws -> NativeSmsAcquisition {
+    return try FfiConverterTypeNativeSmsAcquisition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsAcquisition_lower(_ value: NativeSmsAcquisition) -> RustBuffer {
+    return FfiConverterTypeNativeSmsAcquisition.lower(value)
+}
+
+
+public struct NativeSmsHistoryStatus: Equatable, Hashable {
+    public var baselineInitialized: Bool
+    public var scanning: Bool
+    public var historyComplete: Bool
+    public var paused: Bool
+    public var providerError: Bool
+    public var pendingCount: UInt64
+    public var ambiguousCount: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(baselineInitialized: Bool, scanning: Bool, historyComplete: Bool, paused: Bool, providerError: Bool, pendingCount: UInt64, ambiguousCount: UInt64) {
+        self.baselineInitialized = baselineInitialized
+        self.scanning = scanning
+        self.historyComplete = historyComplete
+        self.paused = paused
+        self.providerError = providerError
+        self.pendingCount = pendingCount
+        self.ambiguousCount = ambiguousCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsHistoryStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsHistoryStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsHistoryStatus {
+        return
+            try NativeSmsHistoryStatus(
+                baselineInitialized: FfiConverterBool.read(from: &buf), 
+                scanning: FfiConverterBool.read(from: &buf), 
+                historyComplete: FfiConverterBool.read(from: &buf), 
+                paused: FfiConverterBool.read(from: &buf), 
+                providerError: FfiConverterBool.read(from: &buf), 
+                pendingCount: FfiConverterUInt64.read(from: &buf), 
+                ambiguousCount: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsHistoryStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.baselineInitialized, into: &buf)
+        FfiConverterBool.write(value.scanning, into: &buf)
+        FfiConverterBool.write(value.historyComplete, into: &buf)
+        FfiConverterBool.write(value.paused, into: &buf)
+        FfiConverterBool.write(value.providerError, into: &buf)
+        FfiConverterUInt64.write(value.pendingCount, into: &buf)
+        FfiConverterUInt64.write(value.ambiguousCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsHistoryStatus_lift(_ buf: RustBuffer) throws -> NativeSmsHistoryStatus {
+    return try FfiConverterTypeNativeSmsHistoryStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsHistoryStatus_lower(_ value: NativeSmsHistoryStatus) -> RustBuffer {
+    return FfiConverterTypeNativeSmsHistoryStatus.lower(value)
+}
+
+
+public struct NativeSmsProviderAcquisitionInput: Equatable, Hashable {
+    public var source: NativeSmsSource
+    public var incoming: Bool
+    public var senderAddress: String?
+    public var recipients: [String]
+    public var body: String
+    public var imported: Bool
+    public var sentAtMs: Int64?
+    public var dateSentMs: Int64?
+    public var creator: String?
+    public var sourceRowFingerprint: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(source: NativeSmsSource, incoming: Bool, senderAddress: String?, recipients: [String], body: String, imported: Bool, sentAtMs: Int64?, dateSentMs: Int64?, creator: String?, sourceRowFingerprint: String) {
+        self.source = source
+        self.incoming = incoming
+        self.senderAddress = senderAddress
+        self.recipients = recipients
+        self.body = body
+        self.imported = imported
+        self.sentAtMs = sentAtMs
+        self.dateSentMs = dateSentMs
+        self.creator = creator
+        self.sourceRowFingerprint = sourceRowFingerprint
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsProviderAcquisitionInput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsProviderAcquisitionInput {
+        return
+            try NativeSmsProviderAcquisitionInput(
+                source: FfiConverterTypeNativeSmsSource.read(from: &buf), 
+                incoming: FfiConverterBool.read(from: &buf), 
+                senderAddress: FfiConverterOptionString.read(from: &buf), 
+                recipients: FfiConverterSequenceString.read(from: &buf), 
+                body: FfiConverterString.read(from: &buf), 
+                imported: FfiConverterBool.read(from: &buf), 
+                sentAtMs: FfiConverterOptionInt64.read(from: &buf), 
+                dateSentMs: FfiConverterOptionInt64.read(from: &buf), 
+                creator: FfiConverterOptionString.read(from: &buf), 
+                sourceRowFingerprint: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsProviderAcquisitionInput, into buf: inout [UInt8]) {
+        FfiConverterTypeNativeSmsSource.write(value.source, into: &buf)
+        FfiConverterBool.write(value.incoming, into: &buf)
+        FfiConverterOptionString.write(value.senderAddress, into: &buf)
+        FfiConverterSequenceString.write(value.recipients, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterBool.write(value.imported, into: &buf)
+        FfiConverterOptionInt64.write(value.sentAtMs, into: &buf)
+        FfiConverterOptionInt64.write(value.dateSentMs, into: &buf)
+        FfiConverterOptionString.write(value.creator, into: &buf)
+        FfiConverterString.write(value.sourceRowFingerprint, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsProviderAcquisitionInput_lift(_ buf: RustBuffer) throws -> NativeSmsProviderAcquisitionInput {
+    return try FfiConverterTypeNativeSmsProviderAcquisitionInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsProviderAcquisitionInput_lower(_ value: NativeSmsProviderAcquisitionInput) -> RustBuffer {
+    return FfiConverterTypeNativeSmsProviderAcquisitionInput.lower(value)
+}
+
+
+public struct NativeSmsReconciliationPlan: Equatable, Hashable {
+    public var sourceGeneration: String
+    public var subscriptionId: String
+    public var cursor: String?
+    public var upperBound: String
+    public var historyUpperBound: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceGeneration: String, subscriptionId: String, cursor: String?, upperBound: String, historyUpperBound: String?) {
+        self.sourceGeneration = sourceGeneration
+        self.subscriptionId = subscriptionId
+        self.cursor = cursor
+        self.upperBound = upperBound
+        self.historyUpperBound = historyUpperBound
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsReconciliationPlan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsReconciliationPlan {
+        return
+            try NativeSmsReconciliationPlan(
+                sourceGeneration: FfiConverterString.read(from: &buf), 
+                subscriptionId: FfiConverterString.read(from: &buf), 
+                cursor: FfiConverterOptionString.read(from: &buf), 
+                upperBound: FfiConverterString.read(from: &buf), 
+                historyUpperBound: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsReconciliationPlan, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceGeneration, into: &buf)
+        FfiConverterString.write(value.subscriptionId, into: &buf)
+        FfiConverterOptionString.write(value.cursor, into: &buf)
+        FfiConverterString.write(value.upperBound, into: &buf)
+        FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsReconciliationPlan_lift(_ buf: RustBuffer) throws -> NativeSmsReconciliationPlan {
+    return try FfiConverterTypeNativeSmsReconciliationPlan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsReconciliationPlan_lower(_ value: NativeSmsReconciliationPlan) -> RustBuffer {
+    return FfiConverterTypeNativeSmsReconciliationPlan.lower(value)
+}
+
+
+public struct NativeSmsScanPlan: Equatable, Hashable {
+    public var sourceGeneration: String
+    public var subscriptionId: String
+    public var imported: Bool
+    public var checkpoint: String?
+    public var historyUpperBound: String?
+    public var historyComplete: Bool
+    public var paused: Bool
+    public var pendingRecheckCursor: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?) {
+        self.sourceGeneration = sourceGeneration
+        self.subscriptionId = subscriptionId
+        self.imported = imported
+        self.checkpoint = checkpoint
+        self.historyUpperBound = historyUpperBound
+        self.historyComplete = historyComplete
+        self.paused = paused
+        self.pendingRecheckCursor = pendingRecheckCursor
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsScanPlan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsScanPlan {
+        return
+            try NativeSmsScanPlan(
+                sourceGeneration: FfiConverterString.read(from: &buf), 
+                subscriptionId: FfiConverterString.read(from: &buf), 
+                imported: FfiConverterBool.read(from: &buf), 
+                checkpoint: FfiConverterOptionString.read(from: &buf), 
+                historyUpperBound: FfiConverterOptionString.read(from: &buf), 
+                historyComplete: FfiConverterBool.read(from: &buf), 
+                paused: FfiConverterBool.read(from: &buf), 
+                pendingRecheckCursor: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsScanPlan, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceGeneration, into: &buf)
+        FfiConverterString.write(value.subscriptionId, into: &buf)
+        FfiConverterBool.write(value.imported, into: &buf)
+        FfiConverterOptionString.write(value.checkpoint, into: &buf)
+        FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
+        FfiConverterBool.write(value.historyComplete, into: &buf)
+        FfiConverterBool.write(value.paused, into: &buf)
+        FfiConverterOptionString.write(value.pendingRecheckCursor, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsScanPlan_lift(_ buf: RustBuffer) throws -> NativeSmsScanPlan {
+    return try FfiConverterTypeNativeSmsScanPlan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsScanPlan_lower(_ value: NativeSmsScanPlan) -> RustBuffer {
+    return FfiConverterTypeNativeSmsScanPlan.lower(value)
+}
+
+
+public struct NativeSmsScanStatus: Equatable, Hashable {
+    public var checkpoint: String?
+    public var historyComplete: Bool
+    public var paused: Bool
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(checkpoint: String?, historyComplete: Bool, paused: Bool, reason: String?) {
+        self.checkpoint = checkpoint
+        self.historyComplete = historyComplete
+        self.paused = paused
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsScanStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsScanStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsScanStatus {
+        return
+            try NativeSmsScanStatus(
+                checkpoint: FfiConverterOptionString.read(from: &buf), 
+                historyComplete: FfiConverterBool.read(from: &buf), 
+                paused: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsScanStatus, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.checkpoint, into: &buf)
+        FfiConverterBool.write(value.historyComplete, into: &buf)
+        FfiConverterBool.write(value.paused, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsScanStatus_lift(_ buf: RustBuffer) throws -> NativeSmsScanStatus {
+    return try FfiConverterTypeNativeSmsScanStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsScanStatus_lower(_ value: NativeSmsScanStatus) -> RustBuffer {
+    return FfiConverterTypeNativeSmsScanStatus.lower(value)
+}
+
+
+public struct NativeSmsSource: Equatable, Hashable {
+    public var sourceGeneration: String
+    public var subscriptionId: String
+    public var providerMessageId: String
+    public var providerThreadId: String?
+    public var broadcastId: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sourceGeneration: String, subscriptionId: String, providerMessageId: String, providerThreadId: String?, broadcastId: String?) {
+        self.sourceGeneration = sourceGeneration
+        self.subscriptionId = subscriptionId
+        self.providerMessageId = providerMessageId
+        self.providerThreadId = providerThreadId
+        self.broadcastId = broadcastId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeSmsSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsSource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsSource {
+        return
+            try NativeSmsSource(
+                sourceGeneration: FfiConverterString.read(from: &buf), 
+                subscriptionId: FfiConverterString.read(from: &buf), 
+                providerMessageId: FfiConverterString.read(from: &buf), 
+                providerThreadId: FfiConverterOptionString.read(from: &buf), 
+                broadcastId: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeSmsSource, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sourceGeneration, into: &buf)
+        FfiConverterString.write(value.subscriptionId, into: &buf)
+        FfiConverterString.write(value.providerMessageId, into: &buf)
+        FfiConverterOptionString.write(value.providerThreadId, into: &buf)
+        FfiConverterOptionString.write(value.broadcastId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsSource_lift(_ buf: RustBuffer) throws -> NativeSmsSource {
+    return try FfiConverterTypeNativeSmsSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsSource_lower(_ value: NativeSmsSource) -> RustBuffer {
+    return FfiConverterTypeNativeSmsSource.lower(value)
+}
+
+
 public struct NativeSnapshotProgress: Equatable, Hashable {
     public var generation: UInt64
     public var highWater: String
@@ -6256,6 +6960,7 @@ enum MobileBindingsError: Swift.Error, Equatable, Hashable, Foundation.Localized
     case Storage
     case MmsAcquisitionLimit
     case MmsMediaQuota
+    case SmsCapacity
 
     
 
@@ -6304,6 +7009,7 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         case 17: return .Storage
         case 18: return .MmsAcquisitionLimit
         case 19: return .MmsMediaQuota
+        case 20: return .SmsCapacity
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6390,6 +7096,10 @@ public struct FfiConverterTypeMobileBindingsError: FfiConverterRustBuffer {
         
         case .MmsMediaQuota:
             writeInt(&buf, Int32(19))
+        
+        
+        case .SmsCapacity:
+            writeInt(&buf, Int32(20))
         
         }
     }
@@ -7305,6 +8015,86 @@ public func FfiConverterTypeNativeSendResult_lower(_ value: NativeSendResult) ->
 
 
 
+
+public enum NativeSmsAcquisitionState: Equatable, Hashable {
+    
+    case pending
+    case unavailable
+    case complete
+    case paused
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeSmsAcquisitionState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeSmsAcquisitionState: FfiConverterRustBuffer {
+    typealias SwiftType = NativeSmsAcquisitionState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeSmsAcquisitionState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pending
+        
+        case 2: return .unavailable
+        
+        case 3: return .complete
+        
+        case 4: return .paused
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeSmsAcquisitionState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .unavailable:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .complete:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .paused:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsAcquisitionState_lift(_ buf: RustBuffer) throws -> NativeSmsAcquisitionState {
+    return try FfiConverterTypeNativeSmsAcquisitionState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeSmsAcquisitionState_lower(_ value: NativeSmsAcquisitionState) -> RustBuffer {
+    return FfiConverterTypeNativeSmsAcquisitionState.lower(value)
+}
+
+
+
 /**
  * State of the newest authoritative (server compaction) snapshot projection.
  */
@@ -7525,6 +8315,30 @@ public func FfiConverterTypeSyncStepState_lower(_ value: SyncStepState) -> RustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -7589,6 +8403,30 @@ fileprivate struct FfiConverterOptionTypeNativePendingVaultRequest: FfiConverter
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeNativePendingVaultRequest.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNativeSmsReconciliationPlan: FfiConverterRustBuffer {
+    typealias SwiftType = NativeSmsReconciliationPlan?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNativeSmsReconciliationPlan.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNativeSmsReconciliationPlan.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -8015,6 +8853,56 @@ fileprivate struct FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverter
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeNativeSmsAcquisition: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeSmsAcquisition]
+
+    public static func write(_ value: [NativeSmsAcquisition], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeSmsAcquisition.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeSmsAcquisition] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeSmsAcquisition]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeSmsAcquisition.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer {
+    typealias SwiftType = [NativeSmsScanPlan]
+
+    public static func write(_ value: [NativeSmsScanPlan], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNativeSmsScanPlan.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [NativeSmsScanPlan] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [NativeSmsScanPlan]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNativeSmsScanPlan.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * Creates a new vault key profile and encrypted check header from a passphrase.
  * Hosts use this material to initialize a vault before opening a native client.
@@ -8264,6 +9152,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() != 17788) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_sms_scan_exhausted() != 27531) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_acknowledge_contact_photo_reclaim_json() != 63889) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8291,6 +9182,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt() != 43275) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_sms_provider_acquisition() != 37196) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot() != 58393) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8301,6 +9195,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming() != 54266) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming_timed() != 57758) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_notification() != 52411) {
@@ -8316,6 +9213,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_notification_dismissal() != 45632) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition() != 6650) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_reconciliation() != 52994) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts() != 45000) {
@@ -8477,6 +9380,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() != 38265) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_reconciliation() != 11405) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans() != 2209) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment() != 2885) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8547,6 +9456,27 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported() != 14767) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state() != 18914) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_pending_recheck_cursor() != 18782) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_provider_error() != 63354) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint() != 31950) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after() != 47158) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_history_status() != 46876) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_scan_status() != 26765) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_snapshot_progress() != 44857) {

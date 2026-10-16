@@ -507,6 +507,10 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         NativeGateway.open(applicationContext)?.let { SmsCallbackReconciler.replay(it, callbacks) }
         NativeGateway.open(applicationContext)?.let { MmsCallbackReconciler.replay(it, mmsCallbacks) }
         MmsCaptureWork.ensurePeriodic(applicationContext)
+        SmsCaptureWork.ensurePeriodic(applicationContext)
+        if (ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED) {
+            SmsCaptureWork.enqueue(applicationContext)
+        }
         // Not enrolled, database unopenable, or shared vault locked: nothing can be synced yet.
         val session = NativeGateway.session(applicationContext) ?: return Result.success()
         val sendGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.SEND_SMS) ==

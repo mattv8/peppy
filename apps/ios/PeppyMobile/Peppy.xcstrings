@@ -211,6 +211,196 @@
         }
       }
     },
+    "peppy.sms_history_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone message sync"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatically adds sent and received SMS, including existing phone history, to your Peppy vault. Works with messages available in Android's SMS storage."
+          }
+        }
+      }
+    },
+    "peppy.sms_history_permission_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read phone messages"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History status"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not allowed"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_allow_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow phone message access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_open_settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open phone message settings"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting_permission": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for phone message access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_sync_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SMS sync is off"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for vault access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting to read phone history"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_reading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reading phone history…"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused — vault recovery capacity reached"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_captured": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone history captured"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone messages unavailable — will retry"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some messages need reconciliation"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_captured_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captured messages sync when your vault connection is available."
+          }
+        }
+      }
+    },
+    "peppy.sms_history_capacity_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History import is paused to keep vault recovery available. Existing messages remain on your phone."
+          }
+        }
+      }
+    },
     "peppy.wifi_only": {
       "localizations": {
         "en": {

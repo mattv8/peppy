@@ -7,5 +7,7 @@ class PeppyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         RelayWakeRuntime.initialize(this)
+        SmsCaptureWork.runner = SmsNativeCapture
+        SmsCaptureLifecycle.ensureObserver(this)
     }
 }

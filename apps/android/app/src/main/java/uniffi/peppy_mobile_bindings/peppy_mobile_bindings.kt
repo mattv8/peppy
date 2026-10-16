@@ -715,6 +715,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_sms_scan_exhausted(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_acknowledge_contact_photo_reclaim_json(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_acknowledge_contact_photo_reference_json(
@@ -733,6 +735,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_sms_provider_acquisition(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot_with_compaction(
@@ -740,6 +744,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_contact_book(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming_timed(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_notification(
     ): Int
@@ -750,6 +756,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_mms_acquisition(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_notification_dismissal(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_reconciliation(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts(
     ): Int
@@ -857,6 +867,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_reconciliation(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo(
@@ -904,6 +918,20 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_state(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_pending_recheck_cursor(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_provider_error(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_history_status(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_scan_status(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_snapshot_progress(
     ): Int
@@ -1035,6 +1063,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_outbox(`ptr`: Long,`envelopeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_sms_scan_exhausted(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`imported`: Byte,`frozenUpperBound`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_acknowledge_contact_photo_reclaim_json(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_acknowledge_contact_photo_reference_json(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1053,6 +1083,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_send_attempt(`ptr`: Long,`commandId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_sms_provider_acquisition(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot(`ptr`: Long,`highWater`: RustBuffer.ByValue,`recordCount`: Long,`purpose`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_snapshot_with_compaction(`ptr`: Long,`highWater`: RustBuffer.ByValue,`recordCount`: Long,`purpose`: RustBuffer.ByValue,`serverCompactionGeneration`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1060,6 +1092,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_contact_book(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_incoming(`ptr`: Long,`sms`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_incoming_timed(`ptr`: Long,`sms`: RustBuffer.ByValue,`smscAtMs`: RustBuffer.ByValue,`receivedAtMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_notification(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1070,6 +1104,10 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_mms_acquisition(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_notification_dismissal(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_acquisition(`ptr`: Long,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_reconciliation(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`upperBound`: RustBuffer.ByValue,`cursor`: RustBuffer.ByValue,`exhausted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_compose_drafts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1177,6 +1215,10 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_uploads(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_reconciliation(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`observedHighWater`: RustBuffer.ByValue,`liveAnchorFingerprint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`observedHighWater`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_attachment(`ptr`: Long,`sourcePath`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_contact_photo(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1225,6 +1267,20 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_server_compaction_supported(`ptr`: Long,`supported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_acquisition_state(`ptr`: Long,`id`: RustBuffer.ByValue,`state`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_pending_recheck_cursor(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`imported`: Byte,`acquisitionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_provider_error(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`providerError`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_scan_checkpoint(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`subscriptionId`: RustBuffer.ByValue,`imported`: Byte,`providerMessageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_acquisitions_after(`ptr`: Long,`afterId`: RustBuffer.ByValue,`limit`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_history_status(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_scan_status(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`subscriptionId`: RustBuffer.ByValue,`imported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_snapshot_progress(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_snapshot_projection_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1570,6 +1626,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_outbox() and 0xFFFF) != 17788) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ack_sms_scan_exhausted() and 0xFFFF) != 27531) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_acknowledge_contact_photo_reclaim_json() and 0xFFFF) != 63889) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1597,6 +1656,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_send_attempt() and 0xFFFF) != 43275) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_sms_provider_acquisition() and 0xFFFF) != 37196) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_begin_snapshot() and 0xFFFF) != 58393) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1607,6 +1669,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming() and 0xFFFF) != 54266) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_incoming_timed() and 0xFFFF) != 57758) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_notification() and 0xFFFF) != 52411) {
@@ -1622,6 +1687,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_notification_dismissal() and 0xFFFF) != 45632) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_acquisition() and 0xFFFF) != 6650) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_complete_sms_reconciliation() and 0xFFFF) != 52994) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compose_drafts() and 0xFFFF) != 45000) {
@@ -1783,6 +1854,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_uploads() and 0xFFFF) != 38265) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_reconciliation() and 0xFFFF) != 11405) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans() and 0xFFFF) != 2209) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment() and 0xFFFF) != 2885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1853,6 +1930,27 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_server_compaction_supported() and 0xFFFF) != 14767) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_acquisition_state() and 0xFFFF) != 18914) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_pending_recheck_cursor() and 0xFFFF) != 18782) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_provider_error() and 0xFFFF) != 63354) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_sms_scan_checkpoint() and 0xFFFF) != 31950) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_acquisitions_after() and 0xFFFF) != 47158) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_history_status() and 0xFFFF) != 46876) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_sms_scan_status() and 0xFFFF) != 26765) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_snapshot_progress() and 0xFFFF) != 44857) {
@@ -2436,6 +2534,8 @@ public interface NativeClientInterface {
     
     fun `ackOutbox`(`envelopeId`: kotlin.String)
     
+    fun `ackSmsScanExhausted`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `imported`: kotlin.Boolean, `frozenUpperBound`: kotlin.String)
+    
     fun `acknowledgeContactPhotoReclaimJson`(`inputJson`: kotlin.String): kotlin.String
     
     fun `acknowledgeContactPhotoReferenceJson`(`inputJson`: kotlin.String): kotlin.String
@@ -2464,6 +2564,8 @@ public interface NativeClientInterface {
      */
     fun `beginSendAttempt`(`commandId`: kotlin.String): NativePermit
     
+    fun `beginSmsProviderAcquisition`(`input`: NativeSmsProviderAcquisitionInput): NativeSmsAcquisition
+    
     fun `beginSnapshot`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `purpose`: NativeSnapshotPurpose): NativeSnapshotProgress
     
     fun `beginSnapshotWithCompaction`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `purpose`: NativeSnapshotPurpose, `serverCompactionGeneration`: kotlin.String?): NativeSnapshotProgress
@@ -2474,6 +2576,14 @@ public interface NativeClientInterface {
     fun `captureContactBook`(`inputJson`: kotlin.String): kotlin.String
     
     fun `captureIncoming`(`sms`: NativeIncomingSms): NativeCaptured
+    
+    /**
+     * Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
+     * identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
+     * reconciliation evidence, and `received_at_ms` is the local receipt time users see. A
+     * provider row captured first for the same message is reused, never duplicated.
+     */
+    fun `captureIncomingTimed`(`sms`: NativeIncomingSms, `smscAtMs`: kotlin.Long?, `receivedAtMs`: kotlin.Long?): NativeCaptured
     
     fun `captureNotification`(`input`: NativeNotificationCapture): NativeNotificationCaptureOutcome
     
@@ -2487,6 +2597,10 @@ public interface NativeClientInterface {
     fun `completeMmsAcquisition`(`id`: kotlin.String): NativeCaptured
     
     fun `completeNotificationDismissal`(`id`: kotlin.String)
+    
+    fun `completeSmsAcquisition`(`id`: kotlin.String): NativeCaptured
+    
+    fun `completeSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `upperBound`: kotlin.String, `cursor`: kotlin.String?, `exhausted`: kotlin.Boolean)
     
     fun `composeDrafts`(): List<NativeComposeDraft>
     
@@ -2654,6 +2768,10 @@ public interface NativeClientInterface {
     
     fun `pendingUploads`(): List<NativeCipherObject>
     
+    fun `planSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String, `liveAnchorFingerprint`: kotlin.String?): NativeSmsReconciliationPlan?
+    
+    fun `planSmsScans`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String): List<NativeSmsScanPlan>
+    
     fun `prepareAttachment`(`sourcePath`: kotlin.String, `mediaType`: kotlin.String, `displayName`: kotlin.String): NativeAttachmentInfo
     
     fun `prepareContactPhoto`(`path`: kotlin.String): NativeAttachmentInfo
@@ -2709,6 +2827,20 @@ public interface NativeClientInterface {
     fun `setServerCompactionState`(`supported`: kotlin.Boolean, `active`: kotlin.Boolean): kotlin.String
     
     fun `setServerCompactionSupported`(`supported`: kotlin.Boolean)
+    
+    fun `setSmsAcquisitionState`(`id`: kotlin.String, `state`: NativeSmsAcquisitionState, `reason`: kotlin.String?)
+    
+    fun `setSmsPendingRecheckCursor`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `imported`: kotlin.Boolean, `acquisitionId`: kotlin.String?)
+    
+    fun `setSmsProviderError`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `providerError`: kotlin.Boolean)
+    
+    fun `setSmsScanCheckpoint`(`sourceGeneration`: kotlin.String, `subscriptionId`: kotlin.String, `imported`: kotlin.Boolean, `providerMessageId`: kotlin.String)
+    
+    fun `smsAcquisitionsAfter`(`afterId`: kotlin.String?, `limit`: kotlin.ULong): List<NativeSmsAcquisition>
+    
+    fun `smsHistoryStatus`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String): NativeSmsHistoryStatus
+    
+    fun `smsScanStatus`(`sourceGeneration`: kotlin.String, `subscriptionId`: kotlin.String, `imported`: kotlin.Boolean): NativeSmsScanStatus
     
     fun `snapshotProgress`(): NativeSnapshotProgress?
     
@@ -2829,6 +2961,23 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`envelopeId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `ackSmsScanExhausted`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `imported`: kotlin.Boolean, `frozenUpperBound`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_ack_sms_scan_exhausted(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterBoolean.lower(`imported`),
+        FfiConverterString.lower(`frozenUpperBound`),_status)
 }
     }
     
@@ -2980,6 +3129,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `beginSmsProviderAcquisition`(`input`: NativeSmsProviderAcquisitionInput): NativeSmsAcquisition {
+            return FfiConverterTypeNativeSmsAcquisition.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_begin_sms_provider_acquisition(
+        it,
+        
+        FfiConverterTypeNativeSmsProviderAcquisitionInput.lower(`input`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `beginSnapshot`(`highWater`: kotlin.String, `recordCount`: kotlin.ULong, `purpose`: NativeSnapshotPurpose): NativeSnapshotProgress {
             return FfiConverterTypeNativeSnapshotProgress.lift(
     callWithHandle {
@@ -3041,6 +3205,29 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterTypeNativeIncomingSms.lower(`sms`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
+     * identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
+     * reconciliation evidence, and `received_at_ms` is the local receipt time users see. A
+     * provider row captured first for the same message is reused, never duplicated.
+     */
+    @Throws(MobileBindingsException::class)override fun `captureIncomingTimed`(`sms`: NativeIncomingSms, `smscAtMs`: kotlin.Long?, `receivedAtMs`: kotlin.Long?): NativeCaptured {
+            return FfiConverterTypeNativeCaptured.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_capture_incoming_timed(
+        it,
+        
+        FfiConverterTypeNativeIncomingSms.lower(`sms`),
+        FfiConverterOptionalLong.lower(`smscAtMs`),
+        FfiConverterOptionalLong.lower(`receivedAtMs`),_status)
 }
     }
     )
@@ -3119,6 +3306,39 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`id`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `completeSmsAcquisition`(`id`: kotlin.String): NativeCaptured {
+            return FfiConverterTypeNativeCaptured.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_acquisition(
+        it,
+        
+        FfiConverterString.lower(`id`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `completeSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `upperBound`: kotlin.String, `cursor`: kotlin.String?, `exhausted`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_complete_sms_reconciliation(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterString.lower(`upperBound`),
+        FfiConverterOptionalString.lower(`cursor`),
+        FfiConverterBoolean.lower(`exhausted`),_status)
 }
     }
     
@@ -3966,6 +4186,41 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `planSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String, `liveAnchorFingerprint`: kotlin.String?): NativeSmsReconciliationPlan? {
+            return FfiConverterOptionalTypeNativeSmsReconciliationPlan.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_reconciliation(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterString.lower(`observedHighWater`),
+        FfiConverterOptionalString.lower(`liveAnchorFingerprint`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `planSmsScans`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String): List<NativeSmsScanPlan> {
+            return FfiConverterSequenceTypeNativeSmsScanPlan.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterString.lower(`observedHighWater`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(MobileBindingsException::class)override fun `prepareAttachment`(`sourcePath`: kotlin.String, `mediaType`: kotlin.String, `displayName`: kotlin.String): NativeAttachmentInfo {
             return FfiConverterTypeNativeAttachmentInfo.lift(
     callWithHandle {
@@ -4340,6 +4595,121 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
 }
     }
     
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setSmsAcquisitionState`(`id`: kotlin.String, `state`: NativeSmsAcquisitionState, `reason`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_acquisition_state(
+        it,
+        
+        FfiConverterString.lower(`id`),
+        FfiConverterTypeNativeSmsAcquisitionState.lower(`state`),
+        FfiConverterOptionalString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setSmsPendingRecheckCursor`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `imported`: kotlin.Boolean, `acquisitionId`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_pending_recheck_cursor(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterBoolean.lower(`imported`),
+        FfiConverterOptionalString.lower(`acquisitionId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setSmsProviderError`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `providerError`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_provider_error(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterBoolean.lower(`providerError`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setSmsScanCheckpoint`(`sourceGeneration`: kotlin.String, `subscriptionId`: kotlin.String, `imported`: kotlin.Boolean, `providerMessageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_sms_scan_checkpoint(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`subscriptionId`),
+        FfiConverterBoolean.lower(`imported`),
+        FfiConverterString.lower(`providerMessageId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `smsAcquisitionsAfter`(`afterId`: kotlin.String?, `limit`: kotlin.ULong): List<NativeSmsAcquisition> {
+            return FfiConverterSequenceTypeNativeSmsAcquisition.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_acquisitions_after(
+        it,
+        
+        FfiConverterOptionalString.lower(`afterId`),
+        FfiConverterULong.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `smsHistoryStatus`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String): NativeSmsHistoryStatus {
+            return FfiConverterTypeNativeSmsHistoryStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_history_status(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `smsScanStatus`(`sourceGeneration`: kotlin.String, `subscriptionId`: kotlin.String, `imported`: kotlin.Boolean): NativeSmsScanStatus {
+            return FfiConverterTypeNativeSmsScanStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_sms_scan_status(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`subscriptionId`),
+        FfiConverterBoolean.lower(`imported`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -7745,6 +8115,8 @@ data class NativeMessage (
     var `seen`: kotlin.Boolean
     , 
     var `sendState`: kotlin.String?
+    , 
+    var `sentAtMs`: kotlin.Long?
     
 ){
     
@@ -7772,6 +8144,7 @@ public object FfiConverterTypeNativeMessage: FfiConverterRustBuffer<NativeMessag
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalLong.read(buf),
         )
     }
 
@@ -7786,7 +8159,8 @@ public object FfiConverterTypeNativeMessage: FfiConverterRustBuffer<NativeMessag
             FfiConverterSequenceString.allocationSize(value.`attachmentIds`) +
             FfiConverterBoolean.allocationSize(value.`incoming`) +
             FfiConverterBoolean.allocationSize(value.`seen`) +
-            FfiConverterOptionalString.allocationSize(value.`sendState`)
+            FfiConverterOptionalString.allocationSize(value.`sendState`) +
+            FfiConverterOptionalLong.allocationSize(value.`sentAtMs`)
     )
 
     override fun write(value: NativeMessage, buf: ByteBuffer) {
@@ -7801,6 +8175,7 @@ public object FfiConverterTypeNativeMessage: FfiConverterRustBuffer<NativeMessag
             FfiConverterBoolean.write(value.`incoming`, buf)
             FfiConverterBoolean.write(value.`seen`, buf)
             FfiConverterOptionalString.write(value.`sendState`, buf)
+            FfiConverterOptionalLong.write(value.`sentAtMs`, buf)
     }
 }
 
@@ -8668,6 +9043,422 @@ public object FfiConverterTypeNativeRawSnapshotRecord: FfiConverterRustBuffer<Na
 
 
 
+data class NativeSmsAcquisition (
+    var `acquisitionId`: kotlin.String
+    , 
+    var `conversationId`: kotlin.String
+    , 
+    var `input`: NativeSmsProviderAcquisitionInput
+    , 
+    var `state`: NativeSmsAcquisitionState
+    , 
+    var `reason`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsAcquisition: FfiConverterRustBuffer<NativeSmsAcquisition> {
+    override fun read(buf: ByteBuffer): NativeSmsAcquisition {
+        return NativeSmsAcquisition(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeNativeSmsProviderAcquisitionInput.read(buf),
+            FfiConverterTypeNativeSmsAcquisitionState.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsAcquisition) = (
+            FfiConverterString.allocationSize(value.`acquisitionId`) +
+            FfiConverterString.allocationSize(value.`conversationId`) +
+            FfiConverterTypeNativeSmsProviderAcquisitionInput.allocationSize(value.`input`) +
+            FfiConverterTypeNativeSmsAcquisitionState.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: NativeSmsAcquisition, buf: ByteBuffer) {
+            FfiConverterString.write(value.`acquisitionId`, buf)
+            FfiConverterString.write(value.`conversationId`, buf)
+            FfiConverterTypeNativeSmsProviderAcquisitionInput.write(value.`input`, buf)
+            FfiConverterTypeNativeSmsAcquisitionState.write(value.`state`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+data class NativeSmsHistoryStatus (
+    var `baselineInitialized`: kotlin.Boolean
+    , 
+    var `scanning`: kotlin.Boolean
+    , 
+    var `historyComplete`: kotlin.Boolean
+    , 
+    var `paused`: kotlin.Boolean
+    , 
+    var `providerError`: kotlin.Boolean
+    , 
+    var `pendingCount`: kotlin.ULong
+    , 
+    var `ambiguousCount`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsHistoryStatus: FfiConverterRustBuffer<NativeSmsHistoryStatus> {
+    override fun read(buf: ByteBuffer): NativeSmsHistoryStatus {
+        return NativeSmsHistoryStatus(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsHistoryStatus) = (
+            FfiConverterBoolean.allocationSize(value.`baselineInitialized`) +
+            FfiConverterBoolean.allocationSize(value.`scanning`) +
+            FfiConverterBoolean.allocationSize(value.`historyComplete`) +
+            FfiConverterBoolean.allocationSize(value.`paused`) +
+            FfiConverterBoolean.allocationSize(value.`providerError`) +
+            FfiConverterULong.allocationSize(value.`pendingCount`) +
+            FfiConverterULong.allocationSize(value.`ambiguousCount`)
+    )
+
+    override fun write(value: NativeSmsHistoryStatus, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`baselineInitialized`, buf)
+            FfiConverterBoolean.write(value.`scanning`, buf)
+            FfiConverterBoolean.write(value.`historyComplete`, buf)
+            FfiConverterBoolean.write(value.`paused`, buf)
+            FfiConverterBoolean.write(value.`providerError`, buf)
+            FfiConverterULong.write(value.`pendingCount`, buf)
+            FfiConverterULong.write(value.`ambiguousCount`, buf)
+    }
+}
+
+
+
+data class NativeSmsProviderAcquisitionInput (
+    var `source`: NativeSmsSource
+    , 
+    var `incoming`: kotlin.Boolean
+    , 
+    var `senderAddress`: kotlin.String?
+    , 
+    var `recipients`: List<kotlin.String>
+    , 
+    var `body`: kotlin.String
+    , 
+    var `imported`: kotlin.Boolean
+    , 
+    var `sentAtMs`: kotlin.Long?
+    , 
+    var `dateSentMs`: kotlin.Long?
+    , 
+    var `creator`: kotlin.String?
+    , 
+    var `sourceRowFingerprint`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsProviderAcquisitionInput: FfiConverterRustBuffer<NativeSmsProviderAcquisitionInput> {
+    override fun read(buf: ByteBuffer): NativeSmsProviderAcquisitionInput {
+        return NativeSmsProviderAcquisitionInput(
+            FfiConverterTypeNativeSmsSource.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsProviderAcquisitionInput) = (
+            FfiConverterTypeNativeSmsSource.allocationSize(value.`source`) +
+            FfiConverterBoolean.allocationSize(value.`incoming`) +
+            FfiConverterOptionalString.allocationSize(value.`senderAddress`) +
+            FfiConverterSequenceString.allocationSize(value.`recipients`) +
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterBoolean.allocationSize(value.`imported`) +
+            FfiConverterOptionalLong.allocationSize(value.`sentAtMs`) +
+            FfiConverterOptionalLong.allocationSize(value.`dateSentMs`) +
+            FfiConverterOptionalString.allocationSize(value.`creator`) +
+            FfiConverterString.allocationSize(value.`sourceRowFingerprint`)
+    )
+
+    override fun write(value: NativeSmsProviderAcquisitionInput, buf: ByteBuffer) {
+            FfiConverterTypeNativeSmsSource.write(value.`source`, buf)
+            FfiConverterBoolean.write(value.`incoming`, buf)
+            FfiConverterOptionalString.write(value.`senderAddress`, buf)
+            FfiConverterSequenceString.write(value.`recipients`, buf)
+            FfiConverterString.write(value.`body`, buf)
+            FfiConverterBoolean.write(value.`imported`, buf)
+            FfiConverterOptionalLong.write(value.`sentAtMs`, buf)
+            FfiConverterOptionalLong.write(value.`dateSentMs`, buf)
+            FfiConverterOptionalString.write(value.`creator`, buf)
+            FfiConverterString.write(value.`sourceRowFingerprint`, buf)
+    }
+}
+
+
+
+data class NativeSmsReconciliationPlan (
+    var `sourceGeneration`: kotlin.String
+    , 
+    var `subscriptionId`: kotlin.String
+    , 
+    var `cursor`: kotlin.String?
+    , 
+    var `upperBound`: kotlin.String
+    , 
+    var `historyUpperBound`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsReconciliationPlan: FfiConverterRustBuffer<NativeSmsReconciliationPlan> {
+    override fun read(buf: ByteBuffer): NativeSmsReconciliationPlan {
+        return NativeSmsReconciliationPlan(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsReconciliationPlan) = (
+            FfiConverterString.allocationSize(value.`sourceGeneration`) +
+            FfiConverterString.allocationSize(value.`subscriptionId`) +
+            FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterString.allocationSize(value.`upperBound`) +
+            FfiConverterOptionalString.allocationSize(value.`historyUpperBound`)
+    )
+
+    override fun write(value: NativeSmsReconciliationPlan, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sourceGeneration`, buf)
+            FfiConverterString.write(value.`subscriptionId`, buf)
+            FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterString.write(value.`upperBound`, buf)
+            FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
+    }
+}
+
+
+
+data class NativeSmsScanPlan (
+    var `sourceGeneration`: kotlin.String
+    , 
+    var `subscriptionId`: kotlin.String
+    , 
+    var `imported`: kotlin.Boolean
+    , 
+    var `checkpoint`: kotlin.String?
+    , 
+    var `historyUpperBound`: kotlin.String?
+    , 
+    var `historyComplete`: kotlin.Boolean
+    , 
+    var `paused`: kotlin.Boolean
+    , 
+    var `pendingRecheckCursor`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSmsScanPlan> {
+    override fun read(buf: ByteBuffer): NativeSmsScanPlan {
+        return NativeSmsScanPlan(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsScanPlan) = (
+            FfiConverterString.allocationSize(value.`sourceGeneration`) +
+            FfiConverterString.allocationSize(value.`subscriptionId`) +
+            FfiConverterBoolean.allocationSize(value.`imported`) +
+            FfiConverterOptionalString.allocationSize(value.`checkpoint`) +
+            FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
+            FfiConverterBoolean.allocationSize(value.`historyComplete`) +
+            FfiConverterBoolean.allocationSize(value.`paused`) +
+            FfiConverterOptionalString.allocationSize(value.`pendingRecheckCursor`)
+    )
+
+    override fun write(value: NativeSmsScanPlan, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sourceGeneration`, buf)
+            FfiConverterString.write(value.`subscriptionId`, buf)
+            FfiConverterBoolean.write(value.`imported`, buf)
+            FfiConverterOptionalString.write(value.`checkpoint`, buf)
+            FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
+            FfiConverterBoolean.write(value.`historyComplete`, buf)
+            FfiConverterBoolean.write(value.`paused`, buf)
+            FfiConverterOptionalString.write(value.`pendingRecheckCursor`, buf)
+    }
+}
+
+
+
+data class NativeSmsScanStatus (
+    var `checkpoint`: kotlin.String?
+    , 
+    var `historyComplete`: kotlin.Boolean
+    , 
+    var `paused`: kotlin.Boolean
+    , 
+    var `reason`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsScanStatus: FfiConverterRustBuffer<NativeSmsScanStatus> {
+    override fun read(buf: ByteBuffer): NativeSmsScanStatus {
+        return NativeSmsScanStatus(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsScanStatus) = (
+            FfiConverterOptionalString.allocationSize(value.`checkpoint`) +
+            FfiConverterBoolean.allocationSize(value.`historyComplete`) +
+            FfiConverterBoolean.allocationSize(value.`paused`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: NativeSmsScanStatus, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`checkpoint`, buf)
+            FfiConverterBoolean.write(value.`historyComplete`, buf)
+            FfiConverterBoolean.write(value.`paused`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
+data class NativeSmsSource (
+    var `sourceGeneration`: kotlin.String
+    , 
+    var `subscriptionId`: kotlin.String
+    , 
+    var `providerMessageId`: kotlin.String
+    , 
+    var `providerThreadId`: kotlin.String?
+    , 
+    var `broadcastId`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsSource: FfiConverterRustBuffer<NativeSmsSource> {
+    override fun read(buf: ByteBuffer): NativeSmsSource {
+        return NativeSmsSource(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeSmsSource) = (
+            FfiConverterString.allocationSize(value.`sourceGeneration`) +
+            FfiConverterString.allocationSize(value.`subscriptionId`) +
+            FfiConverterString.allocationSize(value.`providerMessageId`) +
+            FfiConverterOptionalString.allocationSize(value.`providerThreadId`) +
+            FfiConverterOptionalString.allocationSize(value.`broadcastId`)
+    )
+
+    override fun write(value: NativeSmsSource, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sourceGeneration`, buf)
+            FfiConverterString.write(value.`subscriptionId`, buf)
+            FfiConverterString.write(value.`providerMessageId`, buf)
+            FfiConverterOptionalString.write(value.`providerThreadId`, buf)
+            FfiConverterOptionalString.write(value.`broadcastId`, buf)
+    }
+}
+
+
+
 data class NativeSnapshotProgress (
     var `generation`: kotlin.ULong
     , 
@@ -9094,6 +9885,12 @@ sealed class MobileBindingsException: kotlin.Exception() {
             get() = ""
     }
     
+    class SmsCapacity(
+        ) : MobileBindingsException() {
+        override val message
+            get() = ""
+    }
+    
 
     
 
@@ -9132,6 +9929,7 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             17 -> MobileBindingsException.Storage()
             18 -> MobileBindingsException.MmsAcquisitionLimit()
             19 -> MobileBindingsException.MmsMediaQuota()
+            20 -> MobileBindingsException.SmsCapacity()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -9214,6 +10012,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
+            is MobileBindingsException.SmsCapacity -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
         }
     }
 
@@ -9293,6 +10095,10 @@ public object FfiConverterTypeMobileBindingsError : FfiConverterRustBuffer<Mobil
             }
             is MobileBindingsException.MmsMediaQuota -> {
                 buf.putInt(19)
+                Unit
+            }
+            is MobileBindingsException.SmsCapacity -> {
+                buf.putInt(20)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -9700,6 +10506,42 @@ public object FfiConverterTypeNativeSendResult: FfiConverterRustBuffer<NativeSen
 
 
 
+
+enum class NativeSmsAcquisitionState {
+    
+    PENDING,
+    UNAVAILABLE,
+    COMPLETE,
+    PAUSED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeSmsAcquisitionState: FfiConverterRustBuffer<NativeSmsAcquisitionState> {
+    override fun read(buf: ByteBuffer) = try {
+        NativeSmsAcquisitionState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NativeSmsAcquisitionState) = 4UL
+
+    override fun write(value: NativeSmsAcquisitionState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 /**
  * State of the newest authoritative (server compaction) snapshot projection.
  */
@@ -9814,6 +10656,38 @@ public object FfiConverterTypeSyncStepState: FfiConverterRustBuffer<SyncStepStat
 /**
  * @suppress
  */
+public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
+    override fun read(buf: ByteBuffer): kotlin.Long? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterLong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Long?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterLong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterLong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -9900,6 +10774,38 @@ public object FfiConverterOptionalTypeNativePendingVaultRequest: FfiConverterRus
         } else {
             buf.put(1)
             FfiConverterTypeNativePendingVaultRequest.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNativeSmsReconciliationPlan: FfiConverterRustBuffer<NativeSmsReconciliationPlan?> {
+    override fun read(buf: ByteBuffer): NativeSmsReconciliationPlan? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNativeSmsReconciliationPlan.read(buf)
+    }
+
+    override fun allocationSize(value: NativeSmsReconciliationPlan?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNativeSmsReconciliationPlan.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NativeSmsReconciliationPlan?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNativeSmsReconciliationPlan.write(value, buf)
         }
     }
 }
@@ -10388,6 +11294,62 @@ public object FfiConverterSequenceTypeNativeRawSnapshotRecord: FfiConverterRustB
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeNativeRawSnapshotRecord.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeSmsAcquisition: FfiConverterRustBuffer<List<NativeSmsAcquisition>> {
+    override fun read(buf: ByteBuffer): List<NativeSmsAcquisition> {
+        val len = buf.getInt()
+        return List<NativeSmsAcquisition>(len) {
+            FfiConverterTypeNativeSmsAcquisition.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeSmsAcquisition>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeSmsAcquisition.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeSmsAcquisition>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeSmsAcquisition.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<List<NativeSmsScanPlan>> {
+    override fun read(buf: ByteBuffer): List<NativeSmsScanPlan> {
+        val len = buf.getInt()
+        return List<NativeSmsScanPlan>(len) {
+            FfiConverterTypeNativeSmsScanPlan.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NativeSmsScanPlan>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNativeSmsScanPlan.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NativeSmsScanPlan>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNativeSmsScanPlan.write(it, buf)
         }
     }
 }

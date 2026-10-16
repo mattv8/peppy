@@ -600,6 +600,9 @@ impl Client {
             transport: Transport::Mms,
             direction: input.direction,
             imported: input.imported,
+            // Non-positive provider dates are unknown, never 1970.
+            sent_at_ms: Some(input.observed_at_ms).filter(|time| *time > 0),
+            ordered_at_ms: (input.observed_at_ms <= 0).then(crate::notifications::now_ms),
             mms_context: Some(MmsContext {
                 source_generation: input.source.source_generation.clone(),
                 subscription_id: input.source.subscription_id.clone(),
