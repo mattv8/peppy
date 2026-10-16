@@ -505,10 +505,13 @@ internal class AndroidContactsProvider(context: Context) {
         val expectedByKind = expected.groupBy { it.kind }
         if (existingByKind.keys != expectedByKind.keys) return false
         return expectedByKind.all { (kind, wanted) ->
-            val have = existingByKind.getValue(kind).toMutableList()
+            val have = existingByKind.getValue(kind)
+            val matched = BooleanArray(have.size)
             have.size == wanted.size && wanted.all { field ->
-                val match = have.firstOrNull { row -> field.values.all { (column, value) -> value == null || row.values[column] == value } }
-                match != null && have.remove(match)
+                val match = have.indices.firstOrNull { index ->
+                    !matched[index] && field.values.all { (column, value) -> value == null || have[index].values[column] == value }
+                }
+                match != null && run { matched[match] = true; true }
             }
         }
     }

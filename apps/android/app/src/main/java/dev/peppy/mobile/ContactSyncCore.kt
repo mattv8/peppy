@@ -23,6 +23,12 @@ internal interface ContactCore {
     fun observeScan(input: JSONObject): JSONObject
     fun finishScan(input: JSONObject): JSONObject
     fun scanState(input: JSONObject): JSONObject
+    /** Owner-local remote full-scan work; request identity remains durable in the core. */
+    fun pendingSyncScans(input: JSONObject): JSONObject
+    /** Publishes terminal blocked results for waiting remote scan requests. */
+    fun reportSyncBlocked(input: JSONObject): JSONObject
+    /** Adds/removes the owner's remote-scan capability without changing book generation. */
+    fun setScanRequestCapability(input: JSONObject): JSONObject
     fun listRequests(input: JSONObject): JSONObject
     fun nextPermit(input: JSONObject): JSONObject
     fun applyEvidence(input: JSONObject): JSONObject
@@ -48,6 +54,9 @@ internal class NativeContactCore(private val client: NativeClientInterface) : Co
     override fun observeScan(input: JSONObject) = JSONObject(client.observeContactScan(input.toString()))
     override fun finishScan(input: JSONObject) = JSONObject(client.finishContactScan(input.toString()))
     override fun scanState(input: JSONObject) = JSONObject(client.contactScanStateJson(input.toString()))
+    override fun pendingSyncScans(input: JSONObject) = JSONObject(client.pendingContactSyncScans(input.toString()))
+    override fun reportSyncBlocked(input: JSONObject) = JSONObject(client.reportContactSyncBlocked(input.toString()))
+    override fun setScanRequestCapability(input: JSONObject) = JSONObject(client.setContactScanRequestCapability(input.toString()))
     override fun listRequests(input: JSONObject) = JSONObject(client.listContactRequestsJson(input.toString()))
     override fun nextPermit(input: JSONObject) = JSONObject(client.nextContactApplyPermit(input.toString()))
     override fun applyEvidence(input: JSONObject) = JSONObject(client.contactApplyEvidenceJson(input.toString()))

@@ -77,16 +77,63 @@ describe("InstanceManagement", () => {
   });
 
   it("uses phone wording for the gateway role and health column", async () => {
-    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], role: "gateway" as const, gateway_online: true }] })) })} />);
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], kind: "android" as const, role: "gateway" as const, gateway_online: true, presence: { state: "connected" as const, last_seen_age_seconds: 0 } }] })) })} />);
     expect(await screen.findByRole("columnheader", { name: "Phone health" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "Phone" })).toBeTruthy();
-    expect(screen.getByRole("cell", { name: "Online" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Connected" })).toBeTruthy();
     expect(screen.queryByText(/gateway/i)).toBeNull();
+  });
+
+  it("does not treat legacy gateway_online as proof that a phone is connected", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], kind: "android" as const, role: "gateway" as const, gateway_online: true }] })) })} />);
+    expect(await screen.findByRole("cell", { name: "Status unknown" })).toBeTruthy();
+  });
+
+  it("shows the reported age for a seen phone", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, devices: [{ ...management.devices[0], kind: "android" as const, presence: { state: "seen" as const, last_seen_age_seconds: 300 } }] })) })} />);
+    expect(await screen.findByRole("cell", { name: "Last seen 5m ago" })).toBeTruthy();
   });
 
   it("shows only the signed-in identity to a non-admin owner", async () => {
     render(<InstanceManagement bridge={bridge({ enrollment_management: vi.fn(async () => ({ ...management, isAdmin: false, username: "sasha" })) })} />);
     expect(await screen.findByText("sasha")).toBeTruthy();
     expect(document.querySelector("#family-vaults")).toBeNull();
+  });
+
+  it("opens revoke as a modal and returns focus to the row button on cancel", async () => {
+    render(<InstanceManagement bridge={bridge()} />);
+    const revokeButton = await screen.findByRole("button", { name: "Revoke" });
+    fireEvent.click(revokeButton);
+    expect(screen.getByRole("dialog", { name: "Revoke device?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull());
+    expect(document.activeElement).toBe(revokeButton);
+  });
+
+  it("shows a failed revoke inside the still-open modal", async () => {
+    render(<InstanceManagement bridge={bridge({ enrollment_revoke_device: vi.fn(async () => { throw new Error("network"); }) })} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke device" }));
+    const dialog = screen.getByRole("dialog", { name: "Revoke device?" });
+    await waitFor(() => expect(dialog.querySelector('[role="alert"]')?.textContent).toContain("No device access was changed"));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("moves focus to the Devices heading after a successful revoke", async () => {
+    const revoked = { ...management, devices: management.devices.map((device) => ({ ...device, revoked: true })) };
+    render(<InstanceManagement bridge={bridge({ enrollment_revoke_device: vi.fn(async () => revoked) })} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke device" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull());
+    expect(document.activeElement?.id).toBe("instance-management-devices-heading");
+  });
+
+  it("closes revoke on Escape without calling revoke", async () => {
+    const mockedBridge = bridge();
+    render(<InstanceManagement bridge={mockedBridge} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull());
+    expect(mockedBridge.enrollment_revoke_device).not.toHaveBeenCalled();
   });
 });

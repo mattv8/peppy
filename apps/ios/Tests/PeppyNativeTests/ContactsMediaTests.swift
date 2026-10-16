@@ -48,6 +48,14 @@ func syntheticImage(_ type: UTType = .png, side: Int = 96, red: CGFloat = 0.8) -
 
 /// Photo capture through the real core (prepare → tracked attachment → capture), no network.
 @Suite(.serialized) struct ContactsPhotoCaptureTests {
+    @Test func photoBacklogDeduplicationPreservesFirstSeenOrder() {
+        var checkpoint = ContactsCheckpoint()
+        checkpoint.addPhotoKeys(["first", "second", "first", "third"])
+        checkpoint.addPhotoKeys(["second", "fourth"])
+
+        #expect(checkpoint.pendingPhotoKeys == ["first", "second", "third", "fourth"])
+    }
+
     let passphrase = "io synthetic vault passphrase"
 
     func owner(_ contacts: [PlatformContact], photos: [String: Data], budget: ContactsPhotoBudget? = nil) async throws

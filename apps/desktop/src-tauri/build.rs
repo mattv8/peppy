@@ -3,6 +3,7 @@
 /// windows can only reach the conversation/draft/read/attachment/close commands.
 const COMMANDS: &[&str] = &[
     "load_state",
+    "load_history",
     "configure_server",
     "unlock_sync",
     "get_app_lock_status",
@@ -32,8 +33,12 @@ const COMMANDS: &[&str] = &[
     "pick_contact_photo",
     "search_contact_recipients",
     "request_contact_repair",
+    "request_contact_sync",
+    "get_contact_sync_request",
     "list_restorable_contacts",
     "restore_contact",
+    "list_devices",
+    "revoke_device",
     "hide_head",
     "close_composer",
     "close_head_panel",

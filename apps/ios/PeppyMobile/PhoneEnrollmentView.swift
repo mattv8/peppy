@@ -12,6 +12,9 @@ struct PhoneEnrollmentView: View {
     @State private var coordinator = PhoneEnrollmentAttemptCoordinator()
     @State private var inviteLink: String?
     @State private var operation: Task<Void, Never>?
+    @State private var claimError: String?
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         NavigationStack {
@@ -21,7 +24,11 @@ struct PhoneEnrollmentView: View {
                 VStack(spacing: 16) {
                 QRScannerView { qr in startScan(qr) }
                     .frame(height: 300).clipShape(RoundedRectangle(cornerRadius: 16))
+                    .allowsHitTesting(!coordinator.isStarting && !coordinator.isConfirming)
                     .accessibilityIdentifier("phone-enrollment-scanner")
+                if coordinator.isStarting {
+                    operationStatus("peppy.production_pairing_checking", id: "phone-enrollment-checking")
+                }
                 if let status {
                     if let code = status.verificationCode {
                         Text(code).font(.title.monospaced())
@@ -30,15 +37,9 @@ struct PhoneEnrollmentView: View {
                     }
                     if status.awaitingOwner {
                         Text("Waiting for the owner to approve this phone.").accessibilityIdentifier("phone-enrollment-waiting")
-                        ProgressView()
-                    } else if coordinator.isConfirming && !status.requiresSharedSecret {
-                        VStack {
-                            ProgressView()
-                            Text("peppy.production_pairing_connecting", tableName: "Peppy")
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel(Text("peppy.production_pairing_connecting", tableName: "Peppy"))
-                        .accessibilityIdentifier("phone-enrollment-connecting")
+                        progressGlyph
+                    } else if coordinator.isConfirming {
+                        operationStatus("peppy.production_pairing_connecting", id: "phone-enrollment-connecting")
                     } else {
                         if status.requiresSharedSecret && !coordinator.canRetryConfirmation && !coordinator.needsRescan {
                             SecureField("Vault shared secret", text: $sharedSecret)
@@ -56,7 +57,7 @@ struct PhoneEnrollmentView: View {
                 } else {
                     Text("Scan the QR code from your Peppy owner device.")
                 }
-                if let error = model.lastError, !coordinator.isConfirming {
+                if let error = model.lastError ?? claimError, !coordinator.isConfirming {
                     Text(error).foregroundStyle(.red).accessibilityIdentifier("phone-enrollment-error")
                     Button(coordinator.canRetryConfirmation ? "Try again" : "Scan again") {
                         if coordinator.canRetryConfirmation {
@@ -73,11 +74,15 @@ struct PhoneEnrollmentView: View {
             }
         }
         .accessibilityIdentifier("phone-enrollment-screen")
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { sharedSecret = "" }
+        }
         .onDisappear { cancel() }
     }
 
     private func startScan(_ qr: String) {
         guard let attempt = coordinator.beginScan() else { return }
+        claimError = nil
         operation = Task { await scan(qr, attempt: attempt) }
     }
 
@@ -89,7 +94,10 @@ struct PhoneEnrollmentView: View {
         }
         guard !Task.isCancelled, coordinator.activeAttempt == attempt else { return }
         guard let scanned = await model.beginPhoneEnrollment(qr: qr) else {
-            if !Task.isCancelled, coordinator.activeAttempt == attempt { coordinator.cancel() }
+            if !Task.isCancelled, coordinator.activeAttempt == attempt {
+                claimError = model.lastError ?? "Could not start phone enrollment. Scan the code again."
+                coordinator.cancel()
+            }
             return
         }
         guard !Task.isCancelled, coordinator.activeAttempt == attempt else { return }
@@ -123,6 +131,7 @@ struct PhoneEnrollmentView: View {
     }
 
     private func cancel() {
+        sharedSecret = ""
         operation?.cancel()
         operation = nil
         coordinator.cancel()
@@ -133,5 +142,23 @@ struct PhoneEnrollmentView: View {
         #if canImport(UIKit)
         UIAccessibility.post(notification: .announcement, argument: String(localized: "peppy.production_pairing_connecting", table: "Peppy"))
         #endif
+    }
+
+    @ViewBuilder private var progressGlyph: some View {
+        if reduceMotion {
+            Image(systemName: "hourglass").accessibilityHidden(true)
+        } else {
+            ProgressView().accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder private func operationStatus(_ key: String, id: String) -> some View {
+        VStack {
+            progressGlyph
+            Text(NSLocalizedString(key, tableName: "Peppy", comment: ""))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(NSLocalizedString(key, tableName: "Peppy", comment: "")))
+        .accessibilityIdentifier(id)
     }
 }

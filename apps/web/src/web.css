@@ -89,15 +89,13 @@ dialog[data-browser-screen] form { gap: 16px; }
 #family-vaults,
 #instance-management-sign-in-card,
 #instance-management-hosted-card,
-#instance-management-error-card,
-#instance-management-revoke-card { display: grid; gap: 16px; }
+#instance-management-error-card { display: grid; gap: 16px; }
 #instance-management-status,
 #instance-management-devices,
 #instance-management-identity,
 #instance-management-sign-in-card,
 #instance-management-hosted-card,
-#instance-management-error-card,
-#instance-management-revoke-card { margin-top: 24px; padding: 24px; border: 1px solid var(--peppy-border, #555); border-radius: var(--peppy-radius-md, 4px); background: var(--peppy-glass-surface, #303030); }
+#instance-management-error-card { margin-top: 24px; padding: 24px; border: 1px solid var(--peppy-border, #555); border-radius: var(--peppy-radius-md, 4px); background: var(--peppy-glass-surface, #303030); }
 #instance-management-status dl { display: flex; gap: 32px; flex-wrap: wrap; margin: 0; }
 #instance-management-status dt { color: var(--peppy-text-secondary, #aaa); }
 #instance-management-status dd { margin: 4px 0 0; }
@@ -105,9 +103,7 @@ dialog[data-browser-screen] form { gap: 16px; }
 #instance-management-devices-table th,
 #instance-management-devices-table td { padding: 12px 8px; border-top: 1px solid var(--peppy-border, #555); }
 .instance-management-kind { display: block; color: var(--peppy-text-secondary, #aaa); font-size: 0.85em; }
-#instance-management-revoke-dialog { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / 55%); }
-#instance-management-revoke-card { width: min(100%, 440px); margin: 0; }
-#instance-management-revoke-card > div { display: flex; gap: 12px; justify-content: flex-end; }
+#instance-management-devices-heading:focus { outline: none; }
 #browser-manage-server-link { position: fixed; right: 16px; bottom: 16px; z-index: 10; color: var(--peppy-text-primary, #ccc); }
 
 #family-vaults { display: grid; gap: 16px; margin-top: 24px; }

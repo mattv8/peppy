@@ -32,10 +32,8 @@
 
 .settings-category-links a[aria-current="location"] {
   background: color-mix(in srgb, var(--peppy-accent) 10%, var(--peppy-surface-panel));
-  border-inline-start: 2px solid var(--peppy-accent);
   color: var(--peppy-text-primary);
   font-weight: 700;
-  padding-inline-start: 6px;
 }
 
 .settings-category-links a:focus-visible {
@@ -116,6 +114,6 @@
 
 @media (forced-colors: active) {
   .settings-category-links a[aria-current="location"] {
-    border-inline-start-color: Highlight;
+    outline: 2px solid Highlight;
   }
 }

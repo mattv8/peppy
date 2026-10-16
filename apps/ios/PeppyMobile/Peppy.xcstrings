@@ -11,6 +11,166 @@
         }
       }
     },
+    "peppy.server_offline_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server offline"
+          }
+        }
+      }
+    },
+    "peppy.server_offline_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy will reconnect automatically."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live sync"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keeps this phone connected for faster message delivery. Uses a small amount of battery."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked — unlock to sync"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote messaging active"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to continue syncing"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote messaging"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_channel_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows while Peppy is keeping your phone connected for faster syncing."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notifications_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off. Live sync can still reconnect; allow notifications to show its ongoing status."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_allow_notifications": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow notifications"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_recovery_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-pair this phone to enable remote messaging."
+          }
+        }
+      }
+    },
     "peppy.sms": {
       "localizations": {
         "en": {
@@ -51,6 +211,196 @@
         }
       }
     },
+    "peppy.sms_history_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone message sync"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatically adds sent and received SMS, including existing phone history, to your Peppy vault. Works with messages available in Android's SMS storage."
+          }
+        }
+      }
+    },
+    "peppy.sms_history_permission_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read phone messages"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History status"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not allowed"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_allow_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow phone message access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_open_settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open phone message settings"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting_permission": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for phone message access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_sync_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SMS sync is off"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for vault access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting to read phone history"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_reading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reading phone history…"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused — vault recovery capacity reached"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_captured": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone history captured"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone messages unavailable — will retry"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some messages need reconciliation"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_captured_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captured messages sync when your vault connection is available."
+          }
+        }
+      }
+    },
+    "peppy.sms_history_capacity_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History import is paused to keep vault recovery available. Existing messages remain on your phone."
+          }
+        }
+      }
+    },
     "peppy.wifi_only": {
       "localizations": {
         "en": {
@@ -67,6 +417,126 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skip silent notifications"
+          }
+        }
+      }
+    },
+    "peppy.app_filters": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App filters"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading app filters…"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_all_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All apps allowed"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_muted_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 app muted"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_muted_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d apps muted"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_search": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search apps"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh app list"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock sync to view or change per-app filters."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No app notifications received yet. Filters appear after the first notification."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_no_match": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching apps."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_save_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save the app filter. Unlock sync and try again."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_load_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load app filters. Try again."
           }
         }
       }
@@ -597,6 +1067,106 @@
           "stringUnit": {
             "state": "translated",
             "value": "Connecting…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_generating": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generating connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not generate the connection code. Try again."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking connection status…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_preparing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing a connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_refreshing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refreshing connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_approving": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving phone…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_cancelling": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelling connection…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_revealing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opening the shared-secret prompt…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_finishing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finishing connection setup…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_idle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No connection code is active."
           }
         }
       }
@@ -1601,6 +2171,206 @@
         }
       }
     },
+    "peppy.wake_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background updates"
+          }
+        }
+      }
+    },
+    "peppy.wake_updates_toggle_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow background updates"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wake registration"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_registered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registered"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unavailable"
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_registered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registered for background updates. Delivery may be delayed by your phone."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up background updates automatically."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background updates will retry when a connection is available."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is paused. Other permitted sync may still run."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_unavailable_server": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is unavailable on this server."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_missing_app_support": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app build does not support background push."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_os_restricted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your phone is limiting background activity."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_keys_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to process pending updates."
+          }
+        }
+      }
+    },
+    "peppy.wake_cleanup_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is paused. Server cleanup will retry when connected."
+          }
+        }
+      }
+    },
+    "peppy.wake_os_settings_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        }
+      }
+    },
+    "peppy.wake_community_relay_enabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay enabled. Background delivery may be delayed."
+          }
+        }
+      }
+    },
+    "peppy.wake_community_relay_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay is off."
+          }
+        }
+      }
+    },
     "peppy.self_hosted_headline": {
       "localizations": {
         "en": {
@@ -1907,6 +2677,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Admin password"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_admin_password_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm admin password"
+          }
+        }
+      }
+    },
+    "peppy.admin_password_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The passwords do not match."
           }
         }
       }

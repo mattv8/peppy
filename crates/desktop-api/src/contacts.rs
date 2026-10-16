@@ -39,6 +39,41 @@ pub fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_ID
 }
 
+/// Core's per-call address cap for contact resolution.
+pub const RESOLVE_ADDRESS_BATCH: usize = 100;
+/// Distinct eligible addresses resolved per snapshot; the rest show their raw number.
+pub const MAX_RESOLVED_ADDRESSES: usize = 1000;
+
+/// Groups eligible resolution candidates by source. The first eligible address occurrence wins
+/// across sources; an invalid source becomes `None`. The 1,000-address cap is global, each
+/// source preserves input order, and callers must not rely on map iteration order.
+pub fn resolution_candidates(
+    addresses: &[(String, Option<String>)],
+) -> HashMap<Option<&str>, Vec<&str>> {
+    let mut by_source = HashMap::new();
+    let mut seen = HashSet::new();
+    for (address, source) in addresses {
+        if address.len() <= 256 && is_phone_address(address) && seen.insert(address.as_str()) {
+            by_source
+                .entry(source.as_deref().filter(|id| valid_id(id)))
+                .or_insert_with(Vec::new)
+                .push(address.as_str());
+        }
+        if seen.len() >= MAX_RESOLVED_ADDRESSES {
+            break;
+        }
+    }
+    by_source
+}
+
+fn is_phone_address(address: &str) -> bool {
+    let digits = address.bytes().filter(u8::is_ascii_digit).count();
+    (3..=15).contains(&digits)
+        && address.bytes().all(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b'+' | b' ' | b'(' | b')' | b'.' | b'-')
+        })
+}
+
 pub fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -95,6 +130,8 @@ pub struct Capabilities {
     pub supports_birthday: bool,
     /// Any device holding a retained tombstone may ask the owner to recreate it.
     pub can_restore: bool,
+    /// The phone advertised encrypted support for a fresh remote full scan.
+    pub can_sync: bool,
 }
 
 pub fn capabilities(book: &Value, own_device: &str) -> Capabilities {
@@ -123,6 +160,7 @@ pub fn capabilities(book: &Value, own_device: &str) -> Capabilities {
         supports_photo: can_write && flag("photo") == Some(true),
         supports_birthday: can_write && flag("birthday") != Some(false),
         can_restore: can_write,
+        can_sync: !owned && live && flag("scan_request") == Some(true),
     }
 }
 
@@ -149,11 +187,13 @@ pub fn book_view(
     let mut view = json!({
         "id": id,
         "deviceName": device_name,
+        "ownerDeviceId": str_field(book, "owner_device_id"),
         "state": book_state(book),
         "capabilities": {
             "canWrite": caps.can_write,
             "canDelete": caps.can_write,
             "canRestore": caps.can_restore,
+            "canSync": caps.can_sync,
             "supportsNotes": caps.supports_notes,
             "supportsPhoto": caps.supports_photo,
             "supportsBirthday": caps.supports_birthday,
@@ -551,9 +591,11 @@ pub fn list_patches(
         }
     };
     let mut old_wire = Vec::with_capacity(old.len());
+    let mut old_ids = HashSet::with_capacity(old.len());
     let mut read_only = HashSet::new();
     for item in old {
         let id = item_id(item)?.ok_or_else(|| invalid("An original contact field has no ID."))?;
+        old_ids.insert(id.clone());
         if item.get("readOnly").and_then(Value::as_bool) == Some(true) {
             read_only.insert(id.clone());
         }
@@ -565,7 +607,7 @@ pub fn list_patches(
     for item in ui_items(next)? {
         match item_id(item)? {
             Some(id) => {
-                if !old_wire.iter().any(|(old_id, _)| *old_id == id) {
+                if !old_ids.contains(&id) {
                     return Err(invalid(
                         "A contact field ID does not belong to this contact.",
                     ));
@@ -1061,6 +1103,96 @@ mod tests {
             request["expected_old"]["phones"],
             json!([{"id":"p1","label":"mobile","value":"1"}])
         );
+    }
+
+    #[test]
+    fn update_rejects_a_foreign_contact_field_id_with_the_exact_error() {
+        let input = json!({
+            "targetBookId":"book", "kind":"update", "contactId":"c1", "baseRevision":"1",
+            "patches":[{"field":"phones", "expectedOld":[{"id":"p1","label":"mobile","number":"1","readOnly":false}], "value":[{"id":"foreign","label":"mobile","number":"2","readOnly":false}]}]
+        });
+        let error = update_patches(
+            &input,
+            &Capabilities {
+                can_write: true,
+                supports_notes: true,
+                supports_photo: true,
+                supports_birthday: true,
+                can_restore: true,
+                can_sync: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ContactError::Ui {
+                code: "invalid-contact-edit",
+                message: "A contact field ID does not belong to this contact.",
+            }
+        ));
+    }
+
+    #[test]
+    fn resolution_candidates_enforce_phone_bounds_and_source_first_wins() {
+        let maximum_length = format!("{}{}", "1".repeat(15), " ".repeat(241));
+        let addresses = vec![
+            ("+12".into(), Some("first".into())),
+            ("+123".into(), Some("first".into())),
+            ("123456789012345".into(), Some("second".into())),
+            ("1234567890123456".into(), Some("second".into())),
+            ("+12a3".into(), Some("first".into())),
+            ("+12é3".into(), Some("first".into())),
+            ("+(12) 3.4-5".into(), Some("first".into())),
+            (maximum_length, Some("first".into())),
+            (
+                format!("{}{}", "1".repeat(15), " ".repeat(242)),
+                Some("first".into()),
+            ),
+            ("+123".into(), Some("second".into())),
+            ("+987".into(), Some(String::new())),
+        ];
+
+        let candidates = resolution_candidates(&addresses);
+        assert_eq!(
+            candidates.get(&Some("first")).unwrap(),
+            &vec!["+123", "+(12) 3.4-5", addresses[7].0.as_str()]
+        );
+        assert_eq!(
+            candidates.get(&Some("second")).unwrap(),
+            &vec!["123456789012345"]
+        );
+        assert_eq!(candidates.get(&None).unwrap(), &vec!["+987"]);
+    }
+
+    #[test]
+    fn resolution_candidates_cap_distinct_eligible_addresses() {
+        let mut addresses = vec![
+            ("not a phone number".into(), Some("ignored".into())),
+            ("+12025550000".into(), Some("first".into())),
+            ("+12025550000".into(), Some("second".into())),
+            ("+12025550001".into(), Some("second".into())),
+        ];
+        addresses.extend(
+            (2..=MAX_RESOLVED_ADDRESSES).map(|index| (format!("+1202555{index:04}"), None)),
+        );
+
+        let candidates = resolution_candidates(&addresses);
+        assert_eq!(
+            candidates.values().map(Vec::len).sum::<usize>(),
+            MAX_RESOLVED_ADDRESSES
+        );
+        assert_eq!(
+            candidates.get(&Some("first")).unwrap(),
+            &vec!["+12025550000"]
+        );
+        assert_eq!(
+            candidates.get(&Some("second")).unwrap(),
+            &vec!["+12025550001"]
+        );
+        let unscoped = candidates.get(&None).unwrap();
+        assert_eq!(unscoped.len(), 998);
+        assert_eq!(unscoped.first(), Some(&"+12025550002"));
+        assert_eq!(unscoped.last(), Some(&"+12025550999"));
     }
 }
 

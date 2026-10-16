@@ -381,6 +381,7 @@ CREATE TABLE IF NOT EXISTS contact_restore_claims(book_id TEXT NOT NULL, tombsto
             [],
         )?;
     }
+    crate::contact_sync_requests::initialize(conn)?;
     Ok(())
 }
 
@@ -853,6 +854,14 @@ pub(crate) fn begin_scan(conn: &Connection, ctx: &Ctx<'_>, input: &str) -> Resul
         "INSERT INTO contact_scan_baseline(scan_id,contact_id,revision) SELECT ?1,id,revision FROM contacts WHERE book_id=?2 AND deleted_at IS NULL",
         params![scan_id, book_id],
     )?;
+    crate::contact_sync_requests::on_scan_started(
+        &tx,
+        ctx,
+        scan_id,
+        book_id,
+        generation,
+        access == "full" && authoritative,
+    )?;
     tx.commit()?;
     Ok(json!({"status":"started","scan_id":scan_id}).to_string())
 }
@@ -977,6 +986,17 @@ pub(crate) fn finish_scan(
     }
     tx.execute("DELETE FROM contact_scan_baseline WHERE scan_id=?", [scan])?;
     publish_book_state(&tx, ctx, &book_id)?;
+    crate::contact_sync_requests::on_scan_finished(
+        &tx,
+        ctx,
+        scan,
+        safe && hold_id.is_none(),
+        if safe && hold_id.is_none() {
+            None
+        } else {
+            Some("incomplete_scan")
+        },
+    )?;
     tx.commit()?;
     let mut out =
         json!({"status":"finished","deletions_applied":deleted > 0,"deleted":deleted,"held":held});
@@ -2068,6 +2088,11 @@ fn apply_peer(
                 params![status, encoded(&result)?, id],
             )?;
             Ok(true)
+        }
+        PrivatePayload::ContactScanRequest { .. } | PrivatePayload::ContactScanResult { .. } => {
+            crate::contact_sync_requests::apply_event(
+                conn, producer, historical, key_epoch, payload,
+            )
         }
         _ => Ok(false),
     }

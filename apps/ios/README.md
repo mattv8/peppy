@@ -39,9 +39,11 @@ Gateway settings and policy are durable shared Rust-core state accessed through 
 
 Foreground sync is bounded and cancels when the scene leaves the foreground. Contact passes may also request `BGAppRefresh` and `BGProcessing`, but iOS chooses whether and when to run them; requested starts are not delivery guarantees. Host tests use fakes and do not establish device Contacts, background scheduling, or iOS SDK behavior.
 
-## Optional APNs wake relay
+## Background updates and APNs wake relay
 
-The APNs wake relay is off until the user explicitly configures an operator HTTPS relay in Settings. APNs registration is then requested, but wake delivery is not guaranteed and no live signed APNs delivery is claimed here. Hints carry only the relay's nested `peppy` `kind` and optional challenge value; they contain no message body. A received wake starts bounded sync/contact work and never authorizes carrier work. If a hint is delayed or missing, authoritative queued sync remains available on later foreground work.
+For an eligible Peppy Hosted enrollment, Background updates are automatic unless a previous relay setting was explicitly off. The app requests an APNs device token after enrollment and on launch without requesting notification authorization; the toggle pauses registration and local wake processing immediately. Hosted configuration is device-authenticated, pins the production relay, and fails closed when the signed build's APNs environment does not match the server configuration. APNs registration and iOS background scheduling are best-effort only: neither proves live delivery nor guarantees immediate locked-phone work.
+
+Community servers retain the optional manual operator-relay setup in Settings. Hints carry only the relay's nested `peppy` `kind` and optional challenge value; they contain no message body. A received hint starts bounded sync/contact work and never authorizes carrier work. If a hint is delayed or missing, authoritative queued sync remains available on later foreground work.
 
 Vault sync envelopes and private attachments keep the existing encrypted body transport. Carrier SMS/MMS would be outside that boundary, but iOS does not perform carrier transport in this build.
 

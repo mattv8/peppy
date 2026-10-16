@@ -5,9 +5,13 @@ import {
   useRef,
   useState,
   useCallback,
+  useMemo,
   type CSSProperties,
+  type ReactNode,
   type RefCallback,
 } from "react";
+import { flushSync } from "react-dom";
+import type { GatewayAvailability } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
   Check,
@@ -58,23 +62,45 @@ import {
   type AttachmentView,
   type ConversationView,
   type DesktopSnapshot,
-  type Draft,
-  type DraftInput,
   type GatewayView,
   type MessageStatus,
+  type MessageView,
+  type HistoryPage,
   type AppFilter,
   type NotificationPreferences,
   type PublicCopy,
   type ContactResolutionMap,
   type AppLockStatus,
 } from "./bridge";
-import { NotificationsView } from "./Notifications";
+import { notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
+import { DevicesSettings } from "./DevicesSettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
-import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
+import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
+import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
 import { peppyCopy } from "./generated/peppyCopy";
+import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
+import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
+import {
+  DraftStore,
+  blankContent,
+  isDirty,
+  isLocalDraftKey,
+  shouldConfirmPostFlushDelete,
+  type DraftContent,
+  type DraftSlot,
+  type SaveOutcome,
+} from "./drafts/DraftStore";
+
+export { errorText } from "./bridgeErrors";
+export {
+  DraftStore,
+  shouldConfirmPostFlushDelete,
+  type DraftSlot,
+  type SaveOutcome,
+} from "./drafts/DraftStore";
 
 /**
  * Display-only names for phone addresses. Stored conversation names, addresses and draft
@@ -123,8 +149,6 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
   unknown: "Unknown delivery state — not retried",
 };
 
-const FALLBACK_ERROR =
-  "The native operation failed. Your edits remain in this window.";
 const COMPOSER_MIN_HEIGHT = 96;
 const COMPOSER_ATTACHMENT_MIN_HEIGHT = 132;
 const RAIL_WIDTH = 48;
@@ -135,29 +159,42 @@ const LIST_COLLAPSE_THRESHOLD = 120;
 const TEXTAREA_LINE_HEIGHT = 22;
 const TEXTAREA_MAX_HEIGHT = 176;
 
-export const errorText = (error: unknown): string =>
-  typeof error === "object" &&
-  error !== null &&
-  "message" in error &&
-  typeof error.message === "string" &&
-  error.message
-    ? error.message
-    : FALLBACK_ERROR;
+function mergeMessages(existing: MessageView[], refreshed: MessageView[]): MessageView[] {
+  const refreshedById = new Map(refreshed.map((message) => [message.id, message]));
+  const merged = existing.map((message) => {
+    const replacement = refreshedById.get(message.id);
+    return replacement ? retainAttachmentPreviews(message, replacement) : message;
+  });
+  const existingIds = new Set(existing.map((message) => message.id));
+  refreshed.forEach((message) => {
+    if (!existingIds.has(message.id)) merged.push(message);
+  });
+  return merged;
+}
 
-const errorCode = (error: unknown): string | undefined =>
-  typeof error === "object" &&
-  error !== null &&
-  "code" in error &&
-  typeof error.code === "string"
-    ? error.code
-    : undefined;
+function retainAttachmentPreviews(previous: MessageView, refreshed: MessageView): MessageView {
+  const previews = new Map(previous.attachments.map((attachment) => [attachment.id, attachment.previewUrl]));
+  return {
+    ...refreshed,
+    attachments: refreshed.attachments.map((attachment) =>
+      attachment.previewUrl || attachment.state !== "ready" || !attachment.mediaType.startsWith("image/") || !previews.get(attachment.id)
+        ? attachment
+        : { ...attachment, previewUrl: previews.get(attachment.id) },
+    ),
+  };
+}
 
-const errorDetail = (error: unknown, key: "conversationId" | "draftId" | "currentRevision"): string | undefined => {
-  if (typeof error !== "object" || error === null) return undefined;
-  const record = error as Record<string, unknown>;
-  const details = typeof record.details === "object" && record.details !== null ? record.details as Record<string, unknown> : record;
-  return typeof details[key] === "string" ? details[key] : undefined;
-};
+function mergeAnchoredMessages(existing: MessageView[], refreshed: MessageView[]): MessageView[] {
+  const existingById = new Map(existing.map((message) => [message.id, message]));
+  const anchor = refreshed[0]?.id;
+  const prefixEnd = anchor ? existing.findIndex((message) => message.id === anchor) : -1;
+  const prefix = prefixEnd > 0 ? existing.slice(0, prefixEnd) : [];
+  const authoritativeRows = refreshed.map((message) => {
+    const previous = existingById.get(message.id);
+    return previous ? retainAttachmentPreviews(previous, message) : message;
+  });
+  return mergeMessages(prefix, authoritativeRows);
+}
 
 function expiryText(seconds: number): string {
   if (seconds <= 0)
@@ -196,11 +233,6 @@ export function readComposerConversation(search: string): string | null {
 
 /* ------------------------------------------------------------------ gateway routes */
 
-type DraftContent = Pick<
-  Draft,
-  "text" | "recipientIds" | "attachmentIds" | "gatewayId" | "simId"
->;
-
 /** Gateway and SIM together identify a route; one device can expose several SIMs. */
 const routeKey = (gatewayId: string, simId: string) =>
   `${encodeURIComponent(gatewayId)} ${encodeURIComponent(simId)}`;
@@ -209,6 +241,34 @@ type RouteChoice =
   | { kind: "route"; gateway: GatewayView; implicit: boolean }
   | { kind: "stale"; gatewayId: string; simId: string }
   | { kind: "none" };
+
+function gatewayAvailability(gateway: GatewayView): GatewayAvailability { return gateway.availability ?? "unknown"; }
+function formatAge(seconds: number): string { return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`; }
+function availabilityLabel(gateway: GatewayView): string {
+  switch (gatewayAvailability(gateway)) {
+    case "delayed": return gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
+    case "offline": return "Not responding";
+    case "never_connected": return "Never connected";
+    case "no_sms_sim": return "No SMS SIM";
+    case "sms_permission_needed": return "Permission needed";
+    case "sms_unavailable": return "SMS unavailable";
+    case "unsupported_platform": return "Can't send SMS";
+    case "capabilities_unknown": case "unknown": return "Status unknown";
+    default: return "";
+  }
+}
+function availabilityProblem(gateway: GatewayView): string | undefined {
+  switch (gatewayAvailability(gateway)) {
+    case "offline": return `${gateway.name} isn't responding. Sending is paused until it reconnects.`;
+    case "never_connected": return `${gateway.name} has never connected. Finish setup on the phone to enable sending.`;
+    case "no_sms_sim": return `No default SMS SIM is set on ${gateway.name}. Open the phone's SIM settings to fix this.`;
+    case "sms_permission_needed": return `Peppy needs SMS permission on ${gateway.name}. Open Peppy on the phone to grant it.`;
+    case "sms_unavailable": return `SMS is unavailable on ${gateway.name}. Check carrier settings on the phone.`;
+    case "unsupported_platform": return "Can't send SMS through Peppy on this iPhone. Select an Android phone to send.";
+    case "capabilities_unknown": return `${gateway.name}'s capabilities are unknown. Sending is paused until the phone reports in.`;
+    default: return undefined;
+  }
+}
 
 /**
  * The stored route must match a reported gateway+SIM exactly; a vanished route is reported as
@@ -245,6 +305,8 @@ function routeProblem(
       : "no phone is configured";
   if (route.kind === "stale")
     return "the selected phone/SIM is no longer reported; choose another route";
+  const availability = availabilityProblem(route.gateway);
+  if (availability) return availability;
   if (!requiresMms && !route.gateway.supportsSms)
     return "this phone/SIM does not support SMS";
   if (requiresMms && !route.gateway.supportsMms)
@@ -270,372 +332,6 @@ const recipientCount = (content: DraftContent, conversation?: ConversationView) 
 const draftEstimateBytes = (content: DraftContent, attachments: Record<string, AttachmentView>) =>
   new TextEncoder().encode(content.text).length + content.attachmentIds.reduce((total, id) => total + (attachments[id]?.byteSize ?? 0), 0);
 
-/* ------------------------------------------------------------------ draft store */
-
-/** Local key for a new-recipient draft that has no native draft/conversation ID yet. */
-const NEW_DRAFT_PREFIX = "new:";
-const isLocalDraftKey = (key: string) => key.startsWith(NEW_DRAFT_PREFIX);
-
-export type DraftSlot = {
-  /** Conversation ID once known, otherwise a `new:` local key. */
-  key: string;
-  /** Native identity; empty strings ask the host to create the draft (and conversation). */
-  id: string;
-  conversationId: string;
-  /** Last revision acknowledged by the host; used as the CAS `expectedRevision`. */
-  revision: string;
-  content: DraftContent;
-  /** Local edit counter, and the newest edit the host has acknowledged. */
-  generation: number;
-  savedGeneration: number;
-  error?: { message: string; code?: string };
-  /** While a send is in flight, saves are deferred so they cannot race the atomic send/clear. */
-  held: boolean;
-  queue: Promise<unknown>;
-};
-
-export type SaveOutcome = { ok: true } | { ok: false; error: string };
-
-const blankContent = (): DraftContent => ({
-  text: "",
-  recipientIds: [],
-  attachmentIds: [],
-});
-const contentOf = (draft: Draft): DraftContent => ({
-  text: draft.text,
-  recipientIds: draft.recipientIds,
-  attachmentIds: draft.attachmentIds,
-  gatewayId: draft.gatewayId,
-  simId: draft.simId,
-});
-const isDirty = (slot: DraftSlot) => slot.generation > slot.savedGeneration;
-const sameDraftContent = (left: DraftContent, right: DraftContent) =>
-  left.text === right.text &&
-  left.gatewayId === right.gatewayId &&
-  left.simId === right.simId &&
-  left.recipientIds.join("\u0000") === right.recipientIds.join("\u0000") &&
-  left.attachmentIds.join("\u0000") === right.attachmentIds.join("\u0000");
-export const shouldConfirmPostFlushDelete = (
-  requestedKey: string,
-  currentKey: string,
-  currentContent: DraftContent,
-  hadContent: boolean,
-  confirmedKey: string | null,
-) =>
-  Boolean(currentContent.text || currentContent.attachmentIds.length) &&
-  (!hadContent || currentKey !== requestedKey) &&
-  confirmedKey !== currentKey;
-
-type DraftStoreEvents = {
-  changed(): void;
-  rekeyed(from: string, to: string): void;
-  unavailable?(from: string, to?: string, message?: string): void;
-};
-
-export type DraftRecovery = {
-  id: string;
-  content: DraftContent;
-  destination?: string;
-  message: string;
-};
-
-/**
- * Per-conversation draft state with serialized CAS saves. A failed save keeps the local edits
- * dirty with an error; callers that must not lose content (send, close) flush and check the
- * outcome. Host snapshots never overwrite dirty or held drafts.
- */
-export class DraftStore {
-  private slots = new Map<string, DraftSlot>();
-  private aliases = new Map<string, string>();
-  private tombstones = new Set<string>();
-  private recoveries = new Map<string, DraftRecovery>();
-  private newCount = 0;
-
-  constructor(
-    private readonly persist: (input: DraftInput) => Promise<Draft>,
-    private readonly events: DraftStoreEvents,
-  ) {}
-
-  /** Follows `new:` keys to the conversation ID the host assigned. */
-  resolve(key: string): string {
-    let current = key;
-    for (
-      let next = this.aliases.get(current);
-      next !== undefined;
-      next = this.aliases.get(current)
-    )
-      current = next;
-    return current;
-  }
-
-  get(key: string): DraftSlot | undefined {
-    return this.slots.get(this.resolve(key));
-  }
-
-  localDrafts(): DraftSlot[] {
-    return [...this.slots.values()].filter((slot) => isLocalDraftKey(slot.key));
-  }
-
-  recoveriesFor(conversationId?: string): DraftRecovery[] {
-    return [...this.recoveries.values()].filter(
-      recovery => conversationId
-        ? !recovery.destination || recovery.destination === conversationId || recovery.id === conversationId
-        : !recovery.destination,
-    );
-  }
-
-  discardRecovery(id: string) {
-    this.recoveries.delete(id);
-    this.events.changed();
-  }
-
-  /** Retires content whose host identity moved outside this window's save queue. */
-  retireUnavailable(key: string, error: unknown): string | undefined {
-    const slot = this.get(key);
-    const destination = errorDetail(error, "conversationId");
-    if (!slot) return destination;
-    const moved = errorCode(error) === "draft-moved";
-    this.retire(
-      slot,
-      slot.content,
-      destination,
-      moved
-        ? "Draft moved elsewhere. Review the retained text before sending again."
-        : "Draft was deleted elsewhere. Retained text can be copied or restored to a new draft.",
-    );
-    return destination;
-  }
-
-  /** Starts a draft; the host assigns both IDs on save. */
-  createNew(recipient?: string): { key: string; saved: Promise<SaveOutcome> } {
-    const key = `${NEW_DRAFT_PREFIX}${++this.newCount}`;
-    this.ensure(key);
-    return { key, saved: this.edit(key, { recipientIds: recipient ? [recipient] : [] }) };
-  }
-
-  edit(key: string, patch: Partial<DraftContent>): Promise<SaveOutcome> {
-    const resolved = this.resolve(key);
-    if (this.tombstones.has(key) || this.tombstones.has(resolved))
-      return Promise.resolve({ ok: false, error: "This draft was deleted or moved elsewhere." });
-    const slot = this.ensure(key);
-    slot.content = { ...slot.content, ...patch };
-    slot.generation += 1;
-    this.events.changed();
-    return this.enqueue(slot);
-  }
-
-  /** Applies the host's view of a conversation's draft unless local edits are pending. */
-  adopt(conversationId: string, draft: Draft | undefined) {
-    const slot = this.get(conversationId);
-    if (slot && (isDirty(slot) || slot.held)) return;
-    if (draft) {
-      this.tombstones.delete(conversationId);
-      const target = slot ?? this.ensure(conversationId);
-      Object.assign(target, {
-        id: draft.id,
-        conversationId: draft.conversationId,
-        revision: draft.revision,
-        content: contentOf(draft),
-        error: undefined,
-      });
-    } else if (slot) {
-      this.tombstones.delete(conversationId);
-      Object.assign(slot, {
-        id: "",
-        revision: "0",
-        content: blankContent(),
-        error: undefined,
-      });
-    } else return;
-    this.events.changed();
-  }
-
-  /** Waits for queued saves and retries once if edits are still unacknowledged. */
-  async flush(key: string): Promise<SaveOutcome> {
-    const slot = this.get(key);
-    if (!slot) return { ok: true };
-    await slot.queue;
-    return isDirty(slot) ? this.enqueue(slot) : { ok: true };
-  }
-
-  /** Flush all live draft slots and report the first failure after every attempt. */
-  async flushAll(): Promise<SaveOutcome> {
-    let firstFailure: SaveOutcome | undefined;
-    for (const key of [...this.slots.keys()]) {
-      const outcome = await this.flush(key);
-      if (!outcome.ok && !firstFailure) firstFailure = outcome;
-    }
-    return firstFailure ?? { ok: true };
-  }
-
-  /** After a stale-revision conflict the person may keep this window's text over the stored one. */
-  rebase(key: string, stored: Draft | undefined) {
-    const slot = this.get(key);
-    if (!slot) return;
-    if (stored)
-      Object.assign(slot, { id: stored.id, revision: stored.revision });
-    else Object.assign(slot, { id: "", revision: "0" });
-  }
-
-  hold(key: string) {
-    const slot = this.get(key);
-    if (slot) slot.held = true;
-  }
-
-  release(key: string) {
-    const slot = this.get(key);
-    if (!slot) return;
-    slot.held = false;
-    if (isDirty(slot)) void this.enqueue(slot);
-  }
-
-  /** A discarded draft is removed only after its serialized saves have completed. */
-  remove(key: string) {
-    const resolved = this.resolve(key);
-    this.tombstones.add(resolved);
-    this.slots.delete(resolved);
-    this.events.changed();
-  }
-
-  /** The host cleared the sent draft; edits typed during the send start a fresh draft. */
-  markSent(key: string, sentGeneration: number) {
-    const slot = this.get(key);
-    if (!slot) return;
-    Object.assign(slot, {
-      id: "",
-      revision: "0",
-      held: false,
-      error: undefined,
-    });
-    if (slot.generation > sentGeneration) {
-      void this.enqueue(slot);
-    } else {
-      slot.content = blankContent();
-      slot.savedGeneration = slot.generation;
-    }
-    this.events.changed();
-  }
-
-  private ensure(key: string): DraftSlot {
-    const resolved = this.resolve(key);
-    let slot = this.slots.get(resolved);
-    if (!slot) {
-      slot = {
-        key: resolved,
-        id: "",
-        conversationId: isLocalDraftKey(resolved) ? "" : resolved,
-        revision: "0",
-        content: blankContent(),
-        generation: 0,
-        savedGeneration: 0,
-        held: false,
-        queue: Promise.resolve(),
-      };
-      this.slots.set(resolved, slot);
-    }
-    return slot;
-  }
-
-  private enqueue(slot: DraftSlot): Promise<SaveOutcome> {
-    const run = slot.queue.then(() => this.save(slot));
-    slot.queue = run;
-    return run;
-  }
-
-  private async save(slot: DraftSlot): Promise<SaveOutcome> {
-    if (this.tombstones.has(slot.key) || this.slots.get(slot.key) !== slot)
-      return { ok: false, error: "This draft was deleted or moved elsewhere." };
-    if (slot.held)
-      return {
-        ok: false,
-        error:
-          "A send is in progress; your edits are kept and saved afterwards.",
-      };
-    if (!isDirty(slot))
-      return slot.error
-        ? { ok: false, error: slot.error.message }
-        : { ok: true };
-    const generation = slot.generation;
-    const input: DraftInput = {
-      id: slot.id,
-      conversationId: slot.conversationId,
-      ...slot.content,
-      expectedRevision: slot.revision,
-    };
-    let saved: Draft;
-    try {
-      saved = await this.persist(input);
-    } catch (error) {
-      const code = errorCode(error);
-      if (code === "draft-moved" || code === "not-found") {
-        this.retireUnavailable(slot.key, error);
-        return { ok: true };
-      }
-      slot.error = { message: errorText(error), code };
-      this.events.changed();
-      return { ok: false, error: slot.error.message };
-    }
-    Object.assign(slot, {
-      id: saved.id,
-      revision: saved.revision,
-      savedGeneration: Math.max(slot.savedGeneration, generation),
-      error: undefined,
-    });
-    if (slot.generation === generation) slot.content = contentOf(saved);
-    if (saved.conversationId && saved.conversationId !== slot.conversationId) {
-      if (slot.generation > generation && !sameDraftContent(contentOf(saved), input)) {
-        this.retire(
-          slot,
-          slot.content,
-          saved.conversationId,
-          "Draft moved while you were editing. Your newer text is retained separately; review it before sending again.",
-        );
-        return { ok: false, error: "Draft moved while you were editing. Your newer text is retained separately." };
-      }
-      if (!this.rekey(slot, saved.conversationId)) return { ok: false, error: "Draft moved while another window has edits. Your text is retained separately." };
-    }
-    this.events.changed();
-    return { ok: true };
-  }
-
-  private rekey(slot: DraftSlot, conversationId: string): boolean {
-    const from = slot.key;
-    slot.conversationId = conversationId;
-    if (from === conversationId) return true;
-    const destination = this.slots.get(conversationId);
-    if (destination && destination !== slot && isDirty(destination)) {
-      this.retire(
-        slot,
-        slot.content,
-        conversationId,
-        "This draft moved while the destination has newer edits. Your text is retained separately.",
-      );
-      return false;
-    }
-    this.slots.delete(from);
-    if (isLocalDraftKey(from)) this.aliases.set(from, conversationId);
-    slot.key = conversationId;
-    this.slots.set(conversationId, slot);
-    this.events.rekeyed(from, conversationId);
-    return true;
-  }
-
-  private retire(
-    slot: DraftSlot,
-    content: DraftContent,
-    destination: string | undefined,
-    message: string,
-  ) {
-    const from = slot.key;
-    if (content.text || content.attachmentIds.length || content.recipientIds.length)
-      this.recoveries.set(from, { id: from, content: { ...content }, destination, message });
-    this.slots.delete(from);
-    if (destination && isLocalDraftKey(from)) this.aliases.set(from, destination);
-    this.events.unavailable?.(from, destination, message);
-    this.events.changed();
-  }
-}
-
 /* ------------------------------------------------------------------ presentational pieces */
 
 type Theme = "light" | "dark" | "system";
@@ -652,6 +348,11 @@ function GatewaySelector({
   onSelect(gateway: GatewayView): void;
 }) {
   const route = resolveRoute(content, gateways);
+  const simLabels = new Map<string, string>();
+  gateways.filter(gateway => gateway.simId).forEach((gateway, index) => {
+    const key = routeKey(gateway.id, gateway.simId);
+    if (!simLabels.has(key)) simLabels.set(key, `SIM ${index + 1}`);
+  });
   const value =
     route.kind === "route"
       ? routeKey(route.gateway.id, route.gateway.simId)
@@ -664,12 +365,13 @@ function GatewaySelector({
     );
     if (gateway) onSelect(gateway);
   };
-  const simLabel = (gateway: GatewayView) => {
-    const index = gateways.findIndex((item) => item.id === gateway.id && item.simId === gateway.simId);
-    return index >= 0 ? `SIM ${index + 1}` : gateway.simId;
-  };
+  const simLabel = (gateway: GatewayView) => gateway.simId ? (simLabels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : "No SMS SIM";
+  const selectedGateway = route.kind === "route" ? route.gateway : undefined;
+  const selectedAvailability = selectedGateway && gatewayAvailability(selectedGateway);
+  const statusHint = selectedGateway && selectedAvailability === "delayed" ? `${selectedGateway.name} last synced ${selectedGateway.lastSeenAgeSeconds !== undefined ? formatAge(selectedGateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.` : undefined;
+  const presenceHint = statusHint ?? (selectedGateway && (availabilityProblem(selectedGateway) ?? (selectedAvailability === "unknown" ? `${selectedGateway.name}'s status is unknown.` : undefined)));
   return (
-    <section id="gateway-selector" aria-label="Phone and SIM" data-route-state={problem ? "blocked" : "ready"}>
+    <section id="gateway-selector" aria-label="Phone and SIM" aria-describedby={statusHint || presenceHint ? "gateway-presence-hint" : undefined} data-route-state={problem ? "blocked" : selectedAvailability === "delayed" ? "delayed" : "ready"}>
         <select
           aria-label="Phone"
           value={value}
@@ -694,8 +396,10 @@ function GatewaySelector({
                 value={key}
                 data-gateway-id={item.id}
                 data-sim-id={item.simId}
+                data-gateway-availability={gatewayAvailability(item)}
+                disabled={gatewayAvailability(item) === "unsupported_platform"}
               >
-                {item.name} · {simLabel(item)}{item.simulated ? " · Simulated" : ""}
+                {item.name}{item.simId ? ` · ${simLabel(item)}` : ""}{item.simulated ? " · Simulated" : ""}{availabilityLabel(item) ? ` · ${availabilityLabel(item)}` : ""}
               </option>
             );
           })}
@@ -703,10 +407,15 @@ function GatewaySelector({
       <span className="route-status-icon" aria-hidden>
         {problem ? (
           <TriangleAlert size={14} aria-hidden />
-        ) : (
+        ) : selectedAvailability === "delayed" ? (
+          <Clock size={14} aria-hidden />
+        ) : selectedAvailability === "connected" ? (
           <Radio size={14} aria-hidden />
+        ) : (
+          <span />
         )}
       </span>
+      <span id="gateway-presence-hint" className="visually-hidden" role="status" aria-live="polite">{statusHint ?? presenceHint}</span>
     </section>
   );
 }
@@ -735,6 +444,14 @@ function MessageList({
   onSaveAttachment,
   listRef,
   onScroll,
+  hasOlderMessages,
+  historyLoading,
+  historyError,
+  onLoadOlder,
+  suppressHistoryAnnouncements,
+  historyExhausted,
+  onStartConversation,
+  noSelectionFeedback,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -745,6 +462,14 @@ function MessageList({
   onSaveAttachment(attachment: AttachmentView): void;
   listRef: RefCallback<HTMLDivElement>;
   onScroll(): void;
+  hasOlderMessages: boolean;
+  historyLoading: boolean;
+  historyError: string | null;
+  onLoadOlder(): void;
+  suppressHistoryAnnouncements: boolean;
+  historyExhausted: boolean;
+  onStartConversation?: () => void;
+  noSelectionFeedback?: ReactNode;
 }) {
   if (loading)
     return (
@@ -769,8 +494,27 @@ function MessageList({
         onScroll={onScroll}
       >
         <div id="no-selection-state">
-          <MessageSquare size={32} aria-hidden />
-          <p>Select a conversation or start a new message</p>
+          <div id="no-selection-primary">
+            <MessageSquare size={32} aria-hidden />
+            {onStartConversation ? (
+              <>
+              <p>No conversation selected</p>
+              <button
+                id="new-conversation-cta"
+                className="primary-button"
+                type="button"
+                data-action="new-conversation"
+                onClick={onStartConversation}
+              >
+                <MessageSquarePlus size={16} aria-hidden />
+                New conversation
+              </button>
+              </>
+            ) : (
+              <p>Select a conversation or start a new message</p>
+            )}
+          </div>
+          {noSelectionFeedback && <div id="no-selection-feedback">{noSelectionFeedback}</div>}
         </div>
       </div>
     );
@@ -782,7 +526,14 @@ function MessageList({
       aria-label="Messages"
       onScroll={onScroll}
     >
-      <div id="message-list-content">
+      {hasOlderMessages && <div id="history-page-sentinel" aria-hidden="true" />}
+      {(historyLoading || historyError || hasOlderMessages) && <div id="history-load-band" aria-busy={historyLoading || undefined} data-history-state={historyLoading ? "loading" : historyError ? "error" : "idle"}>
+        {historyLoading && !historyError && <span id="history-load-indicator" role="status">Loading older messages…</span>}
+        {historyError && <div id="history-load-error" role="alert">Couldn&apos;t load older messages. <button id="history-retry-button" className="secondary-button" type="button" aria-label="Retry loading older messages" disabled={historyLoading} onClick={onLoadOlder}>Retry</button></div>}
+        {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="secondary-button" type="button" onClick={onLoadOlder}>Load older messages</button>}
+      </div>}
+      <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
+        {historyExhausted && <p id="history-beginning-marker">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
         {conversation.messages.map((message) => (
           <article
@@ -901,7 +652,7 @@ function MessageList({
 
 /** Only an enrolled owner can add a phone; joined devices keep the normal conversation view. */
 function ownerWithoutPhone(snapshot: DesktopSnapshot) {
-  return snapshot.connection.state === "connected" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
+  return snapshot.connection.state === "connected" && snapshot.encryption.state === "unlocked" && snapshot.gateways.length === 0 && snapshot.deviceRole === "owner";
 }
 const phoneDeferredKey = (origin: string | undefined) => origin ? `peppy.setup.phoneDeferred:${origin}` : "";
 const phoneSetupDeferred = (origin: string | undefined) => {
@@ -939,6 +690,7 @@ function SettingsView({
   browserHost = false,
   accountUrl,
   canRevealVaultSecret = false,
+  serverOffline = false,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -967,6 +719,7 @@ function SettingsView({
   browserHost?: boolean;
   accountUrl?: string;
   canRevealVaultSecret?: boolean;
+  serverOffline?: boolean;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -977,12 +730,7 @@ function SettingsView({
   const pendingSectionRef = useRef<string | null>(null);
   const scrollEndTimer = useRef<number | undefined>(undefined);
   const [activeSection, setActiveSection] = useState("server");
-  const syncText =
-    encryption === "unlocked"
-      ? "Device sync encrypted"
-      : encryption === "mismatch"
-        ? "Device sync key mismatch"
-        : "Device sync not unlocked";
+  const syncText = syncStatusText(encryption);
 
   const runAction = async (action: SettingsAction) => {
     if (pendingAction) return;
@@ -1005,6 +753,7 @@ function SettingsView({
   const sections = [
     { id: "server", label: "Server" },
     { id: "sync", label: "Sync encryption" },
+    { id: "devices", label: "Devices" },
     { id: "notifications", label: "Notifications" },
     { id: "theme", label: "Appearance" },
     ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
@@ -1133,6 +882,7 @@ function SettingsView({
           </button>
         )}
       </section>
+      <DevicesSettings serverOffline={serverOffline} />
       <NotificationSettings
         notifications={notifications}
         filters={filters}
@@ -1209,9 +959,11 @@ function SettingsView({
 function StatusDetails({
   connection,
   encryption,
+  serverUnreachable = false,
 }: {
   connection?: DesktopSnapshot["connection"];
   encryption?: DesktopSnapshot["encryption"]["state"];
+  serverUnreachable?: boolean;
 }) {
   if (!connection || !encryption)
     return <div className="status-details" data-status-details><div className="status-details-row">Loading status…</div></div>;
@@ -1231,7 +983,7 @@ function StatusDetails({
         <ShieldAlert size={14} aria-hidden />
         <span>Carrier SMS/MMS not end-to-end encrypted</span>
       </div>
-      <div id="connection-status" className="status-details-row" data-connection-state={connection.state} data-error-code={connection.errorCode} title={label}>
+      <div id="connection-status" className="status-details-row" data-connection-state={connection.state} data-error-code={connection.errorCode} data-server-unreachable={serverUnreachable || undefined} title={label}>
         <span className="connection-dot" aria-hidden />
         <span>{label}</span>
       </div>
@@ -1253,6 +1005,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("head") === "1",
   );
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [suppressHistoryAnnouncements, setSuppressHistoryAnnouncements] = useState(false);
+  const [historyExhausted, setHistoryExhausted] = useState(false);
   const [appLock, setAppLock] = useState<AppLockStatus | null>(null);
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
@@ -1294,7 +1051,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationSettingsRequested = useRef(false);
   const [notice, setNotice] = useState("");
   const [addingPhone, setAddingPhone] = useState(false);
+  const [initialEnrollmentActive, setInitialEnrollmentActive] = useState(false);
   const [phoneDeferredOrigin, setPhoneDeferredOrigin] = useState<string | null>(null);
+  useEffect(() => {
+    if (snapshot?.connection.state === "connected") setInitialEnrollmentActive(false);
+  }, [snapshot?.connection.state]);
   // Names of contacts picked from search, shown on chips until the next native snapshot
   // resolves the same addresses. Display only; recipient IDs stay phone addresses.
   const [chosenContacts, setChosenContacts] = useState<ContactResolutionMap>({});
@@ -1309,7 +1070,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [sending, setSending] = useState(false);
   const [closingHead, setClosingHead] = useState(false);
   const [lifecyclePending, setLifecyclePending] = useState<string | null>(null);
-  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  const [draftsVersion, rerender] = useReducer((count: number) => count + 1, 0);
   const defaultListWidth = typeof window !== "undefined" && window.innerWidth < 900 ? 240 : 280;
   const [listWidth, setListWidth] = useState(defaultListWidth);
   const [listCollapsed, setListCollapsed] = useState(false);
@@ -1347,6 +1108,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const sendingRef = useRef(false);
   const closingRef = useRef(false);
   const loadSequence = useRef(0);
+  const historySequence = useRef(0);
+  const historyLoadingRef = useRef(false);
+  const historySentinelArmed = useRef(true);
+  const historyUserScrolled = useRef(false);
+  const hasOlderMessagesRef = useRef(false);
+  const mountedRef = useRef(true);
+  const overlayHeightRef = useRef(overlayHeight);
+  overlayHeightRef.current = overlayHeight;
+  const historyAnchorRef = useRef<{ row: HTMLElement; top: number } | null>(null);
   const messageRows = useRef(new Map<string, HTMLElement>());
   const handlers = useRef({
     rekeyed: (_from: string, _to: string) => {},
@@ -1364,27 +1134,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     });
   const store = storeRef.current;
 
-  const persistLayout = (
-    next: {
-      listWidth?: number;
-      listCollapsed?: boolean;
-      composerHeight?: number | null;
-      headComposerHeight?: number | null;
-      recipientPosition?: RecipientPosition;
-      navigationPosition?: NavigationPosition;
-    } = {},
-  ) => {
-    try {
-      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
-      const layout =
-        typeof stored === "object" && stored !== null && !Array.isArray(stored)
-          ? stored
-          : {};
-      localStorage.setItem("peppy.layout.v1", JSON.stringify({ ...layout, ...next }));
-    } catch {
-      /* Storage is optional in embedded previews. */
-    }
-  };
+  const persistLayout = persistLayoutPatch;
   const changeNavigationPosition = (position: NavigationPosition) => {
     setNavigationPosition(position);
     persistLayout({ navigationPosition: position });
@@ -1558,6 +1308,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const choose = (key: string) => {
+    loadSequence.current += 1;
+    historySequence.current += 1;
+    historyLoadingRef.current = false;
+    setHistoryLoading(false);
+    setHistoryError(null);
+    setHasOlderMessages(false);
+    setHistoryExhausted(false);
+    hasOlderMessagesRef.current = false;
+    historySentinelArmed.current = true;
+    historyUserScrolled.current = false;
+    historyAnchorRef.current = null;
     selectedRef.current = key;
     setSelected(key);
   };
@@ -1567,13 +1328,31 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   /** Loads host state for one conversation; responses superseded by a newer request are dropped. */
   const refresh = async (conversationId = selectedRef.current) => {
     const sequence = ++loadSequence.current;
-    const state = await bridge.load_state(
-      conversationId && !isLocalDraftKey(conversationId)
-        ? conversationId
-        : undefined,
-    );
-    if (sequence !== loadSequence.current) return;
-    setSnapshot(state);
+    const loadedConversation = snapshotRef.current?.activeConversationId === conversationId
+      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)
+      : undefined;
+    const historyFromMessageId = loadedConversation?.messages[0]?.id;
+    const requestedConversationId = conversationId && !isLocalDraftKey(conversationId)
+      ? conversationId
+      : undefined;
+    const state = historyFromMessageId
+      ? await bridge.load_state(requestedConversationId, historyFromMessageId)
+      : await bridge.load_state(requestedConversationId);
+    if (!mountedRef.current || sequence !== loadSequence.current) return;
+    setSnapshot((current) => {
+      const previous = historyFromMessageId && current && current.activeConversationId === state.activeConversationId
+        ? current.conversations.find((item) => item.id === state.activeConversationId)
+        : undefined;
+      const refreshed = state.conversations.find((item) => item.id === state.activeConversationId);
+      if (!previous || !refreshed) return state;
+      return {
+        ...state,
+        conversations: state.conversations.map((item) => item.id === refreshed.id
+          ? { ...item, messages: mergeAnchoredMessages(previous.messages, refreshed.messages) }
+          : item),
+      };
+    });
+    const activeConversation = state.conversations.find((item) => item.id === state.activeConversationId);
     if (state.activeConversationId)
       store.adopt(state.activeConversationId, state.draft);
     if (
@@ -1582,6 +1361,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       state.activeConversationId
     )
       choose(state.activeConversationId);
+    const responseHasOlder = activeConversation?.hasOlderMessages ?? false;
+    const currentAnchor = snapshotRef.current?.activeConversationId === conversationId
+      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)?.messages[0]?.id
+      : undefined;
+    if (currentAnchor === historyFromMessageId || !currentAnchor) {
+      hasOlderMessagesRef.current = responseHasOlder;
+      setHasOlderMessages(responseHasOlder);
+    }
   };
 
   const select = (key: string) => {
@@ -1607,11 +1394,30 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     void refresh(composerConversation ?? undefined)
       .catch(report(""))
       .finally(() => setLoading(false));
-    return bridge.subscribe(() => void refresh().catch(report("")));
+    const unsubscribe = bridge.subscribe(() => void refresh().catch(report("")));
+    return () => {
+      mountedRef.current = false;
+      loadSequence.current += 1;
+      historySequence.current += 1;
+      historyAnchorRef.current = null;
+      unsubscribe();
+    };
   }, []);
+  useEffect(() => {
+    if (snapshot?.encryption.state !== "locked" && !appLock?.locked) return;
+    historySequence.current += 1;
+    historyLoadingRef.current = false;
+    historyAnchorRef.current = null;
+    hasOlderMessagesRef.current = false;
+    setHistoryLoading(false);
+    setHistoryError(null);
+    setHasOlderMessages(false);
+    setHistoryExhausted(false);
+  }, [appLock?.locked, snapshot?.encryption.state]);
   useEffect(() => {
     if (browserHost) return;
     void bridge.get_app_lock_status().then(setAppLock).catch(() => setAppLock(null));
@@ -1658,9 +1464,84 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const onMessageScroll = () => {
     const element = messageListRef.current;
     if (!element) return;
+    if (!element.hasAttribute("data-scroll-programmatic")) historyUserScrolled.current = true;
     nearBottom.current =
       element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
   };
+  const loadOlderMessages = useCallback(async () => {
+    const conversationId = selectedRef.current;
+    const current = snapshotRef.current?.conversations.find((item) => item.id === conversationId);
+    const beforeMessageId = current?.messages[0]?.id;
+    if (!conversationId || isLocalDraftKey(conversationId) || !beforeMessageId || !hasOlderMessagesRef.current || historyLoadingRef.current) return;
+    const sequence = ++historySequence.current;
+    historySentinelArmed.current = false;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const page: HistoryPage = await bridge.load_history(conversationId, beforeMessageId);
+      if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId) return;
+      if (page.conversationId !== conversationId) {
+        setHistoryError("Conversation changed while loading older messages. Reload and try again.");
+        return;
+      }
+      const list = messageListRef.current;
+      const listBounds = list?.getBoundingClientRect();
+      const unobscuredBottom = (listBounds?.bottom ?? 0) - (overlayHeightRef.current ?? 0);
+      const visibleRow = listBounds
+        ? [...messageRows.current.values()]
+            .map((row) => ({ row, bounds: row.getBoundingClientRect() }))
+            .filter(({ bounds }) => bounds.bottom > listBounds.top && bounds.top < unobscuredBottom)
+            .sort((left, right) => left.bounds.top - right.bounds.top)[0]?.row
+        : undefined;
+      const anchorRow = visibleRow ?? messageRows.current.get(beforeMessageId) ?? null;
+      historyAnchorRef.current = anchorRow ? { row: anchorRow, top: anchorRow.getBoundingClientRect().top } : null;
+      nearBottom.current = false;
+      flushSync(() => {
+        setSuppressHistoryAnnouncements(true);
+        setSnapshot((previous) => {
+        if (!previous || previous.activeConversationId !== conversationId) return previous;
+        return { ...previous, conversations: previous.conversations.map((item) => item.id === conversationId
+          ? { ...item, messages: mergeMessages(page.messages, item.messages) }
+          : item) };
+        });
+      });
+      const anchor = historyAnchorRef.current;
+      if (list && anchor) {
+        list.setAttribute("data-scroll-programmatic", "");
+        list.scrollTop += anchor.row.getBoundingClientRect().top - anchor.top;
+        if (typeof requestAnimationFrame === "undefined") list.removeAttribute("data-scroll-programmatic");
+        else requestAnimationFrame(() => list.removeAttribute("data-scroll-programmatic"));
+      }
+      hasOlderMessagesRef.current = page.hasMore;
+      setHasOlderMessages(page.hasMore);
+      historyUserScrolled.current = false;
+      if (!page.hasMore) setHistoryExhausted(true);
+      if (typeof requestAnimationFrame === "undefined") setSuppressHistoryAnnouncements(false);
+      else requestAnimationFrame(() => mountedRef.current && setSuppressHistoryAnnouncements(false));
+    } catch (error) {
+      if (sequence === historySequence.current) setHistoryError(errorText(error));
+    } finally {
+      if (sequence === historySequence.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    const list = messageListRef.current;
+    const sentinel = document.getElementById("history-page-sentinel");
+    if (!list || !sentinel || !hasOlderMessages || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) {
+        historySentinelArmed.current = true;
+        return;
+      }
+      if (historyUserScrolled.current && historySentinelArmed.current) void loadOlderMessages();
+    }, { root: list, rootMargin: "200px 0px 0px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasOlderMessages, loadOlderMessages, messageIds]);
   useLayoutEffect(() => {
     if (!conversationLoaded) return;
     stickToBottom();
@@ -1775,20 +1656,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const changeRecipientPosition = (position: RecipientPosition) => {
     setRecipientPosition(position);
-    try {
-      const stored = JSON.parse(localStorage.getItem("peppy.layout.v1") ?? "{}");
-      const layout =
-        typeof stored === "object" && stored !== null && !Array.isArray(stored)
-          ? stored
-          : {};
-      delete layout.recipientAnchor;
-      localStorage.setItem(
-        "peppy.layout.v1",
-        JSON.stringify({ ...layout, recipientPosition: position }),
-      );
-    } catch {
-      /* Storage is optional in embedded previews. */
-    }
+    persistRecipientPosition(position);
   };
 
   const startNewMessage = async (recipient?: string) => {
@@ -1881,6 +1749,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         await bridge.discard_draft({ id: current.id, conversationId: current.conversationId, expectedRevision: current.revision });
       store.remove(conversationId);
       setDeleteConfirmationId(null);
+      setNewComposeKey((current) =>
+        current && store.resolve(current) === conversationId ? null : current,
+      );
       if (selectedRef.current === conversationId) {
         const next = snapshotRef.current?.conversations.find(item => item.id !== conversationId)?.id ?? "";
         choose(next);
@@ -2121,6 +1992,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return;
     }
     try {
+      historySequence.current += 1;
+      historyLoadingRef.current = false;
+      historyAnchorRef.current = null;
+      hasOlderMessagesRef.current = false;
+      setHistoryLoading(false);
+      setHistoryError(null);
+      setHasOlderMessages(false);
       await lock();
       await refresh();
     } catch (error) {
@@ -2138,8 +2016,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const resolution: ContactResolutionMap = { ...(snapshot?.contactResolution ?? {}), ...chosenContacts };
-  const conversations: Conversation[] = [
+  const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
+  const conversations = useMemo<Conversation[]>(() => [
     ...store.localDrafts().map((local) => ({
       id: local.key,
       name: local.content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
@@ -2156,7 +2034,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       recipientlessDraft,
       draftOnly,
     })),
-  ];
+  ], [draftsVersion, resolution, snapshot?.conversations, store]);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   const lockCode = snapshot?.connection.errorCode;
@@ -2173,9 +2051,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return <main ref={mainRef} id="composer-shell" aria-busy="true" data-platform={platform}>Loading messaging state…</main>;
 
   const setupCode = snapshot?.connection.errorCode;
+  const nativeCredentialed = snapshot?.mode === "native" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "");
   const canUnlock = snapshot?.mode === "native"
-    ? snapshot.encryption.state !== "unlocked" && !["server-required", "credentials-required", "revoked"].includes(setupCode ?? "")
+    ? snapshot.encryption.state !== "unlocked" && nativeCredentialed
     : browserHost && snapshot?.mode === "browser" && (snapshot.encryption.state === "locked" || snapshot.encryption.state === "mismatch");
+  const canRecoverNativeSync = canUnlock || nativeCredentialed;
+  const needsServerSetup = snapshot?.connection.errorCode === "server-required" || snapshot?.connection.errorCode === "credentials-required";
+  const showSetup = Boolean(snapshot && (addingPhone || initialEnrollmentActive || (!selected && (needsServerSetup || setupCode === "revoked" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
+  const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
+  const serverOffline = Boolean(snapshot && enrolled && isServerUnreachable(snapshot.connection));
   const attachments: Attachment[] = content.attachmentIds.map(
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
@@ -2199,7 +2083,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
   const blockedReason = active?.replyBlockedReason ?? (effectivePendingRecipient ? pendingRecipientReason : problem);
-  const statusActive = Boolean(blockedReason || mmsLimitShown || notice);
+  const delayedStatus = route.kind === "route" && gatewayAvailability(route.gateway) === "delayed"
+    ? `${route.gateway.name} last synced ${route.gateway.lastSeenAgeSeconds !== undefined ? formatAge(route.gateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.`
+    : undefined;
+  const statusActive = Boolean(blockedReason || delayedStatus || mmsLimitShown || notice);
   const composerResizeHandle = (
     <ResizeHandle
       id="handle-h2"
@@ -2222,6 +2109,49 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       }}
     />
   );
+  const draftFeedback = slot?.error || recoveries.length ? (
+    <>
+      {slot?.error && <DraftRecovery
+        error={slot.error.message}
+        onRetry={() => void retrySave()}
+      />}
+      {recoveries.map(recovery => <section
+        key={recovery.id}
+        id={`draft-recovery-${recovery.id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+        data-draft-recovery={recovery.id}
+        aria-label="Recoverable unsaved draft"
+        role="status"
+      >
+        <p>{recovery.message}</p>
+        {recovery.content.text && <pre>{recovery.content.text}</pre>}
+        {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
+          void store.edit(recovery.destination!, recovery.content).then(outcome => {
+            if (outcome.ok) store.discardRecovery(recovery.id);
+            else setNotice(`Retained text was not applied: ${outcome.error}`);
+          });
+         }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
+          const { key } = store.createNew();
+          setNewComposeKey(key);
+          choose(key);
+          store.discardRecovery(recovery.id);
+          void store.edit(key, recovery.content);
+        }}>Restore in new draft</button>}
+        {recovery.content.text && <button className="secondary-button" type="button" onClick={() => {
+          void navigator.clipboard?.writeText(recovery.content.text).then(
+            () => setNotice("Recoverable text copied."),
+            () => setNotice("Could not copy recoverable text; select it above to copy."),
+          );
+        }}>Copy retained text</button>}
+        <button className="secondary-button" type="button" onClick={() => store.discardRecovery(recovery.id)}>Discard retained text</button>
+      </section>)}
+    </>
+  ) : undefined;
+  const noSelectionFeedback = notice || draftFeedback ? (
+    <>
+      {notice && <p id="no-selection-notice" role="status">{notice}</p>}
+      {draftFeedback}
+    </>
+  ) : undefined;
   const composer = (
             <section
       id="composer-area"
@@ -2242,43 +2172,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onRemoveAttachment={slotKey ? (id) => edit({ attachmentIds: content.attachmentIds.filter((attachmentId) => attachmentId !== id) }) : undefined}
         status={notice}
         statusActive={statusActive}
-        bannerSlot={slot?.error || recoveries.length ? (
-          <>
-            {slot?.error && <DraftRecovery
-              error={slot.error.message}
-              onRetry={() => void retrySave()}
-            />}
-            {recoveries.map(recovery => <section
-              key={recovery.id}
-              id={`draft-recovery-${recovery.id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
-              data-draft-recovery={recovery.id}
-              aria-label="Recoverable unsaved draft"
-              role="status"
-            >
-              <p>{recovery.message}</p>
-              {recovery.content.text && <pre>{recovery.content.text}</pre>}
-              {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
-                void store.edit(recovery.destination!, recovery.content).then(outcome => {
-                  if (outcome.ok) store.discardRecovery(recovery.id);
-                  else setNotice(`Retained text was not applied: ${outcome.error}`);
-                });
-               }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
-                const { key } = store.createNew();
-                setNewComposeKey(key);
-                choose(key);
-                store.discardRecovery(recovery.id);
-                void store.edit(key, recovery.content);
-              }}>Restore in new draft</button>}
-              {recovery.content.text && <button className="secondary-button" type="button" onClick={() => {
-                void navigator.clipboard?.writeText(recovery.content.text).then(
-                  () => setNotice("Recoverable text copied."),
-                  () => setNotice("Could not copy recoverable text; select it above to copy."),
-                );
-              }}>Copy retained text</button>}
-              <button className="secondary-button" type="button" onClick={() => store.discardRecovery(recovery.id)}>Discard retained text</button>
-            </section>)}
-          </>
-        ) : undefined}
+        bannerSlot={draftFeedback}
         statusSlot={
           <>
             <p id="reply-blocked-reason" data-reply-blocked role="status" hidden={!active?.replyBlockedReason}>
@@ -2287,6 +2181,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <span id="unavailable-hint" hidden={!blockedReason}>
               Sending unavailable: {blockedReason}
             </span>
+            <p id="gateway-status-hint" role="status" hidden={!delayedStatus}>{delayedStatus}</p>
             {mmsLimitShown && route.kind === "route" && (
               <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
@@ -2339,23 +2234,32 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onSaveAttachment={(file) => void saveAttachment(file)}
       listRef={setMessageListNode}
       onScroll={onMessageScroll}
+      hasOlderMessages={hasOlderMessages}
+      historyLoading={historyLoading}
+      historyError={historyError}
+      onLoadOlder={() => void loadOlderMessages()}
+      suppressHistoryAnnouncements={suppressHistoryAnnouncements}
+      historyExhausted={historyExhausted}
+      onStartConversation={!composerConversation && !slotKey ? () => void startNewMessage() : undefined}
+      noSelectionFeedback={!composerConversation && !slotKey ? noSelectionFeedback : undefined}
     />
   );
   const panelStatus = snapshot
     ? {
-        tone: statusTone(snapshot.connection, snapshot.encryption.state),
+        tone: statusTone(snapshot.connection, snapshot.encryption.state, serverOffline),
         summary: statusSummary(snapshot.connection, snapshot.encryption.state),
-        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} />,
+        details: <StatusDetails connection={snapshot.connection} encryption={snapshot.encryption.state} serverUnreachable={serverOffline} />,
       }
     : {
         tone: "neutral" as const,
         summary: "Loading status",
         details: <StatusDetails />,
       };
-  const notificationUnread = snapshot?.notifications.filter(notification => !notification.seen && !notification.dismissalPending && !snapshot.appFilters.some(filter => filter.muted && filter.sourceDeviceId === notification.target.sourceDeviceId && filter.packageName === notification.packageName)).length ?? 0;
+  const mutedNotificationKeys = new Set((snapshot?.appFilters ?? []).filter((filter) => filter.muted).map((filter) => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
+  const notificationUnread = snapshot?.notifications.filter((notification) => !notification.seen && !notification.dismissalPending && !mutedNotificationKeys.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName))).length ?? 0;
   const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
   const composerConnectionDot = snapshot
-    ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} />
+    ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} serverUnreachable={serverOffline} />
     : null;
   if (composerConversation) {
     return (
@@ -2482,9 +2386,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               aria-label="New message"
               title="New message"
               data-action="new-message"
-              onClick={() =>
-                document.getElementById("recipient-search")?.focus()
-              }
+              onClick={() => void startNewMessage()}
             >
               <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden />
             </button>}
@@ -2543,7 +2445,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <h1 data-header-title>Contacts</h1>
               ) : (
                 <div className="header-copy-details">
-                  <b data-header-title>{title ?? "Set up Peppy"}</b>
+                  <b data-header-title>{title ?? (showSetup ? "Set up Peppy" : "Peppy")}</b>
                   {active?.participants && <small data-conversation-participants>{active.participants.map((part) => displayAddressName(part, resolution)).join(", ")}</small>}
                 </div>
               )}
@@ -2571,7 +2473,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   <ExternalLink size={16} aria-hidden />
                 </button>
               )}
-              {((active?.recipientlessDraft && active.draftOnly) || (Boolean(newComposeKey) && content.recipientIds.length === 0)) && <button
+              {slotKey && ((active?.recipientlessDraft && active.draftOnly) || (Boolean(newComposeKey) && content.recipientIds.length === 0)) && <button
                 id="conversation-delete-draft"
                 className={deleteConfirmationId === slotKey ? "confirming" : undefined}
                 aria-label={deleteConfirmationId === slotKey ? "Confirm delete draft" : "Delete draft"}
@@ -2590,6 +2492,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               </button>}
             </div>
           </header>
+          <ServerOfflineAnnouncement offline={serverOffline} />
+          {serverOffline && <ServerOfflineBanner />}
           {settingsOpen ? (
             <SettingsView
               mode={mode}
@@ -2599,7 +2503,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onAction={runSetupAction}
               onOpenAccount={() => bridge.hosted_open_billing()}
               encryption={snapshot?.encryption.state ?? "locked"}
-              canUnlock={canUnlock}
+              canUnlock={canRecoverNativeSync}
               theme={theme}
               onTheme={setTheme}
               navigationPosition={navigationPosition}
@@ -2622,6 +2526,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                browserHost={browserHost}
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
+               serverOffline={serverOffline}
              />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -2640,21 +2545,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
-              {snapshot && (addingPhone || (!selected && (snapshot.connection.errorCode === "server-required" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview") || (snapshot.connection.state !== "connected" && !canUnlock)))) ? (
+              {showSetup && snapshot ? (
                 <SetupLanding
                   mode={mode}
                   onMode={setMode}
                   enrolledWithoutPhone={ownerWithoutPhone(snapshot)}
+                  enrollmentEstablished={snapshot.deviceRole === "owner" && snapshot.encryption.state === "unlocked"}
                   addingPhone={addingPhone}
-                  onExit={() => setAddingPhone(false)}
-                  onDeferPhone={() => {
+                  connectionPending={snapshot.connection.errorCode === "connecting"}
+                  onExit={() => { setAddingPhone(false); setInitialEnrollmentActive(false); }}
+                  onDeferPhone={async () => {
                     const key = phoneDeferredKey(snapshot.connection.origin);
                     if (key) localStorage.setItem(key, "1");
-                    setPhoneDeferredOrigin(snapshot.connection.origin ?? null);
-                    setAddingPhone(false);
-                    void refresh();
+                     setPhoneDeferredOrigin(snapshot.connection.origin ?? null);
+                     setInitialEnrollmentActive(false);
+                     await refresh();
+                    if (addingPhone) setAddingPhone(false);
                   }}
-                  onJoined={() => { setAddingPhone(false); void refresh(); }}
+                  onJoined={async () => { await refresh(); setAddingPhone(false); setInitialEnrollmentActive(false); }}
+                  onInitialEnrollmentStart={() => setInitialEnrollmentActive(true)}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
                 />
@@ -2662,11 +2571,17 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <>
                   <div
                     id="conversation-stage"
-                    style={overlayHeight === null ? undefined : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties}
+                    style={
+                      !slotKey
+                        ? { "--composer-overlay-height": "0px" } as CSSProperties
+                        : overlayHeight === null
+                          ? undefined
+                          : { "--composer-overlay-height": `${overlayHeight}px` } as CSSProperties
+                    }
                   >
                     {messages}
                     {recipientRail}
-                    {composer}
+                    {slotKey && composer}
                   </div>
                 </>
               )}

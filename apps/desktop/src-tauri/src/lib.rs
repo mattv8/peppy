@@ -5,8 +5,8 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
@@ -18,6 +18,7 @@ mod composer_scope;
 mod contacts;
 mod credentials;
 mod dialogs;
+mod devices;
 mod dto;
 mod enrollment;
 mod error;
@@ -26,6 +27,8 @@ mod gateways;
 mod heads;
 mod heads_runtime;
 
+#[cfg(test)]
+mod activation_session_tests;
 #[cfg(test)]
 mod draft_command_tests;
 mod hosted;
@@ -49,18 +52,18 @@ mod window_chrome;
 mod windows;
 
 use credentials::{
-    check_origin_binding, ensure_database_key, load_config, parse_credential, save_config,
-    store_credential, HostConfig,
+    HostConfig, check_origin_binding, ensure_database_key, load_config, parse_credential,
+    save_config, store_credential,
 };
-use dto::{DraftView, Head, PublicCopyView, SendResultView, Snapshot};
-use error::{core_error, BridgeError, BridgeResult};
+use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot};
+use error::{BridgeError, BridgeResult, core_error};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{AttachmentId, ConversationId, NotificationTarget};
 use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
-use session::{open_session, DraftInput, Notifier, Session, VaultSummary};
+use session::{DraftInput, Notifier, Session, VaultSummary, open_session};
 use sync::{blocking, fetch_vault, vault_header};
 
 pub const STATE_EVENT: &str = "peppy://state";
@@ -91,6 +94,7 @@ pub struct AppState {
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
 pub const COMPOSER_COMMANDS: &[&str] = &[
     "load_state",
+    "load_history",
     "save_draft",
     "send_draft",
     "mark_seen",
@@ -364,12 +368,19 @@ async fn load_state_for_window(
     label: &str,
     session: Arc<Session>,
     conversation_id: Option<String>,
+    history_from_message_id: Option<String>,
     origin: Option<String>,
     preferences: NotificationPreferences,
 ) -> BridgeResult<(Snapshot, bool)> {
     if label == tray::MAIN {
         return blocking(move || {
-            session.snapshot(conversation_id.as_deref(), head(), origin, preferences)
+            session.snapshot(
+                conversation_id.as_deref(),
+                history_from_message_id.as_deref(),
+                head(),
+                origin,
+                preferences,
+            )
         })
         .await;
     }
@@ -377,7 +388,13 @@ async fn load_state_for_window(
         effective_composer_conversation(state, label, &session, conversation_id.as_deref())?
             .expect("composer conversation");
     blocking(move || {
-        session.snapshot_scoped(&conversation_id.to_string(), head(), origin, preferences)
+        session.snapshot_scoped(
+            &conversation_id.to_string(),
+            history_from_message_id.as_deref(),
+            head(),
+            origin,
+            preferences,
+        )
     })
     .await
 }
@@ -388,6 +405,7 @@ async fn load_state(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     conversation_id: Option<String>,
+    history_from_message_id: Option<String>,
 ) -> BridgeResult<Snapshot> {
     if state.app_locked.load(Ordering::Acquire) {
         return Ok(locked_snapshot(
@@ -404,10 +422,19 @@ async fn load_state(
         window.label(),
         session.clone(),
         conversation_id,
+        history_from_message_id,
         origin,
         preferences,
     )
     .await?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(locked_snapshot(
+            state.app_lock_storage_available.load(Ordering::Acquire),
+        ));
+    }
+    if !session_is_current(&state, &session).await {
+        return Ok(empty_snapshot(state.config()?.origin));
+    }
     let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
     snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
     snapshot.head.panel = Some(panel);
@@ -421,6 +448,44 @@ async fn load_state(
         session.notify();
     }
     Ok(snapshot)
+}
+
+async fn session_is_current(state: &AppState, session: &Arc<Session>) -> bool {
+    state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, session))
+}
+
+#[tauri::command]
+async fn load_history(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    before_message_id: String,
+) -> BridgeResult<HistoryPage> {
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let session = state.require_session().await?;
+    let scoped_conversation = if window.label() == tray::MAIN {
+        ConversationId::from_str(&conversation_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?
+    } else {
+        effective_composer_conversation(&state, window.label(), &session, Some(&conversation_id))?
+            .expect("composer conversation")
+    };
+    let history_session = session.clone();
+    let page = blocking(move || {
+        history_session.history_page(&scoped_conversation.to_string(), &before_message_id)
+    })
+    .await?;
+    if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    Ok(page)
 }
 
 #[tauri::command]
@@ -599,6 +664,7 @@ async fn unlock_sync(
     else {
         return Ok(());
     };
+    let verified_passphrase = passphrase.clone();
     let result = unlock_with(
         &state,
         &session,
@@ -608,6 +674,17 @@ async fn unlock_sync(
         vault.profile_fingerprint,
     )
     .await;
+    if result.is_ok() {
+        if let Ok(current) = state.require_session().await {
+            if Arc::ptr_eq(&current, &session) && current.binding == session.binding {
+                let _ = enrollment::save_verified_vault_secret_if_empty(
+                    &*state.store,
+                    &session.binding.vault_secret_account(),
+                    &verified_passphrase,
+                );
+            }
+        }
+    }
     session.notify();
     result
 }
@@ -754,6 +831,8 @@ async fn unlock_with(
     let binding = session.binding.clone();
     state.update_config(|config| config.add_cached_epoch(&binding, epoch))?;
     session.set_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
+    // The renderer refreshes only on state events; the claim path notifies before this unlock.
+    session.notify();
     session.request_work();
     session.reconnect_wake.notify_one();
     Ok(())
@@ -920,6 +999,18 @@ async fn list_contact_books(state: State<'_, AppState>) -> BridgeResult<Vec<serd
 }
 
 #[tauri::command]
+async fn list_devices(state: State<'_, AppState>) -> BridgeResult<devices::DeviceRosterView> {
+    let session = state.require_session().await?;
+    devices::list(&session).await
+}
+
+#[tauri::command]
+async fn revoke_device(state: State<'_, AppState>, device_id: String) -> BridgeResult<()> {
+    let session = state.require_session().await?;
+    devices::revoke(&session, &device_id).await
+}
+
+#[tauri::command]
 async fn list_contacts(
     state: State<'_, AppState>,
     book_id: String,
@@ -947,6 +1038,18 @@ async fn search_contact_recipients(
 async fn request_contact_repair(state: State<'_, AppState>) -> BridgeResult<serde_json::Value> {
     let session = state.require_session().await?;
     blocking(move || contacts::request_repair(&session)).await
+}
+
+#[tauri::command]
+async fn request_contact_sync(state: State<'_, AppState>, book_id: String) -> BridgeResult<serde_json::Value> {
+    let session = state.require_session().await?;
+    blocking(move || contacts::request_sync(&session, &book_id)).await
+}
+
+#[tauri::command]
+async fn get_contact_sync_request(state: State<'_, AppState>, book_id: String) -> BridgeResult<serde_json::Value> {
+    let session = state.require_session().await?;
+    blocking(move || contacts::sync_request_status(&session, &book_id)).await
 }
 
 /// This device's contact edit requests and the owner results recorded in the local ledger.
@@ -1777,6 +1880,7 @@ pub fn run() {
     macro_rules! command_handler {
         ($($extra:path,)*) => { tauri::generate_handler![
         load_state,
+        load_history,
         configure_server,
         unlock_sync,
         get_app_lock_status,
@@ -1798,6 +1902,8 @@ pub fn run() {
         set_notification_preferences,
         set_notification_context,
         request_notification_permission,
+        list_devices,
+        revoke_device,
         list_contact_books,
         list_contacts,
         forget_contact_book,
@@ -1806,6 +1912,8 @@ pub fn run() {
         pick_contact_photo,
         search_contact_recipients,
         request_contact_repair,
+        request_contact_sync,
+        get_contact_sync_request,
         list_restorable_contacts,
         restore_contact,
         set_start_at_login,
@@ -1823,7 +1931,11 @@ pub fn run() {
         let state = webview.app_handle().state::<AppState>();
         let allowed = matches!(
             command,
-            "load_state" | "get_app_lock_status" | "unlock_app" | "acknowledge_lifecycle"
+            "load_state"
+                | "load_history"
+                | "get_app_lock_status"
+                | "unlock_app"
+                | "acknowledge_lifecycle"
         );
         if state.app_locked.load(Ordering::Acquire) && !allowed {
             invoke

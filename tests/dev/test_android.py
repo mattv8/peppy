@@ -583,6 +583,68 @@ class AndroidHelperTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(log.exists())
 
+    def create_deploy_fixture(self, temp, install_fails=False):
+        temp = pathlib.Path(temp)
+        sdk = temp / "sdk"
+        artifacts = temp / "artifacts"
+        app_data = temp / "app-data"
+        log = temp / "adb.log"
+        (sdk / "platform-tools").mkdir(parents=True)
+        artifacts.mkdir()
+        app_data.mkdir()
+        (artifacts / "app-debug.apk").touch()
+        (app_data / "synthetic-state.txt").write_text("synthetic-user-state\n")
+        adb = sdk / "platform-tools" / "adb"
+        adb.write_text(
+            "#!/bin/sh\n"
+            "echo \"$@\" >> \"$ADB_LOG\"\n"
+            "case \"$*\" in\n"
+            "  *devices*) echo 'emulator-5554 device' ;;\n"
+            "  *getprop*) echo x86_64 ;;\n"
+            "  *uninstall*|*'pm clear'*) rm -f \"$APP_DATA/synthetic-state.txt\" ;;\n"
+            "  *'install -r'*) if [ -n \"$INSTALL_FAILS\" ]; then echo 'Failure [INSTALL_FAILED_VERSION_DOWNGRADE]'; exit 1; fi ;;\n"
+            "esac\n"
+        )
+        adb.chmod(0o755)
+        return {
+            "app_data": app_data,
+            "log": log,
+            "env": {
+                "ANDROID_SDK_ROOT": str(sdk),
+                "PEPPY_ANDROID_ARTIFACTS": str(artifacts),
+                "ADB_LOG": str(log),
+                "APP_DATA": str(app_data),
+                "INSTALL_FAILS": "1" if install_fails else "",
+            },
+        }
+
+    def test_repeat_deploy_replaces_in_place_and_preserves_synthetic_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_deploy_fixture(temp)
+            for _ in range(2):
+                result = self.run_helper("deploy", env=fixture["env"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            calls = fixture["log"].read_text().splitlines()
+            installs = [call for call in calls if " install " in call]
+            self.assertEqual(len(installs), 2)
+            self.assertTrue(all("install -r" in call for call in installs))
+            self.assertFalse(any("uninstall" in call or "pm clear" in call for call in calls))
+            self.assertEqual((fixture["app_data"] / "synthetic-state.txt").read_text(), "synthetic-user-state\n")
+
+    def test_install_failure_exits_without_uninstall_clear_or_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = self.create_deploy_fixture(temp, install_fails=True)
+            result = self.run_helper("deploy", env=fixture["env"])
+
+            self.assertNotEqual(result.returncode, 0)
+            calls = fixture["log"].read_text().splitlines()
+            installs = [call for call in calls if " install " in call]
+            self.assertEqual(len(installs), 1)
+            self.assertTrue(all("install -r" in call for call in installs))
+            self.assertFalse(any("uninstall" in call or "pm clear" in call for call in calls))
+            self.assertEqual((fixture["app_data"] / "synthetic-state.txt").read_text(), "synthetic-user-state\n")
+
     def create_android_fixture(self, temp, include_test_apk=False, gradle_exit_code=0):
         temp = pathlib.Path(temp)
         bin_dir = temp / "bin"

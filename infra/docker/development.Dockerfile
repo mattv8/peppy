@@ -2,7 +2,7 @@ FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d
 
 ARG DEV_UID=1000
 ARG DEV_GID=1000
-ARG NODE_VERSION=24.21.0
+ARG NODE_VERSION=26.12.0
 RUN test "${DEV_UID}" != 0 \
     && apt-get update && apt-get install --yes --no-install-recommends ca-certificates curl python3 tar xz-utils util-linux build-essential pkg-config libssl-dev libsodium-dev libsqlite3-dev libpq-dev \
     && rm -rf /var/lib/apt/lists/* \
@@ -17,6 +17,7 @@ RUN test "${DEV_UID}" != 0 \
     && rm -f SHASUMS256.txt "${node_archive}" \
     && mkdir -p /workspace/target /artifacts /home/developer/.cargo /home/developer/.local/share/pnpm /home/developer/.cache/corepack \
     && chown -R "${DEV_UID}:${DEV_GID}" /workspace /artifacts /home/developer \
+    && npm install --global corepack@0.36.0 \
     && COREPACK_HOME=/home/developer/.cache/corepack corepack enable \
     && COREPACK_HOME=/home/developer/.cache/corepack corepack prepare pnpm@12.8.1 --activate
 COPY infra/dev/container-run.sh /usr/local/bin/run

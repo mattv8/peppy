@@ -10,6 +10,11 @@ struct SelfHostedEnrollmentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @State private var enrollment = SelfHostedEnrollmentState()
+    @State private var isCheckingServer = false
+    @State private var isCheckingPendingSecret = false
+    @State private var isCancellingInvite = false
+    @State private var pendingSecretRequestID: UUID?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(model: AppModel, isPresented: Binding<Bool>, inviteLink: String? = nil) {
         self.model = model
@@ -41,9 +46,7 @@ struct SelfHostedEnrollmentView: View {
                         .foregroundStyle(colors.Error)
                         .accessibilityIdentifier("self-hosted-enrollment-error")
                 }
-                if model.activity == .enrolling {
-                    ProgressView().accessibilityIdentifier("self-hosted-enrollment-progress")
-                }
+                operationStatus
             }
             .navigationTitle(enrollment.joining ? "Connect to Peppy" : "Set up Peppy")
             .toolbar {
@@ -56,8 +59,16 @@ struct SelfHostedEnrollmentView: View {
         .task(id: enrollment.joining ? enrollment.origin : "") {
             enrollment.hasPendingSecretForJoin = false
             guard enrollment.joining, !enrollment.origin.isEmpty else { return }
+            let requestID = UUID()
+            pendingSecretRequestID = requestID
+            isCheckingPendingSecret = true
+            defer {
+                if pendingSecretRequestID == requestID {
+                    isCheckingPendingSecret = false
+                }
+            }
             let hasPendingSecret = await model.hasPendingVaultSecret(origin: enrollment.origin)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, pendingSecretRequestID == requestID else { return }
             enrollment.hasPendingSecretForJoin = hasPendingSecret
         }
         .onDisappear { enrollment.clearSecrets() }
@@ -293,7 +304,17 @@ struct SelfHostedEnrollmentView: View {
     }
 
     private var isUnavailable: Bool {
-        model.activity != .idle || scenePhase != .active
+        model.activity != .idle || isCheckingServer || isCheckingPendingSecret || isCancellingInvite || scenePhase != .active
+    }
+
+    @ViewBuilder private var operationStatus: some View {
+        if isCheckingServer || isCheckingPendingSecret {
+            labeledProgress("peppy.production_pairing_checking", id: "self-hosted-enrollment-checking")
+        } else if isCancellingInvite {
+            labeledProgress("peppy.production_pairing_cancelling", id: "self-hosted-enrollment-cancelling")
+        } else if model.activity == .enrolling {
+            labeledProgress("peppy.production_pairing_connecting", id: "self-hosted-enrollment-progress")
+        }
     }
 
 
@@ -338,9 +359,12 @@ struct SelfHostedEnrollmentView: View {
     }
 
     private func discoverServer() {
+        guard !isCheckingServer else { return }
         let requestedOrigin = enrollment.origin
         let epoch = enrollment.beginDiscovery()
+        isCheckingServer = true
         Task {
+            defer { isCheckingServer = false }
             guard let discovery = await model.discoverSelfHostedInstance(origin: requestedOrigin), !enrollment.joining else { return }
             if discovery.claimed {
                 enrollment.origin = discovery.origin
@@ -441,8 +465,15 @@ struct SelfHostedEnrollmentView: View {
             model.vaultRequestRecoveryRetained()
             return
         }
-        model.cancelVaultRequest(origin: enrollment.origin)
-        restartEnrollment()
+        guard !isCancellingInvite else { return }
+        let origin = enrollment.origin
+        isCancellingInvite = true
+        Task {
+            let didCancel = await model.cancelVaultRequest(origin: origin)
+            guard !Task.isCancelled else { return }
+            isCancellingInvite = false
+            if didCancel { restartEnrollment() }
+        }
     }
 
     private func restartEnrollment() {
@@ -453,5 +484,19 @@ struct SelfHostedEnrollmentView: View {
     private func cancel() {
         enrollment.clearSecrets()
         isPresented = false
+    }
+
+    private func labeledProgress(_ key: String, id: String) -> some View {
+        HStack {
+            if reduceMotion {
+                Image(systemName: "hourglass").accessibilityHidden(true)
+            } else {
+                ProgressView().accessibilityHidden(true)
+            }
+            Text(NSLocalizedString(key, tableName: "Peppy", comment: ""))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(NSLocalizedString(key, tableName: "Peppy", comment: "")))
+        .accessibilityIdentifier(id)
     }
 }

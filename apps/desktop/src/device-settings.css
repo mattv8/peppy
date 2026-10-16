@@ -1,0 +1,8 @@
+#settings-devices ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+#settings-devices li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm, 4px); }
+#settings-devices li div { display: grid; gap: 2px; min-width: 0; }
+#settings-devices li span, #settings-devices li small { color: var(--peppy-text-secondary); font-size: 12px; }
+#settings-devices li span[data-presence-state="delayed"] { color: var(--peppy-warning-text); }
+#settings-devices li span[data-presence-state="never"], #settings-devices li span[data-presence-state="unknown"] { color: var(--peppy-text-muted); }
+#devices-removed { display: grid; gap: 8px; }
+@media (max-width: 480px) { #settings-devices li { align-items: flex-start; flex-wrap: wrap; } #settings-devices li button { margin-left: auto; } }

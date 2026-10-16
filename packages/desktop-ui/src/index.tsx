@@ -7,6 +7,7 @@ import {
   ExternalLink,
   GripVertical,
   Loader,
+  LoaderCircle,
   MessageCircle,
   MessageSquarePlus,
   Minus,
@@ -28,6 +29,7 @@ import {
   normalizePhoneNumber,
 } from "./phone";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
+export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {
   formatPhoneInput,
@@ -193,9 +195,17 @@ export function StatusPopover({ tone, summary, children }: { tone: StatusTone; s
   </div>;
 }
 
-export function ConnectionDot({ state, label }: { state: string; label: string }): ReactElement {
-  return <span role="status" aria-label={label} title={label} data-connection-state={state}>
+export function ConnectionDot({ state, label, serverUnreachable = false }: { state: string; label: string; serverUnreachable?: boolean }): ReactElement {
+  return <span role="status" aria-label={label} title={label} data-connection-state={state} data-server-unreachable={serverUnreachable || undefined}>
     <span className="connection-dot" aria-hidden />
+  </span>;
+}
+
+/** Visible pending status: the label is the live-region text; the spinner is decorative. */
+export function BusyIndicator({ id, label }: { id: string; label: string }): ReactElement {
+  return <span id={id} className="busy-indicator" role="status" aria-live="polite" aria-atomic="true">
+    <LoaderCircle className="busy-indicator-icon" size={14} strokeWidth={1.75} aria-hidden />
+    <span className="busy-indicator-label">{label}</span>
   </span>;
 }
 
@@ -277,6 +287,7 @@ export function RecipientPanel({
   const searchSeqRef = useRef(0);
   const suggestionListId = useId();
   const recipientIds = recipients.map((recipient) => recipient.id).join("\n");
+  const chosenRecipientIds = new Set(recipients.map((recipient) => recipient.id));
   // Latest callback without re-running the search on every parent render.
   const searchRef = useRef(searchContacts);
   searchRef.current = searchContacts;
@@ -307,7 +318,7 @@ export function RecipientPanel({
     searchSeqRef.current += 1;
     setSuggestions([]);
     onSuggestionChosen?.(suggestion);
-    if (!recipients.some((recipient) => recipient.id === suggestion.id)) {
+    if (!chosenRecipientIds.has(suggestion.id)) {
       onCommit([...recipients.map((recipient) => recipient.id), suggestion.id]);
     }
     setError(null);

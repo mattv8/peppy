@@ -3,7 +3,7 @@ use std::env;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
-const UP: [&str; 16] = [
+const UP: [&str; 17] = [
     include_str!("../migrations/0001_foundation.sql"),
     include_str!("../migrations/0002_messaging.sql"),
     include_str!("../migrations/0003_pairing_proofs.sql"),
@@ -20,9 +20,10 @@ const UP: [&str; 16] = [
     include_str!("../migrations/0014_enrollment.sql"),
     include_str!("../migrations/0015_remove_legacy_pairing.sql"),
     include_str!("../migrations/0016_multi_vault.sql"),
+    include_str!("../migrations/0017_device_presence.sql"),
 ];
 
-const DOWN: [&str; 16] = [
+const DOWN: [&str; 17] = [
     include_str!("../migrations/down/0001_foundation.down.sql"),
     include_str!("../migrations/down/0002_messaging.down.sql"),
     include_str!("../migrations/down/0003_pairing_proofs.down.sql"),
@@ -39,6 +40,7 @@ const DOWN: [&str; 16] = [
     include_str!("../migrations/down/0014_enrollment.down.sql"),
     include_str!("../migrations/down/0015_remove_legacy_pairing.down.sql"),
     include_str!("../migrations/down/0016_multi_vault.down.sql"),
+    include_str!("../migrations/down/0017_device_presence.down.sql"),
 ];
 
 #[tokio::test]
@@ -129,6 +131,10 @@ async fn assert_latest_schema(database: &mut PgConnection) {
     assert!(table_exists(database, "vault_requests").await);
     assert!(table_exists(database, "device_admissions").await);
     assert!(table_exists(database, "phone_invitations").await);
+    assert!(table_exists(database, "device_presence").await);
+    assert!(table_exists(database, "device_sockets").await);
+    assert!(index_exists(database, "device_sockets_active_by_device").await);
+    assert!(index_exists(database, "device_sockets_responsive_by_device").await);
     assert!(index_exists(database, "device_wake_jobs_lease_due").await);
     assert!(constraint_exists(database, "storage_deletions_reason_check").await);
     assert!(function_exists(database, "peppy_reject_mutation").await);

@@ -9,8 +9,11 @@ export type AttachmentView = { id: string; name: string; mediaType: string; byte
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; body: string; timestamp: string; status?: MessageStatus; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 /** `participants` are native-provided reply addressees and exclude a confirmed self address. */
 /** Draft flags are authoritative host metadata; do not infer them from an unloaded message list. */
-export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
-export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
+export type ConversationView = { id: string; name: string; preview: string; unread: number; messages: MessageView[]; hasOlderMessages?: boolean; participants?: string[]; replyBlockedReason?: string; recipientlessDraft?: boolean; draftOnly?: boolean };
+export type HistoryPage = { conversationId: string; messages: MessageView[]; hasMore: boolean };
+export type GatewayAvailability = "unknown" | "connected" | "delayed" | "offline" | "never_connected" | "no_sms_sim" | "sms_permission_needed" | "sms_unavailable" | "capabilities_unknown" | "unsupported_platform";
+export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
+export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
 export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
@@ -25,8 +28,11 @@ export type AppFilter = { sourceDeviceId: string; packageName: string; appName: 
 export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden" };
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";
 /** Native values: requests go to the owner phone, so `canRestore` follows `canWrite`; `supportsNotes`/`supportsBirthday` follow the phone's platform (iOS has no notes). */
-export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean };
-export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number };
+export type BookCapabilities = { canWrite: boolean; canDelete: boolean; supportsNotes: boolean; supportsPhoto: boolean; canRestore?: boolean; supportsBirthday?: boolean; canSync?: boolean };
+export type ContactBookView = { id: string; deviceName: string; state: ContactBookState; capabilities: BookCapabilities; contactCount: number; defaultAccountLabel?: string; lastSyncAt?: string; stalenessNote?: string; pendingEditCount: number; ownerDeviceId?: string; sourceRevoked?: boolean };
+export type ManagedDeviceView = { id: string; name: string; kind: string | null; role: string; revoked: boolean; presence?: GatewayPresence; wakeRoute?: boolean };
+export type DeviceRosterView = { currentDeviceId: string; devices: ManagedDeviceView[] };
+export type ContactScanStatus = { requestId: string; bookId: string; state: "queued" | "waiting" | "scanning" | "completed" | "blocked" | "failed" | "expired"; reason?: string; expiresAt?: number };
 /** `label` is the wire value (round-trips unchanged); `displayLabel` is for people (e.g. Apple raw labels). */
 export type ContactPhone = { id?: string; label: string; displayLabel?: string; number: string; readOnly?: boolean };
 export type ContactEmail = { id?: string; label: string; displayLabel?: string; address: string; readOnly?: boolean };
@@ -51,7 +57,7 @@ export type HostedAccountView = { available: boolean; signedIn: boolean; account
 /** Sanitized enrollment state. Secrets and device credentials remain in the platform host. */
 export type EnrollmentView = {
   mode: "community" | "hosted";
-  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
+  stage: "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
   origin?: string;
   owner?: boolean;
   hasGateway?: boolean;
@@ -76,7 +82,8 @@ export type HostedPreviewView = {
 export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
 
 export interface DesktopBridge {
-  load_state(conversationId?: string): Promise<DesktopSnapshot>;
+  load_state(conversationId?: string, historyFromMessageId?: string): Promise<DesktopSnapshot>;
+  load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage>;
   configure_server(origin: string): Promise<void>;
   unlock_sync(): Promise<void>;
   get_app_lock_status(): Promise<AppLockStatus>;
@@ -114,6 +121,8 @@ export interface DesktopBridge {
   acknowledge_lifecycle(id: string, ok: boolean): Promise<void>;
   window(action: "minimize" | "maximize" | "close"): Promise<void>;
   list_contact_books(): Promise<ContactBookView[]>;
+  list_devices(): Promise<DeviceRosterView>;
+  revoke_device(deviceId: string): Promise<void>;
   forget_contact_book(bookId: string): Promise<void>;
   /** One page of at most 200 contacts; request the next page with `offset`. */
   list_contacts(bookId: string, query?: string, offset?: number): Promise<ContactView[]>;
@@ -121,6 +130,8 @@ export interface DesktopBridge {
   list_contact_edits(bookId?: string): Promise<ContactEditStatus[]>;
   search_contact_recipients(query: string, sourceDeviceId?: string): Promise<RecipientSuggestion[]>;
   request_contact_repair(): Promise<ContactSyncStatus>;
+  request_contact_sync(bookId: string): Promise<ContactScanStatus>;
+  get_contact_sync_request(bookId: string): Promise<ContactScanStatus | null>;
   pick_contact_photo(): Promise<{ dataUrl: string; naturalWidth: number; naturalHeight: number } | null>;
   list_restorable_contacts(bookId: string): Promise<RestorableContact[]>;
   restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome>;

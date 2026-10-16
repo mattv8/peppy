@@ -115,6 +115,7 @@ fn history_row_with_new_compose_intent_is_not_recipientless() {
     let (snapshot, _) = session
         .snapshot(
             Some(&moved.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -138,6 +139,10 @@ pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
         simulated: true,
         supports_sms: sms,
         supports_mms: mms,
+        availability: peppy_desktop_api::GatewayAvailability::Unknown,
+        last_seen_age_seconds: None,
+        presence: None,
+        wake_route: false,
         capability_note: None,
         mms_content_version: mms.then_some(2),
         mms_max_bytes: mms.then_some(300 * 1024),
@@ -775,6 +780,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             Some("http://127.0.0.1:9".into()),
             crate::notifications::NotificationPreferences::default(),
@@ -846,6 +852,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -898,6 +905,7 @@ fn clearing_saved_draft_recipients_persists_and_new_draft_cannot_send() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -1576,6 +1584,7 @@ mod real_server {
         let (snapshot, _) = session
             .snapshot(
                 None,
+                None,
                 crate::head(),
                 Some(server.url.clone()),
                 crate::notifications::NotificationPreferences::default(),
@@ -1609,6 +1618,7 @@ mod real_server {
         .await;
         let (snapshot, _) = session
             .snapshot(
+                None,
                 None,
                 crate::head(),
                 None,
@@ -1727,6 +1737,7 @@ mod real_server {
         let (snapshot, _) = receiver
             .snapshot(
                 Some(&draft.conversation_id),
+                None,
                 crate::head(),
                 None,
                 crate::notifications::NotificationPreferences::default(),

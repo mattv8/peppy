@@ -3,6 +3,32 @@ import Testing
 
 @MainActor
 @Suite struct PhoneEnrollmentAttemptCoordinatorTests {
+    @Test func staleOwnerPollDoesNotStopTheNextPollAfterAnOverlappingAction() {
+        let coordinator = OwnerPhonePollingCoordinator()
+        let inFlightPoll = coordinator.beginPoll()
+        let action = coordinator.beginAction()
+
+        coordinator.finishAction(action)
+
+        #expect(!coordinator.shouldApplyPoll(inFlightPoll))
+        #expect(coordinator.shouldApplyPoll(coordinator.beginPoll()))
+    }
+
+    @Test func scanRemainsBusyUntilTheInitialStatusArrives() {
+        let coordinator = PhoneEnrollmentAttemptCoordinator()
+        let attempt = coordinator.beginScan()
+
+        #expect(coordinator.isStarting)
+        #expect(coordinator.beginScan() == nil)
+
+        _ = coordinator.received(
+            PhoneEnrollmentStatus(verificationCode: "123456", awaitingOwner: true, requiresSharedSecret: false),
+            for: attempt!
+        )
+
+        #expect(!coordinator.isStarting)
+    }
+
     @Test func approvedTransferConfirmsOnlyOnceAndCompletesOnce() {
         let coordinator = PhoneEnrollmentAttemptCoordinator()
         let attempt = coordinator.beginScan()!

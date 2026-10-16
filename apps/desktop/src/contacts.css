@@ -75,7 +75,10 @@
 }
 
 #contacts-unsaved-changes,
-#contacts-readiness-status {
+#contacts-readiness-status,
+#contacts-sync-status,
+#contacts-scan-status,
+#contacts-sync-unavailable {
   margin: 0;
   padding: 8px;
   border-bottom: 1px solid var(--peppy-border);
@@ -83,6 +86,12 @@
   background: var(--peppy-warning-surface);
   color: var(--peppy-warning-text);
 }
+
+#contacts-sync-status,
+#contacts-sync-unavailable { background: var(--peppy-warning-surface); color: var(--peppy-warning-text); }
+#contacts-scan-status[data-scan-state="completed"] { background: var(--peppy-surface-active); color: var(--peppy-text-primary); }
+#contacts-scan-status[data-scan-state="blocked"],
+#contacts-scan-status[data-scan-state="failed"] { background: var(--peppy-error-surface); color: var(--peppy-error-text); }
 
 #contacts-unsaved-changes {
   display: flex;
@@ -142,22 +151,11 @@
   border-left-color: var(--peppy-accent);
 }
 
-[data-book-forget][data-confirm-forget] {
-  background: var(--peppy-error-surface);
-  color: var(--peppy-error-text);
-  border-color: var(--peppy-error);
-}
-
 @media (forced-colors: active) {
   .contacts-book-row[aria-current] {
     border-left-color: Highlight;
   }
 
-  [data-book-forget][data-confirm-forget] {
-    background: Canvas;
-    color: CanvasText;
-    border-color: Highlight;
-  }
 }
 
 .contacts-row-state-badge {
@@ -396,6 +394,8 @@
 }
 
 @media (max-width: 560px) {
+  #contacts-center-toolbar { flex-wrap: wrap; }
+  #contacts-sync-now { flex: 0 0 auto; }
   #contacts-detail-panel {
     position: absolute;
     inset: 0;

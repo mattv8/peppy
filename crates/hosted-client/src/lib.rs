@@ -10,7 +10,7 @@ use peppy_hosted_api::enrollment::ClientKind;
 use peppy_hosted_api::{
     AccountResponse, CompleteProvisioningRequest, CompleteProvisioningResponse, IdentityProvider,
     LoginAttemptRequest, LoginAttemptResponse, ProvisioningGrantResponse, ProvisioningRequest,
-    SessionExchangeRequest, SessionResponse,
+    PushConfig, SessionExchangeRequest, SessionResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,8 @@ pub mod newenrollment;
 
 const MAX_JSON: usize = 16 * 1024;
 const MAX_CHECKPOINT: usize = 64 * 1024;
+const HOSTED_ORIGIN: &str = "https://peppy.pro";
+const HOSTED_WAKE_RELAY_URL: &str = "https://relay.peppy.pro";
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostedClientError {
@@ -31,6 +33,8 @@ pub enum HostedClientError {
     InvalidRequest,
     #[error("invalid profile")]
     InvalidProfile,
+    #[error("verified handoff keys are unavailable")]
+    KeysUnavailable,
     #[error("cryptographic operation failed")]
     Crypto,
 }
@@ -237,6 +241,23 @@ pub fn parse_hosted_account(
 }
 pub fn generate_hosted_passphrase() -> String {
     peppy_crypto::passphrase::generate_passphrase()
+}
+
+/// Returns the fixed hosted wake relay only for the canonical hosted origin.
+pub fn hosted_wake_relay_url(origin: String) -> Option<String> {
+    (origin == HOSTED_ORIGIN).then(|| HOSTED_WAKE_RELAY_URL.into())
+}
+
+/// Parses the versioned hosted push capability response without widening the
+/// canonical wire contract to untrusted provider or environment values.
+pub fn parse_push_config(json: String) -> Result<PushConfig, HostedClientError> {
+    bounded(&json, MAX_JSON)?;
+    let config: PushConfig =
+        serde_json::from_str(&json).map_err(|_| HostedClientError::InvalidRequest)?;
+    if !config.validate() {
+        return invalid();
+    }
+    Ok(config)
 }
 pub fn hosted_passphrase_acceptable(mut passphrase: String) -> bool {
     let acceptable = peppy_crypto::passphrase::passphrase_acceptable(&passphrase);
@@ -607,6 +628,37 @@ mod tests {
             serde_json::json!({"account_id": account, "classification": "new", "entitlement": "none", "access": "read_write"}).to_string(),
             Uuid::new_v4().to_string()
         ).is_err());
+    }
+
+    #[test]
+    fn hosted_wake_relay_requires_the_exact_hosted_origin() {
+        assert_eq!(
+            hosted_wake_relay_url("https://peppy.pro".into()),
+            Some("https://relay.peppy.pro".into())
+        );
+        for origin in [
+            "https://peppy.pro/",
+            "https://peppy.pro.evil.example",
+            "https://relay.peppy.pro",
+            "http://peppy.pro",
+        ] {
+            assert_eq!(hosted_wake_relay_url(origin.into()), None, "{origin}");
+        }
+    }
+
+    #[test]
+    fn push_config_fails_closed_on_incompatible_values() {
+        let valid = r#"{"version":1,"available":true,"providers":["fcm","apns"],"apns_environment":"production"}"#;
+        assert!(parse_push_config(valid.into()).is_ok());
+        for invalid in [
+            r#"{"version":2,"available":true,"providers":["fcm"],"apns_environment":null}"#,
+            r#"{"version":1,"available":true,"providers":["apns"],"apns_environment":null}"#,
+            r#"{"version":1,"available":false,"providers":["fcm"],"apns_environment":null}"#,
+            r#"{"version":1,"available":true,"providers":["fcm","fcm"],"apns_environment":null}"#,
+            r#"{"version":1,"available":true,"providers":["webpush"],"apns_environment":null}"#,
+        ] {
+            assert!(parse_push_config(invalid.into()).is_err(), "{invalid}");
+        }
     }
 
     #[test]

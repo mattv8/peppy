@@ -631,6 +631,58 @@ async fn native_claim_is_atomic_idempotent_rate_limited_and_authorizes_managemen
 }
 
 #[tokio::test]
+async fn mobile_owner_claim_exposes_raw_kind_through_authenticated_devices() {
+    let fixture = Fixture::new().await;
+    let app = fixture.community_app().await;
+    let token = "a".repeat(96);
+    let mut claim = claim_request(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "android");
+    claim["credential_digest"] = json!(hex::encode(Sha256::digest(token.as_bytes())));
+
+    let claimed = send(
+        app.clone(),
+        Method::POST,
+        "/v1/instance/claim",
+        Some(&claim),
+        &[],
+    )
+    .await;
+    assert_eq!(claimed.status(), StatusCode::OK);
+
+    let devices = send(
+        app,
+        Method::GET,
+        "/v1/devices",
+        None,
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(devices.status(), StatusCode::OK);
+    let devices = json_body(devices).await;
+    let last_seen_age_seconds = devices["devices"][0]["presence"]["last_seen_age_seconds"]
+        .as_u64()
+        .expect("authenticated roster presence must include a nonnegative last-seen age");
+    assert_eq!(
+        devices["devices"],
+        json!([{
+            "device_id": claim["device"]["device_id"],
+            "name": claim["device"]["name"],
+            "role": "owner",
+            "revoked": false,
+            "profile_fingerprint": claim["material"]["fingerprint"],
+            "key_epoch": 1,
+            "kind": "android",
+            "presence": {
+                "state": "seen",
+                "last_seen_age_seconds": last_seen_age_seconds
+            },
+            "wake_route": false
+        }])
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn exhausted_fresh_claim_admission_rejects_a_correct_setup_token() {
     let fixture = Fixture::new().await;
     let app = fixture.community_app().await;

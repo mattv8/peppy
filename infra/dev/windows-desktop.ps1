@@ -57,6 +57,23 @@ function Get-NativePnpm {
   }
 }
 
+function Test-NodeVersion {
+  param([string]$Selector, [string]$Version)
+  if ($Version -notmatch '^v\d+\.\d+\.\d+$') {
+    return $false
+  }
+  if ($Selector -match '^\d+$') {
+    return $Version -match "^v$Selector\.\d+\.\d+$"
+  }
+  if ($Selector -match '^\d+\.\d+$') {
+    return $Version -match "^v$Selector\.\d+$"
+  }
+  if ($Selector -match '^\d+\.\d+\.\d+$') {
+    return $Version -eq "v$Selector"
+  }
+  return $false
+}
+
 function Assert-VisualStudioBuildTools {
   $candidates = @()
   foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
@@ -83,7 +100,8 @@ function Assert-NativeToolchain {
   $rustc = Get-NativeCommand 'rustc.exe'
   $nodeExpected = (Get-Content -LiteralPath (Join-Path $Repository '.node-version') -Raw).Trim()
   $rustExpected = ((Select-String -LiteralPath (Join-Path $Repository 'rust-toolchain.toml') -Pattern '^channel = "([^"]+)"').Matches[0].Groups[1].Value)
-  if ((& $node --version) -ne "v$nodeExpected") { throw "Node $nodeExpected is required." }
+  $nodeVersion = & $node --version
+  if (-not (Test-NodeVersion -Selector $nodeExpected -Version $nodeVersion)) { throw "Node $nodeExpected is required (found $nodeVersion)." }
   if ((& $pnpm --version) -ne '12.8.1') { throw 'pnpm 12.8.1 is required.' }
   if (-not ((& $rustc --version) -like "rustc $rustExpected *")) { throw "Rust $rustExpected is required." }
   $env:OPENSSL_SRC_PERL = Get-NativePerl

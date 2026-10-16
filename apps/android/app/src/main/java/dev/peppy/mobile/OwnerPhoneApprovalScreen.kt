@@ -78,6 +78,9 @@ internal fun OwnerPhoneApprovalHost.actions(): OwnerPhoneApprovalActions = objec
     override suspend fun cancel() = this@actions.cancel()
 }
 
+internal fun canRevealSharedSecret(result: OwnerPhoneApprovalHost.Result): Boolean =
+    result is OwnerPhoneApprovalHost.Result.View && result.status.stage == OwnerPhoneStage.WAITING
+
 /** Bridges the host's suspending secret request to the approval-fallback dialog. Never saved. */
 private class ApprovalPromptBridge : SecretPrompt {
     val request = mutableStateOf<CompletableDeferred<CharArray?>?>(null)
@@ -103,12 +106,15 @@ internal fun OwnerPhoneApprovalScreen(
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val prompt = remember { ApprovalPromptBridge() }
+    val operations = remember { EnrollmentOperationState() }
+    val revealVisibility = remember { RevealVisibilityState() }
     // The last good view survives transient failures; an error never replaces the invitation on screen.
     var view by remember { mutableStateOf<OwnerPhoneApprovalHost.Result.View?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var method by remember { mutableStateOf(OwnerPhoneMethod.TRANSFER) }
     var codesMatch by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var busyLabel by remember { mutableStateOf<Int?>(null) }
     // Plain remember only: a revealed secret is never saved across recreation.
     var revealed by remember { mutableStateOf<String?>(null) }
     var revealFailure by remember { mutableStateOf<String?>(null) }
@@ -125,65 +131,103 @@ internal fun OwnerPhoneApprovalScreen(
             OwnerPhoneApprovalHost.Result.Cancelled -> Unit
         }
     }
-    fun launch(action: suspend () -> OwnerPhoneApprovalHost.Result) {
-        if (busy) return
-        busy = true
-        scope.launch {
-            try { apply(action()) } finally { busy = false }
+    fun finishOperation(operation: Long) {
+        if (operations.complete(operation)) {
+            busy = false
+            busyLabel = null
         }
     }
-    fun approve() = launch {
+    fun launch(label: Int, action: suspend () -> OwnerPhoneApprovalHost.Result) {
+        val operation = operations.begin() ?: return
+        busy = true
+        busyLabel = label
+        scope.launch {
+            try {
+                val next = action()
+                if (operations.isActive(operation)) apply(next)
+            } catch (_: Exception) {
+                if (operations.isActive(operation)) error = "offline"
+            } finally {
+                finishOperation(operation)
+            }
+        }
+    }
+    fun approve() = launch(R.string.peppy_production_pairing_approving) {
         when (val next = host.approve(prompt)) {
             // Cancelling the fallback dialog leaves the verify stage unchanged.
             OwnerPhoneApprovalHost.Result.Cancelled -> host.poll()
             else -> next
         }
     }
-    fun restart() = launch { host.restart(method) }
+    fun restart() = launch(R.string.peppy_production_pairing_refreshing) { host.restart(method) }
     fun retry() {
         val current = view?.status?.stage
         when {
-            current == OwnerPhoneStage.APPROVED -> launch { host.poll() }
+            current == OwnerPhoneStage.APPROVED -> launch(R.string.peppy_production_pairing_checking) { host.poll() }
             error == "expired" || current == null || current == OwnerPhoneStage.EXPIRED || current == OwnerPhoneStage.DENIED -> restart()
             current == OwnerPhoneStage.VERIFY -> approve()
-            else -> launch { host.poll() }
+            else -> launch(R.string.peppy_production_pairing_checking) { host.poll() }
         }
     }
     fun cancel() {
-        if (busy) return
+        val operation = operations.begin() ?: return
         busy = true
+        busyLabel = R.string.peppy_production_pairing_cancelling
         scope.launch {
             try {
-                when (val next = host.cancel()) {
-                    OwnerPhoneApprovalHost.Result.Cancelled -> onDone()
-                    else -> apply(next)
+                val next = host.cancel()
+                if (operations.isActive(operation)) {
+                    when (next) {
+                        OwnerPhoneApprovalHost.Result.Cancelled -> onDone()
+                        else -> apply(next)
+                    }
                 }
-            } finally { busy = false }
+            } catch (_: Exception) {
+                if (operations.isActive(operation)) error = "offline"
+            } finally {
+                finishOperation(operation)
+            }
         }
     }
     // Reveal rotates the invitation to the shared-secret method first, so a recipient is asked for the secret.
     fun revealSharedSecret() {
-        if (busy) return
+        val operation = operations.begin() ?: return
+        val revealOperation = revealVisibility.begin() ?: run {
+            operations.complete(operation)
+            return
+        }
         busy = true
+        busyLabel = R.string.peppy_production_pairing_revealing
         scope.launch {
             try {
                 val rotated = host.rotateIfNeeded(OwnerPhoneMethod.SHARED_SECRET)
+                if (!operations.isActive(operation)) return@launch
                 apply(rotated)
-                if (rotated !is OwnerPhoneApprovalHost.Result.View) return@launch
+                if (!canRevealSharedSecret(rotated)) return@launch
                 method = OwnerPhoneMethod.SHARED_SECRET
                 when (val outcome = revealSecret()) {
                     is RevealOutcome.Revealed -> {
+                        if (!operations.isActive(operation) || !revealVisibility.isVisible(revealOperation)) {
+                            outcome.secret.fill('\u0000')
+                            return@launch
+                        }
                         revealed = String(outcome.secret)
                         outcome.secret.fill('\u0000')
                         revealFailure = null
                     }
                     is RevealOutcome.Failed -> {
+                        if (!operations.isActive(operation) || !revealVisibility.isVisible(revealOperation)) return@launch
                         revealed = null
                         revealFailure = outcome.code
                     }
-                    RevealOutcome.Cancelled -> Unit
+                    RevealOutcome.Cancelled -> if (!operations.isActive(operation) || !revealVisibility.isVisible(revealOperation)) return@launch
                 }
-            } finally { busy = false }
+            } catch (_: Exception) {
+                if (operations.isActive(operation)) revealFailure = "lock-required"
+            } finally {
+                revealVisibility.finish(revealOperation)
+                finishOperation(operation)
+            }
         }
     }
     fun toggleReveal() {
@@ -197,25 +241,40 @@ internal fun OwnerPhoneApprovalScreen(
     }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) revealed = null
+            if (event == Lifecycle.Event.ON_STOP) {
+                revealVisibility.hide()
+                revealed = null
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            operations.invalidate()
+            revealVisibility.hide()
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     LaunchedEffect(host) {
-        apply(host.start(OwnerPhoneMethod.TRANSFER))
+        launch(R.string.peppy_production_pairing_preparing) { host.start(OwnerPhoneMethod.TRANSFER) }
         while (true) {
             delay(2_000)
             // Skip while an action is in flight so a stale VERIFY poll cannot overwrite an APPROVED result.
             if (busy) continue
-            when (view?.status?.stage) {
-                OwnerPhoneStage.WAITING -> apply(host.rotateIfNeeded(method))
-                OwnerPhoneStage.VERIFY -> apply(host.poll())
-                OwnerPhoneStage.APPROVED -> apply(host.poll())
-                // CONNECTED, EXPIRED, and DENIED are terminal for polling.
-                else -> Unit
+            val current = view?.status
+            if (current?.stage == OwnerPhoneStage.WAITING &&
+                nativeOwnerPhoneShouldRotate(current.stage, current.expiresInSeconds, method, method)
+            ) {
+                launch(R.string.peppy_production_pairing_refreshing) { host.rotateIfNeeded(method) }
+                continue
             }
+            val snapshot = operations.snapshot()
+            val next = when (current?.stage) {
+                OwnerPhoneStage.WAITING -> host.poll()
+                OwnerPhoneStage.VERIFY, OwnerPhoneStage.APPROVED -> host.poll()
+                // CONNECTED, EXPIRED, and DENIED are terminal for polling.
+                else -> null
+            }
+            if (next != null && operations.isCurrentSnapshot(snapshot)) apply(next)
         }
     }
 
@@ -253,7 +312,7 @@ internal fun OwnerPhoneApprovalScreen(
                 revealed?.let { secret ->
                     Text(secret, Modifier.testTag("owner-phone-revealed-secret"), style = MaterialTheme.typography.titleMedium)
                 }
-                cancelButton(::cancel)
+                cancelButton(::cancel, !busy)
             }
             OwnerPhoneStage.VERIFY -> {
                 val sas = view?.status?.sas.orEmpty()
@@ -274,9 +333,9 @@ internal fun OwnerPhoneApprovalScreen(
                     Text(stringResource(R.string.peppy_owner_phone_codes_match), Modifier.padding(start = 8.dp))
                 }
                 Button(onClick = { approve() }, enabled = codesMatch && !busy, modifier = Modifier.testTag("owner-phone-approve")) {
-                    if (busy) CircularProgressIndicator(Modifier.size(16.dp)) else Text(stringResource(R.string.peppy_owner_phone_approve_cta))
+                    Text(stringResource(R.string.peppy_owner_phone_approve_cta))
                 }
-                cancelButton(::cancel)
+                cancelButton(::cancel, !busy)
             }
             OwnerPhoneStage.CONNECTED -> {
                 Text(stringResource(R.string.peppy_owner_phone_connected_headline), Modifier.testTag("owner-phone-connected").semantics { liveRegion = LiveRegionMode.Assertive })
@@ -286,28 +345,37 @@ internal fun OwnerPhoneApprovalScreen(
             OwnerPhoneStage.EXPIRED -> {
                 Text(stringResource(R.string.peppy_owner_phone_expired_headline))
                 Text(stringResource(R.string.peppy_owner_phone_expired_body), Modifier.semantics { liveRegion = LiveRegionMode.Assertive })
-                Button(onClick = { restart() }, modifier = Modifier.testTag("owner-phone-restart")) { Text(stringResource(R.string.peppy_owner_phone_restart_cta)) }
-                cancelButton(::cancel)
+                Button(onClick = { restart() }, enabled = !busy, modifier = Modifier.testTag("owner-phone-restart")) { Text(stringResource(R.string.peppy_owner_phone_restart_cta)) }
+                cancelButton(::cancel, !busy)
             }
             OwnerPhoneStage.APPROVED -> {
                 Text(stringResource(R.string.peppy_owner_phone_approved_body), Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                CircularProgressIndicator()
-                cancelButton(::cancel)
+                if (!busy) CircularProgressIndicator()
+                cancelButton(::cancel, !busy)
             }
             OwnerPhoneStage.DENIED -> {
                 Text(stringResource(R.string.peppy_owner_phone_error_denied), Modifier.testTag("owner-phone-error").semantics { liveRegion = LiveRegionMode.Assertive }, color = MaterialTheme.colorScheme.error)
-                Button(onClick = { restart() }, modifier = Modifier.testTag("owner-phone-restart")) { Text(stringResource(R.string.peppy_owner_phone_restart_cta)) }
-                cancelButton(::cancel)
+                Button(onClick = { restart() }, enabled = !busy, modifier = Modifier.testTag("owner-phone-restart")) { Text(stringResource(R.string.peppy_owner_phone_restart_cta)) }
+                cancelButton(::cancel, !busy)
             }
             null -> {
                 Text(stringResource(R.string.peppy_owner_phone_waiting_headline))
-                if (busy) CircularProgressIndicator()
+            }
+        }
+        busyLabel?.let { label ->
+            Row(
+                Modifier.testTag("owner-phone-progress").semantics { liveRegion = LiveRegionMode.Polite },
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(Modifier.size(16.dp))
+                Text(stringResource(label))
             }
         }
         error?.let { code ->
             Text(ownerPhoneErrorMessage(code), Modifier.testTag("owner-phone-error").semantics { liveRegion = LiveRegionMode.Assertive }, color = MaterialTheme.colorScheme.error)
             Button(onClick = ::retry, enabled = !busy) { Text(stringResource(R.string.peppy_try_again)) }
-            cancelButton(::cancel)
+            cancelButton(::cancel, !busy)
         }
         revealFailure?.let {
             Text(ownerPhoneErrorMessage(it), Modifier.testTag("owner-phone-reveal-error").semantics { liveRegion = LiveRegionMode.Assertive }, color = MaterialTheme.colorScheme.error)
@@ -382,8 +450,8 @@ private fun QrCode(value: String, modifier: Modifier) {
 private const val QR_SIZE_DP = 280
 
 @Composable
-private fun cancelButton(onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, modifier = Modifier.testTag("owner-phone-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
+private fun cancelButton(onClick: () -> Unit, enabled: Boolean) {
+    OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.testTag("owner-phone-cancel")) { Text(stringResource(R.string.peppy_cancel)) }
 }
 
 @Composable

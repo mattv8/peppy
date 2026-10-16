@@ -121,6 +121,15 @@ pub struct GatewayView {
     pub simulated: bool,
     pub supports_sms: bool,
     pub supports_mms: bool,
+    /// A truthful presence/capability projection. Missing from legacy cached views means unknown.
+    #[serde(default)]
+    pub availability: GatewayAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence: Option<GatewayPresence>,
+    #[serde(default)]
+    pub wake_route: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mms_content_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +142,37 @@ pub struct GatewayView {
     pub capability_note: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayAvailability {
+    #[default]
+    Unknown,
+    Connected,
+    Delayed,
+    Offline,
+    NeverConnected,
+    NoSmsSim,
+    SmsPermissionNeeded,
+    SmsUnavailable,
+    CapabilitiesUnknown,
+    UnsupportedPlatform,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GatewayPresence {
+    pub state: GatewayPresenceState,
+    pub last_seen_age_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPresenceState {
+    Connected,
+    Seen,
+    Never,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationView {
@@ -141,6 +181,8 @@ pub struct ConversationView {
     pub preview: String,
     pub unread: u64,
     pub messages: Vec<MessageView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_older_messages: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,12 +197,20 @@ pub struct ConversationView {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub conversation_id: String,
+    pub messages: Vec<MessageView>,
+    pub has_more: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MessageView {
     pub id: String,
     pub revision: String,
     pub sender: &'static str,
     pub body: String,
-    /// Core records carry no wall-clock time; an empty string is shown rather than a fake time.
+    /// Empty only when the provider did not supply a timestamp; never synthesized from arrival.
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<&'static str>,
@@ -300,7 +350,12 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             "other"
         },
         body: message.payload.body.clone(),
-        timestamp: String::new(),
+        timestamp: message
+            .payload
+            .sent_at_ms
+            .filter(|value| *value > 0)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
         status: message.send_state.map(send_state_label),
         attachments,
         transport: match message.payload.transport {
@@ -416,6 +471,27 @@ mod tests {
                 "mirroredBanners": true,
                 "preview": "full",
             })
+        );
+    }
+
+    #[test]
+    fn legacy_gateway_cache_defaults_new_presence_fields_to_unknown() {
+        let gateway: GatewayView = serde_json::from_value(json!({
+            "id": "gateway", "name": "Phone", "simId": "sim", "online": true,
+            "simulated": false, "supportsSms": true, "supportsMms": false,
+        }))
+        .unwrap();
+
+        assert_eq!(gateway.availability, GatewayAvailability::Unknown);
+        assert!(!gateway.wake_route);
+        assert!(gateway.presence.is_none());
+        assert_eq!(
+            serde_json::to_value(GatewayPresence {
+                state: GatewayPresenceState::Seen,
+                last_seen_age_seconds: None,
+            })
+            .unwrap(),
+            json!({"state": "seen", "last_seen_age_seconds": null})
         );
     }
 }

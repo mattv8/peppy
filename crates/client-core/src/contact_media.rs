@@ -843,37 +843,43 @@ fn transfer_state_at(conn: &Connection, own_device: &str, now: i64) -> Result<St
         .map(|(sequence, id, reason)| json!({"producer_sequence": sequence.to_string(), "local_attachment_id": id, "reason": reason}))
         .collect::<Vec<_>>();
     let mut reclaims = Vec::with_capacity(candidates.len());
-    for (local, remote, attempts, _) in candidates {
-        // Each acknowledged reference with the server cursor this device journaled it at.
-        let rows = conn
-            .prepare("SELECT g.producer_sequence,(SELECT MAX(j.cursor) FROM journal j WHERE j.envelope_id=g.envelope_id) FROM contact_photo_registrations g WHERE g.attachment_id=? AND g.acknowledged=1 ORDER BY g.producer_sequence")?
-            .query_map([&local], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        // The release cutoff must cover every reference; unknown until all were echoed back.
-        let release_after_cursor = rows
-            .iter()
-            .map(|(_, cursor)| *cursor)
-            .collect::<Option<Vec<_>>>()
-            .and_then(|cursors| cursors.into_iter().max())
-            .map(|cursor| cursor.to_string());
-        let references = rows
-            .into_iter()
-            .map(|(sequence, cursor)| {
-                json!({
-                    "producer_device_id": own_device,
-                    "producer_sequence": sequence.to_string(),
-                    "source_cursor": cursor.map(|c| c.to_string()),
+    if !candidates.is_empty() {
+        let mut reference_query = conn.prepare_cached(
+            "SELECT g.producer_sequence,(SELECT MAX(j.cursor) FROM journal j WHERE j.envelope_id=g.envelope_id) FROM contact_photo_registrations g WHERE g.attachment_id=? AND g.acknowledged=1 ORDER BY g.producer_sequence",
+        )?;
+        for (local, remote, attempts, _) in candidates {
+            // Each acknowledged reference with the server cursor this device journaled it at.
+            let rows = reference_query
+                .query_map([&local], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            // The release cutoff must cover every reference; unknown until all were echoed back.
+            let release_after_cursor = rows
+                .iter()
+                .map(|(_, cursor)| *cursor)
+                .collect::<Option<Vec<_>>>()
+                .and_then(|cursors| cursors.into_iter().max())
+                .map(|cursor| cursor.to_string());
+            let references = rows
+                .into_iter()
+                .map(|(sequence, cursor)| {
+                    json!({
+                        "producer_device_id": own_device,
+                        "producer_sequence": sequence.to_string(),
+                        "source_cursor": cursor.map(|c| c.to_string()),
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        reclaims.push(json!({
-            "attachment_id": local,
-            "remote_object_id": remote,
-            "server_compaction_generation": generation,
-            "release_after_cursor": release_after_cursor,
-            "references": references,
-            "attempts": attempts,
-        }));
+                .collect::<Vec<_>>();
+            reclaims.push(json!({
+                "attachment_id": local,
+                "remote_object_id": remote,
+                "server_compaction_generation": generation,
+                "release_after_cursor": release_after_cursor,
+                "references": references,
+                "attempts": attempts,
+            }));
+        }
     }
     Ok(json!({
         "schema_version": 1,
@@ -1134,6 +1140,42 @@ mod tests {
         assert_eq!(out["status"], "completed");
         assert_eq!(at(now + 10 * 86400)["reclaims"], json!([]));
         assert!(!blocks_discard(conn, id).unwrap());
+    }
+
+    #[test]
+    fn transfer_state_keeps_each_reclaim_candidate_release_proof_separate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (client, config) = client(&dir);
+        let first = photo(&client, &dir);
+        let second = photo(&client, &dir);
+        let first_remote = uuid::Uuid::new_v4().to_string();
+        let second_remote = uuid::Uuid::new_v4().to_string();
+        let session = client.lock().unwrap();
+        session
+            .conn
+            .execute(
+                "UPDATE attachments SET state='uploaded',remote_object_id=? WHERE attachment_id=?",
+                params![first_remote, first.to_string()],
+            )
+            .unwrap();
+        session
+            .conn
+            .execute(
+                "UPDATE attachments SET state='uploaded',remote_object_id=? WHERE attachment_id=?",
+                params![second_remote, second.to_string()],
+            )
+            .unwrap();
+        let state: Value = serde_json::from_str(
+            &transfer_state_at(&session.conn, &config.device_id.to_string(), 1_800_000_000)
+                .unwrap(),
+        )
+        .unwrap();
+        let reclaims = state["reclaims"].as_array().unwrap();
+        assert_eq!(reclaims.len(), 2);
+        for reclaim in reclaims {
+            assert_eq!(reclaim["release_after_cursor"], Value::Null);
+            assert_eq!(reclaim["references"], json!([]));
+        }
     }
 
     /// Two vault members, authenticated envelopes relayed by hand.

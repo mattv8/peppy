@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
 object GatewayScheduler {
     @VisibleForTesting
     @Volatile
-    internal var schedule: (Context) -> Unit = { GatewayWork.enqueue(it) }
+    internal var schedule: (Context) -> Unit = { GatewayWork.enqueueUrgent(it) }
 }
 
 /**
@@ -96,7 +96,14 @@ object IncomingCapture {
             val body = group.joinToString(separator = "") { it.body }
             val timestamp = group.first().timestampMillis
             try {
-                client.captureIncoming(NativeIncomingSms(null, address, body, broadcastId(address, timestamp, body), false))
+                val broadcastId = broadcastId(address, timestamp, body)
+                // The SMSC timestamp is the provider's later `date_sent` (reconciliation evidence);
+                // users see the local receipt time, matching the provider's `date`.
+                client.captureIncomingTimed(
+                    NativeIncomingSms(null, address, body, broadcastId, false),
+                    timestamp.takeIf { it > 0 },
+                    System.currentTimeMillis(),
+                )
                 captured++
             } catch (_: MobileBindingsException) {
                 // Rejected by core validation; nothing durable to sync for this sender.

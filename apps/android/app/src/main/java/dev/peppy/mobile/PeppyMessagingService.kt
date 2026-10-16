@@ -6,18 +6,16 @@ import com.google.firebase.messaging.RemoteMessage
 /** FCM receives only `kind`/`value`; no envelope plaintext is accepted or displayed. */
 class PeppyMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
-        RelayWakeRuntime.initialize(applicationContext)
-        if (RelayWakeRuntime.enabled) RelayWakeRuntime.client?.register(token)
+        RelayWakeRuntime.tokenChanged(applicationContext)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        RelayWakeRuntime.initialize(applicationContext)
-        if (!RelayWakeRuntime.enabled) return
+        if (!RelayWakeRuntime.acceptsWakes(applicationContext)) return
         when (message.data["kind"]) {
-            "wake" -> GatewayWork.enqueue(applicationContext)
+            "wake" -> RemoteMessagingService.resumeOrEnqueue(applicationContext)
             "challenge" -> {
                 val value = message.data["value"] ?: return
-                RelayWakeRuntime.client?.confirm(value)
+                RelayWakeRuntime.challenge(applicationContext, value)
             }
         }
     }

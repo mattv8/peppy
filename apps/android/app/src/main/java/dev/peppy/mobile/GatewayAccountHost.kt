@@ -11,6 +11,15 @@ internal data class GatewayAccountState(val self: GatewayAccountDevice, val devi
 
 /** Authenticated account boundary. Credentials stay inside NativeGateway / GatewayHttp. */
 internal object GatewayAccountHost {
+    fun pushConfig(context: Context): HttpResult {
+        val credential = NativeGateway.accountCredential(context) ?: throw java.io.IOException("not enrolled")
+        return GatewayHttp(credential.origin, credential.bearerToken).get("/v1/devices/self/push-config")
+    }
+    /** Uses the credential captured with the cleanup record; delayed cleanup cannot borrow new auth. */
+    fun deleteWakeRoute(origin: String, bearerToken: String, routeId: String): HttpResult {
+        if (!UUID_RE.matches(routeId)) throw java.io.IOException("invalid route")
+        return GatewayHttp(origin, bearerToken).deleteJson("/v1/devices/self/wake-route?route_id=$routeId", "{}")
+    }
     fun load(context: Context): GatewayAccountState? {
         val credential = NativeGateway.accountCredential(context) ?: return null
         val result = try { GatewayHttp(credential.origin, credential.bearerToken).get("/v1/devices") } catch (_: Exception) { return null }
@@ -48,11 +57,15 @@ internal object GatewayAccountHost {
 
     fun publishWake(context: Context, routeId: String, wakeCredential: String) {
         val credential = NativeGateway.accountCredential(context) ?: throw java.io.IOException("not enrolled")
-        val connection = URL(credential.origin + "/v1/devices/self/wake-route").openConnection() as HttpURLConnection
+        publishWake(credential.origin, credential.bearerToken, routeId, wakeCredential)
+    }
+    /** Publishes only with the credential captured by the matching relay operation. */
+    fun publishWake(origin: String, bearerToken: String, routeId: String, wakeCredential: String) {
+        val connection = URL(origin + "/v1/devices/self/wake-route").openConnection() as HttpURLConnection
         try {
             val body = JSONObject().put("route_id", routeId).put("wake_credential", wakeCredential).toString().toByteArray()
             connection.instanceFollowRedirects = false; connection.requestMethod = "PUT"; connection.connectTimeout = GatewayHttp.TIMEOUT_MS; connection.readTimeout = GatewayHttp.TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer ${credential.bearerToken}"); connection.setRequestProperty("Content-Type", "application/json"); connection.doOutput = true
+            connection.setRequestProperty("Authorization", "Bearer $bearerToken"); connection.setRequestProperty("Content-Type", "application/json"); connection.doOutput = true
             connection.outputStream.use { it.write(body) }
             if (connection.responseCode !in 200..299) throw java.io.IOException("route publisher rejected")
         } finally { connection.disconnect() }

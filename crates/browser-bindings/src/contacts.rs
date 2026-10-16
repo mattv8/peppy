@@ -1,7 +1,6 @@
 use super::*;
 use peppy_desktop_api::{ContactError, contacts as shared};
 use std::{
-    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     time::{SystemTime, UNIX_EPOCH},
@@ -21,6 +20,8 @@ pub(super) fn handles(command: &str) -> bool {
             | "request_contact_repair"
             | "contact_repair_status"
             | "contact_snapshot"
+            | "request_contact_sync"
+            | "get_contact_sync_request"
     )
 }
 
@@ -54,6 +55,20 @@ struct ContactSnapshot {
     sync: Value,
 }
 
+fn projection_state_display(
+    state: peppy_client_core::SnapshotProjectionState,
+    reason: Option<String>,
+) -> (&'static str, Option<String>) {
+    use peppy_client_core::SnapshotProjectionState as State;
+
+    let display = match state {
+        State::Draining | State::Staging => "rebuilding",
+        State::Promoted => "current",
+        State::Failed => "failed",
+    };
+    (display, reason)
+}
+
 impl BrowserCore {
     pub(super) fn contacts_command(&self, command: &str, args: Value) -> Result<Value, Failure> {
         match command {
@@ -68,6 +83,8 @@ impl BrowserCore {
             "request_contact_repair" => self.request_contact_repair(),
             "contact_repair_status" => self.contact_repair_status(),
             "contact_snapshot" => self.contact_snapshot(args),
+            "request_contact_sync" => self.request_contact_sync(args),
+            "get_contact_sync_request" => self.contact_sync_request_status(args),
             _ => Err(unknown_command()),
         }
     }
@@ -100,7 +117,16 @@ impl BrowserCore {
             self.raw_books()?
                 .iter()
                 .filter_map(|book| {
-                    shared::book_view(book, &own, &std::collections::HashMap::new(), &pending)
+                    let mut view =
+                        shared::book_view(book, &own, &std::collections::HashMap::new(), &pending)?;
+                    if view
+                        .get("ownerDeviceId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| self.context.revoked_device_ids.contains(id))
+                    {
+                        view["sourceRevoked"] = json!(true);
+                    }
+                    Some(view)
                 })
                 .collect(),
         ))
@@ -112,29 +138,9 @@ impl BrowserCore {
         &self,
         addresses: &[(String, Option<String>)],
     ) -> Result<ContactSnapshot, Failure> {
-        const MAX_ADDRESSES: usize = 1000;
-        const RESOLVE_BATCH: usize = 100;
-        let mut by_source: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
-        let mut seen = HashSet::new();
-        for (address, source) in addresses {
-            let digits = address.bytes().filter(u8::is_ascii_digit).count();
-            let phone = (3..=15).contains(&digits)
-                && address.bytes().all(|byte| {
-                    byte.is_ascii_digit() || matches!(byte, b'+' | b' ' | b'(' | b')' | b'.' | b'-')
-                });
-            if address.len() <= 256 && phone && seen.insert(address.as_str()) {
-                by_source
-                    .entry(source.as_deref().filter(|id| shared::valid_id(id)))
-                    .or_default()
-                    .push(address);
-            }
-            if seen.len() >= MAX_ADDRESSES {
-                break;
-            }
-        }
         let mut resolution = serde_json::Map::new();
-        for (source, addresses) in by_source {
-            for batch in addresses.chunks(RESOLVE_BATCH) {
+        for (source, addresses) in shared::resolution_candidates(addresses) {
+            for batch in addresses.chunks(shared::RESOLVE_ADDRESS_BATCH) {
                 let mut input = json!({"addresses": batch});
                 if let Some(source) = source {
                     input["source_device_id"] = json!(source);
@@ -174,15 +180,7 @@ impl BrowserCore {
             .snapshot_projection_status()
             .ok()
             .flatten()
-            .map(|status| {
-                use peppy_client_core::SnapshotProjectionState as State;
-                let state = match status.state {
-                    State::Draining | State::Staging => "rebuilding",
-                    State::Promoted => "current",
-                    State::Failed => "failed",
-                };
-                (state, status.reason)
-            });
+            .map(|status| projection_state_display(status.state, status.reason));
         let sync = shared::sync_status(
             self.client()?.contact_repair_required().unwrap_or(false),
             readiness,
@@ -230,6 +228,41 @@ impl BrowserCore {
             .into_iter()
             .find(|book| book.get("id").and_then(Value::as_str) == Some(book_id))
             .ok_or_else(|| Failure::new("not-found", "The contact book was not found."))
+    }
+
+    fn request_contact_sync(&self, args: Value) -> Result<Value, Failure> {
+        let book_id = args
+            .get("bookId")
+            .and_then(Value::as_str)
+            .filter(|id| shared::valid_id(id))
+            .ok_or_else(invalid)?;
+        let book = self.find_book(book_id)?;
+        if book
+            .get("owner_device_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| self.context.revoked_device_ids.contains(id))
+        {
+            return Err(Failure::new(
+                "source_revoked",
+                "This book's source device was removed.",
+            ));
+        }
+        parse(
+            self.client()?
+                .request_contact_sync(&json!({"book_id": book_id}).to_string()),
+        )
+    }
+
+    fn contact_sync_request_status(&self, args: Value) -> Result<Value, Failure> {
+        let book_id = args
+            .get("bookId")
+            .and_then(Value::as_str)
+            .filter(|id| shared::valid_id(id))
+            .ok_or_else(invalid)?;
+        parse(
+            self.client()?
+                .contact_sync_request_status(&json!({"book_id": book_id}).to_string()),
+        )
     }
 
     fn forget_contact_book(&self, args: Value) -> Result<Value, Failure> {
@@ -445,15 +478,7 @@ impl BrowserCore {
             .snapshot_projection_status()
             .ok()
             .flatten()
-            .map(|status| {
-                let state = match status.state {
-                    peppy_client_core::SnapshotProjectionState::Draining
-                    | peppy_client_core::SnapshotProjectionState::Staging => "rebuilding",
-                    peppy_client_core::SnapshotProjectionState::Promoted => "current",
-                    peppy_client_core::SnapshotProjectionState::Failed => "failed",
-                };
-                (state, status.reason)
-            });
+            .map(|status| projection_state_display(status.state, status.reason));
         Ok(shared::sync_status(
             client.contact_repair_required().unwrap_or(true),
             readiness,
@@ -691,6 +716,34 @@ mod tests {
     }
 
     #[test]
+    fn projection_state_display_preserves_each_reason() {
+        use peppy_client_core::SnapshotProjectionState as State;
+
+        for (state, reason, expected_state, expected_reason) in [
+            (State::Draining, None, "rebuilding", None),
+            (State::Staging, Some("staged"), "rebuilding", Some("staged")),
+            (
+                State::Promoted,
+                Some("retained"),
+                "current",
+                Some("retained"),
+            ),
+            (
+                State::Failed,
+                Some("missing_record"),
+                "failed",
+                Some("missing_record"),
+            ),
+        ] {
+            let (display_state, display_reason) =
+                projection_state_display(state, reason.map(str::to_owned));
+
+            assert_eq!(display_state, expected_state);
+            assert_eq!(display_reason.as_deref(), expected_reason);
+        }
+    }
+
+    #[test]
     fn actual_sqlcipher_book_list_and_contact_search_use_camel_case_whitelists() {
         let mut fixture = ContactFixture::new();
         let books = fixture.command("list_contact_books", json!({}));
@@ -704,6 +757,11 @@ mod tests {
         assert_eq!(book["deviceName"], "Phone");
         assert_eq!(book["contactCount"], 3);
         assert_eq!(book["capabilities"]["canWrite"], true);
+        assert_eq!(book["capabilities"]["canSync"], false);
+        assert_eq!(
+            book["ownerDeviceId"],
+            fixture.owner_config.device_id.to_string()
+        );
         assert_eq!(book["capabilities"]["supportsPhoto"], true);
         assert_eq!(
             object_keys(book),
@@ -713,6 +771,7 @@ mod tests {
                 "defaultAccountLabel",
                 "deviceName",
                 "id",
+                "ownerDeviceId",
                 "pendingEditCount",
                 "state",
             ])
@@ -904,6 +963,27 @@ mod tests {
             )["code"],
             "not-found"
         );
+    }
+
+    #[test]
+    fn scan_request_and_status_use_the_encrypted_core_ledger() {
+        let mut fixture = ContactFixture::new();
+        fixture
+            .owner
+            .set_contact_scan_request_capability(
+                &json!({"book_id": BOOK_ID, "enabled": true}).to_string(),
+            )
+            .unwrap();
+        fixture.deliver_owner_to_browser();
+
+        let request = fixture.command("request_contact_sync", json!({"bookId": BOOK_ID}));
+        assert_eq!(request["bookId"], BOOK_ID);
+        assert_eq!(request["state"], "queued");
+        assert!(request["requestId"].is_string());
+        assert!(request["expiresAt"].is_u64());
+        let status = fixture.command("get_contact_sync_request", json!({"bookId": BOOK_ID}));
+        assert_eq!(status["requestId"], request["requestId"]);
+        assert_eq!(status["bookId"], BOOK_ID);
     }
 
     #[test]

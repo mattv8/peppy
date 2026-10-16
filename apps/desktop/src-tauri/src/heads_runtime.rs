@@ -1,11 +1,11 @@
 //! Native-owned runtime for floating conversation heads.
 use crate::{
+    AppState, STATE_EVENT,
     credentials::Binding,
-    error::{core_error, BridgeError, BridgeResult},
-    heads::{HeadLayout, HeadLayoutStore, Pin, PinStore, MAX_HEADS},
+    error::{BridgeError, BridgeResult, core_error},
+    heads::{HeadLayout, HeadLayoutStore, MAX_HEADS, Pin, PinStore},
     tray,
     windows::{self, HeadCallback, HeadEvent, HeadFrame, HeadPosition, HeadSpec},
-    AppState, STATE_EVENT,
 };
 use peppy_client_core::ConversationId;
 use std::{
@@ -581,6 +581,7 @@ fn resolve_heads(
     let conversations = session.client.list_conversations().map_err(core_error)?;
     let drafts = session.client.compose_drafts().map_err(core_error)?;
     let mut result = Vec::with_capacity(wanted.len());
+    let mut emitted_ids = HashSet::with_capacity(wanted.len());
     for conversation in conversations {
         let id = conversation.conversation_id.to_string();
         if !wanted.contains(&id) {
@@ -591,22 +592,23 @@ fn resolve_heads(
         } else {
             session
                 .client
-                .messages(conversation.conversation_id)
+                .latest_message(conversation.conversation_id)
                 .map_err(core_error)?
-                .last()
+                .as_ref()
                 .map(crate::dto::counterpart)
                 .unwrap_or_else(|| "Conversation".into())
         };
         result.push(HeadData {
-            id,
+            id: id.clone(),
             initials: initials(&name),
             name,
             unread: conversation.unread_count,
         });
+        emitted_ids.insert(id);
     }
     for draft in drafts {
         let id = draft.conversation_id.to_string();
-        if !wanted.contains(&id) || result.iter().any(|head| head.id == id) {
+        if !wanted.contains(&id) || emitted_ids.contains(&id) {
             continue;
         }
         let name = if draft.recipients.is_empty() {
@@ -615,11 +617,12 @@ fn resolve_heads(
             draft.recipients.join(", ")
         };
         result.push(HeadData {
-            id,
+            id: id.clone(),
             initials: initials(&name),
             name,
             unread: 0,
         });
+        emitted_ids.insert(id);
     }
     Ok(Some(result))
 }
@@ -643,9 +646,9 @@ fn resolve_one(
     {
         let name = session
             .client
-            .messages(conversation)
+            .latest_message(conversation)
             .map_err(core_error)?
-            .last()
+            .as_ref()
             .map(crate::dto::counterpart)
             .unwrap_or_else(|| "Conversation".into());
         return Ok(HeadData {

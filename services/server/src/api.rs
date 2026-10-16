@@ -155,7 +155,7 @@ impl EnrollmentAuthorization for CommunityEnrollmentAuthorization {
 use axum::{
     Json, Router,
     extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
-    extract::{ConnectInfo, FromRequestParts, Path, State},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -165,10 +165,14 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ipnet::IpNet;
-use peppy_hosted_api::enrollment::{
-    ClaimInstanceRequest, ClaimInstanceResponse, ClientKind, DeploymentMode, EnrollmentDevice,
-    EnrollmentRole, InstanceAccount, InstanceInfo, InstanceLoginRequest, InstanceManagement,
-    InstanceSession, VaultMaterial,
+use peppy_hosted_api::{DeviceRosterDevice, DeviceRosterResponse};
+use peppy_hosted_api::{
+    PushConfig, PushConfigAdvertisement,
+    enrollment::{
+        ClaimInstanceRequest, ClaimInstanceResponse, ClientKind, DeploymentMode, EnrollmentDevice,
+        EnrollmentRole, InstanceAccount, InstanceInfo, InstanceLoginRequest, InstanceManagement,
+        InstanceSession, VaultMaterial,
+    },
 };
 use peppy_protocol::{Envelope, EnvelopePurpose};
 use serde::{Deserialize, Serialize};
@@ -196,6 +200,8 @@ const DUMMY_ADMIN_PASSWORD_HASH: &str =
 pub(super) struct ApiState {
     pub(super) db: PgPool,
     committed: tokio::sync::broadcast::Sender<(Uuid, i64)>,
+    presence_changed: tokio::sync::broadcast::Sender<Uuid>,
+    presence_touches: Arc<std::sync::Mutex<HashMap<(Uuid, Uuid), std::time::Instant>>>,
     storage: Option<Storage>,
     vault_attachment_quota_bytes: i64,
     upload_slots: Arc<tokio::sync::Semaphore>,
@@ -206,6 +212,7 @@ pub(super) struct ApiState {
     pub(super) event_stream_slots: Arc<tokio::sync::Semaphore>,
     pub(super) event_stream_sessions: Arc<std::sync::Mutex<HashMap<Vec<u8>, usize>>>,
     policy: Arc<dyn AccessPolicy>,
+    push_config: PushConfig,
     row_security: bool,
     instance_origin: Option<url::Url>,
     claim_policy: crate::instance::ClaimPolicy,
@@ -299,6 +306,7 @@ pub fn router(db: PgPool) -> Router {
         None,
         options,
         None,
+        PushConfigAdvertisement::default(),
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: authorization,
@@ -326,6 +334,7 @@ pub fn router_with_options(db: PgPool, options: TransportOptions) -> Router {
         None,
         options,
         None,
+        PushConfigAdvertisement::default(),
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: authorization,
@@ -350,6 +359,7 @@ pub fn router_with_options_and_relay(
         None,
         options,
         Some(relay_url),
+        PushConfigAdvertisement::default(),
         RouterAuthorization {
             policy: Arc::new(CommunityAccessPolicy),
             enrollment: Arc::new(CommunityEnrollmentAuthorization::new(db.clone())),
@@ -418,6 +428,7 @@ pub(crate) fn build_router(
     initialized_storage: Option<Storage>,
     options: TransportOptions,
     explicit_relay_url: Option<url::Url>,
+    push_advertisement: PushConfigAdvertisement,
     authorization: RouterAuthorization,
 ) -> (Router, Maintenance) {
     let RouterAuthorization {
@@ -427,6 +438,7 @@ pub(crate) fn build_router(
         row_security,
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
+    let (presence_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let storage = initialized_storage.or_else(|| {
         config
             .as_ref()
@@ -446,10 +458,17 @@ pub(crate) fn build_router(
         .as_ref()
         .map(|config| config.trusted_proxy_cidrs.clone())
         .unwrap_or_default();
+    let push_config_response = push_advertisement
+        .response()
+        .expect("router requires a validated push configuration");
     let router = Router::new()
         .route("/v1/vault", get(vault_header))
         .route("/v1/devices/{device_id}/revoke", post(revoke_device))
-        .route("/v1/devices/self/wake-route", put(register_wake_route))
+        .route("/v1/devices/self/push-config", get(push_config))
+        .route(
+            "/v1/devices/self/wake-route",
+            put(register_wake_route).delete(revoke_wake_route),
+        )
         .route("/v1/devices", get(devices))
         .route(
             "/v1/capabilities",
@@ -516,6 +535,8 @@ pub(crate) fn build_router(
     let router = router.with_state(ApiState {
         db: db.clone(),
         committed: committed.clone(),
+        presence_changed,
+        presence_touches: Arc::new(std::sync::Mutex::new(HashMap::new())),
         storage: storage.clone(),
         vault_attachment_quota_bytes,
         upload_slots: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -530,6 +551,7 @@ pub(crate) fn build_router(
         event_stream_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         event_stream_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         policy,
+        push_config: push_config_response,
         row_security,
         instance_origin: config
             .as_ref()
@@ -1120,18 +1142,34 @@ async fn instance_devices(db: &PgPool, vault_id: Uuid) -> ApiResult<Vec<Enrollme
     let rows = sqlx::query("SELECT d.device_id, COALESCE(d.name, 'Unnamed device') name, COALESCE(d.kind, 'desktop') kind, d.role, d.revoked_at IS NOT NULL revoked, EXISTS(SELECT 1 FROM device_wake_routes routes WHERE routes.vault_id=d.vault_id AND routes.device_id=d.device_id AND routes.revoked_at IS NULL) gateway_online FROM devices d WHERE d.vault_id=$1 ORDER BY d.created_at")
         .bind(vault_id).fetch_all(db).await
         .map_err(|error| database_unavailable(&error, "instance_devices"))?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(EnrollmentDevice {
-                device_id: row.get("device_id"),
-                name: row.get("name"),
-                kind: client_kind(row.get("kind"))?,
-                role: enrollment_role(row.get("role"))?,
-                revoked: row.get("revoked"),
-                gateway_online: row.get("gateway_online"),
-            })
-        })
-        .collect()
+    let presence_by_device = crate::presence::lookup_many_best_effort(
+        db,
+        vault_id,
+        &rows
+            .iter()
+            .map(|row| (row.get("device_id"), row.get("revoked")))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let mut devices = Vec::with_capacity(rows.len());
+    for row in rows {
+        let device_id = row.get("device_id");
+        let revoked = row.get("revoked");
+        let presence = presence_by_device.get(&device_id).cloned();
+        let gateway_online = row.get("gateway_online");
+        devices.push(EnrollmentDevice {
+            device_id,
+            name: row.get("name"),
+            kind: client_kind(row.get("kind"))?,
+            role: enrollment_role(row.get("role"))?,
+            revoked,
+            // This legacy field intentionally describes wake registration only.
+            gateway_online,
+            presence,
+            wake_route: gateway_online,
+        });
+    }
+    Ok(devices)
 }
 
 pub(super) async fn instance_account(
@@ -1242,6 +1280,8 @@ pub(super) async fn instance_revoke_device(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "instance_revoke_commit"))?;
+    crate::presence::revoke_best_effort(&state.db, vault_id, device_id).await;
+    let _ = state.presence_changed.send(vault_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1339,7 +1379,33 @@ async fn authenticated(
 ) -> ApiResult<Principal> {
     let principal = auth_with_mode(s, headers).await?;
     authorize(s, &principal, operation).await?;
+    if reserve_presence_touch(&s.presence_touches, principal.vault, principal.device) {
+        crate::presence::touch_best_effort(&s.db, principal.vault, principal.device).await;
+    }
     Ok(principal)
+}
+
+const PRESENCE_TOUCH_CACHE_LIMIT: usize = 1_024;
+const PRESENCE_TOUCH_CACHE_TTL: Duration = Duration::from_secs(60);
+
+fn reserve_presence_touch(
+    touches: &std::sync::Mutex<HashMap<(Uuid, Uuid), std::time::Instant>>,
+    vault_id: Uuid,
+    device_id: Uuid,
+) -> bool {
+    let now = std::time::Instant::now();
+    let mut touches = touches.lock().expect("presence touch cache lock poisoned");
+    touches.retain(|_, seen| now.duration_since(*seen) <= PRESENCE_TOUCH_CACHE_TTL);
+    if touches.get(&(vault_id, device_id)).is_some_and(|seen| {
+        now.duration_since(*seen) < Duration::from_secs(crate::presence::TOUCH_SECONDS as u64)
+    }) {
+        return false;
+    }
+    if touches.len() >= PRESENCE_TOUCH_CACHE_LIMIT {
+        touches.clear();
+    }
+    touches.insert((vault_id, device_id), now);
+    true
 }
 async fn auth_direct(db: &PgPool, headers: &HeaderMap) -> ApiResult<Principal> {
     let bearer = headers
@@ -1698,6 +1764,8 @@ async fn revoke_device(
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "revoke_commit"))?;
+    crate::presence::revoke_best_effort(&s.db, p.vault, device_id).await;
+    let _ = s.presence_changed.send(p.vault);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1707,12 +1775,24 @@ struct WakeRouteRequest {
     route_id: Uuid,
     wake_credential: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WakeRouteDeleteQuery {
+    route_id: Option<Uuid>,
+}
+
+async fn push_config(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<PushConfig>> {
+    authenticated(&s, &h, Operation::Sync).await?;
+    Ok(Json(s.push_config))
+}
+
 async fn register_wake_route(
     State(s): State<ApiState>,
     h: HeaderMap,
     Json(x): Json<WakeRouteRequest>,
 ) -> ApiResult<StatusCode> {
-    let p = authenticated(&s, &h, Operation::Publish).await?;
+    let p = authenticated(&s, &h, Operation::Sync).await?;
     if x.route_id.is_nil()
         || x.wake_credential.len() != 64
         || !x.wake_credential.bytes().all(|b| b.is_ascii_hexdigit())
@@ -1725,11 +1805,45 @@ async fn register_wake_route(
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "wake_route_begin"))?;
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(p.vault)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_vault_lock"))?;
+    revalidate_principal(&mut tx, &p).await?;
     sqlx::query("INSERT INTO device_wake_routes(vault_id,device_id,route_id,wake_credential) VALUES($1,$2,$3,$4) ON CONFLICT(vault_id,device_id) DO UPDATE SET route_id=EXCLUDED.route_id,wake_credential=EXCLUDED.wake_credential,revoked_at=NULL,created_at=now(),generation=device_wake_routes.generation+1")
         .bind(p.vault).bind(p.device).bind(x.route_id).bind(x.wake_credential).execute(&mut *tx).await.map_err(|error| database_unavailable(&error, "wake_route_register"))?;
     tx.commit()
         .await
         .map_err(|error| database_unavailable(&error, "wake_route_commit"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_wake_route(
+    State(s): State<ApiState>,
+    h: HeaderMap,
+    Query(query): Query<WakeRouteDeleteQuery>,
+) -> ApiResult<StatusCode> {
+    let p = authenticated(&s, &h, Operation::Revoke).await?;
+    let mut tx = scope::begin(&s.db, p.vault)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke_begin"))?;
+    sqlx::query("SELECT 1 FROM vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(p.vault)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke_vault_lock"))?;
+    revalidate_principal(&mut tx, &p).await?;
+    sqlx::query("WITH revoked AS (UPDATE device_wake_routes SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2 AND revoked_at IS NULL AND ($3::uuid IS NULL OR route_id=$3) RETURNING vault_id,device_id) DELETE FROM device_wake_jobs jobs USING revoked WHERE jobs.vault_id=revoked.vault_id AND jobs.device_id=revoked.device_id")
+        .bind(p.vault)
+        .bind(p.device)
+        .bind(query.route_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke"))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "wake_route_revoke_commit"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1823,32 +1937,44 @@ async fn delete_vault(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
-struct DeviceView {
-    device_id: Uuid,
-    role: String,
-    revoked: bool,
-    profile_fingerprint: String,
-    key_epoch: u32,
-}
-async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Value>> {
+async fn devices(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<DeviceRosterResponse>> {
     let p = authenticated(&s, &h, Operation::Read).await?;
     let mut tx = scope::begin(&s.db, p.vault)
         .await
         .map_err(|error| database_unavailable(&error, "devices_begin"))?;
-    let rows = sqlx::query("SELECT device_id,role,revoked_at IS NOT NULL revoked,profile_fingerprint,key_epoch FROM devices WHERE vault_id=$1 ORDER BY created_at")
+    let rows = sqlx::query("SELECT d.device_id,d.name,d.role,d.revoked_at IS NOT NULL revoked,d.kind,d.profile_fingerprint,d.key_epoch,EXISTS(SELECT 1 FROM device_wake_routes routes WHERE routes.vault_id=d.vault_id AND routes.device_id=d.device_id AND routes.revoked_at IS NULL) wake_route FROM devices d WHERE d.vault_id=$1 ORDER BY d.created_at")
         .bind(p.vault).fetch_all(&mut *tx).await.map_err(|error| database_unavailable(&error, "api_query"))?;
-    let devices = rows
-        .into_iter()
-        .map(|row| DeviceView {
-            device_id: row.get("device_id"),
+    tx.commit()
+        .await
+        .map_err(|error| database_unavailable(&error, "devices_commit"))?;
+    let presence_by_device = crate::presence::lookup_many_best_effort(
+        &s.db,
+        p.vault,
+        &rows
+            .iter()
+            .map(|row| (row.get("device_id"), row.get("revoked")))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let mut devices = Vec::with_capacity(rows.len());
+    for row in rows {
+        let device_id = row.get("device_id");
+        let revoked = row.get("revoked");
+        let presence = presence_by_device.get(&device_id).cloned();
+        let wake_route = row.get("wake_route");
+        devices.push(DeviceRosterDevice {
+            device_id,
+            name: row.get("name"),
             role: row.get("role"),
-            revoked: row.get("revoked"),
+            revoked,
+            kind: row.get("kind"),
             profile_fingerprint: row.get("profile_fingerprint"),
             key_epoch: row.get::<i32, _>("key_epoch") as u32,
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(json!({"devices":devices})))
+            presence,
+            wake_route,
+        });
+    }
+    Ok(Json(DeviceRosterResponse { devices }))
 }
 
 async fn capabilities(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Value>> {
@@ -2027,12 +2153,22 @@ async fn ingest(
             .execute(&mut *tx)
             .await
             .map_err(|error| insert_error(error, "ingest_compaction_insert"))?;
-        for reference in &compaction.supersedes {
-            sqlx::query("INSERT INTO record_supersessions(vault_id,by_cursor,target_producer_device_id,target_producer_sequence) VALUES($1,$2,$3,$4)")
+        if !compaction.supersedes.is_empty() {
+            let target_devices: Vec<_> = compaction
+                .supersedes
+                .iter()
+                .map(|reference| reference.producer_device_id.0)
+                .collect();
+            let target_sequences: Vec<_> = compaction
+                .supersedes
+                .iter()
+                .map(|reference| reference.producer_sequence.0 as i64)
+                .collect();
+            sqlx::query("INSERT INTO record_supersessions(vault_id,by_cursor,target_producer_device_id,target_producer_sequence) SELECT $1,$2,target_device,target_sequence FROM UNNEST($3::uuid[],$4::bigint[]) AS targets(target_device,target_sequence)")
                 .bind(p.vault)
                 .bind(c)
-                .bind(reference.producer_device_id.0)
-                .bind(reference.producer_sequence.0 as i64)
+                .bind(target_devices)
+                .bind(target_sequences)
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| insert_error(error, "ingest_supersession_insert"))?;
@@ -2215,6 +2351,20 @@ mod close {
 const WS_PROTOCOL_VERSION: u64 = 1;
 const WS_REPLAY_PAGE: i64 = 100;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeartbeatAction {
+    SendChallenge,
+    Disconnect,
+}
+
+fn heartbeat_action(has_outstanding_challenge: bool) -> HeartbeatAction {
+    if has_outstanding_challenge {
+        HeartbeatAction::Disconnect
+    } else {
+        HeartbeatAction::SendChallenge
+    }
+}
+
 async fn websocket(
     State(s): State<ApiState>,
     headers: HeaderMap,
@@ -2223,10 +2373,11 @@ async fn websocket(
     let principal = authenticated(&s, &headers, Operation::Sync).await?;
     // Subscribe before replay so a commit between replay and live is never missed.
     let receiver = s.committed.subscribe();
+    let presence_receiver = s.presence_changed.subscribe();
     Ok(upgrade
         .max_message_size(1_100_000)
         .max_frame_size(1_100_000)
-        .on_upgrade(move |socket| ws_session(socket, s, principal, receiver))
+        .on_upgrade(move |socket| ws_session(socket, s, principal, receiver, presence_receiver))
         .into_response())
 }
 
@@ -2311,6 +2462,7 @@ async fn ws_session(
     state: ApiState,
     principal: Principal,
     mut notices: tokio::sync::broadcast::Receiver<(Uuid, i64)>,
+    mut presence_notices: tokio::sync::broadcast::Receiver<Uuid>,
 ) {
     let options = Arc::clone(&state.options);
     let mut cursor = match read_hello(&mut socket, options.hello_timeout).await {
@@ -2343,7 +2495,7 @@ async fn ws_session(
         "resume_cursor": cursor.to_string(),
         "high_water_cursor": high_water.to_string(),
         "replay_floor_cursor": replay_floor.to_string(),
-        "frame_types": ["ready", "event", "resync_required"],
+        "frame_types": ["ready", "event", "resync_required", "presence_changed"],
     });
     if let Err(stop) = send_frame(&mut socket, ready.to_string(), options.send_timeout).await {
         return stop.close(&mut socket).await;
@@ -2351,7 +2503,28 @@ async fn ws_session(
     if let Err(stop) = send_replay(&mut socket, &state, &principal, &mut cursor).await {
         return stop.close(&mut socket).await;
     }
+    let connection_id = Uuid::new_v4();
+    let presence_active = match scope::begin(&state.db, principal.vault).await {
+        Ok(mut tx) => {
+            match crate::presence::open(&mut tx, principal.vault, principal.device, connection_id)
+                .await
+            {
+                Ok(()) => tx.commit().await.is_ok(),
+                Err(error) => {
+                    tracing::debug!(%error, "presence socket lease unavailable");
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            tracing::debug!(%error, "presence socket scope unavailable");
+            false
+        }
+    };
+    // A pending row is intentionally not advertised; the first challenge Pong
+    // performs the connected transition.
     let mut recheck = tokio::time::interval(Duration::from_secs(20));
+    let mut challenge: Option<Vec<u8>> = None;
     // Broadcast is only a latency hint; committed rows are the durable source.
     let mut durable_replay = tokio::time::interval(options.durable_replay_interval);
     durable_replay.tick().await;
@@ -2362,10 +2535,25 @@ async fn ws_session(
                     if authorize(&state, &principal, Operation::Sync).await.is_err() {
                         WsStop::PolicyDenied
                     } else {
-                        continue;
+                        match heartbeat_action(challenge.is_some()) {
+                            HeartbeatAction::Disconnect => WsStop::Disconnected,
+                            HeartbeatAction::SendChallenge => {
+                            let token = Uuid::new_v4().as_bytes().to_vec();
+                            match tokio::time::timeout(options.send_timeout, socket.send(Message::Ping(token.clone().into()))).await {
+                                Ok(Ok(())) => {
+                                    challenge = Some(token);
+                                    continue;
+                                }
+                                Ok(Err(_)) | Err(_) => WsStop::Disconnected,
+                            }
+                            }
+                        }
                     }
                 },
-                Ok(false) => return ws_close(&mut socket, close::REVOKED, "revoked").await,
+                Ok(false) => {
+                    if presence_active { close_presence(&state, &principal, connection_id).await; }
+                    return ws_close(&mut socket, close::REVOKED, "revoked").await
+                },
                 Err(error) => {
                     tracing::warn!(error_kind = %error, "websocket revocation recheck failed");
                     WsStop::Database
@@ -2376,11 +2564,31 @@ async fn ws_session(
                 Err(stop) => stop,
             },
             incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                    if presence_active { close_presence(&state, &principal, connection_id).await; }
+                    return
+                },
                 Some(Ok(Message::Text(_))) | Some(Ok(Message::Binary(_))) => {
+                    if presence_active { close_presence(&state, &principal, connection_id).await; }
                     return ws_close(&mut socket, close::INVALID_HELLO, "unexpected_client_frame").await;
                 }
-                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                Some(Ok(Message::Ping(_))) => continue,
+                // Only a Pong after the authenticated session's control pings
+                // proves the peer is responsive; client traffic alone is not a lease.
+                Some(Ok(Message::Pong(payload))) => {
+                    if challenge.as_ref().is_some_and(|token| token.as_slice() == payload.as_ref()) {
+                        challenge = None;
+                        if presence_active && let Ok(mut tx) = scope::begin(&state.db, principal.vault).await
+                            && crate::presence::renew(&mut tx, principal.vault, principal.device, connection_id)
+                                .await
+                                .unwrap_or(false)
+                                && tx.commit().await.is_ok()
+                        {
+                            let _ = state.presence_changed.send(principal.vault);
+                        }
+                    }
+                    continue
+                },
             },
             notice = notices.recv() => match notice {
                 // Hints at or below the delivered cursor are already satisfied.
@@ -2399,10 +2607,36 @@ async fn ws_session(
                         Err(stop) => stop,
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    if presence_active { close_presence(&state, &principal, connection_id).await; }
+                    return
+                },
+            },
+            presence = presence_notices.recv() => match presence {
+                Ok(vault) if vault == principal.vault => {
+                    if send_frame(&mut socket, json!({"type":"presence_changed"}).to_string(), options.send_timeout).await.is_err() {
+                        WsStop::Disconnected
+                    } else { continue }
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    if presence_active { close_presence(&state, &principal, connection_id).await; }
+                    return
+                },
+            },
         };
+        if presence_active {
+            close_presence(&state, &principal, connection_id).await;
+        }
         return stop.close(&mut socket).await;
+    }
+}
+async fn close_presence(state: &ApiState, principal: &Principal, connection_id: Uuid) {
+    if crate::presence::close(&state.db, principal.vault, connection_id)
+        .await
+        .unwrap_or(false)
+    {
+        let _ = state.presence_changed.send(principal.vault);
     }
 }
 async fn still_active(state: &ApiState, p: &Principal) -> Result<bool, sqlx::Error> {
@@ -2465,6 +2699,22 @@ async fn send_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_disconnects_before_replacing_an_unanswered_challenge() {
+        assert_eq!(heartbeat_action(false), HeartbeatAction::SendChallenge);
+        assert_eq!(heartbeat_action(true), HeartbeatAction::Disconnect);
+    }
+
+    #[test]
+    fn touch_cache_throttles_one_device_without_throttling_another() {
+        let touches = std::sync::Mutex::new(HashMap::new());
+        let vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        assert!(reserve_presence_touch(&touches, vault, device));
+        assert!(!reserve_presence_touch(&touches, vault, device));
+        assert!(reserve_presence_touch(&touches, vault, Uuid::new_v4()));
+    }
 
     #[test]
     fn profile_requires_matching_vault_epoch_and_fingerprint() {
