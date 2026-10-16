@@ -153,9 +153,21 @@ const STATUS_LABEL: Record<MessageStatus, string> = {
 
 const TIMELESS_OUTGOING_STATUSES = new Set<MessageStatus>(["queued-local", "server-accepted"]);
 
-function messageTime(message: MessageView): string | undefined {
-  if (message.sender === "other" || !message.status) return message.timestamp;
-  return TIMELESS_OUTGOING_STATUSES.has(message.status) ? undefined : message.statusAt;
+type MessageTime = {
+  displayedTime?: string;
+  deliveryTimeFallback?: boolean;
+  deliveryTimeUnavailable?: boolean;
+};
+
+function messageTime(message: MessageView): MessageTime {
+  if (message.status === "delivery-confirmed") {
+    if (isoDateTime(message.statusAt)) return { displayedTime: message.statusAt };
+    if (isoDateTime(message.timestamp)) return { displayedTime: message.timestamp, deliveryTimeFallback: true };
+    return { deliveryTimeUnavailable: true };
+  }
+
+  if (message.sender === "other" || !message.status) return { displayedTime: message.timestamp };
+  return { displayedTime: TIMELESS_OUTGOING_STATUSES.has(message.status) ? undefined : message.statusAt };
 }
 
 const COMPOSER_MIN_HEIGHT = 96;
@@ -545,9 +557,16 @@ function MessageList({
         {historyExhausted && <p id="history-beginning-marker">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
         {conversation.messages.map((message) => {
-          const displayedTime = messageTime(message);
+          const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
           const formattedTime = formatDateTime(displayedTime);
           const isoTime = isoDateTime(displayedTime);
+          const deliveryConfirmed = message.status === "delivery-confirmed";
+          const deliveryLabel = deliveryTimeFallback
+            ? "Delivery confirmed; sent time shown because delivery time is unavailable"
+            : deliveryTimeUnavailable
+              ? "Delivery confirmed; time unavailable"
+              : "Delivery confirmed";
+          const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
           return (
             <div
               key={message.id}
@@ -633,7 +652,7 @@ function MessageList({
               </article>
               {(message.status || formattedTime) && (
                 <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
-                  {message.status && (
+                  {!deliveryConfirmed && message.status && (
                     <span className="message-meta-status">
                       {["failed-before-submit", "failed-confirmed"].includes(
                         message.status,
@@ -641,8 +660,6 @@ function MessageList({
                         <X size={10} aria-hidden />
                       ) : message.status === "unknown" ? (
                         <TriangleAlert size={10} aria-hidden />
-                      ) : message.status === "delivery-confirmed" ? (
-                        <CheckCheck size={10} aria-hidden />
                       ) : message.status === "sent" ? (
                         <Check size={10} aria-hidden />
                       ) : (
@@ -651,8 +668,18 @@ function MessageList({
                       {STATUS_LABEL[message.status]}
                     </span>
                   )}
-                  {message.status && formattedTime && <span className="message-meta-separator" aria-hidden>·</span>}
+                  {!deliveryConfirmed && message.status && formattedTime && <span className="message-meta-separator" aria-hidden>·</span>}
                   {formattedTime && isoTime && <time dateTime={isoTime}>{formattedTime}</time>}
+                  {deliveryConfirmed && (
+                    <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}>
+                      <CheckCheck size={10} aria-hidden />
+                    </span>
+                  )}
+                  {phoneHistory && (
+                    <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}>
+                      <Smartphone size={10} aria-hidden />
+                    </span>
+                  )}
                 </div>
               )}
             </div>

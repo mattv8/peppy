@@ -808,6 +808,97 @@ afterEach(() => {
 });
 
 describe("lazy conversation history", () => {
+  it("renders compact message metadata with truthful delivery and phone-history timing", async () => {
+    const incoming = host.conversations[0].messages[0];
+    Object.assign(incoming, { timestamp: "1788435180000", attachments: [] });
+    host.conversations[0].messages.push(
+      {
+        ...incoming,
+        id: "m-delivered-time",
+        sender: "self",
+        body: "Delivered with evidence",
+        timestamp: "1788435100000",
+        status: "delivery-confirmed",
+        statusAt: "1788435180000",
+      },
+      {
+        ...incoming,
+        id: "m-delivered-provider-time",
+        sender: "self",
+        body: "Delivered with provider time",
+        timestamp: "1788435100000",
+        status: "delivery-confirmed",
+        statusAt: "not-a-date",
+      },
+      {
+        ...incoming,
+        id: "m-delivered-without-time",
+        sender: "self",
+        body: "Delivered without timing evidence",
+        timestamp: "not-a-date",
+        status: "delivery-confirmed",
+        statusAt: undefined,
+      },
+      {
+        ...incoming,
+        id: "m-phone-history",
+        sender: "self",
+        body: "Phone history",
+        timestamp: "1788435100000",
+        status: undefined,
+      },
+      {
+        ...incoming,
+        id: "m-incoming-history",
+        sender: "other",
+        body: "Incoming history",
+        timestamp: "1788435100000",
+        status: undefined,
+      },
+      {
+        ...incoming,
+        id: "m-sent-without-status-time",
+        sender: "self",
+        body: "Sent without a status time",
+        timestamp: "1788435100000",
+        status: "sent",
+        statusAt: undefined,
+      },
+    );
+    render(<App />);
+
+    await screen.findByText("Delivered with evidence");
+    const deliveredMeta = document.querySelector<HTMLElement>('[data-message-meta="m-delivered-time"]')!;
+    const deliveredIcon = within(deliveredMeta).getByRole("img", { name: "Delivery confirmed" });
+    expect(deliveredIcon).toHaveAttribute("title", "Delivery confirmed");
+    expect(deliveredMeta).toHaveTextContent(formatDateTime("1788435180000")!);
+    expect(deliveredMeta).not.toHaveTextContent("Delivery confirmed");
+    expect(deliveredMeta.querySelector(".message-meta-separator")).not.toBeInTheDocument();
+    expect(deliveredMeta.querySelector("time")!.compareDocumentPosition(deliveredIcon) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    const providerTimeMeta = document.querySelector<HTMLElement>('[data-message-meta="m-delivered-provider-time"]')!;
+    const providerTimeIcon = within(providerTimeMeta).getByRole("img", { name: /sent time shown because delivery time is unavailable/i });
+    expect(providerTimeIcon)
+      .toHaveAttribute("title", "Delivery confirmed; sent time shown because delivery time is unavailable");
+    expect(providerTimeMeta.querySelector("time")).toHaveTextContent(formatDateTime("1788435100000")!);
+    expect(providerTimeMeta.querySelector("time")!.compareDocumentPosition(providerTimeIcon) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    const unavailableTimeMeta = document.querySelector<HTMLElement>('[data-message-meta="m-delivered-without-time"]')!;
+    expect(within(unavailableTimeMeta).getByRole("img", { name: /time unavailable/i }))
+      .toHaveAttribute("title", "Delivery confirmed; time unavailable");
+    expect(unavailableTimeMeta.querySelector("time")).not.toBeInTheDocument();
+
+    const phoneHistoryIcon = document.querySelector<HTMLElement>('[data-message-phone-icon="m-phone-history"]')!;
+    expect(phoneHistoryIcon).toHaveAttribute("role", "img");
+    expect(phoneHistoryIcon).toHaveAttribute("aria-label", "From phone history");
+    expect(phoneHistoryIcon).toHaveAttribute("title", "From phone history");
+    expect(document.querySelector('[data-message-phone-icon="m-incoming-history"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-phone-icon="m-sent-without-status-time"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-meta="m-sent-without-status-time"] time')).not.toBeInTheDocument();
+  });
+
   it("renders receipt and status evidence below their bubbles without exposing routing metadata", async () => {
     const incoming = host.conversations[0].messages[0];
     Object.assign(incoming, {
