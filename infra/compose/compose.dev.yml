@@ -82,6 +82,9 @@ services:
     environment:
       DEBUG: ${DEBUG:-false}
       PEPPY_ACCEPT_ANDROID_LICENSES: ${PEPPY_ACCEPT_ANDROID_LICENSES:-}
+      PEPPY_ANDROID_ABI: ${PEPPY_ANDROID_ABI:-}
+      PEPPY_ANDROID_FORCE_NATIVE_CLEAN: ${PEPPY_ANDROID_FORCE_NATIVE_CLEAN:-}
+      PEPPY_ANDROID_ARTIFACTS: ${PEPPY_ANDROID_CONTAINER_ARTIFACTS:-/artifacts/android}
     volumes:
       - ${PEPPY_SOURCE_TREE:-.}:/source:ro
       - ./.opencode/dev/artifacts:/artifacts

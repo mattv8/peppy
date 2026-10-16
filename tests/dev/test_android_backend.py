@@ -1,3 +1,4 @@
+import contextlib
 import os
 import pathlib
 import shutil
@@ -7,20 +8,108 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+BOTH_RUST_TARGETS = "aarch64-linux-android\nx86_64-linux-android\n"
+
+
+def install_android_scripts(repo):
+    helper_directory = repo / "infra/dev"
+    helper_directory.mkdir(parents=True)
+    for name in ("android.sh", "dev_port.py", "dev_tls.py"):
+        shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
+    return helper_directory / "android.sh"
+
+
+class AndroidFixture:
+    """Controlled native-build repository, SDK, JDK, Rust, and Gradle shims for one build invocation."""
+
+    def __init__(self, root):
+        self.root = root
+        self.repo = root / "repo"
+        self.bin = root / "bin"
+        self.state = root / "state"
+        self.calls = root / "calls"
+        self.sdk = root / "sdk"
+        self.jdk = root / "jdk"
+        self.artifacts = root / "artifacts"
+        self.bin.mkdir()
+        self.state.mkdir()
+        self.script = install_android_scripts(self.repo)
+        self.set_rust_targets(BOTH_RUST_TARGETS)
+        self.write_script(self.sdk / "cmdline-tools/latest/bin/sdkmanager", 'echo "sdk:$*" >> "$CALLS"')
+        self.write_script(self.jdk / "bin/java", "echo 'openjdk version \"17.0.1\"' >&2")
+        self.write_script(self.repo / "infra/compose/verify-android-native.sh", 'echo "verify:$PEPPY_ANDROID_ABI" >> "$CALLS"')
+        self.write_gradle()
+        self.shim("sdkmanager", 'echo "sdk:$*" >> "$CALLS"')
+        self.shim("uname", "echo Darwin")
+        self.shim("cargo", 'echo "cargo" >> "$CALLS"')
+        self.shim(
+            "rustup",
+            'echo "rustup:$*" >> "$CALLS"\n'
+            '[ "$1" = target ] && [ "$2" = list ] && [ "$3" = --installed ] && cat "$FIXTURE_STATE/rust-targets"',
+        )
+        self.shim("pkg-config", 'echo "pkg-config:$*" >> "$CALLS"')
+        self.shim("brew", 'echo "brew:$*" >> "$CALLS"\nexit 99')
+        self.shim("docker", 'echo "docker:$*" >> "$CALLS"\nexit 99')
+
+    def write_script(self, path, body):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    def shim(self, name, body):
+        self.write_script(self.bin / name, body)
+
+    def write_gradle(self):
+        self.write_script(
+            self.repo / "apps/android/gradlew",
+            'echo "gradle:$*" >> "$CALLS"\n'
+            "mkdir -p app/build/outputs/apk/debug app/build/outputs/apk/androidTest/debug\n"
+            "touch app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
+        )
+
+    def set_rust_targets(self, text):
+        (self.state / "rust-targets").write_text(text)
+
+    def environment(self, **overrides):
+        environment = {
+            "HOME": str(self.root),
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "CALLS": str(self.calls),
+            "FIXTURE_STATE": str(self.state),
+            "ANDROID_SDK_ROOT": str(self.sdk),
+            "ANDROID_NDK_HOME": str(self.sdk / "ndk/27.2.12479018"),
+            "JAVA_HOME": str(self.jdk),
+            "PEPPY_ACCEPT_ANDROID_LICENSES": "1",
+            "PEPPY_ANDROID_ARTIFACTS": str(self.artifacts),
+        }
+        return environment | overrides
+
+    def run(self, *arguments, **overrides):
+        return subprocess.run(
+            ["bash", str(self.script), *arguments],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=self.environment(**overrides),
+        )
+
+    def call_lines(self):
+        return self.calls.read_text().splitlines() if self.calls.exists() else []
 
 
 class AndroidBackendTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def android_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            yield AndroidFixture(pathlib.Path(temporary_directory))
+
     def write_command(self, directory, name, body):
         command = directory / name
         command.write_text(f"#!/bin/sh\n{body}\n")
         command.chmod(0o755)
 
     def copy_android_script(self, repo):
-        helper_directory = repo / "infra/dev"
-        helper_directory.mkdir(parents=True)
-        for name in ("android.sh", "dev_port.py", "dev_tls.py"):
-            shutil.copy(ROOT / "infra/dev" / name, helper_directory / name)
-        return helper_directory / "android.sh"
+        return install_android_scripts(repo)
 
     def copy_script_with_fake_java_home(self, repo, fake_java_home):
         script = self.copy_android_script(repo)
@@ -419,3 +508,67 @@ class AndroidBackendTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("PEPPY_ACCEPT_ANDROID_LICENSES must equal 1", result.stderr)
             self.assertFalse(calls.exists())
+
+    def test_invalid_build_selectors_fail_before_sdk_cargo_or_docker_effects(self):
+        for host in ("Darwin", "Linux"):
+            for selector, value, message in (
+                ("PEPPY_ANDROID_ABI", "armeabi-v7a", "PEPPY_ANDROID_ABI must be all, arm64-v8a, or x86_64"),
+                ("PEPPY_ANDROID_ABI", "x86", "PEPPY_ANDROID_ABI must be all, arm64-v8a, or x86_64"),
+                ("PEPPY_ANDROID_FORCE_NATIVE_CLEAN", "yes", "PEPPY_ANDROID_FORCE_NATIVE_CLEAN must be 0 or 1"),
+                ("PEPPY_ANDROID_FORCE_NATIVE_CLEAN", "2", "PEPPY_ANDROID_FORCE_NATIVE_CLEAN must be 0 or 1"),
+                ("PEPPY_ANDROID_BUILD_BACKEND", "remote", "PEPPY_ANDROID_BUILD_BACKEND must be auto, native, or docker"),
+            ):
+                with self.subTest(host=host, selector=selector, value=value), self.android_fixture() as fixture:
+                    fixture.shim("uname", f"echo {host}")
+
+                    result = fixture.run("build", **{selector: value})
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertEqual(fixture.call_lines(), [])
+
+    def test_gradle_daemon_policy_follows_test_ci_and_container_context(self):
+        for command, overrides, expects_no_daemon in (
+            ("build", {}, False),
+            ("build", {"CI": "false"}, False),
+            ("test", {}, True),
+            ("build", {"CI": "1"}, True),
+            ("build", {"CI": "true"}, True),
+            ("build", {"PEPPY_ANDROID_CONTAINER": "1"}, True),
+        ):
+            with self.subTest(command=command, overrides=overrides), self.android_fixture() as fixture:
+                result = fixture.run(command, **overrides)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                gradle = [call for call in fixture.call_lines() if call.startswith("gradle:")]
+                self.assertEqual(len(gradle), 1)
+                self.assertEqual("--no-daemon" in gradle[0], expects_no_daemon, gradle[0])
+
+    def test_native_rust_targets_and_gradle_abi_follow_selected_abi(self):
+        arm_only = "aarch64-linux-android\n"
+        x86_only = "x86_64-linux-android\n"
+        for selector, installed, missing, expected_gradle in (
+            ("all", BOTH_RUST_TARGETS, None, "gradle::app:assembleDebug"),
+            ("all", arm_only, "Rust target x86_64-linux-android is missing", None),
+            ("all", x86_only, "Rust target aarch64-linux-android is missing", None),
+            ("arm64-v8a", arm_only, None, "gradle:-PpeppyAndroidAbi=arm64-v8a :app:assembleDebug"),
+            ("arm64-v8a", x86_only, "Rust target aarch64-linux-android is missing", None),
+            ("x86_64", arm_only, "Rust target x86_64-linux-android is missing", None),
+            ("x86_64", x86_only, None, "gradle:-PpeppyAndroidAbi=x86_64 :app:assembleDebug"),
+        ):
+            with self.subTest(selector=selector, installed=installed), self.android_fixture() as fixture:
+                fixture.set_rust_targets(installed)
+
+                result = fixture.run("build", PEPPY_ANDROID_ABI=selector)
+
+                calls = fixture.call_lines()
+                if missing:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(missing, result.stderr)
+                    self.assertFalse(any(call.startswith(("verify:", "gradle:")) for call in calls))
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"verify:{selector}", calls)
+                    self.assertIn(expected_gradle, calls)
+                    if selector == "all":
+                        self.assertFalse(any("peppyAndroidAbi" in call for call in calls))

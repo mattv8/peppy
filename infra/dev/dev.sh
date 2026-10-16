@@ -59,7 +59,7 @@ case "$recipe" in
   dev-down|dev-test|ci-test)
     require_container_tooling
     exec just "$recipe" "$@" ;;
-  dev-start|android-build|android-run|desktop-dev|desktop-bundle|desktop-run|ios-run)
+  dev-start|android-build|android-run|android-run-fast|desktop-dev|desktop-bundle|desktop-run|ios-run)
     select_source_tree
     exec just "$recipe" "$@" ;;
   android-test|android-emulator|android-forward|android-deploy|android-open|android-smoke|android-sms|desktop-open)

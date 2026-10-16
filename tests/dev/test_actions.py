@@ -32,16 +32,20 @@ LEGACY_ACTIONS = [
 ]
 EXPECTED_ACTIONS = [
     ("peppy.dev-start", "Dev: Start development", "bash infra/dev/dev.sh dev-start", "play"),
+    ("peppy.desktop-dev", "Desktop: Develop (hot reload)", "bash infra/dev/dev.sh desktop-dev", "play"),
     ("peppy.desktop-run", "Desktop: Rebuild and open", "bash infra/dev/dev.sh desktop-run", "play-circle"),
     ("peppy.android-run", "Android: Rebuild and open", "bash infra/dev/dev.sh android-run", "device-mobile"),
+    ("peppy.android-run-fast", "Android: Rebuild and open (fast)", "bash infra/dev/dev.sh android-run-fast", "device-mobile"),
     ("peppy.ios-run", "iOS: Rebuild and open", "bash infra/dev/dev.sh ios-run", "device-mobile"),
     ("peppy.ci-test", "CI: Run all tests", "bash infra/dev/dev.sh ci-test", "checkbox-circle"),
     ("peppy.dev-down", "Dev: Stop backend", "bash infra/dev/dev.sh dev-down", "stop-circle"),
 ]
 PARENT_RUN_ACTION_IDS = {
     "peppy.dev-start",
+    "peppy.desktop-dev",
     "peppy.desktop-run",
     "peppy.android-run",
+    "peppy.android-run-fast",
     "peppy.ios-run",
     "peppy.dev-down",
 }
@@ -109,7 +113,7 @@ class InstallActionsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Installed {len(template['projectActions'])} actions", result.stdout)
 
-    def test_editor_catalog_and_tasks_are_exact_six_action_toolbar_contract(self):
+    def test_editor_catalog_and_tasks_are_exact_eight_action_toolbar_contract(self):
         template = json.loads(TEMPLATE_PATH.read_text())
         tasks = json.loads(TASKS_PATH.read_text())["tasks"]
         expected_actions = [
@@ -130,7 +134,7 @@ class InstallActionsTests(unittest.TestCase):
         self.assertTrue(all(task["presentation"] == {"panel": "dedicated", "reveal": "always"} for task in tasks))
         self.assertTrue(all(task["problemMatcher"] == [] for task in tasks))
 
-    def test_migrates_actual_legacy_sixteen_actions_to_six_and_is_idempotent(self):
+    def test_migrates_actual_legacy_sixteen_actions_to_eight_and_is_idempotent(self):
         self.write_config({"version": 1, "projectActions": [
             {"id": action_id, "name": "Old", "command": command, "icon": "old"}
             for action_id, command in LEGACY_ACTIONS
@@ -139,6 +143,41 @@ class InstallActionsTests(unittest.TestCase):
         self.assertEqual(self.install(), "updated")
         self.assertEqual(self.read_config()["projectActions"], json.loads(TEMPLATE_PATH.read_text())["projectActions"])
         self.assertEqual(self.install(), "unchanged")
+
+    def test_migrates_current_six_action_catalog_to_eight_and_is_idempotent(self):
+        current_six_ids = {
+            "peppy.dev-start", "peppy.desktop-run", "peppy.android-run",
+            "peppy.ios-run", "peppy.ci-test", "peppy.dev-down",
+        }
+        self.write_config({"version": 1, "projectActions": [
+            {"id": action_id, "name": "Old", "command": command, "icon": "old"}
+            for action_id, _, command, _ in EXPECTED_ACTIONS
+            if action_id in current_six_ids
+        ]})
+
+        self.assertEqual(self.install(), "updated")
+        self.assertEqual(self.read_config()["projectActions"], json.loads(TEMPLATE_PATH.read_text())["projectActions"])
+        self.assertEqual(self.install(), "unchanged")
+
+    def test_adopts_legacy_desktop_dev_and_preserves_its_run_in_preference(self):
+        self.write_config({"version": 1, "projectActions": [
+            {"id": "peppy.desktop-dev", "name": "Old", "command": "bash infra/dev/dev.sh desktop-dev", "icon": "old", "runIn": "project"},
+        ]})
+
+        self.assertEqual(self.install(), "updated")
+        action = next(action for action in self.read_config()["projectActions"] if action["id"] == "peppy.desktop-dev")
+        self.assertEqual(action["runIn"], "project")
+
+    def test_refuses_customized_legacy_desktop_dev_without_changing_file(self):
+        config = {"version": 1, "projectActions": [
+            {"id": "peppy.desktop-dev", "name": "Local", "command": "echo local", "icon": "tools"},
+        ]}
+        self.write_config(config)
+        original = self.config_path().read_text()
+
+        with self.assertRaisesRegex(self.installer.InstallError, "Rename the local action"):
+            self.install()
+        self.assertEqual(self.config_path().read_text(), original)
 
     def test_preserves_customized_retired_command_unknown_namespace_and_user_keys(self):
         customized = {"id": "peppy.android-sms", "name": "Mine", "command": "echo mine", "custom": True}
@@ -197,7 +236,7 @@ class InstallActionsTests(unittest.TestCase):
         actions = self.read_config()["projectActions"]
         self.assertEqual(actions[0]["id"], "peppy.android-sms")
         self.assertEqual(actions[0]["command"], "bash infra/dev/dev.sh android-sms +1555 custom")
-        self.assertEqual(len(actions), 7)
+        self.assertEqual(len(actions), 9)
 
     def test_rejects_malformed_config_without_changing_file(self):
         self.config_path().parent.mkdir()

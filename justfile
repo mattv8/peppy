@@ -116,6 +116,10 @@ android-run:
     bash infra/dev/android.sh deploy
     bash infra/dev/android.sh open
 
+android-run-fast:
+    @test "${PEPPY_ACCEPT_ANDROID_LICENSES:-}" = 1 || { echo "PEPPY_ACCEPT_ANDROID_LICENSES=1 is required before Android build/deploy; review and accept Android SDK licenses first, then make the one-time setting in .opencode/dev/android.env" >&2; exit 1; }
+    bash infra/dev/android.sh run-fast
+
 android-smoke:
     bash infra/dev/android.sh smoke
 
