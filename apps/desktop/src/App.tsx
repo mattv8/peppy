@@ -79,6 +79,8 @@ import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { DevicesSettings } from "./DevicesSettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
+import { UpdatesSettings } from "./UpdatesSettings";
+import { isTauriUpdateHost, useUpdateActivity } from "./updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
 import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
 import { peppyCopy } from "./generated/peppyCopy";
@@ -752,6 +754,7 @@ function SettingsView({
   const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
   const [actionError, setActionError] = useState<{ action: SettingsAction; message: string } | null>(null);
   const [revealError, setRevealError] = useState<string | null>(null);
+  const nativeUpdateHost = !browserHost && isTauriUpdateHost();
   const settingsContentRef = useRef<HTMLDivElement>(null);
   const pendingSectionRef = useRef<string | null>(null);
   const scrollEndTimer = useRef<number | undefined>(undefined);
@@ -783,6 +786,7 @@ function SettingsView({
     { id: "notifications", label: "Notifications" },
     { id: "theme", label: "Appearance" },
     ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
+    ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
     ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
   ];
@@ -969,6 +973,7 @@ function SettingsView({
         }} /> Start at login</label>
         {startupError && <p className="settings-error" role="alert">Start at login was not changed: {startupError}</p>}
       </section>}
+      {nativeUpdateHost && <UpdatesSettings />}
       {!browserHost && <AppLockSettings status={appLock} onChange={onAppLock} />}
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
@@ -1022,6 +1027,7 @@ function StatusDetails({
 export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string } = {}) {
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
+  useUpdateActivity(!browserHost);
   const [composerConversation] = useState(() =>
     typeof window === "undefined"
       ? null

@@ -2402,6 +2402,13 @@ describe("host state display", () => {
     delete bridge.lock_sync;
   });
 
+  it("omits native update settings from the browser host", async () => {
+    render(<App hostKind="browser" fixedOrigin="https://community.example" />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(document.querySelector('[data-settings-section="updates"]')).not.toBeInTheDocument();
+  });
+
   it("preserves browser account links and native hosted account actions in settings order", async () => {
     const configure = vi.spyOn(bridge, "configure_server");
     render(<App hostKind="browser" fixedOrigin="https://app.example.com" accountUrl="https://account.example.com/account" />);
