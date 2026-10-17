@@ -71,3 +71,6 @@ axum = "=0.8.6"
 ed25519-dalek = "=2.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 tokio-rustls = "0.26"
+
+[patch.crates-io]
+libsodium-sys-stable = { path = "../../../vendor/libsodium-sys-stable" }
