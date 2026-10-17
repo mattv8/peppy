@@ -76,22 +76,34 @@ For group MMS replies, the app reads the default SMS SIM's own number from the c
 
 **Rust library profile:** Set `PEPPY_ANDROID_NATIVE_PROFILE=debug` (default) or `release` to control whether the Rust-native bindings library is built with optimizations. The artifact workflow explicitly selects `release`; developer and local smoke tests default to `debug`. Profile selection does not change runtime security gates or debug origin checks.
 
-## SMS latency diagnostics (debug only)
+## SMS capture timing and diagnostics
 
-### Build and collect a comparison
+SMS-provider changes use a 1-second quiet period, capped at 3 seconds of awake time per notification burst. Observer-triggered work has no additional initial delay. This is the normal behavior in both debug and release builds; the former slow-mode switch has been removed.
+
+Foreground and gateway follow-up scans retain their 15-second delay. Unique-work coalescing, retries, and Android scheduling still apply: an observer hint does not cancel or replace already pending work. No expedited upload, extra polling loop, or persistent service is introduced by the fast observer path.
+
+### Build and collect diagnostics
 
 With the [Android build prerequisites](#build-backends) installed and native libraries generated, run from `apps/android`:
 
 ```sh
-# Baseline: existing 15-second debounce and 15-second capture delay.
-./gradlew :app:assembleDebug -PpeppySmsDiagnostics=true -PpeppySmsFastCapture=false
+# Normal build: bounded fast observer capture, diagnostics off.
+./gradlew :app:assembleDebug
 
-# Experiment: 1-second observer quiet period, 3-second maximum awake wait,
-# and no additional delay for a newly accepted observer request.
-./gradlew :app:assembleDebug -PpeppySmsDiagnostics=true -PpeppySmsFastCapture=true
+# Same capture behavior with content-free debug timing diagnostics.
+./gradlew :app:assembleDebug -PpeppySmsDiagnostics=true
 ```
 
-Both commands write `app/build/outputs/apk/debug/app-debug.apk`; retain the baseline artifact before building the experiment. The properties accept only `true` or `false`, default to false, and cannot enable either feature in a release build. Omit the properties or set them false to return to the baseline with diagnostics off.
+Both commands write `app/build/outputs/apk/debug/app-debug.apk`. `peppySmsDiagnostics` accepts only `true` or `false`, defaults to false, and cannot enable diagnostic logging in a release build. Omit it or set it false to disable logging without changing capture timing.
+
+For an already configured HTTPS local dev stack, include its existing local CA in the debug build. The native development helper does this automatically. When invoking Gradle directly from `apps/android`, set these before the build:
+
+```sh
+export DEBUG=true
+export PEPPY_DEV_TLS_CERT="$(python3 ../../infra/dev/dev_tls.py ca-path)"
+```
+
+These settings affect only the debug loopback trust configuration. A bare Gradle build without them does not trust the local dev CA.
 
 After installing the chosen build on a test phone, collect only this diagnostic tag:
 
@@ -99,9 +111,9 @@ After installing the chosen build on a test phone, collect only this diagnostic 
 adb logcat -v threadtime -s PeppySyncTrace
 ```
 
-For clean isolated-send measurements, allow more than 15 seconds after foregrounding or a completed sync and verify no delayed capture request is pending. Foreground entry and gateway passes enqueue delayed work; `KEEP` preserves that work even when a fast observer hint arrives. An enqueue trace without a corresponding worker start can therefore be expected, rather than evidence of a lost SMS. Measure this pending-work case separately from the clean case.
+For settled-queue measurements, allow more than 15 seconds after foregrounding or a completed sync and verify no delayed capture request is pending. Foreground entry and gateway passes enqueue delayed work; `KEEP` preserves that work even when an observer hint arrives. An enqueue trace without a corresponding worker start can therefore be expected, rather than evidence of a lost SMS. Measure this pending-work case separately from the settled case.
 
-Compare isolated messages and bursts with settled history, then test backfill separately. Cover foreground/background, screen on/off, and Wi-Fi/cellular with the same phone, server, permissions, and workload. Record the build flags and native build profile for each run. Server acknowledgement and appearance on another client are different endpoints; measure them separately.
+Compare isolated messages and bursts with settled history, then test backfill separately. Cover foreground/background, screen on/off, and Wi-Fi/cellular with the same phone, server, permissions, and workload. Record whether diagnostics are enabled and the native build profile for each run. Server acknowledgement and appearance on another client are different endpoints; measure them separately.
 
 For battery comparisons, repeat matched unplugged idle-baseline and workload runs. Use Android CPU, wake-lock, and network measurements alongside these traces; logcat is not an energy meter. Keep debugging/collection conditions matched and account for tracing overhead. Physical-phone latency and energy results have not yet been established; emulator tests and APK builds do not establish them.
 
@@ -124,7 +136,7 @@ Event/field codes are defined in [`SyncDiagnostics.kt`](app/src/main/java/dev/pe
 - `NATIVE_OPEN SUCCESS=1` means a non-null client was returned. `COLD=1` means no cached client was observed at entry, not proof that this call initialized it; duration can include lock contention.
 - Logs contain numeric metadata, not SMS bodies, phone/provider IDs, URLs, credentials, response bodies, or exception text. Logcat can drop lines. Coalesced hints, process death, retry/backoff, and Doze prevent exact per-message attribution from these pass-level traces.
 
-The five-second acknowledgement target applies to a healthy network, a live process, settled history, and no pre-existing delayed/retry or recovery work. The experiment does not expedite uploads, keep the process alive, or change the periodic fallback.
+The five-second acknowledgement target applies to a healthy network, a live process, settled history, and no pre-existing delayed/retry or recovery work. It is not a delivery guarantee. The observer policy does not expedite uploads, keep the process alive, or change the periodic fallback.
 
 ## Build backends
 

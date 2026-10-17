@@ -10,7 +10,6 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import androidx.annotation.VisibleForTesting
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -123,19 +122,17 @@ object SmsCaptureWork {
     const val PERIODIC_NAME = "peppy-sms-capture-periodic"
 
     @Volatile internal var runner: SmsCaptureRunner? = null
-    @VisibleForTesting
-    @Volatile internal var fastModeOverride: Boolean? = null
     private val executionMutex = Mutex()
     /** A hint that arrived while a pass may already be past the provider rows it changed. */
     private val hintCount = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** Coalesced hint: KEEP drops it while a pass runs, so the running pass re-checks [hintPending]. */
+    /** Coalesced hint: KEEP drops it while a pass runs, so the running pass re-checks [hintCount]. */
     fun enqueue(context: Context) {
         hintCount.incrementAndGet()
         schedule(context, ExistingWorkPolicy.KEEP, SmsCaptureRequestSource.DEFAULT)
     }
 
-    /** Provider-observer path only: fast debug builds request immediate unique work. */
+    /** Provider-observer path requests immediate unique work. */
     internal fun enqueueObserver(context: Context) {
         hintCount.incrementAndGet()
         schedule(context, ExistingWorkPolicy.KEEP, SmsCaptureRequestSource.OBSERVER)
@@ -162,21 +159,20 @@ object SmsCaptureWork {
     }
 
     private fun schedule(context: Context, policy: ExistingWorkPolicy, source: SmsCaptureRequestSource) {
-        val fastMode = fastModeOverride ?: BuildConfig.PEPPY_SMS_FAST_CAPTURE
-        val delayMs = smsCaptureInitialDelayMs(source, fastMode)
-        val diagnostic = captureDiagnosticRequest(source, delayMs, fastMode)
-        val request = createRequest(source, fastMode, diagnostic?.data())
+        val delayMs = smsCaptureInitialDelayMs(source)
+        val diagnostic = captureDiagnosticRequest(source, delayMs)
+        val request = createRequest(source, diagnostic?.data())
         WorkManager.getInstance(context).enqueueUniqueWork(NAME, policy, request)
     }
 
-    internal fun createRequest(source: SmsCaptureRequestSource, fastMode: Boolean, diagnosticData: Data? = null) =
+    internal fun createRequest(source: SmsCaptureRequestSource, diagnosticData: Data? = null) =
         OneTimeWorkRequestBuilder<SmsCaptureWorker>()
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .apply { smsCaptureInitialDelayMs(source, fastMode).takeIf { it > 0 }?.let { setInitialDelay(it, TimeUnit.MILLISECONDS) } }
+            .apply { smsCaptureInitialDelayMs(source).takeIf { it > 0 }?.let { setInitialDelay(it, TimeUnit.MILLISECONDS) } }
             .apply { if (diagnosticData != null) setInputData(diagnosticData) }
             .build()
 
-    private fun captureDiagnosticRequest(source: SmsCaptureRequestSource, delayMs: Long, fastMode: Boolean): CaptureDiagnosticRequest? {
+    private fun captureDiagnosticRequest(source: SmsCaptureRequestSource, delayMs: Long): CaptureDiagnosticRequest? {
         if (!SyncDiagnostics.enabled) return null
         val parent = SyncDiagnostics.currentTraceId()
         val traceId = SyncDiagnostics.newTraceId()
@@ -187,7 +183,6 @@ object SmsCaptureWork {
                 SyncTraceField.PARENT_ID to parent,
                 SyncTraceField.SOURCE to source.code,
                 SyncTraceField.DELAY_MS to delayMs,
-                SyncTraceField.FAST_MODE to if (fastMode) 1 else 0,
                 SyncTraceField.ENQUEUED_MS to enqueuedMs,
             )
         }
@@ -202,8 +197,8 @@ object SmsCaptureWork {
 
 internal enum class SmsCaptureRequestSource(val code: Long) { DEFAULT(0), OBSERVER(1), CONTINUATION(2), UNKNOWN(3) }
 
-internal fun smsCaptureInitialDelayMs(source: SmsCaptureRequestSource, fastMode: Boolean): Long = when (source) {
-    SmsCaptureRequestSource.OBSERVER -> if (fastMode) 0 else CAPTURE_DELAY_MS
+internal fun smsCaptureInitialDelayMs(source: SmsCaptureRequestSource): Long = when (source) {
+    SmsCaptureRequestSource.OBSERVER -> 0
     SmsCaptureRequestSource.DEFAULT -> CAPTURE_DELAY_MS
     SmsCaptureRequestSource.CONTINUATION -> 0
     SmsCaptureRequestSource.UNKNOWN -> CAPTURE_DELAY_MS
@@ -299,7 +294,6 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
 
 private const val WORK_OUTCOME_SUCCESS = 1L
 private const val WORK_OUTCOME_RETRY = 2L
-private const val WORK_OUTCOME_FAILURE = 3L
 private const val WORK_OUTCOME_THROW = 4L
 
 private data class CaptureWorkerDiagnostic(val traceId: Long, val enqueuedMs: Long?, val source: Long, val unavailable: Boolean) {
