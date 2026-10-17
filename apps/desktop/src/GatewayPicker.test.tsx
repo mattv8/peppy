@@ -12,18 +12,19 @@ const options: GatewayPickerOption[] = [
 
 function renderPicker(overrides: Partial<ComponentProps<typeof GatewayPicker>> = {}) {
   const onChange = vi.fn();
-  render(
+  const { unmount } = render(
     <div className="theme-dark">
       <GatewayPicker options={options} value="pixel:sim-1" placeholder="Choose phone" onChange={onChange} {...overrides} />
       <button type="button">Outside</button>
     </div>,
   );
-  return { onChange, trigger: screen.getByRole("combobox", { name: "Phone" }) };
+  return { onChange, trigger: screen.getByRole("combobox", { name: "Phone" }), unmount };
 }
 
 describe("GatewayPicker", () => {
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -86,6 +87,97 @@ describe("GatewayPicker", () => {
     expect(onChange).toHaveBeenCalledWith("galaxy:sim-3");
   });
 
+  it("focuses the trigger when a pointer opens the picker", () => {
+    const { trigger } = renderPicker();
+    const outside = screen.getByRole("button", { name: "Outside" });
+    outside.focus();
+
+    fireEvent.click(trigger);
+
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it.each(["ArrowDown", "ArrowUp"])("opens closed %s on the selected enabled route", (key) => {
+    const { trigger } = renderPicker({ value: "galaxy:sim-3" });
+
+    fireEvent.keyDown(trigger, { key });
+
+    expect(trigger).toHaveAttribute("aria-activedescendant", expect.stringContaining("galaxy"));
+  });
+
+  it("closes without committing when the selected route is chosen again", () => {
+    const { onChange, trigger } = renderPicker();
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("option", { name: /Pixel 8/ }));
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("prevents popup background mousedown defaults while retaining trigger focus", () => {
+    const { trigger } = renderPicker();
+    trigger.focus();
+    fireEvent.click(trigger);
+    const popup = screen.getByRole("listbox");
+
+    expect(fireEvent.mouseDown(popup)).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("extends pending typeahead with Space without committing", () => {
+    vi.useFakeTimers();
+    const typeaheadOptions = [
+      options[0],
+      { ...options[2], value: "smart:sim-3", name: "S Phone", simLabel: undefined, statusLabel: undefined },
+    ];
+    const { onChange, trigger } = renderPicker({ options: typeaheadOptions });
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: "s" });
+    fireEvent.keyDown(trigger, { key: " " });
+
+    expect(trigger).toHaveAttribute("aria-activedescendant", expect.stringContaining("smart"));
+    expect(onChange).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(500);
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledWith("smart:sim-3");
+  });
+
+  it("keeps typeahead pending until 500ms after the most recent search key", () => {
+    vi.useFakeTimers();
+    const { trigger } = renderPicker();
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: "g" });
+    vi.advanceTimersByTime(400);
+    fireEvent.keyDown(trigger, { key: "a" });
+    vi.advanceTimersByTime(200);
+    fireEvent.keyDown(trigger, { key: "p" });
+
+    expect(trigger).toHaveAttribute("aria-activedescendant", expect.stringContaining("galaxy"));
+    vi.advanceTimersByTime(501);
+    fireEvent.keyDown(trigger, { key: "p" });
+    expect(trigger).toHaveAttribute("aria-activedescendant", expect.stringContaining("pixel"));
+  });
+
+  it("keeps the missing-SIM availability badge when its label matches the SIM label", () => {
+    const unavailable = {
+      ...options[0],
+      simLabel: "No SMS SIM",
+      statusLabel: "No SMS SIM",
+      availability: "no_sms_sim" as const,
+    };
+    const { trigger } = renderPicker({ options: [unavailable], value: unavailable.value });
+
+    expect(trigger.querySelector('[data-route-badge="status"][data-gateway-availability="no_sms_sim"]')).toBeInTheDocument();
+    expect(trigger.querySelector('[data-route-badge="sim"]')).not.toBeInTheDocument();
+  });
+
   it("keeps the active descendant valid when choices change while open", () => {
     const onChange = vi.fn();
     const { rerender } = render(
@@ -104,7 +196,7 @@ describe("GatewayPicker", () => {
     );
     expect(trigger).toHaveAttribute("aria-activedescendant", expect.stringContaining("pixel"));
     fireEvent.keyDown(trigger, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledWith("pixel:sim-1");
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("keeps an all-disabled list visible without committing a route", () => {
@@ -142,7 +234,7 @@ describe("GatewayPicker", () => {
     );
     expect(trigger).toHaveAttribute("aria-activedescendant", expect.stringContaining("pixel"));
     fireEvent.keyDown(trigger, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledWith("pixel:sim-1");
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("describes the selected route and uses whitespace-safe active option IDs", () => {
@@ -188,6 +280,64 @@ describe("GatewayPicker", () => {
     fireEvent.click(trigger);
     const popup = screen.getByRole("listbox");
     expect(popup).toHaveStyle({ top: "394px", transform: "translateY(-100%)" });
+  });
+
+  it("caps below placement and clamps a popup to the viewport gutter", () => {
+    const { trigger } = renderPicker();
+    vi.stubGlobal("innerHeight", 700);
+    vi.stubGlobal("innerWidth", 300);
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      bottom: 100, height: 30, left: -20, right: 180, top: 70, width: 200, x: -20, y: 70, toJSON: () => ({}),
+    });
+
+    fireEvent.click(trigger);
+
+    expect(screen.getByRole("listbox")).toHaveStyle({ top: "106px", left: "8px", maxHeight: "280px" });
+  });
+
+  it("does not reposition for scroll events from inside the popup", () => {
+    const { trigger } = renderPicker();
+    const getBoundingClientRect = vi.spyOn(trigger, "getBoundingClientRect");
+
+    fireEvent.click(trigger);
+    getBoundingClientRect.mockClear();
+    fireEvent.scroll(screen.getByRole("listbox"));
+    expect(getBoundingClientRect).not.toHaveBeenCalled();
+
+    fireEvent.scroll(document);
+    expect(getBoundingClientRect).toHaveBeenCalled();
+  });
+
+  it("cleans up a pending typeahead timer when unmounted", () => {
+    vi.useFakeTimers();
+    const clearTimeout = vi.spyOn(globalThis, "clearTimeout");
+    const { trigger, unmount } = renderPicker();
+
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: "g" });
+    unmount();
+
+    expect(clearTimeout).toHaveBeenCalled();
+  });
+
+  it("keeps listbox and active option IDs isolated across pickers", () => {
+    const onChange = vi.fn();
+    render(
+      <div className="theme-dark">
+        <GatewayPicker options={options} value="pixel:sim-1" placeholder="Choose phone" onChange={onChange} />
+        <GatewayPicker options={options} value="galaxy:sim-3" placeholder="Choose phone" onChange={onChange} />
+      </div>,
+    );
+    const [firstPicker, secondPicker] = screen.getAllByRole("combobox", { name: "Phone" });
+
+    fireEvent.keyDown(firstPicker, { key: "ArrowDown" });
+    const firstListboxId = firstPicker.getAttribute("aria-controls");
+    const firstActiveOptionId = firstPicker.getAttribute("aria-activedescendant");
+    fireEvent.keyDown(secondPicker, { key: "ArrowDown" });
+
+    expect(firstListboxId).not.toBe(secondPicker.getAttribute("aria-controls"));
+    expect(firstActiveOptionId).not.toBe(secondPicker.getAttribute("aria-activedescendant"));
+    expect(document.getElementById(secondPicker.getAttribute("aria-activedescendant") ?? "")).toBeInTheDocument();
   });
 
   it("scrolls the initially selected option into view when the popup mounts", () => {

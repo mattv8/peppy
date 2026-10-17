@@ -462,7 +462,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   pointer-events: auto;
 }
 #gateway-selector { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; max-width: 100%; padding: 4px 8px; font-size: 12px; }
-#gateway-selector [role="combobox"] { display: flex; width: auto; height: auto; }
+#gateway-selector [data-gateway-picker-trigger] { display: flex; width: auto; height: auto; border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius, 4px); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); }
 #unavailable-hint { color: var(--peppy-warning-text); }
 #unavailable-hint { margin: 0; color: var(--peppy-warning-text); font-size: 11px; }
 #unavailable-hint[hidden] { display: none; }

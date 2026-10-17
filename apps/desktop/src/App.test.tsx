@@ -1957,14 +1957,18 @@ describe("composer window", () => {
     openComposerWindow("aurora", true);
     render(<App />);
     const phone = await screen.findByRole("combobox", { name: "Phone" });
+    const textarea = message();
+    textarea.focus();
     fireEvent.click(phone);
     expect(await screen.findByRole("listbox")).toBeInTheDocument();
+    expect(document.activeElement).toBe(phone);
 
-    await act(async () => { fireEvent.keyDown(phone, { key: "Escape" }); });
+    await act(async () => { fireEvent.keyDown(document.activeElement!, { key: "Escape" }); });
 
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(bridge.close_composer).not.toHaveBeenCalled();
-    fireEvent.keyDown(phone, { key: "Escape" });
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     await waitFor(() => expect(bridge.close_composer).toHaveBeenCalledOnce());
   });
 
@@ -2325,9 +2329,46 @@ describe("gateway routes", () => {
     const option = await screen.findByRole("option", { name: /My iPhone/, hidden: true });
     expect(option).toHaveAttribute("aria-disabled", "true");
     expect(option).toHaveAttribute("data-gateway-availability", "unsupported_platform");
-    fireEvent.click(option);
+    await act(async () => { fireEvent.click(option); });
     expect(bridge.save_draft).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+
+  it("does not save or revise a draft when the selected route is chosen again", async () => {
+    render(<App />);
+    await screen.findByRole("combobox", { name: "Phone" });
+
+    await chooseGateway(SMS_ONLY);
+    await waitFor(() => expect(host.drafts.get("aurora")).toMatchObject({ simId: "sim-1" }));
+    const revision = host.drafts.get("aurora")!.revision;
+    const saves = vi.mocked(bridge.save_draft).mock.calls.length;
+
+    await chooseGateway(SMS_ONLY);
+    await act(async () => {});
+
+    expect(host.drafts.get("aurora")?.revision).toBe(revision);
+    expect(bridge.save_draft).toHaveBeenCalledTimes(saves);
+  });
+
+  it("does not create an empty draft when an implicit route is reselected", async () => {
+    host.gateways = [SMS_ONLY];
+    render(<App />);
+    await screen.findByRole("combobox", { name: "Phone" });
+
+    await chooseGateway(SMS_ONLY);
+    await act(async () => {});
+
+    expect(bridge.save_draft).not.toHaveBeenCalled();
+    expect(host.drafts.get("aurora")).toBeUndefined();
+  });
+
+  it("does not mark Phone invalid for a reply blocker", async () => {
+    host.conversations[0].replyBlockedReason = "confirm your address on the phone";
+    host.drafts.set("aurora", storedDraft());
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Phone" })).not.toHaveAttribute("aria-invalid");
   });
 });
 
