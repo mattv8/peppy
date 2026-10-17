@@ -34,7 +34,6 @@ fun strictDebugBoolean(name: String): Boolean = providers.gradleProperty(name).o
 } ?: false
 
 val peppySmsDiagnostics = strictDebugBoolean("peppySmsDiagnostics")
-val peppySmsFastCapture = strictDebugBoolean("peppySmsFastCapture")
 
 private val certificatePemPattern = Regex(
     """\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----\s*\z""",
@@ -109,7 +108,6 @@ android {
         ).orNull.orEmpty()
         buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
-        buildConfigField("boolean", "PEPPY_SMS_FAST_CAPTURE", "false")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
         ndk {
             abiFilters.clear()
@@ -126,11 +124,9 @@ android {
     buildTypes {
         getByName("debug") {
             buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", peppySmsDiagnostics.toString())
-            buildConfigField("boolean", "PEPPY_SMS_FAST_CAPTURE", peppySmsFastCapture.toString())
         }
         getByName("release") {
             buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
-            buildConfigField("boolean", "PEPPY_SMS_FAST_CAPTURE", "false")
         }
     }
 

@@ -34,6 +34,7 @@ import org.robolectric.Shadows.shadowOf
 class SmsCaptureSchedulingTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private lateinit var workerExecutor: ExecutorService
+    private var readSmsPermissionBeforeTest: Boolean? = null
 
     @Before fun setUpWorkManager() {
         workerExecutor = Executors.newSingleThreadExecutor()
@@ -42,54 +43,44 @@ class SmsCaptureSchedulingTest {
             Configuration.Builder().setExecutor(workerExecutor).build(),
             ExecutorsMode.PRESERVE_EXECUTORS,
         )
-        SmsCaptureWork.fastModeOverride = null
         SmsCaptureWork.runner = null
     }
 
     @After fun tearDownWorkManager() {
+        restoreReadSmsPermission()
         WorkManagerTestInitHelper.closeWorkDatabase()
         workerExecutor.shutdownNow()
         assertTrue(workerExecutor.awaitTermination(1, TimeUnit.SECONDS))
         SmsCaptureWork.takeHintCount()
-        SmsCaptureWork.fastModeOverride = null
         SmsCaptureWork.runner = null
     }
 
-    @Test fun baselineDebounceUsesTrailingFifteenSecondQuietPeriod() {
-        val debouncer = SmsCaptureDebouncer(smsCaptureDebouncePolicy(fastMode = false))
-
-        assertEquals(15_000L, debouncer.nextDelayMs(0))
-        assertEquals(15_000L, debouncer.nextDelayMs(5_000))
-    }
-
-    @Test fun fastDebounceCapsContinuousNotificationsAtThreeSeconds() {
-        val debouncer = SmsCaptureDebouncer(smsCaptureDebouncePolicy(fastMode = true))
+    @Test fun debounceCapsContinuousNotificationsAtThreeSeconds() {
+        val debouncer = SmsCaptureDebouncer(smsCaptureDebouncePolicy())
 
         assertEquals(1_000L, debouncer.nextDelayMs(0))
         assertEquals(1_000L, debouncer.nextDelayMs(1_500))
         assertEquals(500L, debouncer.nextDelayMs(2_500))
     }
 
-    @Test fun resetStartsANewFastBurstWindow() {
-        val debouncer = SmsCaptureDebouncer(smsCaptureDebouncePolicy(fastMode = true))
+    @Test fun resetStartsANewBurstWindow() {
+        val debouncer = SmsCaptureDebouncer(smsCaptureDebouncePolicy())
 
         debouncer.nextDelayMs(0)
         debouncer.reset()
         assertEquals(1_000L, debouncer.nextDelayMs(2_500))
     }
 
-    @Test fun observerDelayIsFastOnlyForTheFastExperiment() {
-        assertEquals(15_000L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.DEFAULT, fastMode = false))
-        assertEquals(15_000L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.OBSERVER, fastMode = false))
-        assertEquals(0L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.OBSERVER, fastMode = true))
-        assertEquals(15_000L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.DEFAULT, fastMode = true))
-        assertEquals(0L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.CONTINUATION, fastMode = true))
+    @Test fun observerRequestsHaveNoDelay() {
+        assertEquals(15_000L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.DEFAULT))
+        assertEquals(0L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.OBSERVER))
+        assertEquals(0L, smsCaptureInitialDelayMs(SmsCaptureRequestSource.CONTINUATION))
     }
 
     @Test fun observerDispatchesOnceAfterQuietPeriodAndCapsAContinuousBurst() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         var dispatches = 0
-        val observer = SmsCaptureLifecycle.observer(context, smsCaptureDebouncePolicy(fastMode = true)) { dispatches += 1 }
+        val observer = SmsCaptureLifecycle.observer(context) { dispatches += 1 }
         context.contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
 
         ShadowLooper.idleMainLooper(3, TimeUnit.SECONDS)
@@ -107,24 +98,9 @@ class SmsCaptureSchedulingTest {
         context.contentResolver.unregisterContentObserver(observer)
     }
 
-    @Test fun baselineObserverDispatchesTwentySecondsAfterNotificationsAtZeroAndFiveSeconds() {
+    @Test fun observerDispatchesOneHintAfterOneSecond() {
         var dispatches = 0
-        val observer = SmsCaptureLifecycle.observer(context, smsCaptureDebouncePolicy(fastMode = false)) { dispatches++ }
-
-        observer.onChange(false)
-        ShadowLooper.idleMainLooper(5, TimeUnit.SECONDS)
-        observer.onChange(false)
-        ShadowLooper.idleMainLooper(14, TimeUnit.SECONDS)
-        assertEquals(0, dispatches)
-        ShadowLooper.idleMainLooper(1, TimeUnit.SECONDS)
-
-        assertEquals(1, dispatches)
-        observer.cancel()
-    }
-
-    @Test fun fastObserverDispatchesOneHintAfterOneSecond() {
-        var dispatches = 0
-        val observer = SmsCaptureLifecycle.observer(context, smsCaptureDebouncePolicy(fastMode = true)) { dispatches++ }
+        val observer = SmsCaptureLifecycle.observer(context) { dispatches++ }
 
         observer.onChange(false)
         ShadowLooper.idleMainLooper(999, TimeUnit.MILLISECONDS)
@@ -135,10 +111,26 @@ class SmsCaptureSchedulingTest {
         observer.cancel()
     }
 
+    @Test fun sustainedNotificationsDispatchAtThreeSecondBoundsWithoutRecurringWhenIdle() {
+        var dispatches = 0
+        val observer = SmsCaptureLifecycle.observer(context) { dispatches += 1 }
+
+        // This is a bounded-work assertion, not a physical battery measurement.
+        repeat(600) {
+            observer.onChange(false)
+            ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
+        }
+
+        assertEquals(20, dispatches)
+        ShadowLooper.idleMainLooper(10, TimeUnit.SECONDS)
+        assertEquals(20, dispatches)
+        observer.cancel()
+    }
+
     @Test fun unregisterCancelsPendingAndStaleObserverCallbacks() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         var dispatches = 0
-        val observer = SmsCaptureLifecycle.observer(context, smsCaptureDebouncePolicy(fastMode = true)) { dispatches += 1 }
+        val observer = SmsCaptureLifecycle.observer(context) { dispatches += 1 }
 
         observer.onChange(false)
         observer.cancel()
@@ -148,27 +140,23 @@ class SmsCaptureSchedulingTest {
         assertEquals(0, dispatches)
     }
 
-    @Test fun requestFactoryPreservesDelaysAndExponentialBackoffForEveryMode() {
-        val normal = SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT, fastMode = true)
-        val baselineObserver = SmsCaptureWork.createRequest(SmsCaptureRequestSource.OBSERVER, fastMode = false)
-        val fastObserver = SmsCaptureWork.createRequest(SmsCaptureRequestSource.OBSERVER, fastMode = true)
+    @Test fun requestFactoryPreservesDelaysAndExponentialBackoff() {
+        val normal = SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT)
+        val observer = SmsCaptureWork.createRequest(SmsCaptureRequestSource.OBSERVER)
 
         assertEquals(15_000L, normal.workSpec.initialDelay)
-        assertEquals(15_000L, baselineObserver.workSpec.initialDelay)
-        assertEquals(0L, fastObserver.workSpec.initialDelay)
-        assertEquals(BackoffPolicy.EXPONENTIAL, fastObserver.workSpec.backoffPolicy)
-        assertEquals(30_000L, fastObserver.workSpec.backoffDelayDuration)
-        assertFalse(fastObserver.workSpec.expedited)
-        assertTrue(normal.workSpec.id != fastObserver.workSpec.id)
+        assertEquals(0L, observer.workSpec.initialDelay)
+        assertEquals(BackoffPolicy.EXPONENTIAL, observer.workSpec.backoffPolicy)
+        assertEquals(30_000L, observer.workSpec.backoffDelayDuration)
+        assertFalse(observer.workSpec.expedited)
+        assertTrue(normal.workSpec.id != observer.workSpec.id)
     }
 
-    @Test fun uniqueKeepPreservesDelayedDefaultRequestWhenFastObserverHintsArrive() {
-        SmsCaptureWork.fastModeOverride = false
+    @Test fun uniqueKeepPreservesDelayedDefaultRequestWhenObserverHintsArrive() {
         SmsCaptureWork.enqueue(context)
         val manager = WorkManager.getInstance(context)
         val original = manager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().single()
 
-        SmsCaptureWork.fastModeOverride = true
         SmsCaptureWork.enqueueObserver(context)
 
         val retained = manager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get()
@@ -207,8 +195,8 @@ class SmsCaptureSchedulingTest {
         val failed = TestListenableWorkerBuilder<SmsCaptureWorker>(context).build()
         assertEquals(androidx.work.ListenableWorker.Result.retry(), failed.startWork().get())
         assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
-        assertEquals(BackoffPolicy.EXPONENTIAL, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT, false).workSpec.backoffPolicy)
-        assertEquals(30_000L, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT, false).workSpec.backoffDelayDuration)
+        assertEquals(BackoffPolicy.EXPONENTIAL, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT).workSpec.backoffPolicy)
+        assertEquals(30_000L, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT).workSpec.backoffDelayDuration)
     }
 
     @Test fun disabledDiagnosticsDoNotTouchInputsClockOrSinkAndDoNotChangeWorkerResult() {
@@ -233,25 +221,43 @@ class SmsCaptureSchedulingTest {
         assertTrue(events.any { it.contains("event=${SyncTraceEvent.CAPTURE_START.code}") })
     }
 
-    @Test fun ensureObserverRegistersOnceAndRevocationCancelsItsPendingDispatch() {
+    @Test fun observerNotificationEnqueuesImmediateWorkerAfterQuietPeriod() {
         val application = context.applicationContext as android.app.Application
         val resolver = context.contentResolver
         val resolverShadow = shadowOf(resolver)
+        SmsCaptureWork.runner = SmsCaptureRunner { SmsCaptureSummary() }
+        rememberReadSmsPermission()
         shadowOf(application).grantPermissions(Manifest.permission.READ_SMS)
         SmsCaptureLifecycle.ensureObserver(context)
+        assertEquals(1, resolverShadow.getContentObservers(Telephony.Sms.CONTENT_URI).size)
+
+        resolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
+        ShadowLooper.idleMainLooper(999, TimeUnit.MILLISECONDS)
+        assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
+        ShadowLooper.idleMainLooper(1, TimeUnit.MILLISECONDS)
+
+        val manager = WorkManager.getInstance(context)
+        val completed = awaitUniqueWorkTerminalWithoutAdvancingClock(manager, expectedCount = 1)
+        assertEquals(1, completed.size)
+        assertTrue(completed.all { it.state == WorkInfo.State.SUCCEEDED })
+        assertEquals(1, manager.getWorkInfosForUniqueWork(SmsCaptureWork.PERIODIC_NAME).get().size)
+    }
+
+    @Test fun observerCallbackRevocationSelfUnregistersAndDoesNotEnqueue() {
+        val application = context.applicationContext as android.app.Application
+        val resolver = context.contentResolver
+        val resolverShadow = shadowOf(resolver)
+        rememberReadSmsPermission()
+        shadowOf(application).grantPermissions(Manifest.permission.READ_SMS)
         SmsCaptureLifecycle.ensureObserver(context)
         assertEquals(1, resolverShadow.getContentObservers(Telephony.Sms.CONTENT_URI).size)
 
         resolver.notifyChange(Telephony.Sms.CONTENT_URI, null)
         ShadowLooper.idleMainLooper()
-
         shadowOf(application).denyPermissions(Manifest.permission.READ_SMS)
-        SmsCaptureLifecycle.ensureObserver(context)
-        assertEquals(0, resolverShadow.getContentObservers(Telephony.Sms.CONTENT_URI).size)
-        // Re-grant before the deadline so an uncancelled callback cannot pass merely because permission stayed denied.
-        shadowOf(application).grantPermissions(Manifest.permission.READ_SMS)
-        ShadowLooper.idleMainLooper(20, TimeUnit.SECONDS)
+        ShadowLooper.idleMainLooper(1, TimeUnit.SECONDS)
 
+        assertEquals(0, resolverShadow.getContentObservers(Telephony.Sms.CONTENT_URI).size)
         assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
     }
 
@@ -327,5 +333,32 @@ class SmsCaptureSchedulingTest {
         }
         fail("unique work did not reach $expectedCount terminal entries: $latest")
         throw AssertionError("unreachable")
+    }
+
+    private fun awaitUniqueWorkTerminalWithoutAdvancingClock(manager: WorkManager, expectedCount: Int): List<WorkInfo> {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var latest = emptyList<WorkInfo>()
+        while (System.nanoTime() < deadline) {
+            ShadowLooper.runUiThreadTasks()
+            latest = manager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get(1, TimeUnit.SECONDS)
+            if (latest.size > expectedCount) fail("unexpected continuation loop: $latest")
+            if (latest.size == expectedCount && latest.all { it.state.isFinished }) return latest
+            Thread.yield()
+        }
+        fail("unique work did not reach $expectedCount terminal entries without advancing the clock: $latest")
+        throw AssertionError("unreachable")
+    }
+
+    private fun rememberReadSmsPermission() {
+        readSmsPermissionBeforeTest = smsReadGranted(context)
+    }
+
+    private fun restoreReadSmsPermission() {
+        val wasGranted = readSmsPermissionBeforeTest ?: return
+        val application = context.applicationContext as android.app.Application
+        shadowOf(application).denyPermissions(Manifest.permission.READ_SMS)
+        SmsCaptureLifecycle.ensureObserver(context)
+        if (wasGranted) shadowOf(application).grantPermissions(Manifest.permission.READ_SMS)
+        readSmsPermissionBeforeTest = null
     }
 }

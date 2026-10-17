@@ -19,8 +19,8 @@ internal fun needsSmsReadSettingsRecovery(hasRequested: Boolean, granted: Boolea
 
 internal data class SmsCaptureDebouncePolicy(val quietMs: Long, val maximumWaitMs: Long? = null)
 
-internal fun smsCaptureDebouncePolicy(fastMode: Boolean): SmsCaptureDebouncePolicy =
-    if (fastMode) SmsCaptureDebouncePolicy(FAST_QUIET_MS, FAST_MAX_WAIT_MS) else SmsCaptureDebouncePolicy(BASELINE_QUIET_MS)
+internal fun smsCaptureDebouncePolicy(): SmsCaptureDebouncePolicy =
+    SmsCaptureDebouncePolicy(FAST_QUIET_MS, FAST_MAX_WAIT_MS)
 
 /** Tracks a provider-notification burst using Handler's uptime clock. */
 internal class SmsCaptureDebouncer(private val policy: SmsCaptureDebouncePolicy) {
@@ -106,7 +106,7 @@ internal object SmsCaptureLifecycle {
         }
     }
 
-    internal fun observer(context: Context, policy: SmsCaptureDebouncePolicy = smsCaptureDebouncePolicy(BuildConfig.PEPPY_SMS_FAST_CAPTURE), onDispatch: (() -> Unit)? = null): SmsProviderObserver {
+    internal fun observer(context: Context, policy: SmsCaptureDebouncePolicy = smsCaptureDebouncePolicy(), onDispatch: (() -> Unit)? = null): SmsProviderObserver {
         val debounceHandler = Handler(Looper.getMainLooper())
         val debouncer = SmsCaptureDebouncer(policy)
         return object : SmsProviderObserver(debounceHandler) {
@@ -122,7 +122,7 @@ internal object SmsCaptureLifecycle {
                 if (onDispatch != null) onDispatch() else {
                     if (SyncDiagnostics.enabled) {
                         SyncDiagnostics.withTrace(SyncDiagnostics.newTraceId()) {
-                            SyncDiagnostics.record(SyncTraceEvent.OBSERVER_DISPATCH, SyncTraceField.COUNT to hintCount.toLong(), SyncTraceField.FAST_MODE to if (BuildConfig.PEPPY_SMS_FAST_CAPTURE) 1 else 0)
+                            SyncDiagnostics.record(SyncTraceEvent.OBSERVER_DISPATCH, SyncTraceField.COUNT to hintCount.toLong())
                             SmsCaptureWork.enqueueObserver(context)
                             SmsCaptureWork.ensurePeriodic(context)
                         }
