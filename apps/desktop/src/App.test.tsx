@@ -743,6 +743,87 @@ const openComposerWindow = (conversationId: string, head = false) =>
     "",
     `/?window=composer&conversationId=${conversationId}${head ? "&head=1" : ""}`,
   );
+class TestResizeObserver {
+  static observers: TestResizeObserver[] = [];
+  readonly targets = new Set<Element>();
+
+  constructor(private readonly callback: ResizeObserverCallback) {
+    TestResizeObserver.observers.push(this);
+  }
+
+  observe(target: Element) {
+    this.targets.add(target);
+  }
+
+  disconnect() {
+    this.targets.clear();
+  }
+
+  static resize(...targets: Element[]) {
+    for (const observer of TestResizeObserver.observers) {
+      const entries = targets
+        .filter((target) => observer.targets.has(target))
+        .map((target) => ({ target } as ResizeObserverEntry));
+      if (entries.length) observer.callback(entries, observer as unknown as ResizeObserver);
+    }
+  }
+
+  static reset() {
+    TestResizeObserver.observers = [];
+  }
+}
+class TestIntersectionObserver {
+  static observers: TestIntersectionObserver[] = [];
+  readonly targets = new Set<Element>();
+
+  constructor(private readonly callback: IntersectionObserverCallback) {
+    TestIntersectionObserver.observers.push(this);
+  }
+
+  observe(target: Element) {
+    this.targets.add(target);
+  }
+
+  disconnect() {
+    this.targets.clear();
+  }
+
+  static intersect(target: Element) {
+    for (const observer of TestIntersectionObserver.observers) {
+      if (observer.targets.has(target))
+        observer.callback([{ target, isIntersecting: true } as IntersectionObserverEntry], observer as unknown as IntersectionObserver);
+    }
+  }
+
+  static reset() {
+    TestIntersectionObserver.observers = [];
+  }
+}
+const mockMessageListGeometry = (geometry: { overlay: number; viewport: number; scrollHeight?: number }) => {
+  const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+  const clientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+  const scrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetHeight: {
+      configurable: true,
+      get() { return this.id === "composer-area" ? geometry.overlay : 0; },
+    },
+    clientHeight: {
+      configurable: true,
+      get() { return this.id === "message-list" ? geometry.viewport : 0; },
+    },
+    scrollHeight: {
+      configurable: true,
+      get() { return this.id === "message-list" ? geometry.scrollHeight ?? 1000 : 0; },
+    },
+  });
+  return () => {
+    for (const [name, descriptor] of [["offsetHeight", offsetHeight], ["clientHeight", clientHeight], ["scrollHeight", scrollHeight]] as const) {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+    }
+  };
+};
 let lifecycle: ((request: { id: string; action: "quit" | "close" | "collapse" }) => void) | undefined;
 let lifecycleDispose: ReturnType<typeof vi.fn>;
 let lifecycleFinished: ((result: { id: string; ok: boolean }) => void) | undefined;
@@ -3118,6 +3199,156 @@ describe("desktop presentation controls", () => {
       if (clientHeight)
         Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeight);
       else delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+    }
+  });
+
+  it("keeps a reader anchored to the unobscured bottom when the composer grows", async () => {
+    const geometry = { overlay: 100, viewport: 300 };
+    const restoreGeometry = mockMessageListGeometry(geometry);
+    TestResizeObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+      await waitFor(() => expect(document.getElementById("conversation-stage")).toHaveStyle({ "--composer-overlay-height": "100px" }));
+      list.scrollTop = 400;
+      fireEvent.scroll(list);
+
+      geometry.overlay = 150;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+
+      expect(list.scrollTop).toBe(450);
+      geometry.overlay = 100;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+
+      expect(list.scrollTop).toBe(400);
+      geometry.overlay = 400;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+
+      expect(list.scrollTop).toBe(600);
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("rebaselines after a hidden message list returns without treating it as a reader scroll", async () => {
+    const geometry = { overlay: 100, viewport: 300 };
+    const restoreGeometry = mockMessageListGeometry(geometry);
+    const loadHistory = vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: "aurora",
+      messages: [],
+      hasMore: false,
+    });
+    host.conversations[0].hasOlderMessages = true;
+    TestResizeObserver.reset();
+    TestIntersectionObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await waitFor(() => expect(document.getElementById("conversation-stage")).toHaveStyle({ "--composer-overlay-height": "100px" }));
+      list.scrollTop = 400;
+      fireEvent.scroll(list);
+
+      fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+      geometry.viewport = 0;
+      await act(async () => TestResizeObserver.resize(list));
+      geometry.overlay = 150;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+      fireEvent.click(screen.getByRole("tab", { name: "Messages" }));
+      geometry.viewport = 300;
+      await act(async () => TestResizeObserver.resize(list));
+      await act(async () => TestIntersectionObserver.intersect(document.getElementById("history-page-sentinel")!));
+
+      expect(list.scrollTop).toBe(400);
+      expect(loadHistory).not.toHaveBeenCalled();
+      await waitFor(() =>
+        expect(list).not.toHaveAttribute("data-scroll-programmatic"),
+      );
+      fireEvent.scroll(list);
+      await act(async () => TestIntersectionObserver.intersect(document.getElementById("history-page-sentinel")!));
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("applies a combined list and composer change once while ignoring content-only resizes", async () => {
+    const geometry = { overlay: 100, viewport: 300 };
+    const restoreGeometry = mockMessageListGeometry(geometry);
+    TestResizeObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await waitFor(() => expect(document.getElementById("conversation-stage")).toHaveStyle({ "--composer-overlay-height": "100px" }));
+      list.scrollTop = 400;
+      fireEvent.scroll(list);
+
+      await act(async () => TestResizeObserver.resize(document.getElementById("message-list-content")!));
+      expect(list.scrollTop).toBe(400);
+
+      geometry.overlay = 150;
+      geometry.viewport = 220;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!, list));
+      expect(list.scrollTop).toBe(530);
+      await act(async () => TestResizeObserver.resize(list));
+      expect(list.scrollTop).toBe(530);
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("pins a near-bottom reader when the composer geometry changes", async () => {
+    const geometry = { overlay: 100, viewport: 300 };
+    const restoreGeometry = mockMessageListGeometry(geometry);
+    TestResizeObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await waitFor(() => expect(document.getElementById("conversation-stage")).toHaveStyle({ "--composer-overlay-height": "100px" }));
+      list.scrollTop = 652;
+      fireEvent.scroll(list);
+
+      geometry.overlay = 150;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+
+      expect(list.scrollTop).toBe(1000);
+      list.scrollTop = 651;
+      fireEvent.scroll(list);
+      geometry.overlay = 100;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+
+      expect(list.scrollTop).toBe(601);
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("reattaches geometry observation after returning from Settings", async () => {
+    const geometry = { overlay: 100, viewport: 478, scrollHeight: 2000 };
+    const restoreGeometry = mockMessageListGeometry(geometry);
+    TestResizeObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    try {
+      render(<App />);
+      await screen.findByRole("log", { name: "Messages" });
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await act(async () => TestResizeObserver.resize(list));
+      list.scrollTop = 500;
+      fireEvent.scroll(list);
+
+      geometry.viewport = 378;
+      await act(async () => TestResizeObserver.resize(list));
+
+      expect(list.scrollTop).toBe(600);
+    } finally {
+      restoreGeometry();
     }
   });
 

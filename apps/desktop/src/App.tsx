@@ -1162,6 +1162,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const mountedRef = useRef(true);
   const overlayHeightRef = useRef(overlayHeight);
   overlayHeightRef.current = overlayHeight;
+  const lastUnobscuredHeight = useRef<number | null>(null);
   const historyAnchorRef = useRef<{ row: HTMLElement; top: number } | null>(null);
   const messageRows = useRef(new Map<string, HTMLElement>());
   const handlers = useRef({
@@ -1315,6 +1316,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [activeView]);
   useEffect(() => installOverlayScrollbars(document), []);
   useLayoutEffect(() => {
+    const measureOverlay = () => {
+      const height = document.getElementById("composer-area")?.offsetHeight ?? 0;
+      setOverlayHeight((current) => (current === height ? current : height));
+    };
     const measure = () => {
       const height = paneRef.current?.offsetHeight ?? 0;
       setPaneHeight((current) => (current === height ? current : height));
@@ -1325,11 +1330,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setComposerChrome((current) => (current === chrome ? current : chrome));
     };
     measure();
+    measureOverlay();
     if (typeof ResizeObserver === "undefined") return;
-    const measureOverlay = () => {
-      const height = document.getElementById("composer-area")?.offsetHeight ?? 0;
-      setOverlayHeight((current) => (current === height ? current : height));
-    };
     const observer = new ResizeObserver(() => {
       measure();
       measureOverlay();
@@ -1338,7 +1340,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const composerArea = document.getElementById("composer-area");
     if (composerArea) observer.observe(composerArea);
     return () => observer.disconnect();
-  }, [activeView, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected)]);
+  }, [activeView, headPanel, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected)]);
   useEffect(() => {
     const root = mainRef.current;
     if (!root) return;
@@ -1533,12 +1535,40 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       element.removeAttribute("data-scroll-programmatic"),
     );
   };
+  const isNearMessageListBottom = (element: HTMLDivElement) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
   const onMessageScroll = () => {
     const element = messageListRef.current;
-    if (!element) return;
+    if (!element || element.clientHeight === 0) return;
     if (!element.hasAttribute("data-scroll-programmatic")) historyUserScrolled.current = true;
-    nearBottom.current =
-      element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
+    nearBottom.current = isNearMessageListBottom(element);
+  };
+  const adjustMessageScrollForGeometry = (element = messageListRef.current) => {
+    if (!element) return;
+    if (element.clientHeight === 0) {
+      lastUnobscuredHeight.current = null;
+      historyUserScrolled.current = false;
+      return;
+    }
+    if (overlayHeightRef.current === null) return;
+    const unobscuredHeight = Math.max(0, element.clientHeight - overlayHeightRef.current);
+    const previousUnobscuredHeight = lastUnobscuredHeight.current;
+    lastUnobscuredHeight.current = unobscuredHeight;
+    if (previousUnobscuredHeight === null) {
+      if (nearBottom.current) stickToBottom(element);
+      return;
+    }
+    if (nearBottom.current) {
+      stickToBottom(element);
+      return;
+    }
+    const adjustment = previousUnobscuredHeight - unobscuredHeight;
+    if (adjustment === 0) return;
+    element.setAttribute("data-scroll-programmatic", "");
+    element.scrollTop += adjustment;
+    nearBottom.current = isNearMessageListBottom(element);
+    if (typeof requestAnimationFrame === "undefined") element.removeAttribute("data-scroll-programmatic");
+    else requestAnimationFrame(() => element.removeAttribute("data-scroll-programmatic"));
   };
   const loadOlderMessages = useCallback(async () => {
     const conversationId = selectedRef.current;
@@ -1615,6 +1645,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return () => observer.disconnect();
   }, [hasOlderMessages, loadOlderMessages, messageIds]);
   useLayoutEffect(() => {
+    lastUnobscuredHeight.current = null;
     if (!conversationLoaded) return;
     stickToBottom();
     nearBottom.current = true;
@@ -1623,24 +1654,29 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (nearBottom.current) stickToBottom();
   }, [messageIds]);
   useLayoutEffect(() => {
-    if (nearBottom.current) stickToBottom();
+    adjustMessageScrollForGeometry();
   }, [overlayHeight]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
     const content = document.getElementById("message-list-content");
     if (!list || !content || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      if (nearBottom.current) stickToBottom(list);
+    const observer = new ResizeObserver((entries) => {
+      if (entries.some((entry) => entry.target === list)) {
+        adjustMessageScrollForGeometry(list);
+      } else if (nearBottom.current) {
+        stickToBottom(list);
+      }
     });
     observer.observe(list);
     observer.observe(content);
     return () => observer.disconnect();
-  }, [slotKey, conversationLoaded]);
+  }, [activeView, slotKey, conversationLoaded, headPanel]);
   useEffect(() => {
     seenMessageIds.current = new Set<string>();
     pendingSeenMessageIds.current = new Set<string>();
   }, [slotKey]);
   const setMessageListNode = useCallback((node: HTMLDivElement | null) => {
+    if (node !== messageListRef.current) lastUnobscuredHeight.current = null;
     messageListRef.current = node;
   }, []);
   const overlayMargin =
