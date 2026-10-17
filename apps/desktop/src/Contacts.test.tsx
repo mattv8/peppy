@@ -85,10 +85,13 @@ describe("ContactsView", () => {
   });
 
   it("explains why limited and unready books cannot request a scan", async () => {
-    vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, state: "limited", capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+    let resolveBooks!: (books: ContactBookView[]) => void;
+    vi.mocked(bridge.list_contact_books).mockImplementation(() => new Promise(resolve => { resolveBooks = resolve; }));
     render(<ContactsView sync={{ repairRequired: false, readiness: { state: "backfill_pending", contacts_ready: false, server_active: true, backfill_unreadable: 0 } }} />);
-    expect(await screen.findByRole("button", { name: "Sync now" })).toBeDisabled();
-    expect(screen.getByText("This phone has limited contact access and cannot complete an authoritative scan.")).toBeInTheDocument();
+    const syncButton = await screen.findByRole("button", { name: "Sync now" });
+    resolveBooks([{ ...mockContactBook, state: "limited", capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+    expect(await screen.findByText("This phone has limited contact access and cannot complete an authoritative scan.")).toBeInTheDocument();
+    expect(syncButton).toBeDisabled();
   });
 
   it.each([
