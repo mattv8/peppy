@@ -50,6 +50,11 @@ server:
 
 build:
   - 'infra/build/**'
+  - 'infra/release/build-desktop-bundles.sh'
+  - 'infra/release/install-rpmrebuild.sh'
+  - 'infra/release/normalize-linux-package-metadata.sh'
+  - 'infra/release/sign-rpm.sh'
+  - 'infra/release/sign-windows-artifact.ps1'
 
 ci:
   - '.github/**'
