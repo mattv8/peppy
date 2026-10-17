@@ -431,6 +431,9 @@ async fn release_media_capabilities(
     state: &AppState,
     capabilities: Vec<(Arc<Session>, AttachmentId)>,
 ) {
+    let Ok(_operation) = admit_update_operation(state) else {
+        return;
+    };
     for (session, attachment) in capabilities {
         let active = state.session.lock().await;
         let current = !state.app_locked.load(Ordering::Acquire)
@@ -2548,6 +2551,38 @@ mod media_protocol_tests {
             .session
             .client
             .release_attachment_ciphertext(latest)
+            .unwrap());
+    }
+
+    #[test]
+    fn window_teardown_keeps_media_lease_while_update_restart_is_reserved() {
+        let harness = ProtocolHarness::new(b"reserved");
+        let reservation = harness.state.update_safety.reserve().unwrap();
+
+        tauri::async_runtime::block_on(release_media_capabilities(
+            &harness.state,
+            vec![(harness.session.clone(), harness.attachment)],
+        ));
+        assert!(harness
+            .session
+            .client
+            .release_attachment_ciphertext(harness.attachment)
+            .unwrap());
+
+        harness
+            .session
+            .client
+            .retain_attachment_ciphertext(harness.attachment)
+            .unwrap();
+        drop(reservation);
+        tauri::async_runtime::block_on(release_media_capabilities(
+            &harness.state,
+            vec![(harness.session.clone(), harness.attachment)],
+        ));
+        assert!(!harness
+            .session
+            .client
+            .release_attachment_ciphertext(harness.attachment)
             .unwrap());
     }
 
