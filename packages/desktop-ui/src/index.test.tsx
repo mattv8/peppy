@@ -175,6 +175,13 @@ function firePointer(target: Element, type: string, pointerId: number, clientX: 
 }
 
 describe("desktop UI controls", () => {
+  it("uses a deterministic fallback avatar for conversations without an identity", () => {
+    render(<ConversationList conversations={people} selectedId="conv-a" onSelect={() => {}} />);
+    const avatar = screen.getByRole("button", { name: /Aurora/ }).querySelector(".contact-avatar");
+    expect(avatar).toHaveAttribute("data-avatar-kind", "person");
+    expect(avatar).toHaveAttribute("data-avatar-color");
+  });
+
   it("offers a cancellable inline delete confirmation only for blank draft rows", () => {
     const onDelete = vi.fn();
     const onCancelDelete = vi.fn();

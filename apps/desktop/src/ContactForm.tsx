@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ContactAvatar, Modal, Plus, X } from "@peppy/desktop-ui";
+import { ContactAvatar, Modal, Plus, X, contactSeed } from "@peppy/desktop-ui";
 import {
   type ContactView,
   type ContactPhone,
@@ -352,7 +352,7 @@ export function ContactForm({
               onClick={handlePhotoPickerClick}
               type="button"
             >
-              <ContactAvatar name={displayName} photoDataUrl={draft.photoDataUrl} size={64} />
+              <ContactAvatar seed={contactSeed(draft.phones, initial?.id ?? "new")} name={displayName} photoDataUrl={draft.photoDataUrl} size={64} />
             </button>
             {/* Remove is distinct from keep: shown for a new crop or an existing photo. */}
             {draft.photoKind !== "remove" && (draft.photoDataUrl || initial?.photoPending) && !fieldReadOnly && (

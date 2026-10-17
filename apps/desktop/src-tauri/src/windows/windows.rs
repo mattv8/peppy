@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use tauri::AppHandle;
@@ -14,11 +14,13 @@ use windows::{
         Graphics::Gdi::{
             BeginPaint, CombineRgn, CreateEllipticRgn, CreateFontW, CreateRoundRectRgn,
             CreateSolidBrush, DrawTextW, EndPaint, EnumDisplayMonitors, FillRgn, GetMonitorInfoW,
-            InvalidateRect, MonitorFromPoint, MonitorFromWindow, SelectObject, SetBkMode,
-            SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-            DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD,
-            MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, OUT_DEFAULT_PRECIS,
-            PAINTSTRUCT, RGN_OR, TRANSPARENT,
+            InvalidateRect, MonitorFromPoint, MonitorFromWindow, RestoreDC, SaveDC, SelectClipRgn,
+            SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, SetWindowRgn,
+            StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+            DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+            FF_DONTCARE, FW_BOLD, HALFTONE, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+            MONITOR_DEFAULTTOPRIMARY, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RGN_OR, SRCCOPY,
+            TRANSPARENT,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -38,7 +40,7 @@ use windows::{
     },
 };
 
-use super::{HeadCallback, HeadEvent, HeadFrame, HeadPosition, HeadSpec};
+use super::{HeadCallback, HeadEvent, HeadFrame, HeadGlyph, HeadPosition, HeadSpec};
 
 const LOGICAL_SIZE: f64 = 56.0;
 const CIRCLE_DIAMETER: f64 = 48.0;
@@ -68,7 +70,10 @@ const CLASS_NAME: &[u16] = &[
 struct Head {
     conversation_id: String,
     generation: u64,
-    initials: String,
+    glyph: HeadGlyph,
+    photo_bgra: Option<Arc<[u8]>>,
+    color: [u8; 3],
+    label: String,
     unread: u64,
     callback: HeadCallback,
     drag_origin: Option<POINT>,
@@ -202,7 +207,7 @@ unsafe fn show_on_ui_thread(spec: &HeadSpec, callback: HeadCallback) -> Result<(
     }
     ensure_class()?;
     let (x, y, scale) = restore_position(&spec.position);
-    let title = accessible_title(&spec.initials, spec.unread);
+    let title = accessible_title(&spec.label, spec.unread);
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         PCWSTR(CLASS_NAME.as_ptr()),
@@ -225,7 +230,10 @@ unsafe fn show_on_ui_thread(spec: &HeadSpec, callback: HeadCallback) -> Result<(
     let head = Head {
         conversation_id: spec.conversation_id.clone(),
         generation: spec.generation,
-        initials: spec.initials.clone(),
+        glyph: spec.glyph.clone(),
+        photo_bgra: photo_bgra(&spec.glyph),
+        color: spec.color,
+        label: spec.label.clone(),
         unread: spec.unread,
         callback,
         drag_origin: None,
@@ -278,7 +286,7 @@ unsafe fn update_existing(
     replacement: Option<HeadCallback>,
 ) -> Result<(), String> {
     let replacing_callback = replacement.is_some();
-    let shape_changed = {
+    let (label, shape_changed) = {
         let mut state = registry()
             .lock()
             .map_err(|_| "native head registry is unavailable")?;
@@ -287,19 +295,22 @@ unsafe fn update_existing(
             .get_mut(&key(hwnd))
             .ok_or("native head does not exist")?;
         head.generation = spec.generation;
-        head.initials = spec.initials.clone();
+        head.glyph = spec.glyph.clone();
+        head.photo_bgra = photo_bgra(&spec.glyph);
+        head.color = spec.color;
+        head.label = spec.label.clone();
         let changed = badge_tier(head.unread) != badge_tier(spec.unread);
         head.unread = spec.unread;
         if let Some(callback) = replacement {
             head.callback = callback;
         }
-        changed
+        (head.label.clone(), changed)
     };
     if shape_changed && !apply_shape(hwnd, physical_size(hwnd)) {
         return Err("Windows could not update the head input region".into());
     }
     let _ = InvalidateRect(Some(hwnd), None, true);
-    let title = accessible_title(&spec.initials, spec.unread);
+    let title = accessible_title(&label, spec.unread);
     let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
     // Updates must never activate a head. Position is owned by native drag and
     // display reconciliation, so a stale async update cannot move it backwards.
@@ -852,7 +863,11 @@ unsafe fn draw_centered_text(
     }
 }
 
-unsafe fn draw_person_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) {
+unsafe fn draw_icon_glyph(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    scale: f64,
+    glyph: &str,
+) -> bool {
     let icon_size = scaled(22.0, scale);
     let circle_size = scaled(CIRCLE_DIAMETER, scale);
     let mut rect = RECT {
@@ -861,7 +876,6 @@ unsafe fn draw_person_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) 
         right: (circle_size + icon_size) / 2,
         bottom: (circle_size + icon_size) / 2,
     };
-    let glyph = "\u{e77b}";
     let mdl2_font = create_scaled_font_for_face(22.0, scale, "Segoe MDL2 Assets");
     if !mdl2_font.is_invalid() {
         let old = SelectObject(hdc, mdl2_font.into());
@@ -874,7 +888,7 @@ unsafe fn draw_person_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) 
         );
         let _ = SelectObject(hdc, old);
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(mdl2_font.into());
-        return;
+        return true;
     }
 
     let fluent_font = create_scaled_font_for_face(22.0, scale, "Segoe Fluent Icons");
@@ -889,6 +903,14 @@ unsafe fn draw_person_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) 
         );
         let _ = SelectObject(hdc, old);
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(fluent_font.into());
+        return true;
+    }
+
+    false
+}
+
+unsafe fn draw_person_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) {
+    if draw_icon_glyph(hdc, scale, "\u{e77b}") {
         return;
     }
 
@@ -918,12 +940,92 @@ unsafe fn draw_person_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) 
     let _ = windows::Win32::Graphics::Gdi::DeleteObject(white.into());
 }
 
+unsafe fn draw_group_icon(hdc: windows::Win32::Graphics::Gdi::HDC, scale: f64) {
+    if !draw_icon_glyph(hdc, scale, "\u{e716}") {
+        draw_person_icon(hdc, scale);
+    }
+}
+
+fn colorref([red, green, blue]: [u8; 3]) -> COLORREF {
+    COLORREF(red as u32 | (green as u32) << 8 | (blue as u32) << 16)
+}
+
+fn photo_bgra(glyph: &HeadGlyph) -> Option<Arc<[u8]>> {
+    let HeadGlyph::Photo(photo) = glyph else {
+        return None;
+    };
+    let pixel_count = usize::try_from(photo.edge)
+        .ok()?
+        .checked_mul(photo.edge as usize)?;
+    let byte_count = pixel_count.checked_mul(4)?;
+    if photo.rgba.len() != byte_count {
+        return None;
+    }
+    let mut bgra = Vec::with_capacity(byte_count);
+    for pixel in photo.rgba.chunks_exact(4) {
+        bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Some(Arc::from(bgra))
+}
+
+unsafe fn draw_photo(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    circle_size: i32,
+    edge: u32,
+    bgra: &[u8],
+) {
+    let Ok(edge) = i32::try_from(edge) else {
+        return;
+    };
+    let bitmap = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: edge,
+            biHeight: -edge,
+            biPlanes: 1,
+            biBitCount: 32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let clip = CreateEllipticRgn(0, 0, circle_size, circle_size);
+    let saved_dc = SaveDC(hdc);
+    let _ = SelectClipRgn(hdc, Some(clip));
+    let _ = SetStretchBltMode(hdc, HALFTONE);
+    let _ = SetBrushOrgEx(hdc, 0, 0, None);
+    let _ = StretchDIBits(
+        hdc,
+        0,
+        0,
+        circle_size,
+        circle_size,
+        0,
+        0,
+        edge,
+        edge,
+        Some(bgra.as_ptr().cast()),
+        &bitmap,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+    if saved_dc != 0 {
+        let _ = RestoreDC(hdc, saved_dc);
+    } else {
+        let _ = SelectClipRgn(hdc, None);
+    }
+    let _ = windows::Win32::Graphics::Gdi::DeleteObject(clip.into());
+}
+
 unsafe fn paint(hwnd: HWND) {
-    let Some((initials, unread)) = registry().lock().ok().and_then(|state| {
-        state
-            .heads
-            .get(&key(hwnd))
-            .map(|head| (head.initials.clone(), head.unread))
+    let Some((glyph, photo_bgra, color, unread)) = registry().lock().ok().and_then(|state| {
+        state.heads.get(&key(hwnd)).map(|head| {
+            (
+                head.glyph.clone(),
+                head.photo_bgra.clone(),
+                head.color,
+                head.unread,
+            )
+        })
     }) else {
         return;
     };
@@ -932,29 +1034,35 @@ unsafe fn paint(hwnd: HWND) {
     let dpi_scale = GetDpiForWindow(hwnd) as f64 / 96.0;
     let circle_size = scaled(CIRCLE_DIAMETER, dpi_scale);
     let circle = CreateEllipticRgn(0, 0, circle_size, circle_size);
-    let blue = CreateSolidBrush(COLORREF(0xA34A24));
-    let _ = FillRgn(hdc, circle, blue);
+    let color_brush = CreateSolidBrush(colorref(color));
+    let _ = FillRgn(hdc, circle, color_brush);
     let _ = windows::Win32::Graphics::Gdi::DeleteObject(circle.into());
-    let _ = windows::Win32::Graphics::Gdi::DeleteObject(blue.into());
+    let _ = windows::Win32::Graphics::Gdi::DeleteObject(color_brush.into());
     let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(0xFFFFFF));
-    if initials.is_empty() {
-        draw_person_icon(hdc, dpi_scale);
-    } else {
-        let inset = scaled(4.0, dpi_scale);
-        let mut text = RECT {
-            left: inset,
-            top: inset,
-            right: circle_size - inset,
-            bottom: circle_size - inset,
-        };
-        draw_centered_text(
-            hdc,
-            &initials.chars().take(2).collect::<String>(),
-            &mut text,
-            18.0,
-            dpi_scale,
-        );
+    match glyph {
+        HeadGlyph::Photo(photo) => match photo_bgra {
+            Some(bgra) => draw_photo(hdc, circle_size, photo.edge, &bgra),
+            None => draw_person_icon(hdc, dpi_scale),
+        },
+        HeadGlyph::Initials(initials) => {
+            let inset = scaled(4.0, dpi_scale);
+            let mut text = RECT {
+                left: inset,
+                top: inset,
+                right: circle_size - inset,
+                bottom: circle_size - inset,
+            };
+            draw_centered_text(
+                hdc,
+                &initials.chars().take(2).collect::<String>(),
+                &mut text,
+                18.0,
+                dpi_scale,
+            );
+        }
+        HeadGlyph::Person => draw_person_icon(hdc, dpi_scale),
+        HeadGlyph::Group => draw_group_icon(hdc, dpi_scale),
     }
     if unread > 0 {
         let mut badge_rect = badge_rect(unread, dpi_scale);
@@ -966,10 +1074,10 @@ unsafe fn paint(hwnd: HWND) {
             scaled(BADGE_HEIGHT, dpi_scale),
             scaled(BADGE_HEIGHT, dpi_scale),
         );
-        let blue = CreateSolidBrush(COLORREF(0xA34A24));
-        let _ = FillRgn(hdc, badge, blue);
+        let ring_color = CreateSolidBrush(colorref(color));
+        let _ = FillRgn(hdc, badge, ring_color);
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(badge.into());
-        let _ = windows::Win32::Graphics::Gdi::DeleteObject(blue.into());
+        let _ = windows::Win32::Graphics::Gdi::DeleteObject(ring_color.into());
         let ring = scaled(BADGE_RING, dpi_scale);
         let inner = CreateRoundRectRgn(
             badge_rect.left + ring,
@@ -1001,13 +1109,14 @@ fn finite_or_zero(value: f64) -> f64 {
         0.0
     }
 }
-fn accessible_title(initials: &str, unread: u64) -> Vec<u16> {
-    let contact = if initials.is_empty() {
-        "Unknown contact"
-    } else {
-        initials
-    };
-    format!("Floating conversation {contact}, {unread} unread messages")
+fn accessible_title(label: &str, unread: u64) -> Vec<u16> {
+    if label.is_empty() || label == "Conversation" {
+        return format!("Floating conversation, {unread} unread messages")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+    }
+    format!("Floating conversation {label}, {unread} unread messages")
         .encode_utf16()
         .chain(Some(0))
         .collect()
@@ -1046,12 +1155,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_initials_use_unknown_contact_in_accessibility_title() {
+    fn generic_labels_omit_the_redundant_conversation_name_in_accessibility_title() {
         let title = String::from_utf16_lossy(&super::accessible_title("", 3));
         assert_eq!(
             title.trim_end_matches('\0'),
-            "Floating conversation Unknown contact, 3 unread messages"
+            "Floating conversation, 3 unread messages"
         );
+        let title = String::from_utf16_lossy(&super::accessible_title("Conversation", 3));
+        assert_eq!(
+            title.trim_end_matches('\0'),
+            "Floating conversation, 3 unread messages"
+        );
+    }
+
+    #[test]
+    fn colorref_uses_windows_bgr_byte_order() {
+        assert_eq!(super::colorref([0x24, 0x4a, 0xa3]).0, 0xA34A24);
     }
 
     #[test]

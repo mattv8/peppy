@@ -111,6 +111,30 @@ pub fn avatar_data_url(bytes: &[u8], edge: u32, max_bytes: usize) -> Option<Stri
     None
 }
 
+/// Decodes, center-crops, and resizes an image to opaque RGBA pixels for a native avatar.
+/// Transparent pixels retain their RGB values with alpha forced to 255.
+pub fn avatar_rgba(bytes: &[u8], edge: u32) -> Option<(u32, Vec<u8>)> {
+    let (image, _) = decode_limited(bytes)?;
+    if edge == 0 {
+        return Some((edge, Vec::new()));
+    }
+
+    let crop_edge = image.width().min(image.height());
+    let cropped = image.crop_imm(
+        (image.width() - crop_edge) / 2,
+        (image.height() - crop_edge) / 2,
+        crop_edge,
+        crop_edge,
+    );
+    let mut rgba = cropped
+        .resize_exact(edge, edge, FilterType::Triangle)
+        .to_rgba8();
+    for pixel in rgba.pixels_mut() {
+        pixel[3] = 255;
+    }
+    Some((edge, rgba.into_raw()))
+}
+
 /// Decodes and re-encodes an image into a new, metadata-free derivative.
 pub fn reencode_public(bytes: &[u8]) -> Result<PublicImage, SharedImageError> {
     if bytes.len() as u64 > MAX_IMAGE_SOURCE_BYTES {
@@ -168,4 +192,39 @@ pub fn public_name(display_name: &str, extension: &str) -> String {
             &cleaned
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+
+    fn transparent_non_square_png() -> Vec<u8> {
+        let image = RgbaImage::from_pixel(160, 96, Rgba([12, 34, 56, 0]));
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn avatar_rgba_center_crops_resizes_and_makes_pixels_opaque() {
+        let (edge, pixels) = avatar_rgba(&transparent_non_square_png(), 96).unwrap();
+
+        assert_eq!(edge, 96);
+        assert_eq!(pixels.len(), 96 * 96 * 4);
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
+    }
+
+    #[test]
+    fn avatar_rgba_rejects_invalid_images() {
+        assert_eq!(avatar_rgba(b"not an image", 96), None);
+    }
 }

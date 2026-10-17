@@ -235,13 +235,16 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #connection-status[data-connection-state="error"],
 #connection-status[data-connection-state="missing-native-host"] { color: var(--peppy-error); }
 #message-list {
-  height: 100%;
+  flex: 1;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 16px 16px calc(var(--composer-overlay-height, 120px) + 16px);
+  overflow-anchor: none;
+  padding: 16px 16px calc(var(--composer-overlay-height, 120px) + var(--composer-gutter));
   background: var(--peppy-surface-editor);
 }
+#message-list-content > :last-child { margin-bottom: 0; }
+#message-list-content > [data-media-message-grid]:last-child > [data-message-group].message-row:last-child { margin-bottom: 0; }
 #history-page-sentinel { height: 0; overflow: hidden; pointer-events: none; }
 #history-load-band {
   min-height: 0;
@@ -424,7 +427,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   right: 0;
   bottom: 100%;
   left: 0;
-  height: 24px;
+  height: var(--composer-gutter);
   content: "";
   background: linear-gradient(to bottom, transparent, var(--peppy-surface-editor));
   pointer-events: none;
@@ -447,7 +450,18 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   position: relative;
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  --composer-gutter: 12px;
 }
+#tabpanel-messages {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+#tabpanel-messages[hidden] { display: none; }
 #recipient-rail-layer {
   position: absolute;
   z-index: 1;

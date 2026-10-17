@@ -45,7 +45,9 @@ import {
   Trash2,
   X,
   type Attachment,
+  type AvatarIdentity,
   type Conversation,
+  conversationAvatar,
   detectPlatform,
   installOverlayScrollbars,
   isRecipientPosition,
@@ -53,6 +55,7 @@ import {
   formatPhoneNumber,
   formatDateTime,
   isoDateTime,
+  seedKey,
   type RecipientPosition,
   type RecipientSuggestion,
 } from "@peppy/desktop-ui";
@@ -123,13 +126,21 @@ export function displayConversation(
   name: string,
   participants: string[] | undefined,
   resolution: ContactResolutionMap,
-): { name: string; avatarUrl?: string } {
+  id: string,
+  recipientless = false,
+): { name: string; avatar: AvatarIdentity } {
   const parts = participants?.length ? participants : [name];
-  if (!parts.some((part) => resolution[part])) return { name: formatPhoneNumber(name) };
+  const avatar = avatarFor(conversationAvatar({ id, name, participants, recipientless }), parts, resolution);
+  if (!parts.some((part) => resolution[part])) return { name: formatPhoneNumber(name), avatar };
   return {
     name: parts.map((part) => displayAddressName(part, resolution)).join(", "),
-    avatarUrl: parts.length === 1 ? resolution[parts[0]]?.photoDataUrl : undefined,
+    avatar,
   };
+}
+
+function avatarFor(identity: AvatarIdentity, addresses: string[], resolution: ContactResolutionMap): AvatarIdentity {
+  const resolved = identity.kind === "person" && addresses.length === 1 ? resolution[addresses[0]] : undefined;
+  return resolved ? { ...identity, photoDataUrl: resolved.photoDataUrl, name: resolved.displayName } : identity;
 }
 
 /** Native contact phone matches as UI suggestions; the phone address is the recipient ID. */
@@ -140,6 +151,8 @@ export async function searchRecipientSuggestions(query: string, sourceDeviceId?:
     label: match.displayName,
     detail: [match.label, match.normalized ? formatPhoneNumber(match.address) : match.number].filter(Boolean).join(" · "),
     avatarUrl: match.avatarUrl,
+    avatarSeed: seedKey(match.address),
+    avatarName: match.displayName,
   }));
 }
 
@@ -1162,6 +1175,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const mountedRef = useRef(true);
   const overlayHeightRef = useRef(overlayHeight);
   overlayHeightRef.current = overlayHeight;
+  const lastUnobscuredHeight = useRef<number | null>(null);
   const historyAnchorRef = useRef<{ row: HTMLElement; top: number } | null>(null);
   const messageRows = useRef(new Map<string, HTMLElement>());
   const handlers = useRef({
@@ -1315,6 +1329,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [activeView]);
   useEffect(() => installOverlayScrollbars(document), []);
   useLayoutEffect(() => {
+    const measureOverlay = () => {
+      const height = document.getElementById("composer-area")?.offsetHeight ?? 0;
+      setOverlayHeight((current) => (current === height ? current : height));
+    };
     const measure = () => {
       const height = paneRef.current?.offsetHeight ?? 0;
       setPaneHeight((current) => (current === height ? current : height));
@@ -1325,11 +1343,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       setComposerChrome((current) => (current === chrome ? current : chrome));
     };
     measure();
+    measureOverlay();
     if (typeof ResizeObserver === "undefined") return;
-    const measureOverlay = () => {
-      const height = document.getElementById("composer-area")?.offsetHeight ?? 0;
-      setOverlayHeight((current) => (current === height ? current : height));
-    };
     const observer = new ResizeObserver(() => {
       measure();
       measureOverlay();
@@ -1338,7 +1353,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const composerArea = document.getElementById("composer-area");
     if (composerArea) observer.observe(composerArea);
     return () => observer.disconnect();
-  }, [activeView, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected)]);
+  }, [activeView, headPanel, loading, Boolean(snapshot), snapshot?.connection.state, Boolean(selected)]);
   useEffect(() => {
     const root = mainRef.current;
     if (!root) return;
@@ -1533,12 +1548,40 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       element.removeAttribute("data-scroll-programmatic"),
     );
   };
+  const isNearMessageListBottom = (element: HTMLDivElement) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
   const onMessageScroll = () => {
     const element = messageListRef.current;
-    if (!element) return;
+    if (!element || element.clientHeight === 0) return;
     if (!element.hasAttribute("data-scroll-programmatic")) historyUserScrolled.current = true;
-    nearBottom.current =
-      element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
+    nearBottom.current = isNearMessageListBottom(element);
+  };
+  const adjustMessageScrollForGeometry = (element = messageListRef.current) => {
+    if (!element) return;
+    if (element.clientHeight === 0) {
+      lastUnobscuredHeight.current = null;
+      historyUserScrolled.current = false;
+      return;
+    }
+    if (overlayHeightRef.current === null) return;
+    const unobscuredHeight = Math.max(0, element.clientHeight - overlayHeightRef.current);
+    const previousUnobscuredHeight = lastUnobscuredHeight.current;
+    lastUnobscuredHeight.current = unobscuredHeight;
+    if (previousUnobscuredHeight === null) {
+      if (nearBottom.current) stickToBottom(element);
+      return;
+    }
+    if (nearBottom.current) {
+      stickToBottom(element);
+      return;
+    }
+    const adjustment = previousUnobscuredHeight - unobscuredHeight;
+    if (adjustment === 0) return;
+    element.setAttribute("data-scroll-programmatic", "");
+    element.scrollTop += adjustment;
+    nearBottom.current = isNearMessageListBottom(element);
+    if (typeof requestAnimationFrame === "undefined") element.removeAttribute("data-scroll-programmatic");
+    else requestAnimationFrame(() => element.removeAttribute("data-scroll-programmatic"));
   };
   const loadOlderMessages = useCallback(async () => {
     const conversationId = selectedRef.current;
@@ -1615,6 +1658,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     return () => observer.disconnect();
   }, [hasOlderMessages, loadOlderMessages, messageIds]);
   useLayoutEffect(() => {
+    lastUnobscuredHeight.current = null;
     if (!conversationLoaded) return;
     stickToBottom();
     nearBottom.current = true;
@@ -1623,24 +1667,29 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (nearBottom.current) stickToBottom();
   }, [messageIds]);
   useLayoutEffect(() => {
-    if (nearBottom.current) stickToBottom();
+    adjustMessageScrollForGeometry();
   }, [overlayHeight]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
     const content = document.getElementById("message-list-content");
     if (!list || !content || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      if (nearBottom.current) stickToBottom(list);
+    const observer = new ResizeObserver((entries) => {
+      if (entries.some((entry) => entry.target === list)) {
+        adjustMessageScrollForGeometry(list);
+      } else if (nearBottom.current) {
+        stickToBottom(list);
+      }
     });
     observer.observe(list);
     observer.observe(content);
     return () => observer.disconnect();
-  }, [slotKey, conversationLoaded]);
+  }, [activeView, slotKey, conversationLoaded, headPanel]);
   useEffect(() => {
     seenMessageIds.current = new Set<string>();
     pendingSeenMessageIds.current = new Set<string>();
   }, [slotKey]);
   const setMessageListNode = useCallback((node: HTMLDivElement | null) => {
+    if (node !== messageListRef.current) lastUnobscuredHeight.current = null;
     messageListRef.current = node;
   }, []);
   const overlayMargin =
@@ -2093,17 +2142,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
   const conversations = useMemo<Conversation[]>(() => [
-    ...store.localDrafts().map((local) => ({
-      id: local.key,
-      name: local.content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
-      preview: "Not saved yet",
-      unread: 0,
-      draftOnly: true,
-      recipientlessDraft: local.content.recipientIds.length === 0,
-    })),
+    ...store.localDrafts().map((local) => {
+      const recipientIds = local.content.recipientIds;
+      return {
+        id: local.key,
+        name: recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
+        avatar: avatarFor(
+          conversationAvatar({ id: local.key, name: "", participants: recipientIds, recipientless: recipientIds.length === 0 }),
+          recipientIds,
+          resolution,
+        ),
+        preview: "Not saved yet",
+        unread: 0,
+        draftOnly: true,
+        recipientlessDraft: recipientIds.length === 0,
+      };
+    }),
     ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly }) => ({
       id,
-      ...displayConversation(name, participants, resolution),
+      ...displayConversation(name, participants, resolution, id, recipientlessDraft),
       preview,
       unread,
       recipientlessDraft,
@@ -2139,8 +2196,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
   );
+  const activeDisplay = active
+    ? displayConversation(active.name, active.participants, resolution, active.id, active.recipientlessDraft)
+    : undefined;
   const title =
-    (active?.name && displayConversation(active.name, active.participants, resolution).name) ??
+    activeDisplay?.name ??
     (isLocalDraftKey(slotKey)
       ? content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message"
       : undefined);
@@ -2284,7 +2344,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const recipientPanel = isNewConversation ? (
     <RecipientPanel
       key={newComposeKey ?? slotKey}
-      recipients={content.recipientIds.map((id) => ({ id, label: resolution[id]?.displayName ?? id, avatarUrl: resolution[id]?.photoDataUrl }))}
+      recipients={content.recipientIds.map((id) => ({
+        id,
+        label: resolution[id]?.displayName ?? id,
+        avatarUrl: resolution[id]?.photoDataUrl,
+        avatarSeed: seedKey(id),
+        avatarName: resolution[id]?.displayName,
+      }))}
       onCommit={commitRecipients}
       searchContacts={snapshot ? (query) => searchRecipientSuggestions(query, content.gatewayId) : undefined}
       onSuggestionChosen={rememberContact}
@@ -2577,9 +2643,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           ref={paneRef}
         >
           <header id="thread-pane-header">
-            {!settingsOpen && !notificationsOpen && !contactsOpen && active && (
+            {!settingsOpen && !notificationsOpen && !contactsOpen && activeDisplay && (
               <span id="thread-contact-avatar">
-                <ContactAvatar name={title ?? active.name} photoDataUrl={displayConversation(active.name, active.participants, resolution).avatarUrl} size={36} />
+                <ContactAvatar {...activeDisplay.avatar} size={36} />
               </span>
             )}
             <div className="header-copy">
