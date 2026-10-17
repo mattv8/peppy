@@ -32,6 +32,8 @@ mod contacts;
 mod conversation_match;
 mod gateway_settings;
 mod media;
+mod media_cache;
+mod media_paging;
 mod mms;
 mod mms_backfill;
 mod mms_identity;
@@ -46,9 +48,11 @@ use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
 };
+pub use media_paging::MediaPageAround;
 pub use mms::{
     MAX_MMS_ACQUISITIONS, MAX_PENDING_MMS_MEDIA_BYTES, MmsAcquisition, MmsAcquisitionInput,
-    MmsAcquisitionPart, MmsAcquisitionState, MmsContext, MmsReplyContext, MmsSource,
+    MmsAcquisitionPart, MmsAcquisitionState, MmsBeginOutcome, MmsContext, MmsPreviewState,
+    MmsProviderIdentityQuarantine, MmsReplyContext, MmsSource,
 };
 pub use mms_backfill::{
     MAX_MMS_BACKFILL_RECHECK, MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck,
@@ -86,7 +90,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 31;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -137,6 +141,8 @@ const LEGACY_KEY_CACHE_BYTES: usize = KEY_CACHE_BYTES - 32;
 const KEY_CACHE_CHECK_DOMAIN: &[u8] = b"peppy-native-key-cache-check-v1\0";
 
 type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Store>>>>;
+type MediaMetaColumns = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
+type ResolvedMedia = (Vec<MediaDescriptor>, Vec<MmsMediaMeta>);
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -790,13 +796,14 @@ struct EpochKeys {
     /// intentionally carry purpose keys alone and cannot recreate it.
     handoff: Option<HandoffRootPackage>,
 }
-struct Store {
-    conn: Connection,
+pub(crate) struct Store {
+    pub(crate) conn: Connection,
     config: ClientConfig,
     db_key: Zeroizing<[u8; 32]>,
     keys: BTreeMap<u32, EpochKeys>,
     active_epoch: Option<u32>,
-    media_dir: PathBuf,
+    pub(crate) media_dir: PathBuf,
+    pub(crate) media_cache: media_cache::MediaCacheState,
 }
 struct Ctx<'a> {
     vault_id: VaultId,
@@ -853,11 +860,14 @@ impl Client {
             keys: BTreeMap::new(),
             active_epoch: None,
             media_dir,
+            media_cache: media_cache::MediaCacheState::default(),
         };
         initialize(&mut store)?;
         let store = Arc::new(Mutex::new(store));
-        registry.insert(path, Arc::downgrade(&store));
-        Ok(Self(store))
+        let client = Self(store);
+        client.cleanup_terminal_mms_parts()?;
+        registry.insert(path, Arc::downgrade(&client.0));
+        Ok(client)
     }
 
     /// Rust-owned, versioned contact DTO entry points for native platform adapters.
@@ -3059,38 +3069,7 @@ impl Client {
     /// object remains pending download and the orphaned ciphertext may be cleaned by a later
     /// filesystem retry; this method returns `Storage` and never claims successful reclamation.
     pub fn evict_attachment_ciphertext(&self, attachment_id: AttachmentId) -> Result<bool, Error> {
-        let mut guard = self.lock()?;
-        let row = attachment_row(&guard.conn, attachment_id)?.ok_or(Error::NotFound)?;
-        if row.state != AttachmentState::Available {
-            return Ok(false);
-        }
-        let id = attachment_id.to_string();
-        let protected: bool = guard.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? OR thumbnail_attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?)>0 UNION SELECT 1 FROM commands c JOIN message_attachments m ON m.message_id=c.message_id WHERE m.attachment_id=?)",
-            params![id, id, id, id],
-            |row| row.get(0),
-        )?;
-        if protected {
-            return Ok(false);
-        }
-        let tx = guard
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "UPDATE attachments SET state=? WHERE attachment_id=?",
-            params![
-                AttachmentState::PendingDownload.code(),
-                attachment_id.to_string()
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM attachment_demand WHERE attachment_id=?",
-            params![attachment_id.to_string()],
-        )?;
-        tx.commit()?;
-        let path = media::cipher_path(&guard.media_dir, attachment_id);
-        std::fs::remove_file(path).map_err(|_| Error::Storage)?;
-        Ok(true)
+        media_cache::evict_attachment_ciphertext(self, attachment_id)
     }
 
     /// Native-only path to verified local ciphertext (for upload). Never hand it to a web view.
@@ -3187,7 +3166,8 @@ impl Client {
                 AttachmentState::PendingDownload.code()
             ],
         )?;
-        Ok(())
+        let mut store = self.lock()?;
+        media_cache::record_installed_attachment(&mut store, attachment_id)
     }
 
     /// Decrypts a locally verified attachment to a native-only temporary plaintext file for
@@ -3560,7 +3540,7 @@ impl Client {
             .collect()
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Store>, Error> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Store>, Error> {
         self.0.lock().map_err(|_| Error::Database)
     }
 
@@ -3642,12 +3622,12 @@ impl Client {
     }
 }
 
-fn media_metadata_for(
+pub(crate) fn media_metadata_for(
     conn: &Connection,
     message_id: MessageId,
     attachment_id: AttachmentId,
 ) -> Result<Option<MediaMetadata>, Error> {
-    let row: Option<(Option<i64>, Option<i64>, Option<i64>, Option<String>)> = conn.query_row(
+    let row: Option<MediaMetaColumns> = conn.query_row(
         "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
         params![message_id.to_string(), attachment_id.to_string()],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -4201,6 +4181,83 @@ ALTER TABLE mms_acquisition_parts ADD COLUMN height INTEGER;
 ALTER TABLE mms_acquisition_parts ADD COLUMN duration_ms INTEGER;
 ALTER TABLE mms_acquisition_parts ADD COLUMN thumbnail_attachment_id TEXT;
 ";
+/// Version 27 -> 28: source-instance identity and terminal provider-ID quarantine.
+const MIGRATION_28: &str = "
+ALTER TABLE mms_acquisitions RENAME TO mms_acquisitions_27;
+CREATE TABLE mms_acquisitions(
+  acquisition_id TEXT PRIMARY KEY,
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  source_instance_id TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  input TEXT NOT NULL,
+  state TEXT NOT NULL,
+  reason TEXT,
+  message_id TEXT NOT NULL,
+  source_sequence INTEGER NOT NULL,
+  local_order INTEGER NOT NULL UNIQUE,
+  UNIQUE(source_generation,subscription_id,provider_message_id,source_instance_id,direction)
+);
+INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_instance_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order)
+SELECT acquisition_id,source_generation,subscription_id,provider_message_id,'',direction,conversation_id,input,state,reason,message_id,source_sequence,local_order FROM mms_acquisitions_27;
+DROP TABLE mms_acquisitions_27;
+CREATE INDEX mms_acquisitions_pending ON mms_acquisitions(state) WHERE state!='complete';
+CREATE INDEX mms_acquisitions_reserved_sequence ON mms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
+CREATE TABLE IF NOT EXISTS mms_provider_identity_quarantines(
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  recorded_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(source_generation,subscription_id,provider_message_id,direction)
+);
+";
+/// Version 28 -> 29: durable LRU inventory for retained downloaded ciphertext.
+const MIGRATION_29: &str = "
+CREATE TABLE media_cache_entries(attachment_id TEXT PRIMARY KEY,last_access INTEGER NOT NULL);
+CREATE INDEX media_cache_entries_lru ON media_cache_entries(last_access, attachment_id);
+";
+/// Version 29 -> 30: durable MMS preview production state.
+const MIGRATION_30: &str = "
+ALTER TABLE mms_acquisition_parts ADD COLUMN preview_state TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE mms_acquisition_parts ADD COLUMN metadata_recorded INTEGER NOT NULL DEFAULT 0;
+";
+/// Version 30 -> 31: remote capacity is independent from local/recovery pressure, and legacy
+/// provider conflicts become visible bounded quarantine evidence.
+const MIGRATION_31: &str = "
+CREATE TABLE mms_backfill_remote_capacity(
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  storage_full INTEGER NOT NULL,
+  PRIMARY KEY(source_generation,subscription_id)
+);
+INSERT INTO mms_backfill_remote_capacity(source_generation,subscription_id,storage_full)
+SELECT source_generation,subscription_id,1
+FROM mms_backfill_scopes
+WHERE pause_reason='remote_storage'
+ON CONFLICT(source_generation,subscription_id)
+DO UPDATE SET storage_full=1;
+CREATE TABLE IF NOT EXISTS mms_provider_identity_conflicts(
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  PRIMARY KEY(source_generation,subscription_id,provider_message_id,direction)
+);
+INSERT INTO mms_provider_identity_quarantines(source_generation,subscription_id,provider_message_id,direction,evidence_json,recorded_at_ms)
+SELECT source_generation,subscription_id,provider_message_id,direction,
+       json_object('reason',reason,'legacy',1),
+       CAST(strftime('%s','now') AS INTEGER)*1000
+FROM mms_provider_identity_conflicts
+WHERE 1
+ON CONFLICT(source_generation,subscription_id,provider_message_id,direction)
+DO UPDATE SET evidence_json=excluded.evidence_json,recorded_at_ms=excluded.recorded_at_ms;
+DROP TABLE mms_provider_identity_conflicts;
+";
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
 const DECODER_REVISION: &str = "4";
@@ -4241,7 +4298,6 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     contact_media::initialize(conn)?;
     snapshot_projection::initialize(conn)?;
     initialize_compaction_state(conn)?;
-    mms_backfill::initialize(conn)?;
     let version: Option<i64> = conn
         .query_row("SELECT version FROM schema_meta", [], |r| r.get(0))
         .optional()?;
@@ -4271,6 +4327,11 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_25)?;
             tx.execute_batch(MIGRATION_26)?;
             tx.execute_batch(MIGRATION_27)?;
+            tx.execute_batch(MIGRATION_28)?;
+            tx.execute_batch(MIGRATION_29)?;
+            tx.execute_batch(MIGRATION_30)?;
+            mms_backfill::initialize(&tx)?;
+            tx.execute_batch(MIGRATION_31)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4279,7 +4340,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=26)) => {
+        Some(version @ (4..=30)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4348,12 +4409,27 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 26 {
                 tx.execute_batch(MIGRATION_27)?;
             }
+            if version <= 27 {
+                tx.execute_batch(MIGRATION_28)?;
+            }
+            if version <= 28 {
+                tx.execute_batch(MIGRATION_29)?;
+            }
+            if version <= 29 {
+                tx.execute_batch(MIGRATION_30)?;
+            }
+            if version <= 30 {
+                mms_backfill::initialize(&tx)?;
+                tx.execute_batch(MIGRATION_31)?;
+            }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
         Some(SCHEMA_VERSION) => {}
         Some(_) => return Err(Error::UnsupportedSchema),
     }
+    mms_backfill::initialize(conn)?;
+    media_cache::initialize(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -4754,19 +4830,21 @@ fn apply_record(
             {
                 return Ok(Some(Q::PayloadConflict));
             }
-            // A gateway must receive command media even if it is larger than the legacy eager cap.
-            for descriptor in &media {
-                conn.execute(
-                    "INSERT OR IGNORE INTO attachment_demand(attachment_id,requested_at) VALUES(?,0)",
-                    params![descriptor.attachment_id.to_string()],
-                )?;
-            }
             if route.gateway_device_id == ctx.device_id {
                 let encoded = json(&message)?;
                 // Retired-epoch commands are rejected immediately; they are never executable.
                 let retired = ctx
                     .active_epoch
                     .is_some_and(|active| envelope.key_epoch < active);
+                // Only a currently eligible, live gateway needs original media to execute.
+                if !historical && !retired {
+                    for descriptor in &media {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO attachment_demand(attachment_id,requested_at) VALUES(?,0)",
+                            params![descriptor.attachment_id.to_string()],
+                        )?;
+                    }
+                }
                 let inserted = conn.execute(
                     "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
                     params![command_id.to_string(), envelope.key_epoch, route.subscription_id, encoded, retired, historical],
@@ -6167,7 +6245,7 @@ fn store_message_media_meta(
             meta.duration_ms.map(to_i64).transpose()?,
             thumbnail,
         );
-        let existing: Option<(Option<i64>, Option<i64>, Option<i64>, Option<String>)> = conn
+        let existing: Option<MediaMetaColumns> = conn
             .query_row(
                 "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
                 params![message_id.to_string(), meta.attachment_id.to_string()],
@@ -6295,7 +6373,7 @@ fn open_frame(value: &[u8]) -> Option<EncryptedEnvelope> {
     })
 }
 
-struct AttachmentRow {
+pub(crate) struct AttachmentRow {
     state: AttachmentState,
     media_type: String,
     display_name: String,
@@ -6306,7 +6384,7 @@ struct AttachmentRow {
     remote_object_id: Option<String>,
 }
 impl AttachmentRow {
-    fn info(&self, attachment_id: AttachmentId) -> AttachmentInfo {
+    pub(crate) fn info(&self, attachment_id: AttachmentId) -> AttachmentInfo {
         AttachmentInfo {
             attachment_id,
             media_type: self.media_type.clone(),
@@ -6321,7 +6399,10 @@ impl AttachmentRow {
         FileKey::import_encrypted_reference(*self.file_key).map_err(|_| Error::Crypto)
     }
 }
-fn attachment_row(conn: &Connection, id: AttachmentId) -> Result<Option<AttachmentRow>, Error> {
+pub(crate) fn attachment_row(
+    conn: &Connection,
+    id: AttachmentId,
+) -> Result<Option<AttachmentRow>, Error> {
     type Raw = (
         String,
         String,
@@ -6417,7 +6498,7 @@ fn descriptor_for_attachment(
 fn resolve_media(
     conn: &Connection,
     message: &MessagePayload,
-) -> Result<Option<(Vec<MediaDescriptor>, Vec<MmsMediaMeta>)>, Error> {
+) -> Result<Option<ResolvedMedia>, Error> {
     let mut media = Vec::with_capacity(message.record.attachments.len());
     for reference in &message.record.attachments {
         let Some(descriptor) = descriptor_for_attachment(conn, reference.attachment_id)? else {
@@ -6834,10 +6915,10 @@ fn canonical(path: &Path) -> Result<PathBuf, Error> {
 fn json<T: Serialize>(value: &T) -> Result<String, Error> {
     serde_json::to_string(value).map_err(|_| Error::Database)
 }
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|_| Error::Database)
 }
-fn parse<T: FromStr>(value: &str) -> Result<T, Error> {
+pub(crate) fn parse<T: FromStr>(value: &str) -> Result<T, Error> {
     value.parse().map_err(|_| Error::Database)
 }
 fn to_i64(value: u64) -> Result<i64, Error> {
@@ -7021,6 +7102,7 @@ mod tests {
         )
         .unwrap();
         let attachment_id = AttachmentId::new();
+        let message_id = MessageId::new();
         let path;
         {
             let guard = client.lock().unwrap();
@@ -7030,6 +7112,20 @@ mod tests {
             ).unwrap();
             path = media::cipher_path(&guard.media_dir, attachment_id);
             std::fs::write(&path, b"ciphertext").unwrap();
+            guard
+                .conn
+                .execute(
+                    "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,?)",
+                    params![message_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), 1_i64, "{}", 0_i64],
+                )
+                .unwrap();
+            guard
+                .conn
+                .execute(
+                    "INSERT INTO message_media_meta(message_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,NULL)",
+                    params![message_id.to_string(), attachment_id.to_string(), 1_i64, 1_i64, Option::<i64>::None],
+                )
+                .unwrap();
             guard
                 .conn
                 .execute_batch("DROP TABLE attachment_demand")
@@ -7045,6 +7141,328 @@ mod tests {
             client.attachment_info(attachment_id).unwrap().state,
             AttachmentState::Available
         );
+    }
+
+    #[test]
+    fn version_27_database_upgrades_mms_rows_and_cache_inventory_idempotently() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v27.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = [27; 32];
+        let acquisition_id = "acquisition";
+        let attachment_id = AttachmentId::new();
+        let conversation_id = ConversationId::new();
+        let message_id = MessageId::new();
+        {
+            let conn = Connection::open(&config.database_path).unwrap();
+            apply_database_key(&conn, &DatabaseKey::new(&key).unwrap()).unwrap();
+            conn.execute_batch("CREATE TABLE schema_meta(version INTEGER NOT NULL); INSERT INTO schema_meta VALUES(27);")
+                .unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            for migration in [
+                MIGRATION_5,
+                MIGRATION_6,
+                MIGRATION_7,
+                MIGRATION_8,
+                MIGRATION_9,
+                MIGRATION_10,
+                MIGRATION_11,
+                MIGRATION_13,
+                MIGRATION_14,
+                MIGRATION_15,
+                MIGRATION_16,
+                MIGRATION_17,
+                MIGRATION_18,
+                MIGRATION_19,
+                MIGRATION_20,
+                MIGRATION_21,
+                MIGRATION_22,
+                MIGRATION_23,
+                MIGRATION_24,
+                MIGRATION_25,
+                MIGRATION_26,
+                MIGRATION_27,
+            ] {
+                conn.execute_batch(migration).unwrap();
+            }
+            mms_backfill::initialize(&conn).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE mms_provider_identity_conflicts(
+                   source_generation TEXT NOT NULL,
+                   subscription_id TEXT NOT NULL,
+                   provider_message_id TEXT NOT NULL,
+                   direction TEXT NOT NULL,
+                   reason TEXT NOT NULL,
+                   PRIMARY KEY(source_generation,subscription_id,provider_message_id,direction)
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,actual_sent_at_ms,sort_at_ms) VALUES(?,?,?,?,?,?,?,?)",
+                params![message_id.to_string(), conversation_id.to_string(), DeviceId::new().to_string(), 42_i64, "{}", 0_i64, 1_i64, 1_i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params![attachment_id.to_string(), AttachmentState::Available.code(), "image/jpeg", "received.jpg", 10_i64, 10_i64, "hash", STREAM_VERSION, vec![0_u8; 32], "remote"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![acquisition_id, "generation", "subscription", "provider", "incoming", conversation_id.to_string(), "{}", "pending", Option::<String>::None, message_id.to_string(), 42_i64, 1_i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mms_acquisition_parts(acquisition_id,provider_part_id,attachment_id,position,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,?,?,NULL)",
+                params![acquisition_id, "part", attachment_id.to_string(), 0_i64, 640_i64, 480_i64, 1_000_i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mms_provider_identity_conflicts(source_generation,subscription_id,provider_message_id,direction,reason) VALUES(?,?,?,?,?)",
+                params!["generation", "subscription", "legacy-conflict", "incoming", "legacy"],
+            )
+            .unwrap();
+        }
+
+        let client = Client::open(config.clone(), DatabaseKey::new(&key).unwrap()).unwrap();
+        assert_eq!(
+            client
+                .mms_backfill_status("generation", "subscription")
+                .unwrap()
+                .quarantined_count,
+            1
+        );
+        {
+            let store = client.lock().unwrap();
+            let preserved: (String, String, String, i64, i64, i64, i64, String, i64) = store
+                .conn
+                .query_row(
+                    "SELECT source_instance_id,message_id,conversation_id,source_sequence,local_order,width,height,preview_state,metadata_recorded FROM mms_acquisitions JOIN mms_acquisition_parts USING(acquisition_id) WHERE acquisition_id=?",
+                    [acquisition_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                preserved,
+                (
+                    "".into(),
+                    message_id.to_string(),
+                    conversation_id.to_string(),
+                    42,
+                    1,
+                    640,
+                    480,
+                    "pending".into(),
+                    0
+                )
+            );
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM media_cache_entries WHERE attachment_id=?",
+                        [attachment_id.to_string()],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store.conn.query_row("SELECT COUNT(*) FROM mms_provider_identity_quarantines WHERE provider_message_id='legacy-conflict'", [], |row| row.get::<_, i64>(0)).unwrap(),
+                1
+            );
+            assert_eq!(
+                store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mms_provider_identity_conflicts'", [], |row| row.get::<_, i64>(0)).unwrap(),
+                0
+            );
+            assert_eq!(
+                store
+                    .conn
+                    .query_row("SELECT version FROM schema_meta", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+        }
+        drop(client);
+
+        let reopened = Client::open(config, DatabaseKey::new(&key).unwrap()).unwrap();
+        let store = reopened.lock().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT source_instance_id FROM mms_acquisitions WHERE acquisition_id=?",
+                    [acquisition_id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            ""
+        );
+        assert_eq!(
+            store.conn.query_row("SELECT preview_state,metadata_recorded FROM mms_acquisition_parts WHERE acquisition_id=?", [acquisition_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).unwrap(),
+            ("pending".into(), 0)
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM media_cache_entries WHERE attachment_id=?",
+                    [attachment_id.to_string()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn version_30_remote_pause_seeds_independent_capacity_and_survives_reopen() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v30-remote.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[30; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        client
+            .plan_mms_backfill_scans("generation", "subscription", "1")
+            .unwrap();
+        client
+            .report_mms_backfill_vault_quota_exceeded("generation", "subscription")
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP TABLE mms_backfill_remote_capacity;
+                     UPDATE schema_meta SET version=30;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        for _ in 0..2 {
+            let reopened = Client::open(config.clone(), key()).unwrap();
+            let plans = reopened
+                .plan_mms_backfill_scans("generation", "subscription", "1")
+                .unwrap();
+            let live = plans
+                .iter()
+                .find(|plan| plan.phase == MmsBackfillPhase::Live)
+                .unwrap();
+            let history = plans
+                .iter()
+                .find(|plan| plan.phase == MmsBackfillPhase::History)
+                .unwrap();
+            assert_eq!(live.pause, Some(MmsBackfillPause::RemoteStorage));
+            assert!(!live.paused);
+            assert_eq!(history.pause, Some(MmsBackfillPause::RemoteStorage));
+            assert!(history.paused);
+            drop(reopened);
+        }
+    }
+
+    #[test]
+    fn reopen_cleans_legacy_blocked_parts_and_preserves_draft_reference() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("blocked-parts.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[31; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        let input = MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "generation".into(),
+                subscription_id: "subscription".into(),
+                provider_message_id: "1".into(),
+                provider_thread_id: None,
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+15555550100".into()),
+            recipients: Vec::new(),
+            subject: None,
+            body: "blocked".into(),
+            imported: false,
+            observed_at_ms: 1,
+            transaction_id: None,
+        };
+        let acquisition = client.begin_mms_acquisition(input).unwrap();
+        let original_path = directory.path().join("original.png");
+        let thumbnail_path = directory.path().join("thumbnail.png");
+        std::fs::write(&original_path, b"original").unwrap();
+        std::fs::write(&thumbnail_path, b"thumbnail").unwrap();
+        let original = client
+            .prepare_attachment(&original_path, "image/png", "original.png")
+            .unwrap()
+            .attachment_id;
+        let thumbnail = client
+            .prepare_attachment(&thumbnail_path, "image/png", "thumbnail.png")
+            .unwrap()
+            .attachment_id;
+        client
+            .set_mms_acquisition_part(&acquisition.acquisition_id, "part", original)
+            .unwrap();
+        client
+            .set_mms_acquisition_part_metadata(
+                &acquisition.acquisition_id,
+                "part",
+                None,
+                None,
+                None,
+                Some(thumbnail),
+            )
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE mms_acquisitions SET state='blocked',reason='legacy blocked' WHERE acquisition_id=?",
+                    [&acquisition.acquisition_id],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision) VALUES(?,?,?,?,?,NULL,0)",
+                    params![
+                        DraftId::new().to_string(),
+                        ConversationId::new().to_string(),
+                        "",
+                        "[]",
+                        json(&vec![original]).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let reopened = Client::open(config, key()).unwrap();
+        assert!(
+            reopened
+                .mms_acquisition_parts(&acquisition.acquisition_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(reopened.mms_pending_media_bytes().unwrap(), 0);
+        assert!(reopened.attachment_info(original).is_ok());
+        assert_eq!(reopened.attachment_info(thumbnail), Err(Error::NotFound));
+        let blocked = reopened
+            .mms_acquisitions(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.acquisition_id == acquisition.acquisition_id)
+            .unwrap();
+        assert_eq!(blocked.state, MmsAcquisitionState::Blocked);
+        assert_eq!(blocked.reason.as_deref(), Some("legacy blocked"));
     }
 
     #[test]

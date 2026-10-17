@@ -36,32 +36,6 @@ class MmsCapturePreferencesTest {
         assertTrue(restarted.importHistory)
     }
 
-    @Test fun legacyBackfillStateCanBeClearedAfterCoreMigration() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        context.getSharedPreferences("peppy-mms-capture", android.content.Context.MODE_PRIVATE).edit().clear().commit()
-        val prefs = MmsPreferences(context)
-        prefs.enabled = true
-        prefs.setHistoryBaseline(42)
-        prefs.importHistory = true
-        prefs.completeHistoryImport()
-        assertEquals(42L, MmsPreferences(context).historyBaseline())
-        assertFalse(MmsPreferences(context).importHistory)
-
-        prefs.clearLegacyBackfillState()
-        assertNull(MmsPreferences(context).historyBaseline())
-        assertNull(MmsPreferences(context).recheckCursor())
-    }
-
-    @Test fun pendingRecheckCursorPersistsAndCanBeCleared() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        context.getSharedPreferences("peppy-mms-capture", android.content.Context.MODE_PRIVATE).edit().clear().commit()
-        val prefs = MmsPreferences(context)
-        prefs.setRecheckCursor("acquisition-50")
-        assertEquals("acquisition-50", MmsPreferences(context).recheckCursor())
-        prefs.setRecheckCursor(null)
-        assertNull(MmsPreferences(context).recheckCursor())
-    }
-
     @Test fun capturedMessagesWakeNetworkSyncExactlyThroughUniqueGatewayWork() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         WorkManagerTestInitHelper.initializeTestWorkManager(

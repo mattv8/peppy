@@ -33,6 +33,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionState
 import uniffi.peppy_mobile_bindings.NativeMmsBackfillPause
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillStatus
 
 internal data class MmsHealth(
     val pending: Int = 0,
@@ -42,6 +43,7 @@ internal data class MmsHealth(
     val transferReasons: List<String> = emptyList(),
     val databaseUnavailable: Boolean = false,
     val backfillStatus: String? = null,
+    val quarantinedCount: Long = 0L,
 )
 
 /** Bounded, content-free transfer failures shown only on this phone. */
@@ -85,12 +87,20 @@ private fun loadMmsHealth(context: Context, databaseOpen: Boolean): MmsHealth {
     if (!databaseOpen) return MmsHealth(databaseUnavailable = true, transferReasons = MmsTransferHealth(context).reasons())
     val client = NativeGateway.open(context) ?: return MmsHealth(databaseUnavailable = true, transferReasons = MmsTransferHealth(context).reasons())
     val acquisitions = client.mmsAcquisitions(1000uL)
-    val incomplete = acquisitions.filter { it.state != NativeMmsAcquisitionState.COMPLETE }
     val backfill = client.mmsBackfillStatus(MmsPreferences(context).sourceGeneration, MmsCapture.PROVIDER_SCOPE)
+    return mmsHealthFromNative(acquisitions, backfill, MmsTransferHealth(context).reasons())
+}
+
+internal fun mmsHealthFromNative(
+    acquisitions: List<uniffi.peppy_mobile_bindings.NativeMmsAcquisition>,
+    backfill: NativeMmsBackfillStatus,
+    transferReasons: List<String>,
+): MmsHealth {
+    val incomplete = acquisitions.filter { it.state != NativeMmsAcquisitionState.COMPLETE }
     val status = when (backfill.pause) {
         NativeMmsBackfillPause.LOCAL_CAPACITY -> "Paused: phone storage capacity"
         NativeMmsBackfillPause.RECOVERY_CAPACITY -> "Paused: recovery capacity"
-        NativeMmsBackfillPause.REMOTE_STORAGE -> "Paused: vault storage capacity"
+        NativeMmsBackfillPause.REMOTE_STORAGE -> "History paused: vault storage capacity"
         null -> when {
             !backfill.baselineInitialized -> "Waiting for the first provider scan"
             !backfill.historyComplete -> "Scanning MMS history"
@@ -103,8 +113,9 @@ private fun loadMmsHealth(context: Context, databaseOpen: Boolean): MmsHealth {
         blocked = incomplete.count { it.state == NativeMmsAcquisitionState.BLOCKED },
         unavailable = incomplete.count { it.state == NativeMmsAcquisitionState.UNAVAILABLE },
         reasons = incomplete.mapNotNull { it.reason?.take(120) }.distinct().take(8),
-        transferReasons = MmsTransferHealth(context).reasons(),
+        transferReasons = transferReasons,
         backfillStatus = status,
+        quarantinedCount = backfill.quarantinedCount.toLong(),
     )
 }
 
@@ -188,6 +199,18 @@ internal fun MmsSettings(
                 else -> Text("Phone-only acquisition health: ${health.pending} pending, ${health.blocked} blocked, ${health.unavailable} unavailable.")
             }
             health.backfillStatus?.let { Text(it, Modifier.testTag("mms-backfill-status"), style = MaterialTheme.typography.bodySmall) }
+            if (health.quarantinedCount > 0L) {
+                Text(
+                    "Quarantined records: ${health.quarantinedCount}",
+                    Modifier.testTag("mms-quarantine-status"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "These phone records were skipped because they could not be matched safely. Existing messages were kept.",
+                    Modifier.testTag("mms-quarantine-explanation"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
             health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }
         }

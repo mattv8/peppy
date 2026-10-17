@@ -105,6 +105,7 @@ pub struct StorageSummary {
     pub pack_quantity: i64,
     pub pack_bytes: i64,
     pub pack_max_quantity: Option<i64>,
+    pub pack_purchase_available: bool,
     pub pack_pending: bool,
     pub pack_mutation_blocked_reason: Option<String>,
     pub pack: Option<PlanSummary>,

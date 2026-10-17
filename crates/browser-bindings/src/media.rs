@@ -11,6 +11,37 @@ use std::{
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
+fn media_cursor(args: &Value) -> Result<peppy_client_core::MediaCursor, Failure> {
+    let cursor = args.get("cursor").ok_or_else(invalid)?;
+    Ok(peppy_client_core::MediaCursor {
+        sort_at_ms: cursor
+            .get("sortAtMs")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+        local_order: cursor
+            .get("localOrder")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+        message_id: cursor
+            .get("messageId")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?,
+        attachment_position: u32::try_from(
+            cursor
+                .get("attachmentPosition")
+                .and_then(Value::as_u64)
+                .ok_or_else(invalid)?,
+        )
+        .map_err(|_| invalid())?,
+    })
+}
+
 pub(super) fn handles(command: &str) -> bool {
     matches!(
         command,
@@ -19,8 +50,13 @@ pub(super) fn handles(command: &str) -> bool {
             | "pending_uploads"
             | "pending_downloads"
             | "media_page"
+            | "media_page_around"
+            | "media_page_newer"
             | "request_attachment_download"
             | "evict_attachment_ciphertext"
+            | "retain_attachment_ciphertext"
+            | "touch_attachment_ciphertext"
+            | "release_attachment_ciphertext"
             | "_worker_attachment_remote"
             | "mark_attachment_uploaded"
             | "discard_unreferenced_attachment"
@@ -44,8 +80,13 @@ impl BrowserCore {
             "pending_uploads" => self.pending_uploads(),
             "pending_downloads" => self.pending_downloads(),
             "media_page" => self.media_page(args),
+            "media_page_around" => self.media_page_around(args),
+            "media_page_newer" => self.media_page_newer(args),
             "request_attachment_download" => self.request_attachment_download(args),
             "evict_attachment_ciphertext" => self.evict_attachment_ciphertext(args),
+            "retain_attachment_ciphertext" => self.retain_attachment_ciphertext(args),
+            "touch_attachment_ciphertext" => self.touch_attachment_ciphertext(args),
+            "release_attachment_ciphertext" => self.release_attachment_ciphertext(args),
             "_worker_attachment_remote" => self.attachment_remote(args),
             "mark_attachment_uploaded" => self.mark_attachment_uploaded(args),
             "discard_unreferenced_attachment" => self.discard_attachment(args),
@@ -133,6 +174,25 @@ impl BrowserCore {
             .map_err(core)?;
         Ok(json!({"evicted": evicted}))
     }
+    fn retain_attachment_ciphertext(&self, args: Value) -> Result<Value, Failure> {
+        self.client()?
+            .retain_attachment_ciphertext(attachment_id(&args)?)
+            .map_err(core)?;
+        Ok(json!({}))
+    }
+    fn touch_attachment_ciphertext(&self, args: Value) -> Result<Value, Failure> {
+        self.client()?
+            .touch_attachment_ciphertext(attachment_id(&args)?)
+            .map_err(core)?;
+        Ok(json!({}))
+    }
+    fn release_attachment_ciphertext(&self, args: Value) -> Result<Value, Failure> {
+        let released = self
+            .client()?
+            .release_attachment_ciphertext(attachment_id(&args)?)
+            .map_err(core)?;
+        Ok(json!({"released": released}))
+    }
     fn media_page(&self, args: Value) -> Result<Value, Failure> {
         let conversation_id = args
             .get("conversationId")
@@ -177,6 +237,47 @@ impl BrowserCore {
         let page = self
             .client()?
             .media_page(conversation_id, cursor.as_ref(), limit)
+            .map_err(core)?;
+        serde_json::to_value(peppy_desktop_api::media_page_view(page))
+            .map_err(|_| core(CoreError::Database))
+    }
+    fn media_page_around(&self, args: Value) -> Result<Value, Failure> {
+        let conversation_id = args
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?;
+        let attachment_id = attachment_id(&args)?;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
+        let limit = usize::try_from(limit).map_err(|_| invalid())?;
+        let client = self.client()?;
+        let page = match args.get("messageId").and_then(Value::as_str) {
+            Some(message_id) => client.media_page_around_at(
+                conversation_id,
+                message_id.parse().map_err(|_| invalid())?,
+                attachment_id,
+                limit,
+            ),
+            None => client.media_page_around(conversation_id, attachment_id, limit),
+        }
+        .map_err(core)?;
+        serde_json::to_value(peppy_desktop_api::media_page_around_view(page))
+            .map_err(|_| core(CoreError::Database))
+    }
+    fn media_page_newer(&self, args: Value) -> Result<Value, Failure> {
+        let conversation_id = args
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?;
+        let cursor = media_cursor(&args)?;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
+        let limit = usize::try_from(limit).map_err(|_| invalid())?;
+        let page = self
+            .client()?
+            .media_page_newer(conversation_id, &cursor, limit)
             .map_err(core)?;
         serde_json::to_value(peppy_desktop_api::media_page_view(page))
             .map_err(|_| core(CoreError::Database))

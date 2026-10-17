@@ -90,7 +90,14 @@ beforeEach(() => {
     stateHint = listener;
     return () => undefined;
   });
-    vi.spyOn(bridge, "media_page").mockResolvedValue({ items: [] });
+  vi.spyOn(bridge, "media_page").mockResolvedValue({ items: [] });
+  vi.spyOn(bridge, "media_page_around").mockImplementation(async (conversationId, attachmentId, messageId) => {
+    const page = await bridge.media_page(conversationId);
+    const target = page.items.find(item => item.attachment.id === attachmentId && item.messageId === messageId);
+    if (!target) throw new Error("missing media anchor");
+    return { target, newer: [], older: [] };
+  });
+  vi.spyOn(bridge, "media_page_newer").mockResolvedValue({ items: [] });
     vi.spyOn(bridge, "load_media").mockResolvedValue({ state: "pending" });
     vi.spyOn(bridge, "open_media").mockResolvedValue({ state: "pending" });
   vi.spyOn(bridge, "close_media").mockResolvedValue();
@@ -128,6 +135,26 @@ describe("App media wiring", () => {
     expect(bridge.load_media).toHaveBeenCalledWith("first-image");
   });
 
+  it("preserves captions and renders a v3 ready thumbnail while its original is remote", async () => {
+    const thumbnail = image("remote-thumbnail");
+    const original = { ...image("remote-original"), state: "pending" as const, previewUrl: undefined, transfer: "download" as const, mediaMeta: { thumbnail } };
+    const captioned = { ...message("captioned", original), body: "A retained caption" };
+    currentSnapshot = snapshot([captioned, message("following", image("following-image"))]);
+    vi.mocked(bridge.media_page).mockResolvedValue({
+      items: [{ ...pageItem(original, captioned.id), mediaMeta: { thumbnail } }],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("A retained caption")).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-message-row="captioned"]')).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "remote-original.png" })).toHaveAttribute("data-thumbnail-state", "ready");
+    fireEvent.click(screen.getByRole("tab", { name: "Media" }));
+    const cell = await screen.findByRole("button", { name: "remote-original.png" });
+    expect(cell).toHaveAttribute("data-cell-state", "ready");
+    expect(cell.querySelector("img")).toHaveAttribute("src", preview);
+  });
+
   it("keeps MMS public-link creation explicit and shows the returned warning", async () => {
     const attachment = image("shared-image");
     currentSnapshot = snapshot([message("shared-message", attachment)]);
@@ -143,63 +170,58 @@ describe("App media wiring", () => {
     expect(bridge.publish_attachment).toHaveBeenCalledWith("shared-image");
   });
 
-  it("walks cursor pages to an older timeline target and advances each lightbox boundary", async () => {
+  it("opens an exact old target from one anchor query and pages both directions", async () => {
     const newest = image("newest");
-    const middle = image("middle");
+    const middle = image("reused");
+    const reusedElsewhere = image("reused");
     const oldest = image("oldest");
-    const cursorCalls: Array<string | undefined> = [];
+    const oldCursor = { sortAtMs: "2", localOrder: "2", messageId: "middle-message", attachmentPosition: 0 };
+    const newCursor = { sortAtMs: "3", localOrder: "3", messageId: "middle-message", attachmentPosition: 0 };
     currentSnapshot = snapshot([
       message("newest-message", newest),
       message("middle-message", middle),
+      message("reused-elsewhere-message", reusedElsewhere, "+15550002"),
       message("oldest-message", oldest),
     ]);
-    vi.mocked(bridge.media_page).mockImplementation(async (_conversationId, cursor) => {
-      cursorCalls.push(cursor?.messageId);
-      if (!cursor) return { items: [pageItem(newest)], nextCursor: { sortAtMs: "3", localOrder: "3", messageId: "newest", attachmentPosition: 0 } };
-      if (cursor.messageId === "newest") return { items: [pageItem(middle)], nextCursor: { sortAtMs: "2", localOrder: "2", messageId: "middle", attachmentPosition: 0 } };
-      return { items: [pageItem(oldest, "oldest-message")] };
-    });
+    vi.mocked(bridge.media_page_around).mockResolvedValue({ target: pageItem(middle, "middle-message"), newer: [], older: [], newerCursor: newCursor, olderCursor: oldCursor });
+    vi.mocked(bridge.media_page_newer).mockResolvedValue({ items: [pageItem(newest, "newest-message")] });
+    vi.mocked(bridge.media_page).mockResolvedValue({ items: [pageItem(oldest, "oldest-message")] });
     vi.mocked(bridge.load_media).mockResolvedValue(ready("blob:image", oldest));
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "newest.png" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "reused.png" }))[0]);
     await screen.findByRole("dialog", { name: "Media viewer" });
-    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
-    await screen.findByRole("img", { name: "middle.png" });
-    await waitFor(() => expect(document.getElementById("lightbox-position-label")).toHaveTextContent("Image 2 of 2"));
-    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    expect(bridge.media_page_around).toHaveBeenCalledWith("aurora", "reused", "middle-message", 40);
+    expect(bridge.media_page).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Newer image" }));
+    await screen.findByRole("img", { name: "newest.png" });
+    fireEvent.click(screen.getByRole("button", { name: "Older image" }));
+    await waitFor(() => expect(document.getElementById("lightbox-position-label")).toHaveTextContent("Image 2 of at least 2 loaded"));
+    fireEvent.click(screen.getByRole("button", { name: "Older image" }));
     await screen.findByRole("img", { name: "oldest.png" });
-    await waitFor(() => expect(document.getElementById("lightbox-position-label")).toHaveTextContent("Image 3 of 3"));
-    expect(screen.getByRole("button", { name: "Next image" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Close media viewer" }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "oldest.png" }));
-
-    await screen.findByRole("dialog", { name: "Media viewer" });
-    await waitFor(() => expect(cursorCalls).toEqual([undefined, "newest", "middle", undefined, "newest", "middle"]));
-    expect(screen.getByRole("button", { name: "Next image" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
-    expect(screen.getByText("Image 2 of 3")).toBeInTheDocument();
+    expect(bridge.media_page_newer).toHaveBeenCalledWith("aurora", newCursor, 40);
+    expect(bridge.media_page).toHaveBeenCalledWith("aurora", oldCursor, 40);
+    expect(document.getElementById("lightbox-position-label")).toHaveTextContent("Image 3 of 3");
   });
 
   it("fences delayed gallery and original responses after a selection change or close", async () => {
-    const page = deferred<Awaited<ReturnType<typeof bridge.media_page>>>();
+    const page = deferred<Awaited<ReturnType<typeof bridge.media_page_around>>>();
     const original = deferred<MediaOpen>();
     const attachment = image("fenced-image");
     currentSnapshot = snapshot([message("fenced-message", attachment)]);
-    vi.mocked(bridge.media_page).mockReturnValue(page.promise);
+    vi.mocked(bridge.media_page_around).mockReturnValue(page.promise);
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "fenced-image.png" }));
     fireEvent.click(screen.getByText("River"));
     currentSnapshot = snapshot([], "river");
     await act(async () => stateHint?.());
-    await act(async () => page.resolve({ items: [pageItem(attachment, "fenced-message")] }));
+    await act(async () => page.resolve({ target: pageItem(attachment, "fenced-message"), newer: [], older: [] }));
     expect(screen.queryByRole("dialog", { name: "Media viewer" })).not.toBeInTheDocument();
 
     currentSnapshot = snapshot([message("fenced-message", attachment)]);
     await act(async () => stateHint?.());
-    vi.mocked(bridge.media_page).mockResolvedValue({ items: [pageItem(attachment, "fenced-message")] });
+    vi.mocked(bridge.media_page_around).mockResolvedValue({ target: pageItem(attachment, "fenced-message"), newer: [], older: [] });
     vi.mocked(bridge.load_media).mockReturnValue(original.promise);
     fireEvent.click(await screen.findByText("Aurora"));
     fireEvent.click(await screen.findByRole("button", { name: "fenced-image.png" }));

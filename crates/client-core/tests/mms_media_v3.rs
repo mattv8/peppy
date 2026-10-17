@@ -294,3 +294,79 @@ fn evicting_a_demanded_original_returns_it_to_pending_without_evicting_uploads()
             .contains(&original)
     );
 }
+
+#[test]
+fn deferred_preview_blocks_completion_until_resolved() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "preview-state", &vault), &vault);
+
+    let unavailable = client
+        .begin_mms_acquisition(input("deferred-unavailable"))
+        .unwrap();
+    let original = prepare(&client, &dir, "deferred.png", b"deferred image");
+    client
+        .set_mms_acquisition_part(&unavailable.acquisition_id, "original", original)
+        .unwrap();
+    client
+        .set_mms_acquisition_part_preview_state(
+            &unavailable.acquisition_id,
+            "original",
+            MmsPreviewState::Deferred,
+        )
+        .unwrap();
+    assert_eq!(
+        client.complete_mms_acquisition(&unavailable.acquisition_id),
+        Err(Error::Conflict)
+    );
+    client
+        .set_mms_acquisition_part_preview_state(
+            &unavailable.acquisition_id,
+            "original",
+            MmsPreviewState::PermanentlyUnavailable,
+        )
+        .unwrap();
+    client
+        .complete_mms_acquisition(&unavailable.acquisition_id)
+        .unwrap();
+
+    let ready = client
+        .begin_mms_acquisition(input("deferred-ready"))
+        .unwrap();
+    let original = prepare(&client, &dir, "ready.png", b"ready image");
+    let thumbnail = prepare(&client, &dir, "ready-thumb.png", b"ready thumbnail");
+    client
+        .set_mms_acquisition_part(&ready.acquisition_id, "original", original)
+        .unwrap();
+    client
+        .set_mms_acquisition_part_metadata(
+            &ready.acquisition_id,
+            "original",
+            None,
+            None,
+            None,
+            Some(thumbnail),
+        )
+        .unwrap();
+    client
+        .set_mms_acquisition_part_preview_state(
+            &ready.acquisition_id,
+            "original",
+            MmsPreviewState::Deferred,
+        )
+        .unwrap();
+    assert_eq!(
+        client.complete_mms_acquisition(&ready.acquisition_id),
+        Err(Error::Conflict)
+    );
+    client
+        .set_mms_acquisition_part_preview_state(
+            &ready.acquisition_id,
+            "original",
+            MmsPreviewState::Ready,
+        )
+        .unwrap();
+    client
+        .complete_mms_acquisition(&ready.acquisition_id)
+        .unwrap();
+}

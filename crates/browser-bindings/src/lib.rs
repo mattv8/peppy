@@ -484,10 +484,18 @@ impl BrowserCore {
                             .attachments
                             .iter()
                             .filter_map(|id| {
-                                client
-                                    .attachment_info(id.attachment_id)
+                                client.attachment_info(id.attachment_id).ok().map(|info| {
+                                    let mut view = dto::attachment_view(&info, None, None);
+                                    view.media_meta = dto::message_attachment_media_metadata_view(
+                                        client,
+                                        message.payload.record.message_id,
+                                        info.attachment_id,
+                                    )
                                     .ok()
-                                    .map(|info| dto::attachment_view(&info, None, None))
+                                    .flatten()
+                                    .map(Box::new);
+                                    view
+                                })
                             })
                             .collect();
                         dto::message_view(message, attachments)
@@ -620,7 +628,18 @@ impl BrowserCore {
                         client
                             .attachment_info(reference.attachment_id)
                             .ok()
-                            .map(|info| dto::attachment_view(&info, None, None))
+                            .map(|info| {
+                                let mut view = dto::attachment_view(&info, None, None);
+                                view.media_meta = dto::message_attachment_media_metadata_view(
+                                    client,
+                                    message.payload.record.message_id,
+                                    info.attachment_id,
+                                )
+                                .ok()
+                                .flatten()
+                                .map(Box::new);
+                                view
+                            })
                     })
                     .collect();
                 dto::message_view(message, attachments)

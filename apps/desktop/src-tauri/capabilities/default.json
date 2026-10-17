@@ -27,6 +27,8 @@
     "allow-save-attachment",
     "allow-request-attachment-download",
     "allow-media-page",
+    "allow-media-page-around",
+    "allow-media-page-newer",
     "allow-open-media",
     "allow-load-media",
     "allow-close-media",

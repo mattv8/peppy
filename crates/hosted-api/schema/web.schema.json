@@ -281,6 +281,9 @@
         "pack_pending": {
           "type": "boolean"
         },
+        "pack_purchase_available": {
+          "type": "boolean"
+        },
         "pack_quantity": {
           "format": "int64",
           "type": "integer"
@@ -296,6 +299,7 @@
         "base_bytes",
         "pack_quantity",
         "pack_bytes",
+        "pack_purchase_available",
         "pack_pending"
       ],
       "type": "object"

@@ -590,7 +590,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                     mms.moreRemaining || sms.moreRemaining,
                 )
             },
-            capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted) { MmsLimits.forSubscription(applicationContext, it) },
+            capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },
             media = {
                 // Media transfer is intentionally separate from SMS/MMS acquisition and text sync.
                 if (hostPolicy.decision(smsAvailable = sendGranted)?.transferMedia == true) {

@@ -1,13 +1,18 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
-import { CheckpointError, type CheckpointInput, IndexedDbCheckpointStore } from "./checkpoint.js";
+import { CheckpointError, type CheckpointInput, IndexedDbCheckpointStore, RuntimeCoreError } from "./checkpoint.js";
 import { CoreRejectedError, type CoreResult } from "./core.js";
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { BrowserSession, BrowserSessionError } from "./session.js";
+import { BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort } from "./host.js";
+import type { OwnerLockManager } from "./owner.js";
 
 const encoder = new TextEncoder();
 const id = "123e4567-e89b-12d3-a456-426614174000";
 const cipherPath = `client.db.media/cipher/${id}.ppss`;
+const previewIds = Array.from({ length: 24 }, (_, index) => `123e4567-e89b-12d3-a456-${String(index + 1).padStart(12, "0")}`);
+
+function cipherPathFor(attachmentId: string): string { return `client.db.media/cipher/${attachmentId}.ppss`; }
 
 type Node = { directory: Set<string> } | { bytes: Uint8Array };
 
@@ -45,11 +50,108 @@ class TrustedCore {
     if (command === "mutate" && this.mutationFailure) throw this.mutationFailure;
     if (command === "_worker_checkpoint_identity") return { wrappedIdentity: this.envelope };
     if (command === "_worker_local_attachment_ids") return { attachmentIds: this.attachmentIds };
+    if (command === "attachment_info") return { state: "ready", plaintextBytes: 3 };
+    if (command === "retain_attachment_ciphertext" || command === "touch_attachment_ciphertext" || command === "release_attachment_ciphertext") return {};
     if (command === "_worker_transport_token") { this.tokenCalls++; return { deviceToken: "private-token" }; }
     if (command === "preview_attachment") return { previewUrl: "data:image/png;base64,cHJldmlldw==" };
     if (command === "_worker_rotate_identity") this.envelope = "rotated-envelope";
     return {};
   }
+}
+
+class AttachmentCore extends TrustedCore {
+  public state: "ready" | "pending" = "ready";
+  public readonly attachmentCommands: string[] = [];
+  public attachmentInfoGate?: Promise<void>;
+  public exportFailure?: CoreRejectedError;
+  public touchFailure?: CoreRejectedError;
+  public snapshot?: CoreResult;
+  public history?: CoreResult;
+  public content = encoder.encode("cat");
+  public previewFailure?: CoreRejectedError;
+  public constructor(private readonly fs: MemoryFs) { super(); }
+
+  public override async invoke(request: { command: string; args: Record<string, unknown> }): Promise<CoreResult> {
+    const { command, args } = request;
+    this.attachmentCommands.push(command);
+    if (command === "attachment_info") {
+      await this.attachmentInfoGate;
+      return this.state === "ready" ? { state: "ready", plaintextBytes: this.content.byteLength } : { state: "pending" };
+    }
+    if (command === "preview_attachment" && this.previewFailure) throw this.previewFailure;
+    if (command === "retain_attachment_ciphertext") {
+      if (this.state !== "ready") throw new CoreRejectedError("media-pending");
+      return {};
+    }
+    if (command === "touch_attachment_ciphertext") {
+      if (this.touchFailure) throw this.touchFailure;
+      return {};
+    }
+    if (command === "evict_attachment_ciphertext") {
+      this.state = "pending";
+      try { this.fs.unlink(`/peppy/${cipherPath}`); } catch {}
+      return {};
+    }
+    if (command === "export_attachment") {
+      if (this.state !== "ready") throw new CoreRejectedError("media-pending");
+      if (this.exportFailure) throw this.exportFailure;
+      const outputId = args.outputId;
+      if (typeof outputId !== "string") throw new Error("missing output ID");
+      if (!this.fs.readdir("/peppy").includes("worker-output")) this.fs.mkdir("/peppy/worker-output");
+      this.fs.writeFile(`/peppy/worker-output/${outputId}`, this.content);
+      return { file: `worker-output/${outputId}`, length: this.content.byteLength, displayName: "cat.jpg", type: "image/jpeg" };
+    }
+    if (command === "public_image") {
+      const outputId = args.outputId;
+      if (typeof outputId !== "string") throw new Error("missing output ID");
+      if (!this.fs.readdir("/peppy").includes("worker-output")) this.fs.mkdir("/peppy/worker-output");
+      this.fs.writeFile(`/peppy/worker-output/${outputId}`, encoder.encode("cat"));
+      return { file: `worker-output/${outputId}`, byteSize: 3, name: "public.png" };
+    }
+    if (command === "_worker_attachment_remote") return { remoteObjectId: "remote-object" };
+    if (command === "_worker_local_attachment_ids") return { attachmentIds: this.state === "ready" ? this.attachmentIds : [] };
+    if (command === "snapshot" && this.snapshot) return this.snapshot;
+    if (command === "load_history" && this.history) return this.history;
+    return super.invoke(request);
+  }
+}
+
+function deferred(): { promise: Promise<void>; release(): void } {
+  let release!: () => void;
+  return { promise: new Promise<void>(resolve => { release = resolve; }), release };
+}
+
+async function unlockedAttachmentSession(state: "ready" | "pending", files: CheckpointInput["files"], attachmentIds = [id]): Promise<{ core: AttachmentCore; fs: MemoryFs; session: BrowserSession; store: IndexedDbCheckpointStore }> {
+  const store = new IndexedDbCheckpointStore(`session-${crypto.randomUUID()}`);
+  await store.commit(checkpoint(0, "envelope-1", files));
+  const fs = new MemoryFs();
+  const core = new AttachmentCore(fs);
+  core.state = state;
+  core.attachmentIds = attachmentIds;
+  const session = await BrowserSession.boot(sessionOptions(core, fs, store));
+  await session.unlock("passphrase");
+  return { core, fs, session, store };
+}
+
+function locks(): OwnerLockManager {
+  let held = false;
+  return {
+    async request(name, _options, operation) {
+      if (held) return operation(null);
+      held = true;
+      try { return await operation({ name }); } finally { held = false; }
+    },
+  };
+}
+
+function workerPort(): BrowserPort & { messages: unknown[]; emit(message: unknown): void; closed: boolean } {
+  const result = {
+    messages: [] as unknown[], closed: false, onmessage: null as BrowserPort["onmessage"],
+    postMessage(message: unknown) { result.messages.push(message); },
+    close() { result.closed = true; },
+    emit(message: unknown) { result.onmessage?.({ data: message } as MessageEvent); },
+  };
+  return result;
 }
 
 function checkpoint(generation: number, envelope = "envelope-1", files: CheckpointInput["files"] = [{ path: "client.db", bytes: encoder.encode("encrypted database") }]): CheckpointInput {
@@ -208,5 +310,186 @@ describe("BrowserSession", () => {
     await expect(session.previewAttachment(id)).resolves.toBe("data:image/png;base64,cHJldmlldw==");
     session.shutdown();
     await expect(session.previewAttachment(id)).rejects.toThrow(BrowserSessionError);
+  });
+
+  it("keeps ready-media availability, hydration, and export atomic when queued eviction races two callers", async () => {
+    const { promise, release } = deferred();
+    const { core, session, store } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    core.attachmentInfoGate = promise;
+
+    const first = session.openMediaAttachment(id, 32 * 1024 * 1024);
+    await vi.waitFor(() => expect(core.attachmentCommands.filter(command => command === "attachment_info")).toHaveLength(1));
+    const eviction = session.mutate("evict_attachment_ciphertext", { id });
+    const second = session.openMediaAttachment(id, 32 * 1024 * 1024);
+    const firstFailure = expect(first).rejects.toMatchObject({ code: "media-pending" });
+    const secondFailure = expect(second).rejects.toMatchObject({ code: "media-pending" });
+    release();
+
+    await expect(eviction).resolves.toEqual({});
+    await firstFailure;
+    await secondFailure;
+    expect(core.attachmentCommands).not.toContain("export_attachment");
+    expect(core.attachmentCommands).not.toContain("retain_attachment_ciphertext");
+    expect(session.phase).toBe("ready");
+    const saved = await store.load(session.generation);
+    expect(saved).toMatchObject({ kind: "present" });
+    if (saved.kind === "present") expect(saved.checkpoint.manifest.files).not.toContain(cipherPath);
+  });
+
+  it("persists an opened cipher after LRU touch and avoids checkpoint work for repeated passive media-pending opens", async () => {
+    const ready = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    await expect(ready.session.openMediaAttachment(id, 32 * 1024 * 1024)).resolves.toMatchObject({ bytes: encoder.encode("cat") });
+    expect(ready.core.attachmentCommands).toEqual(expect.arrayContaining(["retain_attachment_ciphertext", "export_attachment", "touch_attachment_ciphertext"]));
+    expect(ready.core.attachmentCommands.lastIndexOf("touch_attachment_ciphertext")).toBeLessThan(ready.core.attachmentCommands.lastIndexOf("_worker_checkpoint_identity"));
+    const durable = await ready.store.load(ready.session.generation);
+    if (durable.kind !== "present") throw new Error("checkpoint missing");
+    await expect(durable.checkpoint.readCipher(cipherPath)).resolves.toEqual(encoder.encode("cold cipher"));
+
+    const pending = await unlockedAttachmentSession("pending", [{ path: "client.db", bytes: encoder.encode("encrypted database") }]);
+    const commit = vi.spyOn(pending.store, "commit");
+    await expect(pending.session.openMediaAttachment(id, 32 * 1024 * 1024)).rejects.toMatchObject({ code: "media-pending" });
+    await expect(pending.session.openMediaAttachment(id, 32 * 1024 * 1024)).rejects.toMatchObject({ code: "media-pending" });
+    expect(commit).not.toHaveBeenCalled();
+    expect(pending.core.attachmentCommands.filter(command => command === "attachment_info")).toHaveLength(2);
+    expect(pending.session.phase).toBe("ready");
+  });
+
+  it("poisons the session when ready local media is absent from the committed manifest", async () => {
+    const setup = await unlockedAttachmentSession("pending", [{ path: "client.db", bytes: encoder.encode("encrypted database") }]);
+    setup.core.state = "ready";
+
+    await expect(setup.session.openMediaAttachment(id, 32 * 1024 * 1024)).rejects.toBeInstanceOf(RuntimeCoreError);
+    expect(setup.session.phase).toBe("closed");
+    await expect(setup.session.openMediaAttachment(id, 32 * 1024 * 1024)).rejects.toThrow(BrowserSessionError);
+  });
+
+  it.each(["exportFailure", "touchFailure"] as const)("releases an acquired media lease after a handled %s", async failure => {
+    const { core, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    core[failure] = new CoreRejectedError("media-pending");
+
+    await expect(session.openMediaAttachment(id, 32 * 1024 * 1024)).rejects.toMatchObject({ code: "media-pending" });
+    expect(core.attachmentCommands.lastIndexOf("release_attachment_ciphertext")).toBeGreaterThan(core.attachmentCommands.lastIndexOf("retain_attachment_ciphertext"));
+    expect(session.phase).toBe("ready");
+  });
+
+  it("maps pending open and load RPCs from a real BrowserSession to ready pending values", async () => {
+    const { core, session } = await unlockedAttachmentSession("pending", [{ path: "client.db", bytes: encoder.encode("encrypted database") }]);
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "open_media", args: { id } })).resolves.toEqual({ id: 1, ok: true, value: { state: "pending" } });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "load_media", args: { id } })).resolves.toEqual({ id: 2, ok: true, value: { state: "pending" } });
+    expect(core.attachmentCommands).not.toContain("export_attachment");
+    expect(session.phase).toBe("ready");
+  });
+
+  it("keeps snapshot and history previews serialized without checkpointing every passive preview", async () => {
+    const files = [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      ...previewIds.map(attachmentId => ({ path: cipherPathFor(attachmentId), bytes: encoder.encode(`cipher-${attachmentId}`) })),
+    ];
+    const { core, session, store } = await unlockedAttachmentSession("ready", files, previewIds);
+    const attachments = (ids: string[]) => ids.map(attachmentId => ({ id: attachmentId, mediaType: "image/png", state: "ready" }));
+    core.snapshot = { activeConversationId: "conversation", conversations: [{ id: "conversation", messages: attachments(previewIds.slice(0, 12)).map(attachment => ({ attachments: [attachment] })) }] };
+    core.history = { messages: attachments(previewIds.slice(12)).map(attachment => ({ attachments: [attachment] })) };
+    const commit = vi.spyOn(store, "commit");
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "load_state", args: {} })).resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "load_history", args: { conversationId: "conversation", beforeMessageId: "message" } })).resolves.toMatchObject({ ok: true });
+
+    expect(core.attachmentCommands.filter(command => command === "preview_attachment")).toHaveLength(24);
+    expect(core.attachmentCommands).not.toContain("touch_attachment_ciphertext");
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("treats an evicted queued preview as transient pending without poisoning or caching it", async () => {
+    const { core, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    await session.mutate("evict_attachment_ciphertext", { id });
+
+    await expect(session.previewAttachment(id)).resolves.toBeUndefined();
+    expect(core.attachmentCommands).not.toContain("preview_attachment");
+    expect(session.phase).toBe("ready");
+    await expect(session.previewAttachment(id)).resolves.toBeUndefined();
+    expect(core.attachmentCommands.filter(command => command === "attachment_info")).toHaveLength(2);
+  });
+
+  it("poisons a preview read when ready local media is absent from the committed manifest", async () => {
+    const { core, session } = await unlockedAttachmentSession("pending", [{ path: "client.db", bytes: encoder.encode("encrypted database") }]);
+    core.state = "ready";
+
+    await expect(session.previewAttachment(id)).resolves.toBeUndefined();
+    expect(session.phase).toBe("closed");
+  });
+
+  it("accepts a zero-byte ready attachment without poisoning preview or save, and still rejects a genuinely missing cipher", async () => {
+    const { core, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    core.content = new Uint8Array();
+    core.previewFailure = new CoreRejectedError("unsupported");
+
+    await expect(session.previewAttachment(id)).resolves.toBeUndefined();
+    expect(session.phase).toBe("ready");
+    await expect(session.exportAttachment(id)).resolves.toMatchObject({ bytes: new Uint8Array(), displayName: "cat.jpg", type: "image/jpeg" });
+    await expect(session.openMediaAttachment(id, 32 * 1024 * 1024)).resolves.toMatchObject({ bytes: new Uint8Array() });
+    expect(session.phase).toBe("ready");
+
+    const missing = await unlockedAttachmentSession("pending", [{ path: "client.db", bytes: encoder.encode("encrypted database") }]);
+    missing.core.state = "ready";
+    await expect(missing.session.previewAttachment(id)).resolves.toBeUndefined();
+    expect(missing.session.phase).toBe("closed");
+  });
+
+  it("releases a completed real open and suppresses its plaintext reply after port disconnect", async () => {
+    const { promise, release } = deferred();
+    const { core, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = workerPort();
+    await host.attach(attached);
+    core.attachmentInfoGate = promise;
+
+    attached.emit({ id: 1, command: "open_media", args: { id } });
+    await vi.waitFor(() => expect(core.attachmentCommands.filter(command => command === "attachment_info")).toHaveLength(1));
+    attached.emit({ id: 2, command: "disconnect", args: {} });
+    await vi.waitFor(() => expect(attached.closed).toBe(true));
+    release();
+
+    await vi.waitFor(() => expect(core.attachmentCommands.filter(command => command === "release_attachment_ciphertext")).toHaveLength(1));
+    expect(attached.messages).not.toContainEqual(expect.objectContaining({ id: 1 }));
+    expect(session.phase).toBe("ready");
+  });
+
+  it.each(["export_attachment", "save_attachment", "publish_attachment"])("keeps a real %s RPC from exporting after queued eviction", async command => {
+    const { promise, release } = deferred();
+    const { core, session } = await unlockedAttachmentSession("ready", [
+      { path: "client.db", bytes: encoder.encode("encrypted database") },
+      { path: cipherPath, bytes: encoder.encode("cold cipher") },
+    ]);
+    core.attachmentInfoGate = promise;
+    const upload = vi.fn(async () => ({ token: "share-token", safe_name: "public.png" }));
+    const publisher: import("./publication.js").PublicCopyTransport & { origin: string } = { origin: "https://peppy.test", postPublicCopy: upload as unknown as import("./publication.js").PublicCopyTransport["postPublicCopy"] };
+    const request = dispatchBrowserRpc(session, { id: 1, command, args: command === "publish_attachment" ? { id, confirmed: true } : { id } }, undefined, publisher);
+    await vi.waitFor(() => expect(core.attachmentCommands.filter(value => value === "attachment_info")).toHaveLength(1));
+    const eviction = session.mutate("evict_attachment_ciphertext", { id });
+    release();
+
+    await expect(eviction).resolves.toEqual({});
+    await expect(request).resolves.toMatchObject({ id: 1, ok: false, error: { code: "media-pending" } });
+    expect(core.attachmentCommands).not.toContain(command === "publish_attachment" ? "public_image" : "export_attachment");
+    expect(session.phase).toBe("ready");
+    expect(upload).not.toHaveBeenCalled();
   });
 });

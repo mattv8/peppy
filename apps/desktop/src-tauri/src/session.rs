@@ -480,15 +480,18 @@ impl Session {
                         preview_url: None,
                         transfer: Some("download"),
                         retryable: None,
+                        media_meta: None,
                     };
                 };
-                let preview_info = self
+                let media_metadata = self
                     .client
                     .message_attachment_media_metadata(message.payload.record.message_id, id)
                     .ok()
-                    .flatten()
-                    .and_then(|metadata| metadata.thumbnail)
-                    .unwrap_or_else(|| info.clone());
+                    .flatten();
+                let preview_info = media_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.thumbnail.as_ref())
+                    .unwrap_or(&info);
                 let mut preview = None;
                 if media::is_previewable(&preview_info.media_type) && preview_info.state.is_local()
                 {
@@ -522,7 +525,17 @@ impl Session {
                         }
                     };
                 }
-                dto::attachment_view(&info, errors.get(&id).cloned(), preview)
+                let mut attachment = dto::attachment_view(&info, errors.get(&id).cloned(), None);
+                if let Some(metadata) = media_metadata {
+                    let mut media_meta = dto::media_metadata_view(metadata);
+                    if let Some(thumbnail) = media_meta.thumbnail.as_mut() {
+                        thumbnail.preview_url = preview;
+                    }
+                    attachment.media_meta = Some(Box::new(media_meta));
+                } else {
+                    attachment.preview_url = preview;
+                }
+                attachment
             })
             .collect()
     }
@@ -625,6 +638,51 @@ impl Session {
             thumbnail.preview_url = preview;
         }
         Ok(view)
+    }
+
+    pub fn media_page_around(
+        &self,
+        conversation: ConversationId,
+        attachment: AttachmentId,
+        message: Option<MessageId>,
+        limit: usize,
+    ) -> BridgeResult<peppy_desktop_api::MediaPageAroundView> {
+        if !(1..=100).contains(&limit) {
+            return Err(BridgeError::new(
+                "invalid-request",
+                "The media page size is invalid.",
+            ));
+        }
+        let page = match message {
+            Some(message) => {
+                self.client
+                    .media_page_around_at(conversation, message, attachment, limit)
+            }
+            None => self
+                .client
+                .media_page_around(conversation, attachment, limit),
+        }
+        .map_err(core_error)?;
+        Ok(peppy_desktop_api::media_page_around_view(page))
+    }
+
+    pub fn media_page_newer(
+        &self,
+        conversation: ConversationId,
+        cursor: &MediaCursor,
+        limit: usize,
+    ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+        if !(1..=100).contains(&limit) {
+            return Err(BridgeError::new(
+                "invalid-request",
+                "The media page size is invalid.",
+            ));
+        }
+        let page = self
+            .client
+            .media_page_newer(conversation, cursor, limit)
+            .map_err(core_error)?;
+        Ok(peppy_desktop_api::media_page_view(page))
     }
 
     /// Builds the sanitized UI snapshot from core state. Returns whether previews were deferred

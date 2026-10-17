@@ -13,6 +13,7 @@ const MAX_RPC_BYTES = 1024 * 1024;
 const MAX_CONTACT_ADDRESSES = 500;
 const MAX_PREVIEWS_PER_SNAPSHOT = 32;
 const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
+const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 const OWNER_NAME = "peppy-browser-v1";
 
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
@@ -39,6 +40,7 @@ export interface HostSession {
   stageInput?(bytes: Uint8Array): Promise<string>;
   readWorkerOutput?(id: string, expectedBytes: number): Promise<Uint8Array>;
   exportAttachment?(id: string): Promise<Record<string, unknown> & { bytes: Uint8Array }>;
+  openMediaAttachment?(id: string, maxBytes: number): Promise<Record<string, unknown> & { bytes: Uint8Array }>;
   prepareAttachment?(bytes: Uint8Array, displayName: string, mediaType: string): Promise<CoreResult>;
   publicImage?(id: string): Promise<Record<string, unknown> & { bytes: Uint8Array; name: string }>;
   previewAttachment?(id: string): Promise<string | undefined>;
@@ -238,7 +240,12 @@ function coreArgs(command: string, args: Record<string, unknown>): Record<string
 }
 
 /** Dispatches a renderer request without exposing a generic Rust command or worker-private APIs. */
-export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }): Promise<RpcResponse> {
+type MediaLeases = {
+  acquire(id: string): boolean;
+  release(id: string): boolean;
+};
+
+export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
   const { id, command, args } = request;
   try {
@@ -269,28 +276,47 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
       const page = await session.query("media_page", mediaPageArgs(args));
       return { id, ok: true, value: await addMediaPagePreviews(session, page) };
     }
-    if (command === "open_media") return { id, ok: true, value: await openMedia(session, args) };
+    if (command === "media_page_around") {
+      const page = await session.query("media_page_around", mediaPageAroundArgs(args));
+      return { id, ok: true, value: await addAroundPreviews(session, page) };
+    }
+    if (command === "media_page_newer") {
+      const page = await session.query("media_page_newer", mediaPageArgs(args));
+      return { id, ok: true, value: await addMediaPagePreviews(session, page) };
+    }
+    if (command === "open_media") {
+      const value = await openMedia(session, args);
+      if (value.state === "ready" && mediaLeases && !mediaLeases.acquire(requiredId(args))) {
+        await session.mutate("release_attachment_ciphertext", { id: requiredId(args) });
+      }
+      return { id, ok: true, value };
+    }
     if (command === "request_attachment_download") {
       return { id, ok: true, value: { demanded: await demandAttachmentIfNeeded(session, requiredId(args)) } };
     }
     if (command === "load_media") {
       await demandAttachmentIfNeeded(session, requiredId(args));
-      return { id, ok: true, value: await openMedia(session, args) };
+      const value = await openMedia(session, args);
+      if (value.state === "ready" && mediaLeases && !mediaLeases.acquire(requiredId(args))) {
+        await session.mutate("release_attachment_ciphertext", { id: requiredId(args) });
+      }
+      return { id, ok: true, value };
     }
     if (command === "close_media") {
       const attachmentId = requiredId(args);
-      await session.mutate("evict_attachment_ciphertext", { id: attachmentId });
+      if (!mediaLeases || mediaLeases.release(attachmentId)) await session.mutate("release_attachment_ciphertext", { id: attachmentId });
       return { id, ok: true, value: undefined };
     }
     if (command === "export_attachment") return { id, ok: true, value: await exportAttachment(session, args) };
     if (command === "save_attachment") {
       const attachmentId = requiredId(args);
-      const info = await session.query("attachment_info", { id: attachmentId });
-      if (typeof info !== "object" || info === null || Array.isArray(info) || (info as Record<string, unknown>).state !== "ready") {
+      try {
+        return { id, ok: true, value: await exportAttachment(session, args) };
+      } catch (error: unknown) {
+        if (!isMediaPending(error)) throw error;
         await demandAttachmentIfNeeded(session, attachmentId);
         throw { code: "media-pending" };
       }
-      return { id, ok: true, value: await exportAttachment(session, args) };
     }
     if (command === "retry_attachment") { await session.query("attachment_info", { id: requiredId(args) }); return { id, ok: true, value: undefined }; }
     if (command === "publish_attachment") {
@@ -371,9 +397,15 @@ async function addMessagePreviews(session: HostSession, messages: unknown[], bud
     const messageView = message as Record<string, unknown>;
     if (!Array.isArray(messageView.attachments)) return message;
     const attachments = await Promise.all(messageView.attachments.map(async attachment => {
-      const preview = remainingPreviews > 0 && previewableAttachment(attachment);
+      const view = attachment as Record<string, unknown>;
+      const mediaMeta = objectOrUndefined(view.mediaMeta);
+      const thumbnail = mediaMeta?.thumbnail;
+      const previewTarget = previewableAttachment(thumbnail) ? thumbnail : attachment;
+      const preview = remainingPreviews > 0 && previewableAttachment(previewTarget);
       if (preview) remainingPreviews -= 1;
-      return preview ? addAttachmentPreview(session, attachment) : attachment;
+      if (!preview) return attachment;
+      if (previewTarget === attachment) return addAttachmentPreview(session, attachment);
+      return { ...view, mediaMeta: { ...mediaMeta, thumbnail: await addAttachmentPreview(session, thumbnail) } };
     }));
     return { ...messageView, attachments };
   }));
@@ -401,6 +433,13 @@ function mediaPageArgs(args: Record<string, unknown>): Record<string, unknown> {
   if (args.cursor !== undefined && (!isMediaCursor(args.cursor))) throw { code: "invalid-request" };
   return { conversationId, limit, ...(args.cursor === undefined ? {} : { cursor: args.cursor }) };
 }
+function mediaPageAroundArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const page = mediaPageArgs({ ...args, cursor: undefined });
+  const attachmentId = args.attachmentId;
+  const messageId = args.messageId;
+  if (typeof attachmentId !== "string" || !/^[0-9a-f-]{36}$/.test(attachmentId) || (messageId !== undefined && (typeof messageId !== "string" || !/^[0-9a-f-]{36}$/.test(messageId)))) throw { code: "invalid-request" };
+  return { ...page, attachmentId, ...(typeof messageId === "string" ? { messageId } : {}) };
+}
 function isMediaCursor(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const cursor = value as Record<string, unknown>;
@@ -423,14 +462,40 @@ async function addMediaPagePreviews(session: HostSession, value: CoreResult): Pr
   }));
   return { ...page, items };
 }
+async function addAroundPreviews(session: HostSession, value: CoreResult): Promise<CoreResult> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
+  const page = value as Record<string, unknown>;
+  if (!page.target || !Array.isArray(page.newer) || !Array.isArray(page.older)) throw { code: "invalid-request" };
+  const items = await addMediaPagePreviews(session, { items: [page.target, ...page.newer, ...page.older] });
+  if (typeof items !== "object" || items === null || !Array.isArray((items as Record<string, unknown>).items)) throw { code: "invalid-request" };
+  const [target, ...neighbors] = (items as Record<string, unknown>).items as unknown[];
+  return { ...page, target, newer: neighbors.slice(0, page.newer.length), older: neighbors.slice(page.newer.length) };
+}
 async function openMedia(session: HostSession, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const id = requiredId(args);
+  if (session.openMediaAttachment) {
+    try {
+      return mediaOutput(await session.openMediaAttachment(id, MAX_INLINE_MEDIA_BYTES));
+    } catch (error: unknown) {
+      if (isMediaPending(error)) return { state: "pending" };
+      throw error;
+    }
+  }
   const info = await session.query("attachment_info", { id });
   if (typeof info !== "object" || info === null || Array.isArray(info)) throw { code: "invalid-request" };
   if ((info as Record<string, unknown>).state !== "ready") return { state: "pending" };
   if (!session.exportAttachment) throw { code: "unavailable" };
-  const output = await session.exportAttachment(id);
+  return mediaOutput(await session.exportAttachment(id));
+}
+function isMediaPending(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "media-pending";
+}
+function mediaOutput(output: Record<string, unknown> & { bytes: Uint8Array }): Record<string, unknown> {
+  if (output.bytes.byteLength > MAX_INLINE_MEDIA_BYTES) throw { code: "unsupported" };
   return { state: "ready", bytes: output.bytes.buffer.slice(output.bytes.byteOffset, output.bytes.byteOffset + output.bytes.byteLength), mediaType: output.type, byteSize: output.bytes.byteLength };
+}
+function objectOrUndefined(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 async function demandAttachmentIfNeeded(session: HostSession, id: string): Promise<boolean> {
   const info = await session.query("attachment_info", { id });
@@ -484,6 +549,7 @@ export class BrowserWorkerHost {
   private unsubscribeNetwork?: () => void;
   private presenter?: BannerPresenter;
   private presentationPort?: BrowserPort;
+  private readonly mediaLeases = new Map<BrowserPort, Map<string, number>>();
 
   public constructor(private readonly dependencies: BrowserHostDependencies) {}
 
@@ -501,6 +567,7 @@ export class BrowserWorkerHost {
         return;
       }
       this.ports.add(port);
+      this.mediaLeases.set(port, new Map());
       port.onmessage = event => { void this.handle(port, event.data); };
       port.start?.();
       port.postMessage({ event: "ready", version: 1 });
@@ -523,6 +590,7 @@ export class BrowserWorkerHost {
       acknowledge?.();
       for (const port of this.ports) { port.postMessage({ event: "stopped", reason }); port.close(); }
       this.ports.clear();
+      this.mediaLeases.clear();
       try { await this.owner?.release(); } catch {}
     } finally { this.dependencies.terminate?.(); }
   }
@@ -550,10 +618,13 @@ export class BrowserWorkerHost {
       return;
     }
     if (validRequest(request) && request.command === "disconnect") {
-      this.ports.delete(port);
-      if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
-      port.postMessage({ event: "stopped", reason: "disconnected" });
-      port.close();
+      try { await this.releasePortMedia(port); } catch {} finally {
+        this.ports.delete(port);
+        this.mediaLeases.delete(port);
+        if (this.presentationPort === port) { this.presentationPort = undefined; this.presenter?.clear(); }
+        port.postMessage({ event: "stopped", reason: "disconnected" });
+        port.close();
+      }
       return;
     }
     if (validRequest(request) && request.command === "set_notification_context") {
@@ -597,13 +668,14 @@ export class BrowserWorkerHost {
     }
     const generation = this.owner.owner.generation;
     const command = validRequest(request) ? request.command : undefined;
-    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher);
+    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.portMediaLeases(port));
     if (response.ok && command === "load_state" && this.dependencies.network?.epochStatus?.()) {
       const value = response.value;
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
         response = { ...response, value: { ...value as Record<string, unknown>, encryption: { ...(value as Record<string, unknown>).encryption as Record<string, unknown>, state: "mismatch" } } };
       }
     }
+    if (!this.ports.has(port)) return;
     port.postMessage(response);
     if (this.owner.owner.phase === "closed") {
       await this.stop("closed");
@@ -692,6 +764,40 @@ export class BrowserWorkerHost {
   }
 
   private async fatal(_error: Error): Promise<void> { await this.stop("fatal"); }
+
+  private portMediaLeases(port: BrowserPort): MediaLeases {
+    return {
+      acquire: id => {
+        const leases = this.mediaLeases.get(port);
+        if (!leases) return false;
+        leases.set(id, (leases.get(id) ?? 0) + 1);
+        return true;
+      },
+      release: id => {
+        const leases = this.mediaLeases.get(port);
+        const count = leases?.get(id) ?? 0;
+        if (count > 1) {
+          leases!.set(id, count - 1);
+          return true;
+        }
+        if (count === 1) leases?.delete(id);
+        return count === 1;
+      },
+    };
+  }
+
+  private async releasePortMedia(port: BrowserPort): Promise<void> {
+    const leases = this.mediaLeases.get(port);
+    let failure: unknown;
+    try {
+      for (const [id, count] of leases ?? []) {
+        for (let lease = 0; lease < count; lease += 1) {
+          try { await this.owner?.owner.mutate("release_attachment_ciphertext", { id }); } catch (error: unknown) { failure ??= error; }
+        }
+      }
+    } finally { leases?.clear(); }
+    if (failure) throw failure;
+  }
 
 }
 

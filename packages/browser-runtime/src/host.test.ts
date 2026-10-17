@@ -30,6 +30,7 @@ class FakeSession implements HostSession {
   public snapshot: Record<string, unknown> = {};
   public previewAttachment?: (id: string) => Promise<string | undefined>;
   public exportAttachment?: (id: string) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
+  public openMediaAttachment?: (id: string, maxBytes: number) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
   public async query(command: string, args: Record<string, unknown>) {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
@@ -62,7 +63,7 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
-  it("checkpoints media demand and eviction instead of exposing generic core dispatch", async () => {
+    it("checkpoints media demand and cache release instead of exposing generic core dispatch", async () => {
     const session = new FakeSession();
     const id = "00000000-0000-0000-0000-000000000001";
     await expect(dispatchBrowserRpc(session, { id: 1, command: "request_attachment_download", args: { id } }))
@@ -72,17 +73,17 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([
       { command: "attachment_info", args: { id }, mutation: false },
       { command: "request_attachment_download", args: { id }, mutation: true },
-      { command: "evict_attachment_ciphertext", args: { id }, mutation: true },
+      { command: "release_attachment_ciphertext", args: { id }, mutation: true },
     ]);
   });
 
   it("makes Save a durable demand while a remote original is pending", async () => {
     const session = new FakeSession();
     const id = "00000000-0000-0000-0000-000000000001";
+    session.exportAttachment = async () => { throw new CoreRejectedError("media-pending"); };
     await expect(dispatchBrowserRpc(session, { id: 1, command: "save_attachment", args: { id } }))
       .resolves.toMatchObject({ ok: false, error: { code: "media-pending" } });
     expect(session.calls).toEqual([
-      { command: "attachment_info", args: { id }, mutation: false },
       { command: "attachment_info", args: { id }, mutation: false },
       { command: "request_attachment_download", args: { id }, mutation: true },
     ]);
@@ -110,7 +111,7 @@ describe("browser host RPC", () => {
     session.exportAttachment = async () => ({ bytes: new Uint8Array([1]), displayName: "file.pdf", type: "application/pdf" });
     await expect(dispatchBrowserRpc(session, { id: 1, command: "save_attachment", args: { id } }))
       .resolves.toMatchObject({ ok: true, value: { displayName: "file.pdf" } });
-    expect(session.calls).toEqual([{ command: "attachment_info", args: { id }, mutation: false }]);
+    expect(session.calls).toEqual([]);
   });
 
   it("enriches a media page from its eager thumbnail without opening the original", async () => {
@@ -125,6 +126,32 @@ describe("browser host RPC", () => {
     const response = await dispatchBrowserRpc(session, { id: 1, command: "media_page", args: { conversationId: "00000000-0000-0000-0000-000000000001" } });
     expect(response).toMatchObject({ ok: true, value: { items: [{ mediaMeta: { thumbnail: { previewUrl: "data:image/png;base64,cHJldmlldw==" } } }] } });
     expect(session.previewAttachment).toHaveBeenCalledWith(thumbnail);
+  });
+
+  it.each(["load_state", "load_history"])("enriches v3 timeline thumbnails for %s without demanding the original", async command => {
+    const session = new FakeSession();
+    const thumbnail = "00000000-0000-0000-0000-000000000002";
+    session.previewAttachment = vi.fn(async () => "data:image/png;base64,cHJldmlldw==");
+    session.snapshot = { activeConversationId: "conversation", conversations: [{ id: "conversation", messages: [{ attachments: [{ id: "original", mediaType: "image/jpeg", state: "pending", mediaMeta: { thumbnail: { id: thumbnail, mediaType: "image/png", state: "ready" } } }] }] }] };
+    session.query = async (coreCommand, args) => {
+      session.calls.push({ command: coreCommand, args, mutation: false });
+      if (coreCommand === "load_history") return { messages: (session.snapshot.conversations as Array<{ messages: unknown[] }>)[0].messages };
+      return coreCommand === "snapshot" ? session.snapshot : { command: coreCommand };
+    };
+    const response = await dispatchBrowserRpc(session, { id: 1, command, args: command === "load_history" ? { conversationId: "conversation", beforeMessageId: "message" } : {} });
+    expect(response).toMatchObject({ ok: true });
+    expect(session.previewAttachment).toHaveBeenCalledWith(thumbnail);
+    expect(session.previewAttachment).not.toHaveBeenCalledWith("original");
+  });
+
+  it("uses the session's serialized media read instead of splitting availability and export", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    session.openMediaAttachment = vi.fn(async () => ({ bytes: new Uint8Array([1]), displayName: "image.jpg", type: "image/jpeg" }));
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "open_media", args: { id } });
+    expect(response).toMatchObject({ ok: true, value: { state: "ready", byteSize: 1 } });
+    expect(session.openMediaAttachment).toHaveBeenCalledWith(id, 32 * 1024 * 1024);
+    expect(session.calls).toEqual([]);
   });
 
   it.each([
@@ -326,6 +353,47 @@ describe("browser host RPC", () => {
     await eventually(() => second.messages.some(message => typeof message === "object" && message !== null && "event" in message && message.event === "changed"));
     expect(boots).toBe(1);
     expect(second.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("balances one retained media resource lease per port close", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    session.openMediaAttachment = async () => ({ bytes: new Uint8Array([1]), displayName: "image.jpg", type: "image/jpeg" });
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const first = port();
+    const second = port();
+    await Promise.all([host.attach(first), host.attach(second)]);
+    first.emit({ id: 1, command: "open_media", args: { id } });
+    second.emit({ id: 2, command: "open_media", args: { id } });
+    await eventually(() => first.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1)
+      && second.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
+    first.emit({ id: 3, command: "close_media", args: { id } });
+    second.emit({ id: 4, command: "close_media", args: { id } });
+    await eventually(() => session.calls.filter(call => call.command === "release_attachment_ciphertext").length === 2);
+    expect(session.calls.filter(call => call.command === "release_attachment_ciphertext")).toEqual([
+      { command: "release_attachment_ciphertext", args: { id }, mutation: true },
+      { command: "release_attachment_ciphertext", args: { id }, mutation: true },
+    ]);
+  });
+
+  it("detaches a port even when releasing one of its media leases fails", async () => {
+    const session = new FakeSession();
+    const id = "00000000-0000-0000-0000-000000000001";
+    session.openMediaAttachment = async () => ({ bytes: new Uint8Array([1]), displayName: "image.jpg", type: "image/jpeg" });
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      if (command === "release_attachment_ciphertext") throw new CoreRejectedError("media-pending");
+      return { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "open_media", args: { id } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 1));
+
+    attached.emit({ id: 2, command: "disconnect", args: {} });
+    await eventually(() => attached.closed);
+    expect(attached.messages).toContainEqual({ event: "stopped", reason: "disconnected" });
   });
 
   it("broadcasts draft deletion after its checkpointed mutation succeeds", async () => {

@@ -66,7 +66,7 @@ internal class MmsMediaPreview(
             retriever.setDataSource(file)
             val width = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toPositiveIntOrNull()
             val height = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toPositiveIntOrNull()
-            val durationMs = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toNonNegativeLongOrNull()
+            val durationMs = retriever.metadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toPositiveLongOrNull()
             val metadata = MmsMediaMetadata(width, height, durationMs)
             if (!includePoster) return MmsMediaPreviewResult(metadata, null, null)
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
@@ -168,7 +168,7 @@ internal class MmsMediaPreview(
     )
 
     private fun String.toPositiveIntOrNull() = toIntOrNull()?.takeIf { it > 0 }
-    private fun String.toNonNegativeLongOrNull() = toLongOrNull()?.takeIf { it >= 0 }
+    private fun String.toPositiveLongOrNull() = toLongOrNull()?.takeIf { it > 0 }
 
     private companion object {
         const val MAX_EDGE = 480

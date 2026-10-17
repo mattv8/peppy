@@ -777,11 +777,13 @@ describe("BrowserBridge", () => {
     const close = bridge.close_media("attachment", "blob:old");
     expect(revoke).toHaveBeenCalledWith("blob:old");
     expect(revoke).not.toHaveBeenCalledWith("blob:new");
+    expect(port.sent.at(-1)).toMatchObject({ command: "close_media", args: { id: "attachment", url: "blob:old" } });
+    port.reply({ id: 3, ok: true, value: undefined });
     await expect(close).resolves.toBeUndefined();
     await expect(bridge.close_media("attachment", "blob:old")).resolves.toBeUndefined();
     const lastClose = bridge.close_media("attachment", "blob:new");
     expect(port.sent.at(-1)).toMatchObject({ command: "close_media", args: { id: "attachment", url: "blob:new" } });
-    port.reply({ id: 3, ok: true, value: undefined });
+    port.reply({ id: 4, ok: true, value: undefined });
     await expect(lastClose).resolves.toBeUndefined();
     Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
   });

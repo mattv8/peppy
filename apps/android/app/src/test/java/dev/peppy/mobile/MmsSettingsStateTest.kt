@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.peppy_mobile_bindings.MobileBindingsException
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillPause
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillStatus
 
 class MmsSettingsStateTest {
     @Test
@@ -27,4 +29,22 @@ class MmsSettingsStateTest {
         assertTrue(MmsHealth(databaseUnavailable = true).databaseUnavailable)
         assertFalse(MmsHealth().databaseUnavailable)
     }
+    @Test
+    fun generatedBackfillStatusMapsQuarantineEvidenceAndHistoryOnlyPauseIntoHealth() {
+        val status = NativeMmsBackfillStatus(
+            baselineInitialized = true,
+            historyUpperBound = "42",
+            historyComplete = false,
+            pause = NativeMmsBackfillPause.REMOTE_STORAGE,
+            pendingCount = 0uL,
+            quarantinedCount = 3uL,
+            recheckCursor = null,
+        )
+
+        val health = mmsHealthFromNative(emptyList(), status, emptyList())
+
+        assertEquals(3L, health.quarantinedCount)
+        assertEquals("History paused: vault storage capacity", health.backfillStatus)
+    }
+
 }

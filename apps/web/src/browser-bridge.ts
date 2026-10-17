@@ -381,9 +381,7 @@ export class BrowserBridge implements DesktopBridge {
     const media = this.mediaBlobUrls.get(url);
     if (!media) return;
     this.revokeMediaUrl(url);
-    if (![...this.mediaBlobUrls.values()].some((candidate) => candidate.attachmentId === media.attachmentId)) {
-      await this.call("close_media", { id: media.attachmentId, url });
-    }
+    await this.call("close_media", { id: media.attachmentId, url });
   }
   private readonly refreshNotificationContext = (): void => {
     if (!this.notificationContext || this.stopped) return;
@@ -458,6 +456,8 @@ export class BrowserBridge implements DesktopBridge {
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
   public request_attachment_download(id: string): Promise<void> { return this.call("request_attachment_download", { id }); }
   public media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage> { return this.call("media_page", { conversationId, cursor, limit }); }
+  public media_page_around(conversationId: string, attachmentId: string, messageId?: string, limit?: number): ReturnType<DesktopBridge["media_page_around"]> { return this.call("media_page_around", { conversationId, attachmentId, messageId, limit }); }
+  public media_page_newer(conversationId: string, cursor: MediaCursor, limit?: number): Promise<MediaPage> { return this.call("media_page_newer", { conversationId, cursor, limit }); }
   private async mediaOpen(command: "open_media" | "load_media", id: string): Promise<MediaOpen> {
     const result = await this.call<{ state: unknown; bytes?: unknown; mediaType?: unknown; byteSize?: unknown }>(command, { id });
     if (this.stopped) throw new BrowserBridgeError("stopped", "Peppy locked or stopped. Reconnect to continue.");
@@ -470,6 +470,7 @@ export class BrowserBridge implements DesktopBridge {
       if (!oldest) break;
       await this.releaseMediaUrl(oldest);
     }
+    if (this.stopped) throw new BrowserBridgeError("stopped", "Peppy locked or stopped. Reconnect to continue.");
     const url = URL.createObjectURL(new Blob([bytes], { type: result.mediaType }));
     this.mediaBlobUrls.set(url, { attachmentId: id, byteSize });
     return { state: "ready", url, mediaType: result.mediaType, byteSize };

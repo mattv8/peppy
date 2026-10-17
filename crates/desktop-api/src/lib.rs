@@ -2,7 +2,8 @@
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
     AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft, Direction,
-    Error, MediaPage, Message, MessageId, MirroredNotification, SendState, Transport,
+    Error, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
+    Transport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -246,6 +247,9 @@ pub struct AttachmentView {
     pub transfer: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// Producer metadata links a ready thumbnail independently from the original's transfer state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_meta: Option<Box<MediaMetadataView>>,
 }
 
 #[derive(Serialize)]
@@ -268,7 +272,7 @@ pub struct MediaPageItemView {
     pub media_meta: Option<MediaMetadataView>,
     pub cursor: MediaCursorView,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaMetadataView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,6 +283,9 @@ pub struct MediaMetadataView {
     pub duration_ms: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<AttachmentView>,
+    /// `thumbnail_unavailable` is producer-authenticated v3 completion evidence, not a host guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_unavailable: Option<&'static str>,
 }
 
 pub fn media_metadata_view(meta: peppy_client_core::MediaMetadata) -> MediaMetadataView {
@@ -290,6 +297,7 @@ pub fn media_metadata_view(meta: peppy_client_core::MediaMetadata) -> MediaMetad
             .thumbnail
             .as_ref()
             .map(|item| attachment_view(item, None, None)),
+        preview_unavailable: meta.thumbnail.is_none().then_some("thumbnail_unavailable"),
     }
 }
 
@@ -309,6 +317,17 @@ pub struct MediaPageView {
     pub items: Vec<MediaPageItemView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<MediaCursorView>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPageAroundView {
+    pub target: MediaPageItemView,
+    pub newer: Vec<MediaPageItemView>,
+    pub older: Vec<MediaPageItemView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newer_cursor: Option<MediaCursorView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<MediaCursorView>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -393,18 +412,11 @@ pub fn attachment_view(
             AttachmentState::Uploaded | AttachmentState::Available => None,
         },
         retryable,
+        media_meta: None,
     }
 }
 
 pub fn media_page_view(page: MediaPage) -> MediaPageView {
-    fn cursor_view(cursor: peppy_client_core::MediaCursor) -> MediaCursorView {
-        MediaCursorView {
-            sort_at_ms: cursor.sort_at_ms.to_string(),
-            local_order: cursor.local_order.to_string(),
-            message_id: cursor.message_id.to_string(),
-            attachment_position: cursor.attachment_position,
-        }
-    }
     MediaPageView {
         items: page
             .items
@@ -421,6 +433,38 @@ pub fn media_page_view(page: MediaPage) -> MediaPageView {
             })
             .collect(),
         next_cursor: page.next_cursor.map(cursor_view),
+    }
+}
+
+pub fn media_page_around_view(page: MediaPageAround) -> MediaPageAroundView {
+    MediaPageAroundView {
+        target: media_page_item_view(page.target),
+        newer: page.newer.into_iter().map(media_page_item_view).collect(),
+        older: page.older.into_iter().map(media_page_item_view).collect(),
+        newer_cursor: page.newer_cursor.map(cursor_view),
+        older_cursor: page.older_cursor.map(cursor_view),
+    }
+}
+
+fn cursor_view(cursor: peppy_client_core::MediaCursor) -> MediaCursorView {
+    MediaCursorView {
+        sort_at_ms: cursor.sort_at_ms.to_string(),
+        local_order: cursor.local_order.to_string(),
+        message_id: cursor.message_id.to_string(),
+        attachment_position: cursor.attachment_position,
+    }
+}
+
+fn media_page_item_view(item: peppy_client_core::MediaPageItem) -> MediaPageItemView {
+    MediaPageItemView {
+        message_id: item.message.record.message_id.to_string(),
+        sender_address: (item.message.direction == Direction::Incoming)
+            .then_some(item.message.sender_address)
+            .flatten(),
+        timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+        attachment: attachment_view(&item.attachment, None, None),
+        media_meta: item.media_meta.map(media_metadata_view),
+        cursor: cursor_view(item.cursor),
     }
 }
 

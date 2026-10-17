@@ -29,6 +29,26 @@ export interface BrowserSessionOptions {
   onFatal: (error: Error) => void;
 }
 
+function isReadyAttachment(value: CoreResult): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).state === "ready";
+}
+
+function attachmentBytes(value: Record<string, unknown>): number {
+  const size = value.plaintextBytes ?? value.byteSize;
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0 || size > MAX_PLAINTEXT_MEDIA_BYTES) throw new BrowserCoreError("core-error");
+  return size;
+}
+
+function exportedAttachment(value: CoreResult, outputId: string, path: string, filesystem: EmscriptenFilesystem, maxBytes: number): Record<string, unknown> & { bytes: Uint8Array } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
+  const output = value as Record<string, unknown>;
+  const length = output.length;
+  if (output.file !== `worker-output/${outputId}` || typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > maxBytes || typeof output.displayName !== "string" || typeof output.type !== "string") throw new BrowserCoreError("core-error");
+  const bytes = new Uint8Array(filesystem.readFile(path));
+  if (bytes.byteLength !== length) throw new BrowserCoreError("core-error");
+  return { bytes, displayName: output.displayName, type: output.type };
+}
+
 export class BrowserSession {
   private phaseValue: BrowserSessionPhase = "closed";
   private generationValue = 0;
@@ -247,20 +267,27 @@ export class BrowserSession {
     const cached = this.previews.get(id);
     if (cached) return cached;
     if (this.previewedIds.has(id)) return undefined;
-    return this.runtime.read(async () => {
-      try {
+    let previewUrl: unknown;
+    try {
+      previewUrl = await this.runtime.read(async () => {
+        this.requireReady();
+        const info = await this.options.core.invoke({ command: "attachment_info", args: { id } });
+        if (!isReadyAttachment(info)) throw new CoreRejectedError("media-pending");
+        attachmentBytes(info);
         await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
         const value = await this.options.core.invoke({ command: "preview_attachment", args: { id } });
-        const previewUrl = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>).previewUrl : undefined;
-        if (typeof previewUrl !== "string" || previewUrl.length > MAX_PREVIEW_URL_BYTES || !/^data:image\/png;base64,[A-Za-z0-9+/]*={0,2}$/.test(previewUrl)) { this.previewedIds.add(id); return undefined; }
-        if (this.previews.size >= 32) this.previews.delete(this.previews.keys().next().value!);
-        this.previews.set(id, previewUrl);
-        return previewUrl;
-      } catch {
-        this.previewedIds.add(id);
-        return undefined;
-      }
-    });
+        return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>).previewUrl : undefined;
+      });
+    } catch {
+      return undefined;
+    }
+    if (typeof previewUrl !== "string" || previewUrl.length > MAX_PREVIEW_URL_BYTES || !/^data:image\/png;base64,[A-Za-z0-9+/]*={0,2}$/.test(previewUrl)) {
+      this.previewedIds.add(id);
+      return undefined;
+    }
+    if (this.previews.size >= 32) this.previews.delete(this.previews.keys().next().value!);
+    this.previews.set(id, previewUrl);
+    return previewUrl;
   }
 
   public async readWorkerOutput(id: string, expectedBytes: number): Promise<Uint8Array> {
@@ -275,16 +302,15 @@ export class BrowserSession {
     });
   }
 
-  /** Hydrates ciphertext and deletes the Worker-only plaintext export in the same serialized read. */
+  /** Exports media and deletes the Worker-only plaintext output after its serialized mutation settles. */
   public async exportAttachment(id: string): Promise<Record<string, unknown> & { bytes: Uint8Array }> {
     this.requireReady();
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new BrowserSessionError("cancelled");
     const outputId = crypto.randomUUID();
     const path = `${ROOT}/worker-output/${outputId}`;
-    return this.runtime.read(async () => {
-      this.requireReady();
-      try {
-        await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
+    try {
+      return await this.accessMedia(id, MAX_PLAINTEXT_MEDIA_BYTES, false, async () => {
+        this.requireReady();
         const value = await this.options.core.invoke({ command: "export_attachment", args: { id, outputId } });
         if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
         const output = value as Record<string, unknown>;
@@ -293,10 +319,22 @@ export class BrowserSession {
         const bytes = new Uint8Array(this.options.filesystem.readFile(path));
         if (bytes.byteLength !== length) throw new BrowserCoreError("core-error");
         return { bytes, displayName: output.displayName, type: output.type };
-      } finally {
-        try { this.options.filesystem.unlink(path); } catch {}
-      }
-    });
+      });
+    } finally { try { this.options.filesystem.unlink(path); } catch {} }
+  }
+
+  /** Checks availability, hydrates, and exports under one checkpointed mutation. */
+  public async openMediaAttachment(id: string, maxBytes: number): Promise<Record<string, unknown> & { bytes: Uint8Array }> {
+    this.requireReady();
+    if (!/^[0-9a-f-]{36}$/.test(id) || !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_PLAINTEXT_MEDIA_BYTES) throw new BrowserSessionError("cancelled");
+    const outputId = crypto.randomUUID();
+    const path = `${ROOT}/worker-output/${outputId}`;
+    try {
+      return await this.accessMedia(id, maxBytes, true, async () => {
+        const value = await this.options.core.invoke({ command: "export_attachment", args: { id, outputId } });
+        return exportedAttachment(value, outputId, path, this.options.filesystem, maxBytes);
+      });
+    } finally { try { this.options.filesystem.unlink(path); } catch {} }
   }
 
   /** Produces and consumes a private metadata-free derivative without exposing a Worker path. */
@@ -305,10 +343,9 @@ export class BrowserSession {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new BrowserSessionError("cancelled");
     const outputId = crypto.randomUUID();
     const path = `${ROOT}/worker-output/${outputId}`;
-    return this.runtime.read(async () => {
-      this.requireReady();
-      try {
-        await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
+    try {
+      return await this.accessMedia(id, MAX_PLAINTEXT_MEDIA_BYTES, false, async () => {
+        this.requireReady();
         const value = await this.options.core.invoke({ command: "public_image", args: { id, outputId } });
         if (typeof value !== "object" || value === null || Array.isArray(value)) throw new BrowserCoreError("core-error");
         const output = value as Record<string, unknown>;
@@ -318,10 +355,8 @@ export class BrowserSession {
         const bytes = new Uint8Array(this.options.filesystem.readFile(path));
         if (bytes.byteLength !== byteSize) throw new BrowserCoreError("core-error");
         return { ...output, name, bytes };
-      } finally {
-        try { this.options.filesystem.unlink(path); } catch {}
-      }
-    });
+      });
+    } finally { try { this.options.filesystem.unlink(path); } catch {} }
   }
 
   public tokenForTransport(): string {
@@ -377,6 +412,40 @@ export class BrowserSession {
     const generation = await this.options.checkpoint.commit(checkpoint);
     this.applyCheckpoint(checkpoint, generation);
     this.createRuntime();
+  }
+
+  private async accessMedia<T>(id: string, maxBytes: number, retainLease: boolean, operation: () => Promise<T>): Promise<T> {
+    const preflight = await this.query("attachment_info", { id });
+    if (!isReadyAttachment(preflight)) throw new CoreRejectedError("media-pending");
+    if (attachmentBytes(preflight) > maxBytes) throw new CoreRejectedError("unsupported");
+    let checkpoint: CheckpointInput | undefined;
+    try {
+      const result = await this.runtime.mutate({
+        invoke: async () => {
+          this.requireReady();
+          const info = await this.options.core.invoke({ command: "attachment_info", args: { id } });
+          if (!isReadyAttachment(info)) throw new CoreRejectedError("media-pending");
+          if (attachmentBytes(info) > maxBytes) throw new CoreRejectedError("unsupported");
+          await this.options.core.invoke({ command: "retain_attachment_ciphertext", args: { id } });
+          try {
+            await hydrateCipher(id, this.generationValue, this.options.checkpoint, this.options.filesystem);
+            const value = await operation();
+            await this.options.core.invoke({ command: "touch_attachment_ciphertext", args: { id } });
+            if (!retainLease) await this.options.core.invoke({ command: "release_attachment_ciphertext", args: { id } });
+            return value;
+          } catch (error: unknown) {
+            try { await this.options.core.invoke({ command: "release_attachment_ciphertext", args: { id } }); } catch {}
+            throw error;
+          }
+        },
+        capture: async generation => checkpoint = await this.capture(generation),
+      });
+      this.applyCheckpoint(checkpoint, result.generation);
+      return result.value;
+    } catch (error: unknown) {
+      this.applyHandledCheckpoint(checkpoint, error);
+      throw error;
+    }
   }
 
   private async capture(expectedGeneration: number): Promise<CheckpointInput> {

@@ -77,6 +77,14 @@ class MmsMediaPreviewTest {
         assertTrue(retriever.released)
     }
 
+    @Test fun zeroOrMalformedDurationIsUnknown() {
+        val zero = FakeRetriever(mapOf("9" to "0"), null)
+        val malformed = FakeRetriever(mapOf("9" to "not-a-duration"), null)
+
+        assertNull(MmsMediaPreview { zero }.inspect(File.createTempFile("mms-preview", ".mp3"), "audio/mpeg").metadata.durationMs)
+        assertNull(MmsMediaPreview { malformed }.inspect(File.createTempFile("mms-preview", ".mp3"), "audio/mpeg").metadata.durationMs)
+    }
+
     @Test fun retrieverFailureReturnsUnavailableAndReleasesIt() {
         val retriever = FakeRetriever(emptyMap(), null, failOnSetDataSource = true)
         val result = MmsMediaPreview { retriever }.inspect(File.createTempFile("mms-preview", ".mp4"), "video/mp4")
