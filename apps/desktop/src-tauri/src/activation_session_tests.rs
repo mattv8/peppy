@@ -195,6 +195,11 @@ async fn claim_unlock_survives_stale_session_race_reopen_and_live_rounds() {
     let after_refresh = reopened.client.key_status().unwrap();
     assert_eq!(after_refresh.active_epoch, Some(1));
     assert!(after_refresh.unlocked_epochs.contains(&1));
+    assert!(
+        crate::sync::drain(&reopened, Duration::from_secs(8)).await,
+        "live workers did not stop after observing epoch 2"
+    );
+    assert!(reopened.cancel.is_cancelled());
     reopened.set_status(|status| status.live = true);
     let behind = snapshot(&reopened, &origin);
     assert_eq!(behind.connection.state, "connected");
