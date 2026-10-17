@@ -1,8 +1,11 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -403,7 +406,7 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T, message: &'static str) -> B
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        File::open(path.parent().expect("cache path parent"))?.sync_all()
+        sync_directory(path.parent().expect("cache path parent"))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -413,14 +416,31 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T, message: &'static str) -> B
 }
 
 fn sync_file(path: &Path) -> BridgeResult<()> {
-    File::open(path)
+    OpenOptions::new()
+        .write(true)
+        .open(path)
         .and_then(|f| f.sync_all())
         .map_err(|_| BridgeError::new("update-cache", "Could not finalize update payload."))
 }
+
 fn sync_dir(path: &Path) -> BridgeResult<()> {
-    File::open(path)
-        .and_then(|f| f.sync_all())
+    sync_directory(path)
         .map_err(|_| BridgeError::new("update-cache", "Could not finalize update cache."))
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows does not support syncing directory handles. File contents are still flushed;
+        // cache recovery verifies renamed entries, but this is not full power-loss durability.
+        let _ = path;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +464,28 @@ mod tests {
         fs::create_dir_all(directory(root.path())).unwrap();
         fs::write(directory(root.path()).join("settings.json"), b"nope").unwrap();
         assert!(load_settings(root.path()).is_err());
+    }
+
+    #[test]
+    fn settings_round_trip_and_rewrite() {
+        let root = tempdir().unwrap();
+        let initial = Settings {
+            automatic: false,
+            deferred_until: Some("2026-10-18T00:00:00Z".into()),
+            attempted_version: Some("1.2.3".into()),
+        };
+        save_settings(root.path(), &initial).unwrap();
+        let rewritten = Settings {
+            automatic: true,
+            deferred_until: None,
+            attempted_version: Some("1.2.4".into()),
+        };
+        save_settings(root.path(), &rewritten).unwrap();
+
+        let loaded = load_settings(root.path()).unwrap();
+        assert!(loaded.automatic);
+        assert_eq!(loaded.deferred_until, None);
+        assert_eq!(loaded.attempted_version.as_deref(), Some("1.2.4"));
     }
 
     #[test]
