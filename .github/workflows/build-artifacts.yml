@@ -272,8 +272,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar -C apps/desktop/src-tauri/target/release/bundle/macos \
-            -czf dist/desktop-macos-app.tar.gz -- *.app
+          archive="$PWD/dist/desktop-macos-app.tar.gz"
+          (
+            cd apps/desktop/src-tauri/target/release/bundle/macos
+            tar -czf "$archive" -- *.app
+          )
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-${{ matrix.name }}-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
