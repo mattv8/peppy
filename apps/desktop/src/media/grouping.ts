@@ -1,9 +1,7 @@
 import type { AttachmentView, MessageView } from "@peppy/desktop-ui/bridge-contracts";
 
 export type GalleryAttachment = AttachmentView & {
-  thumbnailUrl?: string;
   originalUrl?: string;
-  previewUnavailable?: boolean;
   durationMs?: number;
 };
 
@@ -21,8 +19,10 @@ export type MessageGroup = {
 const GROUP_WINDOW_MS = 3 * 60 * 1000;
 
 function timestampMilliseconds(message: GalleryMessage): number | undefined {
-  const numericValue = Number(message.timestamp);
-  const value = Number.isFinite(numericValue) ? numericValue : Date.parse(message.timestamp);
+  const timestamp = message.timestamp.trim();
+  if (!timestamp) return undefined;
+  const numericValue = Number(timestamp);
+  const value = Number.isFinite(numericValue) ? numericValue : Date.parse(timestamp);
   return Number.isFinite(value) ? value : undefined;
 }
 
@@ -38,6 +38,7 @@ function senderIdentity(message: GalleryMessage): string | undefined {
 function canJoin(group: GalleryMessage[], candidate: GalleryMessage): boolean {
   const previous = group.at(-1);
   if (!previous || !isImageOnly(candidate) || !isImageOnly(previous)) return false;
+  if (previous.body || previous.subject) return false;
   const previousIdentity = senderIdentity(previous);
   const candidateIdentity = senderIdentity(candidate);
   if (!previousIdentity || previousIdentity !== candidateIdentity) return false;

@@ -6,8 +6,9 @@ use peppy_client_core::{
     ComposeDraftUpdate, DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts,
     GatewayPlatform, GatewaySettings, IncomingSms, KeyProfile, MAX_SEAL_BATCH, Message,
     MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause, MmsBackfillPhase,
-    MmsBackfillRecheck, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsLegacyBackfillState,
-    MmsSource, NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
+    MmsBackfillRecheck, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
+    MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
+    NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
     PermitBlock, PermitDecision, ReceivedCommand, SendResult, SmsAcquisitionInput,
     SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
     Transport, VaultCheckHeader, VaultId,
@@ -231,6 +232,7 @@ pub struct NativeMmsBackfillStatus {
     pub history_complete: bool,
     pub pause: Option<NativeMmsBackfillPause>,
     pub pending_count: u64,
+    pub quarantined_count: u64,
     pub recheck_cursor: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -241,6 +243,7 @@ pub struct NativeMmsBackfillScanPlan {
     pub cursor: Option<String>,
     pub history_upper_bound: Option<String>,
     pub history_complete: bool,
+    pub paused: bool,
     pub pause: Option<NativeMmsBackfillPause>,
     pub budget: u64,
 }
@@ -284,6 +287,29 @@ pub struct NativeMmsAcquisition {
     pub attachment_ids: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsProviderIdentityQuarantine {
+    pub source: NativeMmsSource,
+    pub incoming: bool,
+    pub reason: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsBeginOutcome {
+    Acquired {
+        // UniFFI lowers Box<Record> transparently while keeping this enum compact.
+        acquisition: Box<NativeMmsAcquisition>,
+    },
+    Quarantined {
+        quarantine: NativeMmsProviderIdentityQuarantine,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsPreviewState {
+    Pending,
+    Deferred,
+    PermanentlyUnavailable,
+    Ready,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsAcquisitionPart {
     pub provider_part_id: String,
     pub attachment_id: String,
@@ -291,6 +317,8 @@ pub struct NativeMmsAcquisitionPart {
     pub height: Option<u32>,
     pub duration_ms: Option<u64>,
     pub thumbnail_attachment_id: Option<String>,
+    pub preview_state: NativeMmsPreviewState,
+    pub metadata_recorded: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsReplyContext {
@@ -1172,6 +1200,7 @@ fn mms_backfill_status_view(
         history_complete: value.history_complete,
         pause: value.pause.map(mms_backfill_pause_view),
         pending_count: value.pending_count,
+        quarantined_count: value.quarantined_count,
         recheck_cursor: value.recheck_cursor,
     }
 }
@@ -1183,8 +1212,49 @@ fn mms_backfill_scan_plan_view(value: MmsBackfillScanPlan) -> NativeMmsBackfillS
         cursor: value.cursor,
         history_upper_bound: value.history_upper_bound,
         history_complete: value.history_complete,
+        paused: value.paused,
         pause: value.pause.map(mms_backfill_pause_view),
         budget: value.budget as u64,
+    }
+}
+fn mms_preview_state(value: NativeMmsPreviewState) -> MmsPreviewState {
+    match value {
+        NativeMmsPreviewState::Pending => MmsPreviewState::Pending,
+        NativeMmsPreviewState::Deferred => MmsPreviewState::Deferred,
+        NativeMmsPreviewState::PermanentlyUnavailable => MmsPreviewState::PermanentlyUnavailable,
+        NativeMmsPreviewState::Ready => MmsPreviewState::Ready,
+    }
+}
+fn mms_preview_state_view(value: MmsPreviewState) -> NativeMmsPreviewState {
+    match value {
+        MmsPreviewState::Pending => NativeMmsPreviewState::Pending,
+        MmsPreviewState::Deferred => NativeMmsPreviewState::Deferred,
+        MmsPreviewState::PermanentlyUnavailable => NativeMmsPreviewState::PermanentlyUnavailable,
+        MmsPreviewState::Ready => NativeMmsPreviewState::Ready,
+    }
+}
+fn mms_quarantine_view(
+    value: MmsProviderIdentityQuarantine,
+) -> NativeMmsProviderIdentityQuarantine {
+    NativeMmsProviderIdentityQuarantine {
+        source: NativeMmsSource {
+            source_generation: value.source.source_generation,
+            subscription_id: value.source.subscription_id,
+            provider_message_id: value.source.provider_message_id,
+            provider_thread_id: value.source.provider_thread_id,
+        },
+        incoming: value.direction == peppy_client_core::Direction::Incoming,
+        reason: value.reason,
+    }
+}
+fn mms_begin_outcome_view(value: MmsBeginOutcome) -> NativeMmsBeginOutcome {
+    match value {
+        MmsBeginOutcome::Acquired(acquisition) => NativeMmsBeginOutcome::Acquired {
+            acquisition: Box::new(mms_acquisition_view(acquisition)),
+        },
+        MmsBeginOutcome::Quarantined(quarantine) => NativeMmsBeginOutcome::Quarantined {
+            quarantine: mms_quarantine_view(quarantine),
+        },
     }
 }
 fn mms_backfill_recheck_request_view(
@@ -1582,6 +1652,18 @@ impl NativeClient {
         })
         .map(mms_acquisition_view)
     }
+    pub fn begin_mms_acquisition_outcome(
+        &self,
+        input: NativeMmsAcquisitionInput,
+    ) -> Result<NativeMmsBeginOutcome, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.begin_mms_acquisition_outcome(mms_input(input))
+        })
+        .map(mms_begin_outcome_view)
+    }
+    pub fn mms_content_version(&self) -> u32 {
+        peppy_client_core::MMS_CONTENT_VERSION
+    }
     pub fn mms_acquisitions(
         &self,
         limit: u64,
@@ -1625,6 +1707,8 @@ impl NativeClient {
                     height: part.height,
                     duration_ms: part.duration_ms,
                     thumbnail_attachment_id: part.thumbnail_attachment_id.map(|id| id.to_string()),
+                    preview_state: mms_preview_state_view(part.preview_state),
+                    metadata_recorded: part.metadata_recorded,
                 })
                 .collect()
         })
@@ -1650,6 +1734,20 @@ impl NativeClient {
                 height,
                 duration_ms,
                 thumbnail_attachment_id,
+            )
+        })
+    }
+    pub fn set_mms_acquisition_part_preview_state(
+        &self,
+        id: String,
+        provider_part_id: String,
+        state: NativeMmsPreviewState,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_mms_acquisition_part_preview_state(
+                &id,
+                &provider_part_id,
+                mms_preview_state(state),
             )
         })
     }
@@ -1747,6 +1845,18 @@ impl NativeClient {
             client.mms_backfill_recheck_requests(&generation, &scope)
         })
         .map(mms_backfill_recheck_view)
+    }
+    pub fn request_mms_recheck(
+        &self,
+        generation: String,
+        scope: String,
+        limit: u64,
+    ) -> Result<u64, MobileBindingsError> {
+        let limit = usize::try_from(limit).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.request_mms_recheck(&generation, &scope, limit)
+        })
+        .and_then(|count| u64::try_from(count).map_err(|_| MobileBindingsError::InvalidRequest))
     }
     pub fn mms_backfill_status(
         &self,

@@ -380,7 +380,7 @@ fn provider_wide_scope_observes_actual_subscription_acquisitions() {
 }
 
 #[test]
-fn completed_provider_id_reuse_is_an_explicit_conflict_not_a_false_deduplication() {
+fn completed_provider_id_date_change_remains_the_existing_source() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let cfg = config(&dir, "gateway", &vault);
@@ -395,16 +395,19 @@ fn completed_provider_id_reuse_is_an_explicit_conflict_not_a_false_deduplication
 
     let mut reused = input("9");
     reused.observed_at_ms = 42;
-    assert_eq!(client.begin_mms_acquisition(reused), Err(Error::Conflict));
+    assert_eq!(
+        client.begin_mms_acquisition(reused).unwrap().acquisition_id,
+        acquisition.acquisition_id
+    );
     assert_eq!(
         client
             .mms_backfill_status("phone-install", "sim-1")
             .unwrap()
             .pending_count,
-        1
+        0
     );
     assert!(
-        !client
+        client
             .finish_mms_backfill_phase(
                 "phone-install",
                 "sim-1",
@@ -420,7 +423,7 @@ fn completed_provider_id_reuse_is_an_explicit_conflict_not_a_false_deduplication
             .mms_backfill_status("phone-install", "sim-1")
             .unwrap()
             .pending_count,
-        1
+        0
     );
 }
 
@@ -508,5 +511,216 @@ fn paused_rechecks_include_existing_backlog_and_fairly_mix_completed_rows() {
         pass.requests
             .iter()
             .any(|request| request.provider_message_id == "1")
+    );
+}
+
+#[test]
+fn phase_pauses_keep_live_and_recheck_available_for_remote_capacity() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "40")
+        .unwrap();
+    client
+        .report_mms_backfill_vault_quota_exceeded("phone-install", "sim-1")
+        .unwrap();
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "40")
+        .unwrap();
+    assert!(!live_plan(&plans).paused);
+    assert!(history_plan(&plans).paused);
+    let recheck = plans
+        .iter()
+        .find(|plan| plan.phase == MmsBackfillPhase::Recheck)
+        .unwrap();
+    assert!(!recheck.paused);
+    assert_eq!(recheck.pause, Some(MmsBackfillPause::RemoteStorage));
+}
+
+#[test]
+fn manual_recheck_reopens_only_bounded_terminal_work() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let first = client.begin_mms_acquisition(input("1")).unwrap();
+    let second = client.begin_mms_acquisition(input("2")).unwrap();
+    client
+        .set_mms_acquisition_state(
+            &first.acquisition_id,
+            MmsAcquisitionState::Unavailable,
+            Some("provider missing"),
+        )
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &second.acquisition_id,
+            MmsAcquisitionState::Blocked,
+            Some("unsupported"),
+        )
+        .unwrap();
+    assert_eq!(
+        client
+            .request_mms_recheck("phone-install", "sim-1", 1)
+            .unwrap(),
+        1
+    );
+    let acquisitions = client.mms_acquisitions(10).unwrap();
+    assert_eq!(
+        acquisitions
+            .iter()
+            .filter(|acquisition| acquisition.state == MmsAcquisitionState::Pending)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn blocked_rows_are_terminal_for_capacity_status_and_history_completion() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "blocked-terminal", &vault), &vault);
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "8")
+        .unwrap();
+    let blocked = client.begin_mms_acquisition(input("1")).unwrap();
+    client
+        .set_mms_acquisition_state(
+            &blocked.acquisition_id,
+            MmsAcquisitionState::Blocked,
+            Some("terminal provider limitation"),
+        )
+        .unwrap();
+
+    assert_eq!(
+        client
+            .mms_backfill_status("phone-install", "sim-1")
+            .unwrap()
+            .pending_count,
+        0
+    );
+    assert!(
+        client
+            .finish_mms_backfill_phase(
+                "phone-install",
+                "sim-1",
+                MmsBackfillPhase::History,
+                history_plan(&plans).history_upper_bound.as_deref().unwrap(),
+                true,
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+fn remote_pause_is_restored_after_local_acquisition_capacity_clears() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "capacity-precedence", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "1001")
+        .unwrap();
+    client
+        .report_mms_backfill_vault_quota_exceeded("phone-install", "sim-1")
+        .unwrap();
+    let mut first = None;
+    for number in 0..MAX_MMS_ACQUISITIONS {
+        let acquisition = client
+            .begin_mms_acquisition(input(&number.to_string()))
+            .unwrap();
+        first.get_or_insert(acquisition.acquisition_id);
+    }
+
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "1001")
+        .unwrap();
+    assert_eq!(
+        live_plan(&plans).pause,
+        Some(MmsBackfillPause::LocalCapacity)
+    );
+    assert!(live_plan(&plans).paused);
+    assert!(
+        !plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Recheck)
+            .unwrap()
+            .paused
+    );
+    client
+        .report_mms_backfill_remote_capacity("phone-install", "sim-1", true)
+        .unwrap();
+    assert_eq!(
+        client
+            .mms_backfill_status("phone-install", "sim-1")
+            .unwrap()
+            .pause,
+        Some(MmsBackfillPause::LocalCapacity)
+    );
+    client
+        .report_mms_backfill_vault_quota_exceeded("phone-install", "sim-1")
+        .unwrap();
+
+    client
+        .set_mms_acquisition_state(
+            first.as_deref().unwrap(),
+            MmsAcquisitionState::Unavailable,
+            Some("retired"),
+        )
+        .unwrap();
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "1001")
+        .unwrap();
+    assert_eq!(
+        live_plan(&plans).pause,
+        Some(MmsBackfillPause::RemoteStorage)
+    );
+    assert!(!live_plan(&plans).paused);
+    assert!(history_plan(&plans).paused);
+}
+
+#[test]
+fn blocked_rows_do_not_disagree_with_pending_only_admission_capacity() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "pending-admission", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "1001")
+        .unwrap();
+    let blocked = client.begin_mms_acquisition(input("blocked")).unwrap();
+    client
+        .set_mms_acquisition_state(
+            &blocked.acquisition_id,
+            MmsAcquisitionState::Blocked,
+            Some("terminal"),
+        )
+        .unwrap();
+    for number in 0..(MAX_MMS_ACQUISITIONS - 1) {
+        client
+            .begin_mms_acquisition(input(&format!("pending-{number}")))
+            .unwrap();
+    }
+
+    assert!(
+        !live_plan(
+            &client
+                .plan_mms_backfill_scans("phone-install", "sim-1", "1001")
+                .unwrap()
+        )
+        .paused
+    );
+    client
+        .begin_mms_acquisition(input("pending-final"))
+        .unwrap();
+    assert!(
+        live_plan(
+            &client
+                .plan_mms_backfill_scans("phone-install", "sim-1", "1001")
+                .unwrap()
+        )
+        .paused
+    );
+    assert_eq!(
+        client.begin_mms_acquisition(input("pending-overflow")),
+        Err(Error::MmsAcquisitionLimit)
     );
 }

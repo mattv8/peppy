@@ -77,6 +77,21 @@ pub struct MmsAcquisition {
     pub attachment_ids: Vec<AttachmentId>,
 }
 
+/// The durable result of resolving a provider row. Quarantine is non-fatal: the host may advance
+/// its scan checkpoint because core retained the ambiguous evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MmsBeginOutcome {
+    Acquired(MmsAcquisition),
+    Quarantined(MmsProviderIdentityQuarantine),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MmsProviderIdentityQuarantine {
+    pub source: MmsSource,
+    pub direction: Direction,
+    pub reason: String,
+}
+
 /// A durable provider-part identity, used to reuse an already prepared local attachment on retry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MmsAcquisitionPart {
@@ -86,6 +101,38 @@ pub struct MmsAcquisitionPart {
     pub height: Option<u32>,
     pub duration_ms: Option<u64>,
     pub thumbnail_attachment_id: Option<AttachmentId>,
+    pub preview_state: MmsPreviewState,
+    pub metadata_recorded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MmsPreviewState {
+    Pending,
+    Deferred,
+    PermanentlyUnavailable,
+    Ready,
+}
+
+impl MmsPreviewState {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Deferred => "deferred",
+            Self::PermanentlyUnavailable => "permanently_unavailable",
+            Self::Ready => "ready",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "pending" => Self::Pending,
+            "deferred" => Self::Deferred,
+            "permanently_unavailable" => Self::PermanentlyUnavailable,
+            "ready" => Self::Ready,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,21 +148,119 @@ impl Client {
         &self,
         input: MmsAcquisitionInput,
     ) -> Result<MmsAcquisition, Error> {
+        match self.begin_mms_acquisition_outcome(input)? {
+            MmsBeginOutcome::Acquired(acquisition) => Ok(acquisition),
+            // Preserve the established exceptional surface for callers that have not adopted the
+            // additive outcome API. Native scanners use the typed outcome instead.
+            MmsBeginOutcome::Quarantined(_) => Err(Error::Conflict),
+        }
+    }
+
+    pub fn begin_mms_acquisition_outcome(
+        &self,
+        input: MmsAcquisitionInput,
+    ) -> Result<MmsBeginOutcome, Error> {
+        self.begin_mms_acquisition_resolved(input)
+    }
+
+    fn begin_mms_acquisition_resolved(
+        &self,
+        input: MmsAcquisitionInput,
+    ) -> Result<MmsBeginOutcome, Error> {
         let (input, unavailable_reason) = normalize_pending_input(input)?;
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing = acquisition_by_source(&tx, &input.source, input.direction)?;
-        if let Some(acquisition) = existing.as_ref()
-            && acquisition.state == MmsAcquisitionState::Complete
-        {
-            if same_provider_identity(&acquisition.input, &input) {
-                tx.commit()?;
-                return Ok(acquisition.clone());
-            }
-            super::mms_backfill::record_provider_identity_conflict(&tx, &input)?;
+        let prior = acquisitions_by_provider_source(&tx, &input.source, input.direction)?;
+        let completed_ambiguity = prior.iter().any(|acquisition| {
+            acquisition.state == MmsAcquisitionState::Complete
+                && !same_provider_identity(&acquisition.input, &input)
+                && !strongly_distinct_provider_instance(&acquisition.input, &input)
+        });
+        if completed_ambiguity {
+            let ambiguous_pending = prior.iter().filter(|acquisition| {
+                acquisition.state == MmsAcquisitionState::Pending
+                    && !strongly_distinct_provider_instance(&acquisition.input, &input)
+            });
+            let detached = retire_provider_identity_acquisitions(
+                &tx,
+                ambiguous_pending,
+                "provider identity is ambiguous",
+            )?;
+            let quarantine =
+                provider_identity_quarantine(&tx, &input, "provider identity is ambiguous")?;
+            prune_terminal_acquisitions(&tx)?;
             tx.commit()?;
-            return Err(Error::Conflict);
+            drop(guard);
+            discard_detached(self, detached)?;
+            return Ok(MmsBeginOutcome::Quarantined(quarantine));
+        }
+        if let Some(completed) = prior.iter().find(|acquisition| {
+            acquisition.state == MmsAcquisitionState::Complete
+                && same_provider_identity(&acquisition.input, &input)
+        }) {
+            tx.commit()?;
+            return Ok(MmsBeginOutcome::Acquired(completed.clone()));
+        }
+
+        let exact = prior.iter().find(|acquisition| {
+            acquisition.state == MmsAcquisitionState::Pending
+                && same_provider_identity(&acquisition.input, &input)
+        });
+        let compatible = prior
+            .iter()
+            .filter(|acquisition| {
+                acquisition.state == MmsAcquisitionState::Pending
+                    && !strongly_distinct_provider_instance(&acquisition.input, &input)
+            })
+            .collect::<Vec<_>>();
+        let terminal = prior
+            .iter()
+            .filter(|acquisition| {
+                is_terminal_acquisition_state(acquisition.state)
+                    && !strongly_distinct_provider_instance(&acquisition.input, &input)
+            })
+            .collect::<Vec<_>>();
+        if exact.is_none() && compatible.len() + terminal.len() > 1 {
+            let detached = retire_provider_identity_acquisitions(
+                &tx,
+                compatible.iter().copied(),
+                "provider identity is ambiguous",
+            )?;
+            let quarantine =
+                provider_identity_quarantine(&tx, &input, "provider identity is ambiguous")?;
+            prune_terminal_acquisitions(&tx)?;
+            tx.commit()?;
+            drop(guard);
+            discard_detached(self, detached)?;
+            return Ok(MmsBeginOutcome::Quarantined(quarantine));
+        }
+        let existing = exact
+            .cloned()
+            .or_else(|| compatible.first().map(|row| (*row).clone()));
+        if existing.is_none() {
+            if terminal.len() == 1
+                && same_provider_identity(&terminal[0].input, &input)
+                && same_terminal_provider_input(&terminal[0].input, &input)
+            {
+                tx.commit()?;
+                return Ok(MmsBeginOutcome::Acquired(terminal[0].clone()));
+            }
+            if !terminal.is_empty() {
+                let quarantine =
+                    provider_identity_quarantine(&tx, &input, "provider identity is ambiguous")?;
+                tx.commit()?;
+                return Ok(MmsBeginOutcome::Quarantined(quarantine));
+            }
+        }
+        let mut retired_detached = Vec::new();
+        if existing.is_none() {
+            let stale = prior.iter().filter(|acquisition| {
+                acquisition.state == MmsAcquisitionState::Pending
+                    && strongly_distinct_provider_instance(&acquisition.input, &input)
+            });
+            retired_detached =
+                retire_provider_identity_acquisitions(&tx, stale, "provider identity superseded")?;
         }
 
         let reconciliation = if unavailable_reason.is_none() {
@@ -158,10 +303,11 @@ impl Client {
             };
             if existing.is_some() {
                 tx.execute(
-                    "UPDATE mms_acquisitions SET conversation_id=?,input=?,state='complete',reason=NULL,message_id=?,source_sequence=? WHERE acquisition_id=?",
+                    "UPDATE mms_acquisitions SET conversation_id=?,input=?,source_instance_id=?,state='complete',reason=NULL,message_id=?,source_sequence=? WHERE acquisition_id=?",
                     params![
                         conversation_id.to_string(),
                         super::json(&stored_input)?,
+                        source_instance_id(&stored_input),
                         message_id.to_string(),
                         super::to_i64(source_sequence.0)?,
                         acquisition_id,
@@ -170,12 +316,13 @@ impl Client {
             } else {
                 let order = next_acquisition_order(&tx)?;
                 tx.execute(
-                    "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,? ,?,'complete',NULL,?,?,?)",
+                    "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_instance_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,? ,?,'complete',NULL,?,?,?)",
                     params![
                         acquisition_id,
                         stored_input.source.source_generation,
                         stored_input.source.subscription_id,
                         stored_input.source.provider_message_id,
+                        source_instance_id(&stored_input),
                         direction_code(stored_input.direction),
                         conversation_id.to_string(),
                         super::json(&stored_input)?,
@@ -188,15 +335,16 @@ impl Client {
             prune_terminal_acquisitions(&tx)?;
             tx.commit()?;
             drop(guard);
-            discard_detached(self, detached)?;
-            return Ok(MmsAcquisition {
+            retired_detached.extend(detached);
+            discard_detached(self, retired_detached)?;
+            return Ok(MmsBeginOutcome::Acquired(MmsAcquisition {
                 acquisition_id,
                 conversation_id,
                 input: stored_input,
                 state: MmsAcquisitionState::Complete,
                 reason: None,
                 attachment_ids: Vec::new(),
-            });
+            }));
         }
 
         if reconciliation == Reconciliation::Ambiguous {
@@ -232,18 +380,24 @@ impl Client {
             };
             if existing.is_some() {
                 tx.execute(
-                    "UPDATE mms_acquisitions SET input=?,state='unavailable',reason=? WHERE acquisition_id=?",
-                    params![super::json(&stored_input)?, REASON, acquisition_id],
+                    "UPDATE mms_acquisitions SET input=?,source_instance_id=?,state='unavailable',reason=? WHERE acquisition_id=?",
+                    params![
+                        super::json(&stored_input)?,
+                        source_instance_id(&stored_input),
+                        REASON,
+                        acquisition_id
+                    ],
                 )?;
             } else {
                 let order = next_acquisition_order(&tx)?;
                 tx.execute(
-                    "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,? ,?,'unavailable',?,?,?,?)",
+                "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_instance_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,? ,?,'unavailable',?,?,?,?)",
                     params![
                         acquisition_id,
                         stored_input.source.source_generation,
                         stored_input.source.subscription_id,
                         stored_input.source.provider_message_id,
+                        source_instance_id(&stored_input),
                         direction_code(stored_input.direction),
                         conversation_id.to_string(),
                         super::json(&stored_input)?,
@@ -257,15 +411,16 @@ impl Client {
             prune_terminal_acquisitions(&tx)?;
             tx.commit()?;
             drop(guard);
-            discard_detached(self, detached)?;
-            return Ok(MmsAcquisition {
+            retired_detached.extend(detached);
+            discard_detached(self, retired_detached)?;
+            return Ok(MmsBeginOutcome::Acquired(MmsAcquisition {
                 acquisition_id,
                 conversation_id,
                 input: stored_input,
                 state: MmsAcquisitionState::Unavailable,
                 reason: Some(REASON.into()),
                 attachment_ids: Vec::new(),
-            });
+            }));
         }
 
         if let Some(mut acquisition) = existing {
@@ -290,9 +445,10 @@ impl Client {
                 Vec::new()
             };
             tx.execute(
-                "UPDATE mms_acquisitions SET input=?,state=?,reason=? WHERE acquisition_id=?",
+                "UPDATE mms_acquisitions SET input=?,source_instance_id=?,state=?,reason=? WHERE acquisition_id=?",
                 params![
                     super::json(&stored_input)?,
+                    source_instance_id(&stored_input),
                     state.code(),
                     reason,
                     acquisition.acquisition_id
@@ -307,8 +463,9 @@ impl Client {
                 acquisition.attachment_ids.clear();
             }
             drop(guard);
-            discard_detached(self, detached)?;
-            return Ok(acquisition);
+            retired_detached.extend(detached);
+            discard_detached(self, retired_detached)?;
+            return Ok(MmsBeginOutcome::Acquired(acquisition));
         }
 
         let state = if unavailable_reason.is_some() {
@@ -319,15 +476,9 @@ impl Client {
         if matches!(
             state,
             MmsAcquisitionState::Pending | MmsAcquisitionState::Blocked
-        ) {
-            let count: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM mms_acquisitions WHERE state IN ('pending','blocked')",
-                [],
-                |row| row.get(0),
-            )?;
-            if usize::try_from(count).map_err(|_| Error::Database)? >= MAX_MMS_ACQUISITIONS {
-                return Err(Error::MmsAcquisitionLimit);
-            }
+        ) && pending_acquisition_capacity_reached(&tx)?
+        {
+            return Err(Error::MmsAcquisitionLimit);
         }
         let mapped = mapped_thread_conversation(&tx, &ctx.device_id.to_string(), &input.source)?;
         let conversation_id = if let Some(mapped) = mapped {
@@ -348,12 +499,13 @@ impl Client {
             attachment_ids: Vec::new(),
         };
         tx.execute(
-            "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_instance_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             params![
                 acquisition.acquisition_id,
                 acquisition.input.source.source_generation,
                 acquisition.input.source.subscription_id,
                 acquisition.input.source.provider_message_id,
+                source_instance_id(&acquisition.input),
                 direction_code(acquisition.input.direction),
                 acquisition.conversation_id.to_string(),
                 super::json(&acquisition.input)?,
@@ -366,7 +518,36 @@ impl Client {
         )?;
         prune_terminal_acquisitions(&tx)?;
         tx.commit()?;
-        Ok(acquisition)
+        drop(guard);
+        discard_detached(self, retired_detached)?;
+        Ok(MmsBeginOutcome::Acquired(acquisition))
+    }
+
+    pub(crate) fn cleanup_terminal_mms_parts(&self) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let acquisition_ids = {
+            let mut query = tx.prepare(
+                "SELECT DISTINCT a.acquisition_id FROM mms_acquisitions a
+                 JOIN mms_acquisition_parts p ON p.acquisition_id=a.acquisition_id
+                 WHERE a.state IN ('blocked','unavailable')",
+            )?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut detached = Vec::new();
+        for acquisition_id in acquisition_ids {
+            detached.extend(unlink_acquisition_parts(&tx, &acquisition_id)?);
+        }
+        detached.sort();
+        detached.dedup();
+        prune_terminal_acquisitions(&tx)?;
+        tx.commit()?;
+        drop(guard);
+        discard_detached(self, detached)
     }
 
     pub fn mms_acquisitions(&self, limit: usize) -> Result<Vec<MmsAcquisition>, Error> {
@@ -438,7 +619,10 @@ impl Client {
         if MmsAcquisitionState::parse(&current) == Some(MmsAcquisitionState::Complete) {
             return Err(Error::Conflict);
         }
-        let detached = if state == MmsAcquisitionState::Unavailable {
+        let detached = if matches!(
+            state,
+            MmsAcquisitionState::Blocked | MmsAcquisitionState::Unavailable
+        ) {
             unlink_acquisition_parts(&tx, id)?
         } else {
             Vec::new()
@@ -554,6 +738,12 @@ impl Client {
         let input: MmsAcquisitionInput = super::decode(encoded_input.as_bytes())?;
         validate_complete_input(&input)?;
         let parts = acquisition_part_mappings(&tx, id)?;
+        if parts
+            .iter()
+            .any(|part| part.preview_state == MmsPreviewState::Deferred)
+        {
+            return Err(Error::Conflict);
+        }
         let attachments: Vec<_> = parts.iter().map(|part| part.attachment_id).collect();
         if input.body.is_empty() && attachments.is_empty() {
             return Err(Error::InvalidRequest("MMS requires text or parts"));
@@ -740,7 +930,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (original, state, current): (AttachmentId, String, (Option<i64>, Option<i64>, Option<i64>, Option<String>)) = tx.query_row(
+        let (original, state, current): (AttachmentId, String, crate::MediaMetaColumns) = tx.query_row(
             "SELECT p.attachment_id,a.state,p.width,p.height,p.duration_ms,p.thumbnail_attachment_id FROM mms_acquisition_parts p JOIN mms_acquisitions a ON a.acquisition_id=p.acquisition_id WHERE p.acquisition_id=? AND p.provider_part_id=?",
             params![id, provider_part_id],
             |row| Ok((row.get::<_, String>(0)?, row.get(1)?, (row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))),
@@ -780,7 +970,7 @@ impl Client {
             super::local_references(&tx, &[thumbnail])?;
         }
         tx.execute(
-            "UPDATE mms_acquisition_parts SET width=?,height=?,duration_ms=?,thumbnail_attachment_id=? WHERE acquisition_id=? AND provider_part_id=?",
+            "UPDATE mms_acquisition_parts SET width=?,height=?,duration_ms=?,thumbnail_attachment_id=?,metadata_recorded=1 WHERE acquisition_id=? AND provider_part_id=?",
             params![requested.0, requested.1, requested.2, requested.3, id, provider_part_id],
         )?;
         if pending_media_bytes(&tx)? > MAX_PENDING_MMS_MEDIA_BYTES {
@@ -791,6 +981,36 @@ impl Client {
         if let Some(detached) = detached {
             self.discard_unreferenced_attachment(detached)?;
         }
+        Ok(())
+    }
+
+    /// Records preview production independently from original acquisition. A permanently
+    /// unavailable optional preview cannot stall the original message.
+    pub fn set_mms_acquisition_part_preview_state(
+        &self,
+        id: &str,
+        provider_part_id: &str,
+        state: MmsPreviewState,
+    ) -> Result<(), Error> {
+        let guard = self.lock()?;
+        let available: Option<bool> = guard
+            .conn
+            .query_row(
+                "SELECT thumbnail_attachment_id IS NOT NULL FROM mms_acquisition_parts WHERE acquisition_id=? AND provider_part_id=?",
+                params![id, provider_part_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(available) = available else {
+            return Err(Error::NotFound);
+        };
+        if state == MmsPreviewState::Ready && !available {
+            return Err(Error::InvalidRequest("MMS preview output"));
+        }
+        guard.conn.execute(
+            "UPDATE mms_acquisition_parts SET preview_state=? WHERE acquisition_id=? AND provider_part_id=?",
+            params![state.code(), id, provider_part_id],
+        )?;
         Ok(())
     }
 }
@@ -836,6 +1056,8 @@ fn normalize_pending_input(
         input.body.clear();
         return Ok((input, Some("provider metadata unavailable")));
     }
+    input.recipients.sort();
+    input.recipients.dedup();
     Ok((input, None))
 }
 
@@ -855,17 +1077,87 @@ fn validate_complete_input(input: &MmsAcquisitionInput) -> Result<(), Error> {
     }
 }
 
-/// Provider capture provenance (`imported`) and body enrichment are not immutable identity: a
-/// row can be revisited live or gain decoded text parts. Other provider evidence must agree before
-/// a completed immutable message is treated as the same source row.
+/// Provider capture provenance and mutable presentation metadata are not immutable identity. A
+/// changed date, subject, sender presentation, or recipient order must not duplicate a completed
+/// message. A differing non-null transaction ID is handled by the source-instance conflict path.
 fn same_provider_identity(existing: &MmsAcquisitionInput, candidate: &MmsAcquisitionInput) -> bool {
-    existing.source == candidate.source
-        && existing.direction == candidate.direction
-        && existing.observed_at_ms == candidate.observed_at_ms
-        && existing.sender_address == candidate.sender_address
-        && existing.recipients == candidate.recipients
-        && existing.subject == candidate.subject
+    same_raw_provider_source(existing, candidate)
         && existing.transaction_id == candidate.transaction_id
+}
+
+fn strongly_distinct_provider_instance(
+    existing: &MmsAcquisitionInput,
+    candidate: &MmsAcquisitionInput,
+) -> bool {
+    same_raw_provider_source(existing, candidate)
+        && existing.transaction_id.is_some()
+        && candidate.transaction_id.is_some()
+        && existing.transaction_id != candidate.transaction_id
+}
+
+fn same_raw_provider_source(
+    existing: &MmsAcquisitionInput,
+    candidate: &MmsAcquisitionInput,
+) -> bool {
+    existing.source.source_generation == candidate.source.source_generation
+        && existing.source.subscription_id == candidate.source.subscription_id
+        && existing.source.provider_message_id == candidate.source.provider_message_id
+        && existing.direction == candidate.direction
+}
+
+fn source_instance_id(input: &MmsAcquisitionInput) -> &str {
+    input.transaction_id.as_deref().unwrap_or("")
+}
+
+fn is_terminal_acquisition_state(state: MmsAcquisitionState) -> bool {
+    matches!(
+        state,
+        MmsAcquisitionState::Blocked | MmsAcquisitionState::Unavailable
+    )
+}
+
+fn same_terminal_provider_input(
+    existing: &MmsAcquisitionInput,
+    candidate: &MmsAcquisitionInput,
+) -> bool {
+    let mut candidate = candidate.clone();
+    candidate.imported = existing.imported;
+    existing == &candidate
+}
+
+fn provider_identity_quarantine(
+    conn: &rusqlite::Connection,
+    input: &MmsAcquisitionInput,
+    reason: &str,
+) -> Result<MmsProviderIdentityQuarantine, Error> {
+    super::mms_backfill::record_provider_identity_quarantine(conn, input, reason)?;
+    Ok(MmsProviderIdentityQuarantine {
+        source: input.source.clone(),
+        direction: input.direction,
+        reason: reason.into(),
+    })
+}
+
+fn retire_provider_identity_acquisitions<'a>(
+    conn: &rusqlite::Connection,
+    acquisitions: impl Iterator<Item = &'a MmsAcquisition>,
+    reason: &str,
+) -> Result<Vec<AttachmentId>, Error> {
+    let mut detached = Vec::new();
+    for acquisition in acquisitions {
+        if acquisition.state != MmsAcquisitionState::Pending {
+            continue;
+        }
+        super::mms_backfill::record_provider_identity_quarantine(conn, &acquisition.input, reason)?;
+        detached.extend(unlink_acquisition_parts(conn, &acquisition.acquisition_id)?);
+        conn.execute(
+            "UPDATE mms_acquisitions SET state='unavailable',reason=? WHERE acquisition_id=?",
+            params![reason, acquisition.acquisition_id],
+        )?;
+    }
+    detached.sort();
+    detached.dedup();
+    Ok(detached)
 }
 
 fn validate_checkpoint_scope(source_generation: &str, subscription_id: &str) -> Result<(), Error> {
@@ -879,17 +1171,36 @@ fn validate_checkpoint_scope(source_generation: &str, subscription_id: &str) -> 
     Ok(())
 }
 
-fn acquisition_by_source(
+fn acquisitions_by_provider_source(
     conn: &rusqlite::Connection,
     source: &MmsSource,
     direction: Direction,
-) -> Result<Option<MmsAcquisition>, Error> {
-    let row: Option<(String, String, String, String, Option<String>)> = conn.query_row(
+) -> Result<Vec<MmsAcquisition>, Error> {
+    let mut query = conn.prepare(
         "SELECT acquisition_id,conversation_id,input,state,reason FROM mms_acquisitions WHERE source_generation=? AND subscription_id=? AND provider_message_id=? AND direction=?",
-        params![source.source_generation, source.subscription_id, source.provider_message_id, direction_code(direction)],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-    ).optional()?;
-    row.map(|row| decode_acquisition_row(conn, row)).transpose()
+    )?;
+    query
+        .query_map(
+            params![
+                source.source_generation,
+                source.subscription_id,
+                source.provider_message_id,
+                direction_code(direction)
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|row| decode_acquisition_row(conn, row))
+        .collect()
 }
 
 type AcquisitionRow = (String, String, String, String, Option<String>);
@@ -925,7 +1236,7 @@ fn acquisition_part_mappings(
     id: &str,
 ) -> Result<Vec<MmsAcquisitionPart>, Error> {
     let mut query = conn.prepare(
-        "SELECT provider_part_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id FROM mms_acquisition_parts WHERE acquisition_id=? ORDER BY position",
+        "SELECT provider_part_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id,preview_state,metadata_recorded FROM mms_acquisition_parts WHERE acquisition_id=? ORDER BY position",
     )?;
     query
         .query_map(params![id], |row| {
@@ -936,6 +1247,8 @@ fn acquisition_part_mappings(
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, bool>(7)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?
@@ -948,6 +1261,8 @@ fn acquisition_part_mappings(
                 height,
                 duration_ms,
                 thumbnail_attachment_id,
+                preview_state,
+                metadata_recorded,
             )| {
                 Ok(MmsAcquisitionPart {
                     provider_part_id,
@@ -967,6 +1282,8 @@ fn acquisition_part_mappings(
                     thumbnail_attachment_id: thumbnail_attachment_id
                         .map(|value| super::parse(&value))
                         .transpose()?,
+                    preview_state: MmsPreviewState::parse(&preview_state).ok_or(Error::Database)?,
+                    metadata_recorded,
                 })
             },
         )
@@ -1083,6 +1400,17 @@ fn next_acquisition_sequence(
             .checked_add(1)
             .ok_or(Error::Database)?,
     ))
+}
+
+pub(crate) fn pending_acquisition_capacity_reached(
+    conn: &rusqlite::Connection,
+) -> Result<bool, Error> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mms_acquisitions WHERE state='pending'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(usize::try_from(count).map_err(|_| Error::Database)? >= MAX_MMS_ACQUISITIONS)
 }
 
 fn pending_media_bytes(conn: &rusqlite::Connection) -> Result<u64, Error> {
@@ -1227,7 +1555,7 @@ fn prune_terminal_acquisitions(conn: &rusqlite::Connection) -> Result<(), Error>
     conn.execute(
         "DELETE FROM mms_acquisitions WHERE acquisition_id IN (
             SELECT a.acquisition_id FROM mms_acquisitions a
-            WHERE a.state='unavailable'
+            WHERE a.state IN ('blocked','unavailable')
               AND NOT EXISTS (SELECT 1 FROM mms_acquisition_parts p WHERE p.acquisition_id=a.acquisition_id)
             ORDER BY a.local_order DESC LIMIT -1 OFFSET ?
         )",
@@ -1324,6 +1652,7 @@ fn namespaced_provider_id(input: &MmsAcquisitionInput) -> String {
         &input.source.source_generation,
         &input.source.subscription_id,
         &input.source.provider_message_id,
+        source_instance_id(input),
         direction_code(input.direction),
     ] {
         hasher.update((value.len() as u64).to_be_bytes());

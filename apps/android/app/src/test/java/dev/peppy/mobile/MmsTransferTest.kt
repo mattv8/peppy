@@ -220,7 +220,7 @@ class MmsTransferTest {
                 "nativeCipherFileForUpload" -> file.path
                 "markAttachmentUploaded" -> { marked += args!![0] as String to args[1] as String; Unit }
                 "installDownloadedAttachment" -> { installed += args!![1] as String; Unit }
-                "mmsBackfillStatus" -> NativeMmsBackfillStatus(false, null, false, if (remotePaused) NativeMmsBackfillPause.REMOTE_STORAGE else null, 0u, null)
+                "mmsBackfillStatus" -> NativeMmsBackfillStatus(false, null, false, if (remotePaused) NativeMmsBackfillPause.REMOTE_STORAGE else null, 0u, 0u, null)
                 "reportMmsBackfillRemoteCapacity" -> { remoteCapacity += args!![2] as Boolean; remotePaused = !(args[2] as Boolean); Unit }
                 "toString" -> "fake-client"
                 else -> throw UnsupportedOperationException(method.name)

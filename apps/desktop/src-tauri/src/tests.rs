@@ -254,6 +254,114 @@ fn media_pages_do_not_omit_items_when_preview_budget_is_exhausted() {
     assert!(second.next_cursor.is_none());
 }
 
+#[test]
+fn snapshot_and_history_emit_v3_thumbnail_metadata_without_promoting_the_original() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let original_path = fixture.dir.path().join("timeline-original.png");
+    let thumbnail_path = fixture.dir.path().join("timeline-thumbnail.png");
+    std::fs::write(&original_path, sample_png(2, 2)).unwrap();
+    std::fs::write(&thumbnail_path, sample_png(1, 1)).unwrap();
+    let original = session.prepare_attachment(&original_path).unwrap();
+    let thumbnail = session.prepare_attachment(&thumbnail_path).unwrap();
+    let acquisition = session
+        .client
+        .begin_mms_acquisition(MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "desktop-native-test".into(),
+                subscription_id: "sim-1".into(),
+                provider_message_id: "timeline-v3".into(),
+                provider_thread_id: Some("timeline-v3-thread".into()),
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+12025550123".into()),
+            recipients: vec![],
+            subject: None,
+            body: "timeline v3".into(),
+            imported: false,
+            observed_at_ms: 1,
+            transaction_id: None,
+        })
+        .unwrap();
+    let original_id = original.id.parse().unwrap();
+    let thumbnail_id = thumbnail.id.parse().unwrap();
+    session
+        .client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "original", original_id)
+        .unwrap();
+    session
+        .client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "original",
+            Some(2),
+            Some(2),
+            None,
+            Some(thumbnail_id),
+        )
+        .unwrap();
+    session
+        .client
+        .mark_attachment_uploaded(thumbnail_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let conversation = session
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap()
+        .conversation_id;
+    let later = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: "+12025550123".into(),
+            body: "later".into(),
+            provider_message_id: Some("timeline-v3-later".into()),
+            imported: false,
+        })
+        .unwrap();
+    let (snapshot, _) = session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            crate::notifications::NotificationPreferences::default(),
+        )
+        .unwrap();
+    let attachment = snapshot.conversations[0]
+        .messages
+        .iter()
+        .find_map(|message| message.attachments.first())
+        .unwrap();
+    assert_ne!(attachment.state, "ready");
+    let thumbnail = attachment
+        .media_meta
+        .as_ref()
+        .and_then(|meta| meta.thumbnail.as_ref())
+        .unwrap();
+    assert_eq!(thumbnail.state, "ready");
+    assert!(thumbnail
+        .preview_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+
+    let history = session
+        .history_page(&conversation.to_string(), &later.message_id.to_string())
+        .unwrap();
+    let history_attachment = &history.messages[0].attachments[0];
+    assert_ne!(history_attachment.state, "ready");
+    assert_eq!(
+        history_attachment
+            .media_meta
+            .as_ref()
+            .and_then(|meta| meta.thumbnail.as_ref())
+            .unwrap()
+            .state,
+        "ready"
+    );
+}
+
 fn set_gateway(session: &Session, mut route: GatewayView) {
     route.sim_id = "sim-1".into();
     session.set_status(|status| {

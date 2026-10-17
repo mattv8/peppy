@@ -18,6 +18,8 @@ const COMMANDS: &[&str] = &[
     "save_attachment",
     "request_attachment_download",
     "media_page",
+    "media_page_around",
+    "media_page_newer",
     "open_media",
     "load_media",
     "close_media",

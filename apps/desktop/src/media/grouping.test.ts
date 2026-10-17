@@ -15,10 +15,13 @@ describe("groupMessages", () => {
     expect(groupMessages([message("one", { senderAddress: undefined }), message("two", { senderAddress: undefined })])).toHaveLength(2);
     expect(groupMessages([message("one"), message("two", { timestamp: "" })])).toHaveLength(2);
     expect(groupMessages([message("one"), message("two", { attachments: [{ id: "video", name: "v", mediaType: "video/mp4", byteSize: 1, state: "ready" }] })])).toHaveLength(2);
+    expect(groupMessages([message("one", { timestamp: " " }), message("two", { timestamp: "  " })])).toHaveLength(2);
   });
 
-  it("allows the caption only on the final group member", () => {
-    const groups = groupMessages([message("one", { sender: "self", body: "ignored" }), message("two", { sender: "self", body: "caption", timestamp: "2026-01-01T12:01:00.000Z" })]);
-    expect(groups[0].messages.at(-1)?.body).toBe("caption");
+  it("ends an image run after a caption or subject", () => {
+    const captioned = groupMessages([message("one", { sender: "self", body: "first" }), message("two", { sender: "self", body: "second", timestamp: "2026-01-01T12:01:00.000Z" })]);
+    const subject = groupMessages([message("three", { sender: "self", subject: "Subject" }), message("four", { sender: "self", timestamp: "2026-01-01T12:01:00.000Z" })]);
+    expect(captioned).toHaveLength(2);
+    expect(subject).toHaveLength(2);
   });
 });

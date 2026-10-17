@@ -9,5 +9,6 @@ class PeppyApplication : Application() {
         RelayWakeRuntime.initialize(this)
         SmsCaptureWork.runner = SmsNativeCapture
         SmsCaptureLifecycle.ensureObserver(this)
+        MmsCaptureLifecycle.ensureObserver(this)
     }
 }

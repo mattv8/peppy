@@ -1034,12 +1034,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [conversationTab, setConversationTab] = useState<"messages" | "media">("messages");
   const [lightboxItems, setLightboxItems] = useState<GalleryMediaPageItem[] | null>(null);
   const [lightboxAttachmentId, setLightboxAttachmentId] = useState<string>();
+  const [lightboxMessageId, setLightboxMessageId] = useState<string>();
   const [lightboxHasNextPage, setLightboxHasNextPage] = useState(false);
+  const [lightboxHasPreviousPage, setLightboxHasPreviousPage] = useState(false);
   const [mediaStateHint, setMediaStateHint] = useState(0);
   const pendingSaveIdsRef = useRef(new Set<string>());
   const gallerySessionRef = useRef(0);
   const galleryConversationRef = useRef<string | undefined>(undefined);
-  const galleryCacheRef = useRef<{ conversationId?: string; items: GalleryMediaPageItem[]; nextCursor?: Parameters<typeof bridge.media_page>[1] }>({ items: [] });
+  const galleryCacheRef = useRef<{ conversationId?: string; items: GalleryMediaPageItem[]; newerCursor?: Parameters<typeof bridge.media_page>[1]; olderCursor?: Parameters<typeof bridge.media_page>[1] }>({ items: [] });
   const requestOriginal = useCallback((id: string) => bridge.load_media(id), []);
   const checkOriginal = useCallback((id: string) => bridge.open_media(id), []);
   const releaseMedia = useCallback((id: string, url: string) => { void bridge.close_media(id, url); }, []);
@@ -1502,6 +1504,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setConversationTab("messages");
     setLightboxItems(null);
     setLightboxAttachmentId(undefined);
+    setLightboxMessageId(undefined);
     gallerySessionRef.current += 1;
     pendingSaveIdsRef.current.clear();
     galleryConversationRef.current = active?.id;
@@ -2291,29 +2294,26 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   ) : null;
   const toGalleryItem = (item: Awaited<ReturnType<typeof bridge.media_page>>["items"][number]): GalleryMediaPageItem => {
     const message = active?.messages.find((candidate) => candidate.id === item.messageId) ?? { id: item.messageId, revision: item.cursor.localOrder, sender: item.senderAddress ? "other" : "self", senderAddress: item.senderAddress, body: "", timestamp: item.timestamp, attachments: [] };
-    return { attachment: { ...item.attachment, thumbnailUrl: item.mediaMeta?.thumbnail?.previewUrl ?? item.attachment.previewUrl, durationMs: item.mediaMeta?.durationMs ? Number(item.mediaMeta.durationMs) : undefined }, message, cursor: item.cursor };
+    const mediaMeta = item.attachment.mediaMeta ?? item.mediaMeta;
+    return { attachment: { ...item.attachment, mediaMeta, durationMs: mediaMeta?.durationMs ? Number(mediaMeta.durationMs) : undefined }, message, cursor: item.cursor };
   };
-  const openGalleryItem = async (item: GalleryMediaPageItem, _loadedItems: GalleryMediaPageItem[]) => {
+  const openGalleryItem = async (item: GalleryMediaPageItem) => {
     const conversationId = active?.id;
     if (!conversationId) return;
     const session = gallerySessionRef.current;
     const isCurrent = () => gallerySessionRef.current === session && galleryConversationRef.current === conversationId;
     try {
-      let cursor: Parameters<typeof bridge.media_page>[1];
-      let nextCursor: Parameters<typeof bridge.media_page>[1];
-      const items: GalleryMediaPageItem[] = [];
-      do {
-        const page = await bridge.media_page(conversationId, cursor, 40);
-        if (!isCurrent()) return;
-        items.push(...page.items.map(toGalleryItem));
-        nextCursor = page.nextCursor;
-        cursor = page.nextCursor;
-      } while (!items.some(candidate => candidate.attachment.id === item.attachment.id) && cursor);
-      if (!isCurrent() || !items.some(candidate => candidate.attachment.id === item.attachment.id)) return;
-      galleryCacheRef.current = { conversationId, items, nextCursor };
+      const page = await bridge.media_page_around(conversationId, item.attachment.id, item.message.id, 40);
+      if (!isCurrent()) return;
+      const uniqueItems = (candidates: GalleryMediaPageItem[]) => [...new Map(candidates.map(candidate => [`${candidate.message.id}:${candidate.attachment.id}`, candidate])).values()];
+      const items = uniqueItems([...page.newer.map(toGalleryItem).reverse(), toGalleryItem(page.target), ...page.older.map(toGalleryItem)]);
+      if (!items.some(candidate => candidate.attachment.id === item.attachment.id && candidate.message.id === item.message.id)) return;
+      galleryCacheRef.current = { conversationId, items, newerCursor: page.newerCursor, olderCursor: page.olderCursor };
       setLightboxItems(items);
-      setLightboxHasNextPage(Boolean(nextCursor));
+      setLightboxHasNextPage(Boolean(page.olderCursor));
+      setLightboxHasPreviousPage(Boolean(page.newerCursor));
       setLightboxAttachmentId(item.attachment.id);
+      setLightboxMessageId(item.message.id);
     } catch {
       if (isCurrent()) setNotice("Could not load conversation media.");
     }
@@ -2348,7 +2348,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       historyExhausted={historyExhausted}
       onStartConversation={!composerConversation && !slotKey ? () => void startNewMessage() : undefined}
       noSelectionFeedback={!composerConversation && !slotKey ? noSelectionFeedback : undefined}
-      onOpenMedia={(item) => void openGalleryItem({ attachment: item.attachment, message: item.message }, [{ attachment: item.attachment, message: item.message }])}
+      onOpenMedia={(item) => void openGalleryItem({ attachment: item.attachment, message: item.message })}
       requestOriginal={requestOriginal}
       checkOriginal={checkOriginal}
       releaseMedia={releaseMedia}
@@ -2359,20 +2359,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         {active && <MediaPanel key={active.id} loadPage={async (cursor) => {
           const page = await bridge.media_page(active.id, cursor as Parameters<typeof bridge.media_page>[1], 40);
           return { items: page.items.map(toGalleryItem), nextCursor: page.nextCursor };
-        }} onOpen={(item, items) => void openGalleryItem(item, items)} />}
+        }} onOpen={(item) => void openGalleryItem(item)} />}
       </div>}
-      {lightboxItems && lightboxAttachmentId && <MediaLightbox items={lightboxItems} initialAttachmentId={lightboxAttachmentId} onDismiss={() => { setLightboxItems(null); setLightboxAttachmentId(undefined); }} requestOriginal={requestOriginal} checkOriginal={checkOriginal} saveMedia={async (id) => { await bridge.save_attachment(id); }} releaseMedia={releaseMedia} hasNextPage={lightboxHasNextPage} retryKey={mediaStateHint} loadAdjacentPage={async (direction) => {
-        if (direction === "previous") return undefined;
+      {lightboxItems && lightboxAttachmentId && <MediaLightbox items={lightboxItems} initialAttachmentId={lightboxAttachmentId} initialMessageId={lightboxMessageId} onDismiss={() => { setLightboxItems(null); setLightboxAttachmentId(undefined); setLightboxMessageId(undefined); }} requestOriginal={requestOriginal} checkOriginal={checkOriginal} saveMedia={async (id) => { await bridge.save_attachment(id); }} releaseMedia={releaseMedia} hasNextPage={lightboxHasNextPage} hasPreviousPage={lightboxHasPreviousPage} retryKey={mediaStateHint} loadAdjacentPage={async (direction) => {
         const cache = galleryCacheRef.current;
-        if (!cache.conversationId || !cache.nextCursor) return undefined;
+        const cursor = direction === "previous" ? cache.newerCursor : cache.olderCursor;
+        if (!cache.conversationId || !cursor) return undefined;
         const session = gallerySessionRef.current;
-        const page = await bridge.media_page(cache.conversationId, cache.nextCursor, 40);
+        const page = direction === "previous"
+          ? await bridge.media_page_newer(cache.conversationId, cursor, 40)
+          : await bridge.media_page(cache.conversationId, cursor, 40);
         if (gallerySessionRef.current !== session || galleryConversationRef.current !== cache.conversationId) return undefined;
-        const pageItems = page.items.map(toGalleryItem).filter((candidate) => !cache.items.some((known) => known.attachment.id === candidate.attachment.id && known.message.id === candidate.message.id));
-        cache.items = [...cache.items, ...pageItems];
-        cache.nextCursor = page.nextCursor;
-        setLightboxHasNextPage(Boolean(page.nextCursor));
-        return { items: pageItems, hasNextPage: Boolean(page.nextCursor) };
+        const pageItems = [...new Map(page.items.map(toGalleryItem).map(candidate => [`${candidate.message.id}:${candidate.attachment.id}`, candidate])).values()].filter((candidate) => !cache.items.some((known) => known.attachment.id === candidate.attachment.id && known.message.id === candidate.message.id));
+        const orderedItems = direction === "previous" ? pageItems.reverse() : pageItems;
+        cache.items = direction === "previous" ? [...orderedItems, ...cache.items] : [...cache.items, ...orderedItems];
+        if (direction === "previous") {
+          cache.newerCursor = page.nextCursor;
+          setLightboxHasPreviousPage(Boolean(page.nextCursor));
+        } else {
+          cache.olderCursor = page.nextCursor;
+          setLightboxHasNextPage(Boolean(page.nextCursor));
+        }
+        return { items: orderedItems, hasNextPage: Boolean(page.nextCursor), cursor: page.nextCursor };
       }} />}
     </>
   );

@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
@@ -61,7 +62,8 @@ use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
-    AttachmentId, AttachmentInfo, ConversationId, NativePlaintextFile, NotificationTarget,
+    AttachmentId, AttachmentInfo, ConversationId, MessageId, NativePlaintextFile,
+    NotificationTarget,
 };
 use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
@@ -74,7 +76,47 @@ pub const STATE_EVENT: &str = "peppy://state";
 static TRAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 const MAX_OPEN_MEDIA_CAPABILITIES: usize = 8;
 const MAX_OPEN_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_INLINE_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MEDIA_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CONCURRENT_MEDIA_READS: usize = 2;
+
+struct MediaReadBudget {
+    available: Mutex<usize>,
+}
+
+impl MediaReadBudget {
+    fn new(maximum: usize) -> Self {
+        Self {
+            available: Mutex::new(maximum),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<MediaReadPermit> {
+        let mut available = self
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *available == 0 {
+            return None;
+        }
+        *available -= 1;
+        Some(MediaReadPermit {
+            budget: self.clone(),
+        })
+    }
+}
+
+struct MediaReadPermit {
+    budget: Arc<MediaReadBudget>,
+}
+
+impl Drop for MediaReadPermit {
+    fn drop(&mut self) {
+        if let Ok(mut available) = self.budget.available.lock() {
+            *available += 1;
+        }
+    }
+}
 
 struct MediaCapability {
     session: Arc<Session>,
@@ -83,6 +125,7 @@ struct MediaCapability {
     media_type: String,
     plaintext_bytes: u64,
     plaintext: NativePlaintextFile,
+    opened_at: Instant,
 }
 
 pub struct AppState {
@@ -106,6 +149,7 @@ pub struct AppState {
     app_lock_storage_available: AtomicBool,
     app_lock_attempts: Arc<app_lock::Attempts>,
     media_capabilities: Mutex<HashMap<String, MediaCapability>>,
+    media_read_budget: Arc<MediaReadBudget>,
 }
 
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
@@ -120,6 +164,8 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "save_attachment",
     "request_attachment_download",
     "media_page",
+    "media_page_around",
+    "media_page_newer",
     "open_media",
     "load_media",
     "close_media",
@@ -239,6 +285,7 @@ impl AppState {
             app_lock_storage_available: AtomicBool::new(true),
             app_lock_attempts: Arc::new(app_lock::Attempts::default()),
             media_capabilities: Mutex::new(HashMap::new()),
+            media_read_budget: Arc::new(MediaReadBudget::new(MAX_CONCURRENT_MEDIA_READS)),
         }
     }
 
@@ -323,6 +370,51 @@ impl AppState {
     async fn require_session(&self) -> BridgeResult<Arc<Session>> {
         self.session().await?.ok_or_else(BridgeError::no_session)
     }
+}
+
+async fn release_media_capabilities(
+    state: &AppState,
+    capabilities: Vec<(Arc<Session>, AttachmentId)>,
+) {
+    for (session, attachment) in capabilities {
+        let active = state.session.lock().await;
+        let current = !state.app_locked.load(Ordering::Acquire)
+            && active
+                .as_ref()
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+        drop(active);
+        if current {
+            let _ = blocking(move || {
+                session
+                    .client
+                    .release_attachment_ciphertext(attachment)
+                    .map_err(core_error)
+            })
+            .await;
+        }
+    }
+}
+
+fn take_window_media_capabilities(
+    state: &AppState,
+    window_label: &str,
+) -> Vec<(Arc<Session>, AttachmentId)> {
+    let Ok(mut capabilities) = state.media_capabilities.lock() else {
+        return Vec::new();
+    };
+    let tokens: Vec<_> = capabilities
+        .iter()
+        .filter(|(_, capability)| capability.window_label == window_label)
+        .map(|(token, _)| token.clone())
+        .collect();
+    tokens
+        .into_iter()
+        .filter_map(|token| {
+            capabilities
+                .remove(&token)
+                .map(|capability| (capability.session, capability.attachment_id))
+        })
+        .collect()
 }
 
 fn head() -> Head {
@@ -1384,14 +1476,14 @@ fn store_media_capability(
     window_label: &str,
     info: AttachmentInfo,
     plaintext: NativePlaintextFile,
-) -> BridgeResult<OpenMediaView> {
+) -> BridgeResult<(OpenMediaView, Vec<(Arc<Session>, AttachmentId)>)> {
     let media_type = inline_media_type(&info.media_type).ok_or_else(|| {
         BridgeError::new(
             "unsupported",
             "Save this media to open it in another application.",
         )
     })?;
-    if info.plaintext_bytes > MAX_OPEN_MEDIA_BYTES {
+    if info.plaintext_bytes > MAX_INLINE_MEDIA_BYTES {
         return Err(BridgeError::new(
             "media-too-large",
             "This media item is too large to open safely.",
@@ -1401,6 +1493,7 @@ fn store_media_capability(
         .media_capabilities
         .lock()
         .map_err(|_| BridgeError::host_state())?;
+    let mut released = Vec::new();
     while capabilities.len() >= MAX_OPEN_MEDIA_CAPABILITIES
         || capabilities
             .values()
@@ -1409,10 +1502,16 @@ fn store_media_capability(
             + info.plaintext_bytes
             > MAX_OPEN_MEDIA_BYTES
     {
-        let Some(token) = capabilities.keys().next().cloned() else {
+        let Some(token) = capabilities
+            .iter()
+            .min_by_key(|(_, capability)| capability.opened_at)
+            .map(|(token, _)| token.clone())
+        else {
             break;
         };
-        capabilities.remove(&token);
+        if let Some(capability) = capabilities.remove(&token) {
+            released.push((capability.session, capability.attachment_id));
+        }
     }
     let token = uuid::Uuid::new_v4().to_string();
     capabilities.insert(
@@ -1424,14 +1523,18 @@ fn store_media_capability(
             media_type: media_type.to_owned(),
             plaintext_bytes: info.plaintext_bytes,
             plaintext,
+            opened_at: Instant::now(),
         },
     );
-    Ok(OpenMediaView {
-        state: "ready",
-        url: Some(media_capability_url(&token)),
-        media_type: Some(media_type.to_owned()),
-        byte_size: Some(info.plaintext_bytes),
-    })
+    Ok((
+        OpenMediaView {
+            state: "ready",
+            url: Some(media_capability_url(&token)),
+            media_type: Some(media_type.to_owned()),
+            byte_size: Some(info.plaintext_bytes),
+        },
+        released,
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -1508,6 +1611,69 @@ async fn media_page(
 }
 
 #[tauri::command]
+async fn media_page_around(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    attachment_id: String,
+    message_id: Option<String>,
+    limit: Option<usize>,
+) -> BridgeResult<peppy_desktop_api::MediaPageAroundView> {
+    let session = state.require_session().await?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    let attachment = AttachmentId::from_str(&attachment_id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let message = message_id
+        .map(|id| {
+            MessageId::from_str(&id)
+                .map_err(|_| BridgeError::new("invalid-request", "The message ID is invalid."))
+        })
+        .transpose()?;
+    if window.label() != tray::MAIN {
+        let scoped = effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&conversation_id),
+        )?;
+        if scoped != Some(conversation) {
+            return Err(window_error());
+        }
+    }
+    blocking(move || {
+        session.media_page_around(conversation, attachment, message, limit.unwrap_or(50))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn media_page_newer(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    cursor: MediaCursorInput,
+    limit: Option<usize>,
+) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+    let session = state.require_session().await?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    if window.label() != tray::MAIN {
+        let scoped = effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&conversation_id),
+        )?;
+        if scoped != Some(conversation) {
+            return Err(window_error());
+        }
+    }
+    let cursor = peppy_client_core::MediaCursor::try_from(cursor)?;
+    blocking(move || session.media_page_newer(conversation, &cursor, limit.unwrap_or(50))).await
+}
+
+#[tauri::command]
 async fn open_media(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -1528,9 +1694,28 @@ async fn open_media(
         }
         acquired_session
             .client
-            .open_native_plaintext(attachment)
-            .map(|plaintext| Some((info, plaintext)))
-            .map_err(core_error)
+            .retain_attachment_ciphertext(attachment)
+            .map_err(core_error)?;
+        match acquired_session.client.open_native_plaintext(attachment) {
+            Ok(plaintext) => {
+                if let Err(error) = acquired_session
+                    .client
+                    .touch_attachment_ciphertext(attachment)
+                {
+                    let _ = acquired_session
+                        .client
+                        .release_attachment_ciphertext(attachment);
+                    return Err(core_error(error));
+                }
+                Ok(Some((info, plaintext)))
+            }
+            Err(error) => {
+                let _ = acquired_session
+                    .client
+                    .release_attachment_ciphertext(attachment);
+                Err(core_error(error))
+            }
+        }
     })
     .await?;
     match ready {
@@ -1541,9 +1726,36 @@ async fn open_media(
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &session))
             {
+                drop(active);
+                let release = session.clone();
+                let _ = blocking(move || {
+                    release
+                        .client
+                        .release_attachment_ciphertext(attachment)
+                        .map_err(core_error)
+                })
+                .await;
                 return Err(BridgeError::new("locked", "Peppy is locked."));
             }
-            store_media_capability(&state, session.clone(), window.label(), info, plaintext)
+            match store_media_capability(&state, session.clone(), window.label(), info, plaintext) {
+                Ok((view, evicted)) => {
+                    drop(active);
+                    release_media_capabilities(&state, evicted).await;
+                    Ok(view)
+                }
+                Err(error) => {
+                    drop(active);
+                    let release = session.clone();
+                    let _ = blocking(move || {
+                        release
+                            .client
+                            .release_attachment_ciphertext(attachment)
+                            .map_err(core_error)
+                    })
+                    .await;
+                    Err(error)
+                }
+            }
         }
         None => Ok(OpenMediaView {
             state: "pending",
@@ -1573,42 +1785,40 @@ async fn close_media(
 ) -> BridgeResult<()> {
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
-    let (released_session, has_remaining_lease) = {
+    let released_sessions = {
         let mut capabilities = state
             .media_capabilities
             .lock()
             .map_err(|_| BridgeError::host_state())?;
-        let mut released_session = None;
+        let mut released_sessions = Vec::new();
         if let Some(url) = url {
             let token = media_capability_token(&url)
                 .ok_or_else(|| BridgeError::new("invalid-request", "The media URL is invalid."))?;
             if capabilities.get(token).is_some_and(|capability| {
                 capability.window_label == window.label() && capability.attachment_id == attachment
             }) {
-                released_session = capabilities
-                    .remove(token)
-                    .map(|capability| capability.session);
+                if let Some(capability) = capabilities.remove(token) {
+                    released_sessions.push(capability.session);
+                }
             }
         } else {
-            released_session = capabilities
-                .values()
-                .find(|capability| {
+            let tokens: Vec<_> = capabilities
+                .iter()
+                .filter(|(_, capability)| {
                     capability.window_label == window.label()
                         && capability.attachment_id == attachment
                 })
-                .map(|capability| capability.session.clone());
-            capabilities.retain(|_, capability| {
-                capability.window_label != window.label() || capability.attachment_id != attachment
-            });
+                .map(|(token, _)| token.clone())
+                .collect();
+            for token in tokens {
+                if let Some(capability) = capabilities.remove(&token) {
+                    released_sessions.push(capability.session);
+                }
+            }
         }
-        (
-            released_session,
-            capabilities
-                .values()
-                .any(|capability| capability.attachment_id == attachment),
-        )
+        released_sessions
     };
-    if let Some(session) = released_session.filter(|_| !has_remaining_lease) {
+    for session in released_sessions {
         let active = state.session.lock().await;
         let current = !state.app_locked.load(Ordering::Acquire)
             && active
@@ -1619,7 +1829,7 @@ async fn close_media(
             blocking(move || {
                 session
                     .client
-                    .evict_attachment_ciphertext(attachment)
+                    .release_attachment_ciphertext(attachment)
                     .map_err(core_error)
             })
             .await?;
@@ -1673,9 +1883,43 @@ fn media_range(value: Option<&tauri::http::HeaderValue>, total: u64) -> Result<(
 }
 
 fn media_protocol_response<R: tauri::Runtime>(
-    context: tauri::UriSchemeContext<'_, R>,
+    app: tauri::AppHandle<R>,
+    webview_label: String,
     request: tauri::http::Request<Vec<u8>>,
+    admission: MediaReadPermit,
 ) -> tauri::http::Response<Vec<u8>> {
+    media_protocol_response_for_state(&app.state::<AppState>(), &webview_label, request, admission)
+}
+
+fn media_protocol_response_for_state(
+    state: &AppState,
+    webview_label: &str,
+    request: tauri::http::Request<Vec<u8>>,
+    admission: MediaReadPermit,
+) -> tauri::http::Response<Vec<u8>> {
+    media_protocol_response_with_reader(
+        state,
+        webview_label,
+        request,
+        admission,
+        |path, start, bytes| {
+            let mut file = File::open(path)?;
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(bytes)
+        },
+    )
+}
+
+fn media_protocol_response_with_reader<F>(
+    state: &AppState,
+    webview_label: &str,
+    request: tauri::http::Request<Vec<u8>>,
+    _admission: MediaReadPermit,
+    read_range: F,
+) -> tauri::http::Response<Vec<u8>>
+where
+    F: FnOnce(&std::path::Path, u64, &mut [u8]) -> std::io::Result<()>,
+{
     let token = request
         .uri()
         .path()
@@ -1687,45 +1931,61 @@ fn media_protocol_response<R: tauri::Runtime>(
             .body(Vec::new())
             .unwrap();
     };
-    let state = context.app_handle().state::<AppState>();
     if state.app_locked.load(Ordering::Acquire) {
         return tauri::http::Response::builder()
             .status(403)
             .body(Vec::new())
             .unwrap();
     }
-    let active = match state.session.try_lock() {
-        Ok(value) => value,
-        Err(_) => {
+    let (
+        capability_session,
+        capability_window,
+        capability_media_type,
+        capability_bytes,
+        capability_path,
+    ) = {
+        let capabilities = match state.media_capabilities.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                return tauri::http::Response::builder()
+                    .status(503)
+                    .body(Vec::new())
+                    .unwrap()
+            }
+        };
+        let Some(capability) = capabilities.get(token) else {
             return tauri::http::Response::builder()
-                .status(503)
+                .status(404)
                 .body(Vec::new())
                 .unwrap();
-        }
+        };
+        (
+            capability.session.clone(),
+            capability.window_label.clone(),
+            capability.media_type.clone(),
+            capability.plaintext_bytes,
+            capability.plaintext.path().to_path_buf(),
+        )
     };
-    let capabilities = match state.media_capabilities.lock() {
-        Ok(value) => value,
-        Err(_) => {
-            return tauri::http::Response::builder()
-                .status(503)
-                .body(Vec::new())
-                .unwrap();
-        }
-    };
-    let Some(capability) = capabilities.get(token) else {
-        return tauri::http::Response::builder()
-            .status(404)
-            .body(Vec::new())
-            .unwrap();
-    };
+    let active = tauri::async_runtime::block_on(state.session.lock());
     if !active
         .as_ref()
-        .is_some_and(|session| Arc::ptr_eq(session, &capability.session))
-        || capability.window_label != context.webview_label()
-        || request.method() != tauri::http::Method::GET
+        .is_some_and(|session| Arc::ptr_eq(session, &capability_session))
+        || capability_window != webview_label
+        || !(request.method() == tauri::http::Method::GET
+            || request.method() == tauri::http::Method::HEAD)
     {
         return tauri::http::Response::builder()
             .status(403)
+            .body(Vec::new())
+            .unwrap();
+    }
+    drop(active);
+    let had_range = request.headers().contains_key(tauri::http::header::RANGE);
+    if !had_range && capability_bytes > MAX_INLINE_MEDIA_BYTES {
+        return tauri::http::Response::builder()
+            .status(413)
+            .header(tauri::http::header::CACHE_CONTROL, "no-store")
             .body(Vec::new())
             .unwrap();
     }
@@ -1742,10 +2002,9 @@ fn media_protocol_response<R: tauri::Runtime>(
             .body(Vec::new())
             .unwrap();
     }
-    let had_range = request.headers().contains_key(tauri::http::header::RANGE);
     let (start, end) = match media_range(
         request.headers().get(tauri::http::header::RANGE),
-        capability.plaintext_bytes,
+        capability_bytes,
     ) {
         Ok(range) => range,
         Err(()) => {
@@ -1753,36 +2012,53 @@ fn media_protocol_response<R: tauri::Runtime>(
                 .status(416)
                 .header(
                     tauri::http::header::CONTENT_RANGE,
-                    format!("bytes */{}", capability.plaintext_bytes),
+                    format!("bytes */{capability_bytes}"),
                 )
                 .body(Vec::new())
                 .unwrap();
         }
     };
     let length = usize::try_from(end - start + 1).unwrap_or(0);
-    let mut bytes = vec![0; length];
-    let read = File::open(capability.plaintext.path()).and_then(|mut file| {
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut bytes)
-    });
-    if read.is_err() {
+    let mut bytes = Vec::new();
+    if request.method() == tauri::http::Method::GET {
+        bytes.resize(length, 0);
+        if read_range(&capability_path, start, &mut bytes).is_err() {
+            return tauri::http::Response::builder()
+                .status(404)
+                .body(Vec::new())
+                .unwrap();
+        }
+    }
+    let active = tauri::async_runtime::block_on(state.session.lock());
+    if state.app_locked.load(Ordering::Acquire)
+        || !active
+            .as_ref()
+            .is_some_and(|session| Arc::ptr_eq(session, &capability_session))
+    {
         return tauri::http::Response::builder()
-            .status(404)
+            .status(403)
             .body(Vec::new())
             .unwrap();
     }
-    let partial = had_range || start != 0 || end + 1 != capability.plaintext_bytes;
+    let partial = had_range || start != 0 || end + 1 != capability_bytes;
     let mut response = tauri::http::Response::builder()
         .status(if partial { 206 } else { 200 })
-        .header(tauri::http::header::CONTENT_TYPE, &capability.media_type)
+        .header(tauri::http::header::CONTENT_TYPE, &capability_media_type)
         .header(tauri::http::header::ACCEPT_RANGES, "bytes")
         .header(tauri::http::header::CACHE_CONTROL, "no-store")
         .header("X-Content-Type-Options", "nosniff")
-        .header(tauri::http::header::CONTENT_LENGTH, bytes.len());
+        .header(
+            tauri::http::header::CONTENT_LENGTH,
+            if request.method() == tauri::http::Method::HEAD {
+                length
+            } else {
+                bytes.len()
+            },
+        );
     if partial {
         response = response.header(
             tauri::http::header::CONTENT_RANGE,
-            format!("bytes {start}-{end}/{}", capability.plaintext_bytes),
+            format!("bytes {start}-{end}/{capability_bytes}"),
         );
     }
     response.body(bytes).unwrap()
@@ -1790,8 +2066,388 @@ fn media_protocol_response<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod media_protocol_tests {
-    use super::{media_range, MAX_MEDIA_RANGE_BYTES};
-    use tauri::http::HeaderValue;
+    use super::{
+        media_protocol_response_for_state, media_protocol_response_with_reader, media_range,
+        release_media_capabilities, store_media_capability, take_window_media_capabilities,
+        AppState, MediaReadBudget, MAX_MEDIA_RANGE_BYTES, MAX_OPEN_MEDIA_CAPABILITIES,
+    };
+    use crate::{secure_store::MemoryStore, tests};
+    use peppy_client_core::AttachmentId;
+    use std::{
+        fs,
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
+    use tauri::http::{HeaderValue, Method, Request, StatusCode};
+
+    struct ProtocolHarness {
+        _fixture: tests::Fixture,
+        state: Arc<AppState>,
+        session: Arc<crate::session::Session>,
+        attachment: AttachmentId,
+        token: String,
+    }
+
+    impl ProtocolHarness {
+        fn new(bytes: &[u8]) -> Self {
+            let fixture = tests::fixture_at("http://127.0.0.1:9");
+            let session = Arc::new(tests::open(&fixture, &fixture.binding, &[]));
+            session
+                .client
+                .unlock(&fixture.profile, &fixture.header, tests::PHRASE)
+                .unwrap();
+            let source = fixture.dir.path().join("protocol-media.png");
+            fs::write(&source, bytes).unwrap();
+            let info = session
+                .client
+                .prepare_attachment(&source, "image/png", "protocol-media.png")
+                .unwrap();
+            session
+                .client
+                .retain_attachment_ciphertext(info.attachment_id)
+                .unwrap();
+            let plaintext = session
+                .client
+                .open_native_plaintext(info.attachment_id)
+                .unwrap();
+            let state = Arc::new(AppState::new(
+                fixture.dir.path().to_path_buf(),
+                Arc::new(MemoryStore::default()),
+                tests::noop(),
+            ));
+            state
+                .app_locked
+                .store(false, std::sync::atomic::Ordering::Release);
+            tauri::async_runtime::block_on(async {
+                *state.session.lock().await = Some(session.clone());
+            });
+            let (view, evicted) =
+                store_media_capability(&state, session.clone(), "main", info.clone(), plaintext)
+                    .unwrap();
+            assert!(evicted.is_empty());
+            let token = super::media_capability_token(view.url.as_deref().unwrap())
+                .unwrap()
+                .to_owned();
+            Self {
+                _fixture: fixture,
+                state,
+                session,
+                attachment: info.attachment_id,
+                token,
+            }
+        }
+
+        fn request(&self, method: Method, range: Option<&str>) -> Request<Vec<u8>> {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("/{}", self.token));
+            if let Some(range) = range {
+                request = request.header(tauri::http::header::RANGE, range);
+            }
+            request.body(Vec::new()).unwrap()
+        }
+
+        fn respond(&self, method: Method, range: Option<&str>) -> tauri::http::Response<Vec<u8>> {
+            let admission = self
+                .state
+                .media_read_budget
+                .try_acquire()
+                .expect("request admitted");
+            media_protocol_response_for_state(
+                &self.state,
+                "main",
+                self.request(method, range),
+                admission,
+            )
+        }
+
+        fn add_capability(
+            &self,
+            name: &str,
+            bytes: &[u8],
+            window_label: &str,
+        ) -> (
+            AttachmentId,
+            String,
+            Vec<(Arc<crate::session::Session>, AttachmentId)>,
+        ) {
+            let source = self._fixture.dir.path().join(name);
+            fs::write(&source, bytes).unwrap();
+            let info = self
+                .session
+                .client
+                .prepare_attachment(&source, "image/png", name)
+                .unwrap();
+            self.session
+                .client
+                .retain_attachment_ciphertext(info.attachment_id)
+                .unwrap();
+            let plaintext = self
+                .session
+                .client
+                .open_native_plaintext(info.attachment_id)
+                .unwrap();
+            let attachment = info.attachment_id;
+            let (view, evicted) = store_media_capability(
+                &self.state,
+                self.session.clone(),
+                window_label,
+                info,
+                plaintext,
+            )
+            .unwrap();
+            let token = super::media_capability_token(view.url.as_deref().unwrap())
+                .unwrap()
+                .to_owned();
+            (attachment, token, evicted)
+        }
+    }
+
+    #[test]
+    fn valid_get_completes_without_relocking_its_session_guard() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let state = harness.state.clone();
+        let request = harness.request(Method::GET, None);
+        let admission = state.media_read_budget.try_acquire().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(media_protocol_response_for_state(
+                    &state, "main", request, admission,
+                ))
+                .unwrap();
+        });
+
+        let response = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("valid GET deadlocked while reacquiring the session mutex");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"0123456789");
+    }
+
+    #[test]
+    fn get_and_head_return_expected_bodies_and_security_headers() {
+        let harness = ProtocolHarness::new(b"0123456789");
+
+        let get = harness.respond(Method::GET, None);
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(get.body(), b"0123456789");
+        assert_eq!(
+            get.headers()[tauri::http::header::CONTENT_TYPE],
+            "image/png"
+        );
+        assert_eq!(get.headers()[tauri::http::header::CONTENT_LENGTH], "10");
+        assert_eq!(get.headers()[tauri::http::header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            get.headers()[tauri::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(get.headers()["X-Content-Type-Options"], "nosniff");
+
+        let head = harness.respond(Method::HEAD, None);
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.body().is_empty());
+        assert_eq!(head.headers()[tauri::http::header::CONTENT_LENGTH], "10");
+        assert_eq!(
+            head.headers()[tauri::http::header::CONTENT_TYPE],
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn valid_and_invalid_ranges_return_206_and_416() {
+        let harness = ProtocolHarness::new(b"0123456789");
+
+        let partial = harness.respond(Method::GET, Some("bytes=2-5"));
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(partial.body(), b"2345");
+        assert_eq!(partial.headers()[tauri::http::header::CONTENT_LENGTH], "4");
+        assert_eq!(
+            partial.headers()[tauri::http::header::CONTENT_RANGE],
+            "bytes 2-5/10"
+        );
+
+        let invalid = harness.respond(Method::GET, Some("bytes=10-11"));
+        assert_eq!(invalid.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert!(invalid.body().is_empty());
+        assert_eq!(
+            invalid.headers()[tauri::http::header::CONTENT_RANGE],
+            "bytes */10"
+        );
+    }
+
+    #[test]
+    fn token_window_method_lock_and_session_checks_fail_closed() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let respond = |path: &str, window: &str, method: Method| {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Vec::new())
+                .unwrap();
+            let admission = harness.state.media_read_budget.try_acquire().unwrap();
+            media_protocol_response_for_state(&harness.state, window, request, admission)
+        };
+
+        assert_eq!(respond("/wrong-token", "main", Method::GET).status(), 404);
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "other", Method::GET).status(),
+            403
+        );
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "main", Method::POST).status(),
+            403
+        );
+
+        harness
+            .state
+            .app_locked
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "main", Method::GET).status(),
+            403
+        );
+        harness
+            .state
+            .app_locked
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        let replacement = Arc::new(tests::open(
+            &harness._fixture,
+            &harness._fixture.binding,
+            &[],
+        ));
+        tauri::async_runtime::block_on(async {
+            *harness.state.session.lock().await = Some(replacement);
+        });
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "main", Method::GET).status(),
+            403
+        );
+    }
+
+    #[test]
+    fn a_contended_session_lock_waits_instead_of_returning_busy_503() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let state = harness.state.clone();
+        let request = harness.request(Method::GET, None);
+        let admission = state.media_read_budget.try_acquire().unwrap();
+        let guard = tauri::async_runtime::block_on(state.session.lock());
+        let (sender, receiver) = mpsc::channel();
+        let request_state = state.clone();
+        std::thread::spawn(move || {
+            sender
+                .send(media_protocol_response_for_state(
+                    &request_state,
+                    "main",
+                    request,
+                    admission,
+                ))
+                .unwrap();
+        });
+        drop(guard);
+
+        let response = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("handler did not resume after the session lock was released");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn session_replacement_during_read_is_rejected_after_io() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let state = harness.state.clone();
+        let request = harness.request(Method::GET, None);
+        let admission = state.media_read_budget.try_acquire().unwrap();
+        let (read_started_sender, read_started_receiver) = mpsc::channel();
+        let (continue_sender, continue_receiver) = mpsc::channel();
+        let (response_sender, response_receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let response = media_protocol_response_with_reader(
+                &state,
+                "main",
+                request,
+                admission,
+                move |_path, _start, bytes| {
+                    read_started_sender.send(()).unwrap();
+                    continue_receiver.recv().unwrap();
+                    bytes.copy_from_slice(b"0123456789");
+                    Ok(())
+                },
+            );
+            response_sender.send(response).unwrap();
+        });
+        read_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("read hook was not reached");
+
+        let replacement = Arc::new(tests::open(
+            &harness._fixture,
+            &harness._fixture.binding,
+            &[],
+        ));
+        tauri::async_runtime::block_on(async {
+            *harness.state.session.lock().await = Some(replacement);
+        });
+        continue_sender.send(()).unwrap();
+
+        let response = response_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("post-read session validation did not complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.body().is_empty());
+    }
+
+    #[test]
+    fn capacity_eviction_and_window_teardown_release_core_leases() {
+        let harness = ProtocolHarness::new(b"first");
+        let (window_attachment, window_token, evicted) =
+            harness.add_capability("window.png", b"window", "composer-test");
+        assert!(evicted.is_empty());
+
+        let removed = take_window_media_capabilities(&harness.state, "composer-test");
+        assert_eq!(removed.len(), 1);
+        tauri::async_runtime::block_on(release_media_capabilities(&harness.state, removed));
+        assert!(!harness
+            .session
+            .client
+            .release_attachment_ciphertext(window_attachment)
+            .unwrap());
+        assert!(!harness
+            .state
+            .media_capabilities
+            .lock()
+            .unwrap()
+            .contains_key(&window_token));
+
+        let mut evicted = Vec::new();
+        let mut latest = harness.attachment;
+        for index in 1..=MAX_OPEN_MEDIA_CAPABILITIES {
+            let (attachment, _token, released) =
+                harness.add_capability(&format!("capacity-{index}.png"), &[index as u8], "main");
+            latest = attachment;
+            evicted.extend(released);
+        }
+        assert!(
+            !evicted.is_empty(),
+            "capacity must evict at least one token"
+        );
+        let evicted_ids: Vec<_> = evicted.iter().map(|(_, id)| *id).collect();
+        tauri::async_runtime::block_on(release_media_capabilities(&harness.state, evicted));
+        for attachment in evicted_ids {
+            assert!(!harness
+                .session
+                .client
+                .release_attachment_ciphertext(attachment)
+                .unwrap());
+        }
+        assert!(harness
+            .session
+            .client
+            .release_attachment_ciphertext(latest)
+            .unwrap());
+    }
 
     #[test]
     fn accepts_video_ranges_and_rejects_ambiguous_or_invalid_ones() {
@@ -1823,6 +2479,15 @@ mod media_protocol_tests {
             .unwrap(),
             (0, MAX_MEDIA_RANGE_BYTES - 1)
         );
+    }
+
+    #[test]
+    fn protocol_admission_is_bounded_before_request_threads_are_created() {
+        let budget = Arc::new(MediaReadBudget::new(1));
+        let first = budget.try_acquire().expect("first request admitted");
+        assert!(budget.try_acquire().is_none());
+        drop(first);
+        assert!(budget.try_acquire().is_some());
     }
 }
 
@@ -2247,7 +2912,25 @@ async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -
 pub fn run() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let builder = tauri::Builder::default()
-        .register_uri_scheme_protocol("peppy-media", media_protocol_response)
+        .register_asynchronous_uri_scheme_protocol("peppy-media", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let label = context.webview_label().to_owned();
+            let state = app.state::<AppState>();
+            let Some(admission) = state.media_read_budget.try_acquire() else {
+                responder.respond(
+                    tauri::http::Response::builder()
+                        .status(503)
+                        .header(tauri::http::header::RETRY_AFTER, "1")
+                        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+                        .body(Vec::new())
+                        .unwrap(),
+                );
+                return;
+            };
+            std::thread::spawn(move || {
+                responder.respond(media_protocol_response(app, label, request, admission))
+            });
+        })
         .on_page_load(|webview, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
@@ -2378,6 +3061,13 @@ pub fn run() {
                     if let Ok(mut scopes) = state.composer_scopes.lock() {
                         scopes.remove(window.label());
                     }
+                    let released = take_window_media_capabilities(&state, window.label());
+                    if !released.is_empty() {
+                        let app = window.app_handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            release_media_capabilities(&app.state::<AppState>(), released).await;
+                        });
+                    }
                 }
             }
             heads_runtime::panel_window_event(window, event);
@@ -2454,6 +3144,8 @@ pub fn run() {
         save_attachment,
         request_attachment_download,
         media_page,
+        media_page_around,
+        media_page_newer,
         open_media,
         load_media,
         close_media,

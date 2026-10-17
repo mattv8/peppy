@@ -26,10 +26,11 @@ class MmsBackfillScannerTest {
         assertTrue(more)
     }
 
-    @Test fun pausedPlansDoNotReadProvidersAndFairRechecksUseCoreRequests() {
+    @Test fun remotePauseFlagsRunLiveAndRecheckButNotHistory() {
         val core = FakeCore(
             listOf(
-                MmsBackfillScanPlan(MmsBackfillPhase.LIVE, null, "9", false, true, 32),
+                MmsBackfillScanPlan(MmsBackfillPhase.LIVE, null, "9", false, false, 32),
+                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, null, "9", false, true, 32),
                 MmsBackfillScanPlan(MmsBackfillPhase.RECHECK, null, null, false, false, 32),
             ),
             MmsBackfillRecheck(listOf(MmsBackfillRecheckRequest("7", true)), 32),
@@ -42,7 +43,7 @@ class MmsBackfillScannerTest {
             MmsBackfillPageResult(null, true, false)
         }) { request -> rechecked += request.providerMessageId; true }
 
-        assertEquals(0, pages)
+        assertEquals(1, pages)
         assertEquals(listOf("7"), rechecked)
         assertTrue(more)
         assertFalse(core.finished.isNotEmpty())

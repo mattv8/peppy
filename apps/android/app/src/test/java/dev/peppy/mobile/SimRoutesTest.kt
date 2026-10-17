@@ -34,10 +34,10 @@ class SimRoutesTest {
         assertEquals("permission_required", denied.getString("sms"))
         assertEquals("unsupported", denied.getString("mms"))
         assertEquals("permission_required", denied.getString("mms_receive"))
-        val enabled = SimRoutes.capabilityReport(routes, sendPermissionGranted = true, mmsEnabled = true, mmsReceivePermissionGranted = true)
+        val enabled = SimRoutes.capabilityReport(routes, sendPermissionGranted = true, mmsEnabled = true, mmsReceivePermissionGranted = true, mmsContentVersion = 3U)
             .getJSONObject("capabilities").getJSONArray("sims").getJSONObject(0)
         assertEquals("available", enabled.getString("mms"))
-        assertEquals(2, enabled.getInt("mms_content_version"))
+        assertEquals(3, enabled.getInt("mms_content_version"))
         assertEquals("available", enabled.getString("mms_receive"))
         assertEquals(false, enabled.getBoolean("mms_carrier_verified"))
         assertEquals(
