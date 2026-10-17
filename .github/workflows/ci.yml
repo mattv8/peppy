@@ -102,6 +102,7 @@ jobs:
       - run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: infra/release/test-compute-version.sh
       - run: infra/release/test-release-scripts.sh
+      - run: infra/release/test-desktop-bundles.sh
       - name: Test real Linux package normalization
         run: |
           sudo apt-get update && sudo apt-get install --yes rpm gnupg cpio file

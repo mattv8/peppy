@@ -245,47 +245,7 @@ jobs:
           APPLE_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
-        run: |
-          config=''
-          if [ "$TRUSTED_UPDATE_BUILD" = true ]; then
-            case "$PEPPY_UPDATE_CHANNEL" in stable|staging) ;; *) echo 'trusted update builds require stable or staging channel' >&2; exit 1 ;; esac
-            for required in VERSION PEPPY_UPDATE_PUBLIC_KEY TAURI_SIGNING_PRIVATE_KEY; do
-              [ -n "${!required}" ] || { echo "$required is required for trusted update builds" >&2; exit 1; }
-            done
-            if [ "$RUNNER_OS" = macOS ]; then
-              for required in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-                [ -n "${!required}" ] || { echo "$required is required for trusted macOS builds" >&2; exit 1; }
-              done
-            fi
-            config=$(node -e 'process.stdout.write(JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.PEPPY_UPDATE_PUBLIC_KEY}}}))')
-          fi
-          if [[ -n "$VERSION" ]]; then
-            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-              echo "version must match X.Y.Z or X.Y.Z-prerelease" >&2
-              exit 1
-            fi
-            if [[ -n "$WIX_VERSION" && ! "$WIX_VERSION" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
-              echo "wix_version must match X.Y.Z.W" >&2
-              exit 1
-            fi
-            json=$(printf '{"version":"%s"' "$VERSION")
-            if [[ -n "$WIX_VERSION" ]]; then
-              json="$json$(printf ',"bundle":{"windows":{"wix":{"version":"%s"}}}' "$WIX_VERSION")"
-            fi
-            json="$json}"
-            # shellcheck disable=SC2016
-            if [ -n "$config" ]; then json=$(node -e 'const [base, overlay] = process.argv.slice(1).map(JSON.parse); const bundle={...base.bundle,...overlay.bundle}; if (process.env.RUNNER_OS === "Windows") { const script = `${process.env.GITHUB_WORKSPACE}\\infra\\release\\sign-windows-artifact.ps1`; bundle.windows={...(base.bundle?.windows ?? {}),signCommand:`powershell -NoProfile -ExecutionPolicy Bypass -File \"${script}\" %1`}; } console.log(JSON.stringify({...base,...overlay,bundle}));' "$json" "$config"); fi
-            pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" --config "$json" -- --locked
-          else
-            pnpm --dir apps/desktop exec tauri build --bundles "$BUNDLES" -- --locked
-          fi
-          if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
-            while IFS= read -r -d '' application; do
-              codesign --verify --deep --strict --verbose=2 "$application"
-              spctl --assess --type execute --verbose=4 "$application"
-              xcrun stapler validate "$application"
-            done < <(find apps/desktop/src-tauri/target/release/bundle/macos -name '*.app' -type d -print0)
-          fi
+        run: infra/release/build-desktop-bundles.sh
       - if: always() && runner.os == 'Windows' && inputs.trusted_update_build
         name: Remove protected Authenticode certificate
         shell: pwsh
