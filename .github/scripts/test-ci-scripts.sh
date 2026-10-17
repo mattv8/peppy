@@ -117,7 +117,7 @@ expect_failure env "${gate_env[@]}" RUST_RESULT=invalid "$GATE"
 expect_failure env CHANGES_RESULT=success "$GATE"
 expect_failure env "${gate_env[@]}" CHANGES_RESULT=failure RUST_RESULT=skipped RUST_REQUIRED= "$GATE"
 
-for prefix in INTEGRATION DESKTOP; do
+for prefix in INTEGRATION DESKTOP DEVELOPMENT_ARTIFACTS; do
   env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=false" "$GATE"
   expect_failure env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=true" "$GATE"
   expect_failure env "${gate_env[@]}" "${prefix}_RESULT=failure" "$GATE"

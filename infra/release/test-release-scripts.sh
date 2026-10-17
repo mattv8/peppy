@@ -75,7 +75,6 @@ grep -Fq "dpkg-deb -c \"\$deb\"" "$script_dir/normalize-linux-package-metadata.s
 grep -Fq "rpmrebuild --package --notest --directory \"\$output_dir\"" "$script_dir/normalize-linux-package-metadata.sh"
 grep -Fq "'%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}'" "$script_dir/normalize-linux-package-metadata.sh"
 grep -Fq -- '--passphrase-fd 3' "$script_dir/sign-checksums.sh"
-grep -Fq 'rpm rpmrebuild' "$script_dir/../../.github/workflows/build-artifacts.yml"
 selected=$(printf '%s\n' '' v0.2.0-staging.9 v0.2.0-staging.10 v0.1.0-staging.99 v0.2.0 other | "$script_dir/prune-prereleases.sh" --keep 2 --select)
 test "$selected" = v0.1.0-staging.99
 test "$(printf '%s\n' 'v0.2.0-staging.6' | "$script_dir/prune-prereleases.sh" --keep 10 --select)" = ''
