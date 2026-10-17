@@ -20,7 +20,7 @@ for deb in "$bundle_dir"/deb/*.deb; do
   sed -i.bak -E "s/^Version: .*/Version: $package_version/" "$work_dir/package/DEBIAN/control"
   rm -f "$work_dir/package/DEBIAN/control.bak"
   dpkg-deb --root-owner-group --build "$work_dir/package" "$deb"
-  dpkg-deb -c "$deb" | awk 'NF >= 3 && $3 != "root/root" { exit 1 }' || { echo "rebuilt DEB contains non-root-owned members: $deb" >&2; exit 1; }
+  dpkg-deb -c "$deb" | awk 'NF >= 2 && $2 != "root/root" { exit 1 }' || { echo "rebuilt DEB contains non-root-owned members: $deb" >&2; exit 1; }
   rm -rf "$work_dir"
   work_dir=''
 done
