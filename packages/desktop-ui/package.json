@@ -8,6 +8,7 @@
     "./bridge-contracts": "./src/bridge-contracts.ts"
   },
   "scripts": {
+    "palette": "node scripts/avatar-palette.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

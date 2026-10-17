@@ -27,6 +27,7 @@ mod enrollment;
 mod error;
 mod fsutil;
 mod gateways;
+mod head_palette;
 mod heads;
 mod heads_runtime;
 

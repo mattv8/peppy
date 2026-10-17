@@ -45,7 +45,9 @@ import {
   Trash2,
   X,
   type Attachment,
+  type AvatarIdentity,
   type Conversation,
+  conversationAvatar,
   detectPlatform,
   installOverlayScrollbars,
   isRecipientPosition,
@@ -53,6 +55,7 @@ import {
   formatPhoneNumber,
   formatDateTime,
   isoDateTime,
+  seedKey,
   type RecipientPosition,
   type RecipientSuggestion,
 } from "@peppy/desktop-ui";
@@ -123,13 +126,21 @@ export function displayConversation(
   name: string,
   participants: string[] | undefined,
   resolution: ContactResolutionMap,
-): { name: string; avatarUrl?: string } {
+  id: string,
+  recipientless = false,
+): { name: string; avatar: AvatarIdentity } {
   const parts = participants?.length ? participants : [name];
-  if (!parts.some((part) => resolution[part])) return { name: formatPhoneNumber(name) };
+  const avatar = avatarFor(conversationAvatar({ id, name, participants, recipientless }), parts, resolution);
+  if (!parts.some((part) => resolution[part])) return { name: formatPhoneNumber(name), avatar };
   return {
     name: parts.map((part) => displayAddressName(part, resolution)).join(", "),
-    avatarUrl: parts.length === 1 ? resolution[parts[0]]?.photoDataUrl : undefined,
+    avatar,
   };
+}
+
+function avatarFor(identity: AvatarIdentity, addresses: string[], resolution: ContactResolutionMap): AvatarIdentity {
+  const resolved = identity.kind === "person" && addresses.length === 1 ? resolution[addresses[0]] : undefined;
+  return resolved ? { ...identity, photoDataUrl: resolved.photoDataUrl, name: resolved.displayName } : identity;
 }
 
 /** Native contact phone matches as UI suggestions; the phone address is the recipient ID. */
@@ -140,6 +151,8 @@ export async function searchRecipientSuggestions(query: string, sourceDeviceId?:
     label: match.displayName,
     detail: [match.label, match.normalized ? formatPhoneNumber(match.address) : match.number].filter(Boolean).join(" · "),
     avatarUrl: match.avatarUrl,
+    avatarSeed: seedKey(match.address),
+    avatarName: match.displayName,
   }));
 }
 
@@ -2129,17 +2142,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
 
   const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
   const conversations = useMemo<Conversation[]>(() => [
-    ...store.localDrafts().map((local) => ({
-      id: local.key,
-      name: local.content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
-      preview: "Not saved yet",
-      unread: 0,
-      draftOnly: true,
-      recipientlessDraft: local.content.recipientIds.length === 0,
-    })),
+    ...store.localDrafts().map((local) => {
+      const recipientIds = local.content.recipientIds;
+      return {
+        id: local.key,
+        name: recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message",
+        avatar: avatarFor(
+          conversationAvatar({ id: local.key, name: "", participants: recipientIds, recipientless: recipientIds.length === 0 }),
+          recipientIds,
+          resolution,
+        ),
+        preview: "Not saved yet",
+        unread: 0,
+        draftOnly: true,
+        recipientlessDraft: recipientIds.length === 0,
+      };
+    }),
     ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly }) => ({
       id,
-      ...displayConversation(name, participants, resolution),
+      ...displayConversation(name, participants, resolution, id, recipientlessDraft),
       preview,
       unread,
       recipientlessDraft,
@@ -2175,8 +2196,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     (id) =>
       attachmentViews[id] ?? { id, name: "Attached file", state: "pending" },
   );
+  const activeDisplay = active
+    ? displayConversation(active.name, active.participants, resolution, active.id, active.recipientlessDraft)
+    : undefined;
   const title =
-    (active?.name && displayConversation(active.name, active.participants, resolution).name) ??
+    activeDisplay?.name ??
     (isLocalDraftKey(slotKey)
       ? content.recipientIds.map((id) => displayAddressName(id, resolution)).join(", ") || "New message"
       : undefined);
@@ -2320,7 +2344,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const recipientPanel = isNewConversation ? (
     <RecipientPanel
       key={newComposeKey ?? slotKey}
-      recipients={content.recipientIds.map((id) => ({ id, label: resolution[id]?.displayName ?? id, avatarUrl: resolution[id]?.photoDataUrl }))}
+      recipients={content.recipientIds.map((id) => ({
+        id,
+        label: resolution[id]?.displayName ?? id,
+        avatarUrl: resolution[id]?.photoDataUrl,
+        avatarSeed: seedKey(id),
+        avatarName: resolution[id]?.displayName,
+      }))}
       onCommit={commitRecipients}
       searchContacts={snapshot ? (query) => searchRecipientSuggestions(query, content.gatewayId) : undefined}
       onSuggestionChosen={rememberContact}
@@ -2613,9 +2643,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           ref={paneRef}
         >
           <header id="thread-pane-header">
-            {!settingsOpen && !notificationsOpen && !contactsOpen && active && (
+            {!settingsOpen && !notificationsOpen && !contactsOpen && activeDisplay && (
               <span id="thread-contact-avatar">
-                <ContactAvatar name={title ?? active.name} photoDataUrl={displayConversation(active.name, active.participants, resolution).avatarUrl} size={36} />
+                <ContactAvatar {...activeDisplay.avatar} size={36} />
               </span>
             )}
             <div className="header-copy">

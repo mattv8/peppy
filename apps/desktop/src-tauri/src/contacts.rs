@@ -185,21 +185,8 @@ pub(crate) fn session_avatar(
         return None;
     }
     *budget -= 1;
-    let value = session
-        .client
-        .open_native_plaintext(id)
-        .ok()
-        .and_then(|file| {
-            let mut bytes = Vec::new();
-            fs::File::open(file.path())
-                .ok()?
-                .take(MAX_AVATAR_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            (bytes.len() as u64 <= MAX_AVATAR_BYTES)
-                .then(|| media::avatar_data_url(&bytes, AVATAR_EDGE, AVATAR_MAX_BYTES))
-                .flatten()
-        });
+    let value = local_photo_bytes(session, id)
+        .and_then(|bytes| media::avatar_data_url(&bytes, AVATAR_EDGE, AVATAR_MAX_BYTES));
     let mut cache = session
         .previews
         .lock()
@@ -209,6 +196,18 @@ pub(crate) fn session_avatar(
     }
     cache.insert(id, value.clone());
     value
+}
+
+/// Reads a verified local contact photo, rejecting data above the avatar budget.
+pub(crate) fn local_photo_bytes(session: &Session, id: AttachmentId) -> Option<Vec<u8>> {
+    let file = session.client.open_native_plaintext(id).ok()?;
+    let mut bytes = Vec::new();
+    fs::File::open(file.path())
+        .ok()?
+        .take(MAX_AVATAR_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_AVATAR_BYTES).then_some(bytes)
 }
 
 /// One page (at most 200, core's cap) of a book's live contacts, starting at `offset`.

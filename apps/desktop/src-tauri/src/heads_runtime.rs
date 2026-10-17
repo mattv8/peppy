@@ -5,9 +5,15 @@ use crate::{
     error::{BridgeError, BridgeResult, core_error},
     heads::{HeadLayout, HeadLayoutStore, MAX_HEADS, Pin, PinStore},
     tray,
-    windows::{self, HeadCallback, HeadEvent, HeadFrame, HeadPosition, HeadSpec},
+    windows::{
+        self, HeadCallback, HeadEvent, HeadFrame, HeadGlyph, HeadPhoto, HeadPosition, HeadSpec,
+    },
 };
 use peppy_client_core::ConversationId;
+use peppy_desktop_api::{
+    avatar::{AvatarKind, conversation_avatar, initials, palette_index},
+    images::avatar_rgba,
+};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
@@ -31,10 +37,15 @@ struct ActiveHead {
     generation: u64,
     panel: bool,
     name: String,
+    glyph: HeadGlyph,
+    color: [u8; 3],
+    label: String,
+    unread: u64,
 }
 
 struct RuntimeState {
     binding: Option<Binding>,
+    session: Option<Arc<crate::session::Session>>,
     heads: HashMap<String, ActiveHead>,
     generation: u64,
     refreshing: bool,
@@ -51,6 +62,7 @@ impl RuntimeState {
     fn new(generation: u64) -> Self {
         Self {
             binding: None,
+            session: None,
             heads: HashMap::new(),
             generation,
             refreshing: false,
@@ -75,14 +87,18 @@ fn adopt_active_head(
     existing: Option<&ActiveHead>,
     position: HeadPosition,
     generation: u64,
-    name: String,
+    head: &HeadData,
 ) -> ActiveHead {
     ActiveHead {
         position,
         frame: existing.and_then(|active| active.frame.clone()),
         generation,
         panel: existing.is_some_and(|active| active.panel),
-        name,
+        name: head.name.clone(),
+        glyph: head.glyph.clone(),
+        color: head.color,
+        label: head.label.clone(),
+        unread: head.unread,
     }
 }
 
@@ -113,6 +129,7 @@ pub struct HeadRuntime {
     actions: mpsc::UnboundedSender<RuntimeAction>,
     panel_writes: Mutex<HashMap<String, PhysicalRect>>,
     panel_debounce: Mutex<HashMap<String, u64>>,
+    photos: PhotoCache,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,8 +151,38 @@ struct RuntimeToken {
 struct HeadData {
     id: String,
     name: String,
-    initials: String,
+    color: [u8; 3],
+    glyph: HeadGlyph,
+    label: String,
     unread: u64,
+}
+
+struct RawHead {
+    id: String,
+    name: String,
+    participants: Option<Vec<String>>,
+    recipientless: bool,
+    unread: u64,
+}
+
+#[derive(Clone)]
+struct ResolvedFace {
+    display_name: String,
+    photo: Option<HeadPhoto>,
+}
+
+type PhotoCache = Arc<Mutex<PhotoCacheEntries>>;
+
+struct PhotoCacheEntries {
+    entries: HashMap<peppy_client_core::AttachmentId, Option<HeadPhoto>>,
+    epoch: u64,
+}
+
+impl PhotoCacheEntries {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+    }
 }
 
 /// Installs one serialized refresh listener and one ordered native-event lane.
@@ -158,6 +205,10 @@ pub fn install(app: &AppHandle) -> BridgeResult<()> {
         actions,
         panel_writes: Mutex::new(HashMap::new()),
         panel_debounce: Mutex::new(HashMap::new()),
+        photos: Arc::new(Mutex::new(PhotoCacheEntries {
+            entries: HashMap::new(),
+            epoch: 0,
+        })),
     });
     let action_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -452,21 +503,14 @@ async fn refresh(app: &AppHandle) {
         Err(_) => return,
     };
     let pin_ids: HashSet<String> = pins.iter().map(|pin| pin.conversation_id.clone()).collect();
-    let cached_names = runtime(app)
-        .state
-        .lock()
-        .ok()
-        .map(|state| {
-            state
-                .heads
-                .iter()
-                .map(|(id, head)| (id.clone(), head.name.clone()))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let reveal = matches!(
+        app.state::<AppState>().notifications.preferences().preview,
+        crate::notifications::Preview::Full
+    );
+    let photos = runtime(app).photos.clone();
     let queried = crate::sync::blocking({
         let session = session.clone();
-        move || resolve_heads(&session, &pin_ids, &cached_names)
+        move || resolve_heads(&session, &pin_ids, reveal, &photos)
     })
     .await;
     let data = match queried {
@@ -527,23 +571,28 @@ async fn refresh(app: &AppHandle) {
                 .unwrap_or(pin.position);
             state.heads.insert(
                 id.clone(),
-                adopt_active_head(
-                    existing.as_ref(),
-                    position.clone(),
-                    token.generation,
-                    head.name.clone(),
-                ),
+                adopt_active_head(existing.as_ref(), position.clone(), token.generation, &head),
             );
-            specs.push((
-                HeadSpec {
-                    conversation_id: id,
-                    generation: token.generation,
-                    initials: head.initials,
-                    unread: head.unread,
-                    position,
-                },
-                existing.is_some(),
-            ));
+            let changed = existing.as_ref().is_none_or(|active| {
+                active.glyph != head.glyph
+                    || active.color != head.color
+                    || active.label != head.label
+                    || active.unread != head.unread
+            });
+            if changed {
+                specs.push((
+                    HeadSpec {
+                        conversation_id: id,
+                        generation: token.generation,
+                        glyph: head.glyph,
+                        color: head.color,
+                        label: head.label,
+                        unread: head.unread,
+                        position,
+                    },
+                    existing.is_some(),
+                ));
+            }
         }
         (to_hide, specs)
     };
@@ -583,35 +632,48 @@ async fn refresh(app: &AppHandle) {
 fn resolve_heads(
     session: &Arc<crate::session::Session>,
     wanted: &HashSet<String>,
-    cached_names: &HashMap<String, String>,
+    reveal: bool,
+    photos: &PhotoCache,
 ) -> BridgeResult<Option<Vec<HeadData>>> {
     if !session_displayable(session)? {
         return Ok(None);
     }
     let conversations = session.client.list_conversations().map_err(core_error)?;
     let drafts = session.client.compose_drafts().map_err(core_error)?;
-    let mut result = Vec::with_capacity(wanted.len());
+    let drafts_by_conversation = drafts
+        .iter()
+        .map(|draft| (draft.conversation_id, draft))
+        .collect::<HashMap<_, _>>();
+    let mut raw_heads = Vec::with_capacity(wanted.len());
     let mut emitted_ids = HashSet::with_capacity(wanted.len());
     for conversation in conversations {
         let id = conversation.conversation_id.to_string();
         if !wanted.contains(&id) {
             continue;
         }
-        let name = if let Some(name) = cached_names.get(&id) {
-            name.clone()
-        } else {
-            session
-                .client
-                .latest_message(conversation.conversation_id)
-                .map_err(core_error)?
-                .as_ref()
-                .map(crate::dto::counterpart)
-                .unwrap_or_else(|| "Conversation".into())
-        };
-        result.push(HeadData {
+        let name = session
+            .client
+            .latest_message(conversation.conversation_id)
+            .map_err(core_error)?
+            .as_ref()
+            .map(crate::dto::counterpart)
+            .or_else(|| {
+                drafts_by_conversation
+                    .get(&conversation.conversation_id)
+                    .map(|draft| draft.recipients.join(", "))
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Conversation".into());
+        let participants = session
+            .client
+            .mms_reply_context(conversation.conversation_id)
+            .ok()
+            .map(|context| context.recipients);
+        raw_heads.push(RawHead {
             id: id.clone(),
-            initials: initials(&name),
             name,
+            participants,
+            recipientless: false,
             unread: conversation.unread_count,
         });
         emitted_ids.insert(id);
@@ -621,25 +683,24 @@ fn resolve_heads(
         if !wanted.contains(&id) || emitted_ids.contains(&id) {
             continue;
         }
-        let name = if draft.recipients.is_empty() {
-            "New message".into()
-        } else {
-            draft.recipients.join(", ")
-        };
-        result.push(HeadData {
+        let name = draft.recipients.join(", ");
+        raw_heads.push(RawHead {
             id: id.clone(),
-            initials: initials(&name),
             name,
+            participants: Some(draft.recipients.clone()),
+            recipientless: draft.recipients.is_empty(),
             unread: 0,
         });
         emitted_ids.insert(id);
     }
-    Ok(Some(result))
+    Ok(Some(resolve_raw_heads(session, raw_heads, reveal, photos)))
 }
 
 fn resolve_one(
     session: &Arc<crate::session::Session>,
     conversation: ConversationId,
+    reveal: bool,
+    photos: &PhotoCache,
 ) -> BridgeResult<HeadData> {
     if !session_displayable(session)? {
         return Err(BridgeError::new(
@@ -647,6 +708,7 @@ fn resolve_one(
             "The local account is no longer available for floating conversations.",
         ));
     }
+    let drafts = session.client.compose_drafts().map_err(core_error)?;
     if let Some(found) = session
         .client
         .list_conversations()
@@ -660,37 +722,249 @@ fn resolve_one(
             .map_err(core_error)?
             .as_ref()
             .map(crate::dto::counterpart)
+            .or_else(|| {
+                drafts
+                    .iter()
+                    .find(|draft| draft.conversation_id == conversation)
+                    .map(|draft| draft.recipients.join(", "))
+            })
+            .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "Conversation".into());
-        return Ok(HeadData {
-            id: conversation.to_string(),
-            initials: initials(&name),
-            name,
-            unread: found.unread_count,
-        });
+        return Ok(resolve_one_raw_head(
+            session,
+            RawHead {
+                id: conversation.to_string(),
+                name,
+                participants: session
+                    .client
+                    .mms_reply_context(conversation)
+                    .ok()
+                    .map(|context| context.recipients),
+                recipientless: false,
+                unread: found.unread_count,
+            },
+            reveal,
+            photos,
+        ));
     }
-    if let Some(draft) = session
-        .client
-        .compose_drafts()
-        .map_err(core_error)?
+    if let Some(draft) = drafts
         .into_iter()
         .find(|draft| draft.conversation_id == conversation)
     {
-        let name = if draft.recipients.is_empty() {
-            "New message".into()
-        } else {
-            draft.recipients.join(", ")
-        };
-        return Ok(HeadData {
-            id: conversation.to_string(),
-            initials: initials(&name),
-            name,
-            unread: 0,
-        });
+        let name = draft.recipients.join(", ");
+        return Ok(resolve_one_raw_head(
+            session,
+            RawHead {
+                id: conversation.to_string(),
+                name,
+                participants: Some(draft.recipients.clone()),
+                recipientless: draft.recipients.is_empty(),
+                unread: 0,
+            },
+            reveal,
+            photos,
+        ));
     }
     Err(BridgeError::new(
         "not-found",
         "The conversation is not available locally.",
     ))
+}
+
+fn resolve_raw_heads(
+    session: &crate::session::Session,
+    heads: Vec<RawHead>,
+    reveal: bool,
+    photos: &PhotoCache,
+) -> Vec<HeadData> {
+    let addresses = heads
+        .iter()
+        .flat_map(raw_addresses)
+        .map(|address| (address, None))
+        .collect::<Vec<_>>();
+    let resolved = reveal.then(|| crate::contacts::resolve_addresses(&session.client, &addresses));
+    heads
+        .into_iter()
+        .map(|head| resolve_raw_head(session, head, reveal, resolved.as_ref(), photos))
+        .collect()
+}
+
+fn resolve_one_raw_head(
+    session: &crate::session::Session,
+    head: RawHead,
+    reveal: bool,
+    photos: &PhotoCache,
+) -> HeadData {
+    let addresses = raw_addresses(&head)
+        .into_iter()
+        .map(|address| (address, None))
+        .collect::<Vec<_>>();
+    let resolved = reveal.then(|| crate::contacts::resolve_addresses(&session.client, &addresses));
+    resolve_raw_head(session, head, reveal, resolved.as_ref(), photos)
+}
+
+fn raw_addresses(head: &RawHead) -> Vec<String> {
+    if head.recipientless {
+        return Vec::new();
+    }
+    head.participants
+        .as_ref()
+        .filter(|participants| !participants.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            head.name
+                .split(", ")
+                .filter(|address| !address.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+}
+
+fn resolve_raw_head(
+    session: &crate::session::Session,
+    head: RawHead,
+    reveal: bool,
+    resolved: Option<&HashMap<String, crate::contacts::Resolved>>,
+    photos: &PhotoCache,
+) -> HeadData {
+    let avatar = conversation_avatar(
+        &head.id,
+        &head.name,
+        head.participants.as_deref(),
+        head.recipientless,
+    );
+    let addresses = raw_addresses(&head);
+    let single_address = addresses.first().map(String::as_str);
+    let resolved_face = matches!(avatar.kind, AvatarKind::Person)
+        .then(|| {
+            single_address.and_then(|address| {
+                resolved
+                    .and_then(|contacts| contacts.get(address))
+                    .map(|contact| ResolvedFace {
+                        display_name: contact.display_name.clone(),
+                        photo: contact
+                            .photo
+                            .filter(|id| {
+                                session
+                                    .client
+                                    .attachment_info(*id)
+                                    .is_ok_and(|info| info.state.is_local())
+                            })
+                            .and_then(|id| cached_photo(session, id, photos)),
+                    })
+            })
+        })
+        .flatten();
+    let group_addresses = addresses
+        .iter()
+        .map(|address| {
+            resolved
+                .and_then(|contacts| contacts.get(address))
+                .map(|contact| contact.display_name.clone())
+                .unwrap_or_else(|| address.clone())
+        })
+        .collect::<Vec<_>>();
+    let (glyph, label) = head_face(
+        avatar.kind,
+        reveal,
+        resolved_face,
+        single_address,
+        &group_addresses,
+        head.recipientless,
+    );
+    HeadData {
+        id: head.id,
+        name: label.clone(),
+        color: crate::head_palette::head_color(palette_index(&avatar.seed)),
+        glyph,
+        label,
+        unread: head.unread,
+    }
+}
+
+fn cached_photo(
+    session: &crate::session::Session,
+    id: peppy_client_core::AttachmentId,
+    photos: &PhotoCache,
+) -> Option<HeadPhoto> {
+    let epoch = {
+        let cache = photos.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(photo) = cache.entries.get(&id) {
+            return photo.clone();
+        }
+        cache.epoch
+    };
+    let photo = crate::contacts::local_photo_bytes(session, id).and_then(|bytes| {
+        avatar_rgba(&bytes, 96).map(|(edge, rgba)| HeadPhoto {
+            edge,
+            rgba: Arc::from(rgba),
+        })
+    });
+    let mut cache = photos.lock().unwrap_or_else(|poison| poison.into_inner());
+    if cache.epoch != epoch {
+        return photo;
+    }
+    if cache.entries.len() >= 16 {
+        cache.clear();
+    }
+    cache.entries.insert(id, photo.clone());
+    photo
+}
+
+fn clear_photos(app: &AppHandle) {
+    runtime(app)
+        .photos
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
+}
+
+fn head_face(
+    kind: AvatarKind,
+    reveal: bool,
+    resolved: Option<ResolvedFace>,
+    single_address: Option<&str>,
+    group_addresses: &[String],
+    recipientless: bool,
+) -> (HeadGlyph, String) {
+    let generic_label = if recipientless {
+        "New message"
+    } else {
+        "Conversation"
+    };
+    if !reveal {
+        return (
+            match kind {
+                AvatarKind::Person => HeadGlyph::Person,
+                AvatarKind::Group => HeadGlyph::Group,
+            },
+            generic_label.into(),
+        );
+    }
+    if matches!(kind, AvatarKind::Group) {
+        return (HeadGlyph::Group, group_addresses.join(", "));
+    }
+    match resolved {
+        Some(ResolvedFace {
+            display_name,
+            photo: Some(photo),
+        }) => (HeadGlyph::Photo(photo), display_name),
+        Some(ResolvedFace {
+            display_name,
+            photo: None,
+        }) => {
+            let glyph = initials(&display_name, 2);
+            if glyph.is_empty() {
+                (HeadGlyph::Person, display_name)
+            } else {
+                (HeadGlyph::Initials(glyph), display_name)
+            }
+        }
+        None => (
+            HeadGlyph::Person,
+            single_address.unwrap_or(generic_label).to_owned(),
+        ),
+    }
 }
 
 fn session_displayable(session: &crate::session::Session) -> BridgeResult<bool> {
@@ -704,18 +978,6 @@ fn session_displayable(session: &crate::session::Session) -> BridgeResult<bool> 
         .lock()
         .map_err(|_| BridgeError::host_state())?;
     Ok(!status.revoked && !session.cancel.is_cancelled())
-}
-
-fn initials(name: &str) -> String {
-    name.split_whitespace()
-        .filter_map(|word| {
-            word.chars()
-                .next()
-                .filter(|character| character.is_alphabetic())
-        })
-        .flat_map(char::to_uppercase)
-        .take(2)
-        .collect()
 }
 
 fn begin_binding(
@@ -735,6 +997,10 @@ fn begin_binding(
         ));
     }
     let binding_changed = state.binding.as_ref() != Some(&binding);
+    let session_changed = state
+        .session
+        .as_ref()
+        .is_none_or(|previous| !Arc::ptr_eq(previous, &session));
     let generation = {
         let app_state = app.state::<AppState>();
         let mut fence = app_state
@@ -757,14 +1023,17 @@ fn begin_binding(
     } else {
         Vec::new()
     };
-    Ok((
-        RuntimeToken {
-            binding,
-            generation: state.generation,
-            session,
-        },
-        stale,
-    ))
+    state.session = Some(session.clone());
+    let token = RuntimeToken {
+        binding,
+        generation: state.generation,
+        session,
+    };
+    drop(state);
+    if binding_changed || session_changed {
+        clear_photos(app);
+    }
+    Ok((token, stale))
 }
 
 async fn revalidate_after_await(app: &AppHandle, token: &RuntimeToken) -> bool {
@@ -1129,9 +1398,14 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
         })
         .await?;
     }
+    let reveal = matches!(
+        app.state::<AppState>().notifications.preferences().preview,
+        crate::notifications::Preview::Full
+    );
+    let photos = runtime(app).photos.clone();
     let head = crate::sync::blocking({
         let session = session.clone();
-        move || resolve_one(&session, conversation)
+        move || resolve_one(&session, conversation, reveal, &photos)
     })
     .await?;
     if !revalidate_after_await(app, &token).await {
@@ -1181,7 +1455,9 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
     let spec = HeadSpec {
         conversation_id: head.id.clone(),
         generation: token.generation,
-        initials: head.initials,
+        glyph: head.glyph.clone(),
+        color: head.color,
+        label: head.label.clone(),
         unread: head.unread,
         position: position.clone(),
     };
@@ -1202,6 +1478,10 @@ pub async fn popout(app: &AppHandle, conversation: ConversationId) -> BridgeResu
                 generation: token.generation,
                 panel: true,
                 name: head.name,
+                glyph: head.glyph,
+                color: head.color,
+                label: head.label,
+                unread: head.unread,
             },
         );
     }
@@ -1617,9 +1897,11 @@ pub async fn reset(app: &AppHandle) -> BridgeResult<()> {
         state.generation = generation;
         state.heads.clear();
         state.binding = None;
+        state.session = None;
         state.queued = false;
         state.layout_cache.clear(); // Clear cache on binding change (N2)
     }
+    clear_photos(app);
     on_main(app, windows::clear_heads).await?;
     update_tray_menu(app, None).await;
     Ok(())
@@ -1635,8 +1917,10 @@ pub fn clear_on_exit(app: &AppHandle) {
         state.queued = false;
         state.heads.clear();
         state.binding = None;
+        state.session = None;
         state.layout_cache.clear(); // Clear cache on exit (N2)
     }
+    clear_photos(app);
     let app = app.clone();
     let _ = app
         .clone()
@@ -1663,9 +1947,11 @@ async fn clear_visible(app: &AppHandle) {
             .collect::<Vec<_>>();
         state.heads.clear();
         state.binding = None;
+        state.session = None;
         state.layout_cache.clear(); // Clear cache on clear visible (N2)
         labels
     };
+    clear_photos(app);
     let _ = on_main(app, move |app| {
         windows::clear_heads(app);
         for label in labels {
@@ -1692,13 +1978,13 @@ async fn update_tray_menu(app: &AppHandle, token: Option<&RuntimeToken>) {
         .lock()
         .ok()
         .map(|state| {
-            let mut entries = state
-                .heads
-                .iter()
-                .map(|(id, head)| (id.clone(), head.name.clone()))
-                .collect::<Vec<_>>();
-            entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-            entries
+            tray_entries(
+                state
+                    .heads
+                    .iter()
+                    .map(|(id, head)| (id.clone(), head.name.clone()))
+                    .collect(),
+            )
         })
         .unwrap_or_default();
     if runtime(app)
@@ -1733,6 +2019,19 @@ async fn update_tray_menu(app: &AppHandle, token: Option<&RuntimeToken>) {
     }
 }
 
+fn tray_entries(mut entries: Vec<(String, String)>) -> Vec<(String, String)> {
+    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut labels = HashMap::new();
+    for (_, label) in &mut entries {
+        let count = labels.entry(label.clone()).or_insert(0usize);
+        *count += 1;
+        if *count > 1 {
+            *label = format!("{label} {count}");
+        }
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1761,12 +2060,133 @@ mod tests {
         (fixture, session, conversation)
     }
 
+    fn photo_cache() -> PhotoCache {
+        Arc::new(Mutex::new(PhotoCacheEntries {
+            entries: HashMap::new(),
+            epoch: 0,
+        }))
+    }
+
     #[test]
-    fn initials_use_only_leading_unicode_letters() {
-        assert_eq!(initials("Ada Lovelace"), "AL");
-        assert_eq!(initials("+18016944617"), "");
-        assert_eq!(initials("  7 Bob  Élodie"), "BÉ");
-        assert_eq!(initials("李 小龍"), "李小");
+    fn hidden_heads_never_reveal_resolved_names_or_photos() {
+        let photo = HeadPhoto {
+            edge: 1,
+            rgba: Arc::from([0, 0, 0, 255]),
+        };
+        assert_eq!(
+            head_face(
+                AvatarKind::Person,
+                false,
+                Some(ResolvedFace {
+                    display_name: "Ada Lovelace".into(),
+                    photo: Some(photo),
+                }),
+                Some("+18015551234"),
+                &[],
+                false,
+            ),
+            (HeadGlyph::Person, "Conversation".into())
+        );
+        assert_eq!(
+            head_face(AvatarKind::Group, false, None, None, &[], false),
+            (HeadGlyph::Group, "Conversation".into())
+        );
+    }
+
+    #[test]
+    fn head_face_selects_full_preview_glyphs_and_labels() {
+        let photo = HeadPhoto {
+            edge: 1,
+            rgba: Arc::from([0, 0, 0, 255]),
+        };
+        assert!(matches!(
+            head_face(
+                AvatarKind::Person,
+                true,
+                Some(ResolvedFace {
+                    display_name: "Ada".into(),
+                    photo: Some(photo),
+                }),
+                None,
+                &[],
+                false,
+            ),
+            (HeadGlyph::Photo(_), label) if label == "Ada"
+        ));
+        assert_eq!(
+            head_face(
+                AvatarKind::Person,
+                true,
+                Some(ResolvedFace {
+                    display_name: "Ada Lovelace".into(),
+                    photo: None,
+                }),
+                None,
+                &[],
+                false,
+            ),
+            (HeadGlyph::Initials("AL".into()), "Ada Lovelace".into())
+        );
+        assert_eq!(
+            head_face(
+                AvatarKind::Person,
+                true,
+                Some(ResolvedFace {
+                    display_name: "+18015551234".into(),
+                    photo: None,
+                }),
+                None,
+                &[],
+                false,
+            ),
+            (HeadGlyph::Person, "+18015551234".into())
+        );
+        assert_eq!(
+            head_face(AvatarKind::Person, true, None, None, &[], false),
+            (HeadGlyph::Person, "Conversation".into())
+        );
+        assert_eq!(
+            head_face(
+                AvatarKind::Person,
+                true,
+                None,
+                Some("+18015551234"),
+                &[],
+                false,
+            ),
+            (HeadGlyph::Person, "+18015551234".into())
+        );
+        assert_eq!(
+            head_face(
+                AvatarKind::Group,
+                true,
+                None,
+                None,
+                &["Ada".into(), "+18015551234".into()],
+                false,
+            ),
+            (HeadGlyph::Group, "Ada, +18015551234".into())
+        );
+    }
+
+    #[test]
+    fn recipientless_drafts_and_hidden_duplicate_labels_are_safe_in_the_tray() {
+        assert_eq!(
+            head_face(AvatarKind::Person, false, None, None, &[], true),
+            (HeadGlyph::Person, "New message".into())
+        );
+        assert_eq!(
+            tray_entries(vec![
+                ("b".into(), "Conversation".into()),
+                ("a".into(), "Conversation".into()),
+                ("draft".into(), "New message".into()),
+            ]),
+            vec![
+                ("a".into(), "Conversation".into()),
+                ("b".into(), "Conversation 2".into()),
+                ("draft".into(), "New message".into()),
+            ]
+        );
     }
 
     #[test]
@@ -1860,7 +2280,7 @@ mod tests {
         let id = conversation.to_string();
         let wanted = HashSet::from([id.clone()]);
         assert!(
-            resolve_heads(&session, &wanted, &HashMap::new())
+            resolve_heads(&session, &wanted, false, &photo_cache())
                 .unwrap()
                 .unwrap()[0]
                 .unread
@@ -1875,7 +2295,7 @@ mod tests {
             .mark_seen_scoped(&[message], Some(conversation))
             .unwrap();
         assert_eq!(
-            resolve_heads(&session, &wanted, &HashMap::new())
+            resolve_heads(&session, &wanted, false, &photo_cache())
                 .unwrap()
                 .unwrap()[0]
                 .unread,
@@ -1888,14 +2308,15 @@ mod tests {
         let (_fixture, session, conversation) = locally_saved_draft_without_sync_unlock();
         assert_eq!(session.client.key_status().unwrap().active_epoch, None);
 
-        let head = resolve_one(&session, conversation).unwrap();
+        let head = resolve_one(&session, conversation, false, &photo_cache()).unwrap();
 
         assert_eq!(head.id, conversation.to_string());
-        assert_eq!(head.name, "+15555550100");
+        assert_eq!(head.name, "Conversation");
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),
-            &HashMap::new(),
+            false,
+            &photo_cache(),
         )
         .unwrap()
         .unwrap();
@@ -1933,13 +2354,16 @@ mod tests {
         });
 
         assert_eq!(
-            resolve_one(&session, conversation).unwrap().id,
+            resolve_one(&session, conversation, false, &photo_cache())
+                .unwrap()
+                .id,
             conversation.to_string()
         );
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),
-            &HashMap::new(),
+            false,
+            &photo_cache(),
         )
         .unwrap()
         .unwrap();
@@ -1952,13 +2376,16 @@ mod tests {
         let (_fixture, session, conversation) = locally_saved_draft_without_sync_unlock();
         session.mismatch.store(true, Ordering::Release);
         assert_eq!(
-            resolve_one(&session, conversation).unwrap().id,
+            resolve_one(&session, conversation, false, &photo_cache())
+                .unwrap()
+                .id,
             conversation.to_string()
         );
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),
-            &HashMap::new(),
+            false,
+            &photo_cache(),
         )
         .unwrap()
         .unwrap();
@@ -1972,7 +2399,10 @@ mod tests {
         session.cancel.cancel();
         assert!(!session_displayable(&session).unwrap());
         assert_eq!(
-            resolve_one(&session, conversation).err().unwrap().code,
+            resolve_one(&session, conversation, false, &photo_cache())
+                .err()
+                .unwrap()
+                .code,
             "session-unavailable"
         );
     }
@@ -1983,7 +2413,10 @@ mod tests {
         session.status.lock().unwrap().revoked = true;
         assert!(!session_displayable(&session).unwrap());
         assert_eq!(
-            resolve_one(&session, conversation).err().unwrap().code,
+            resolve_one(&session, conversation, false, &photo_cache())
+                .err()
+                .unwrap()
+                .code,
             "session-unavailable"
         );
     }
@@ -1992,7 +2425,7 @@ mod tests {
     fn local_head_resolution_rejects_unknown_conversation() {
         let (_fixture, session, _) = locally_saved_draft_without_sync_unlock();
         assert_eq!(
-            resolve_one(&session, ConversationId::new())
+            resolve_one(&session, ConversationId::new(), false, &photo_cache())
                 .err()
                 .unwrap()
                 .code,
@@ -2027,8 +2460,24 @@ mod tests {
             generation: 4,
             panel: true,
             name: "Old".into(),
+            glyph: HeadGlyph::Person,
+            color: [1, 2, 3],
+            label: "Old".into(),
+            unread: 1,
         };
-        let adopted = adopt_active_head(Some(&existing), position(), 4, "New".into());
+        let adopted = adopt_active_head(
+            Some(&existing),
+            position(),
+            4,
+            &HeadData {
+                id: "conversation".into(),
+                name: "New".into(),
+                glyph: HeadGlyph::Initials("N".into()),
+                color: [4, 5, 6],
+                label: "New".into(),
+                unread: 2,
+            },
+        );
         assert!(adopted.panel);
         assert_eq!(adopted.frame.unwrap().x, frame.x);
         assert_eq!(adopted.name, "New");
