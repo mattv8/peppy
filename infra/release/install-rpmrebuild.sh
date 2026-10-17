@@ -29,10 +29,10 @@ payload="$tmp/rpmrebuild-$version"
 mkdir "$payload"
 tar -xzf "$archive" -C "$payload"
 [ -f "$payload/rpmrebuild" ] || { echo 'rpmrebuild archive is missing its launcher' >&2; exit 1; }
-[ -f "$payload/rpmrebuild.sh" ] && [ -f "$payload/rpmrebuild_lib.src" ] && [ -d "$payload/plugins" ] && [ -d "$payload/locale" ] || {
+if [ ! -f "$payload/rpmrebuild.sh" ] || [ ! -f "$payload/rpmrebuild_lib.src" ] || [ ! -d "$payload/plugins" ] || [ ! -d "$payload/locale" ]; then
   echo 'rpmrebuild archive is missing required runtime files' >&2
   exit 1
-}
+fi
 
 rm -rf "$root_dir"
 mv "$payload" "$root_dir"
