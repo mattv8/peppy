@@ -23,7 +23,6 @@ export type GatewayPickerProps = {
   disabled?: boolean;
   onChange(value: string): void;
   describedBy?: string;
-  invalid?: boolean;
 };
 
 type PopupPosition = Pick<CSSProperties, "top" | "left" | "width" | "maxHeight" | "transform">;
@@ -33,7 +32,7 @@ const POPUP_GAP_PX = 6;
 const VIEWPORT_GUTTER_PX = 8;
 const PREFERRED_POPUP_HEIGHT_PX = 280;
 
-function selectedOption(options: GatewayPickerOption[], value: string) {
+function findOption(options: GatewayPickerOption[], value: string) {
   return options.find((option) => option.value === value);
 }
 
@@ -67,18 +66,18 @@ function optionId(listboxId: string, value: string) {
 }
 
 function routeBadges(option: GatewayPickerOption, id?: string) {
-  const showStatus = option.statusLabel && option.statusLabel !== option.simLabel;
+  const showSim = option.simLabel && option.simLabel !== option.statusLabel;
   return (
     <span id={id} data-gateway-badges>
       <span data-route-badge="device">{option.name}</span>
-      {option.simLabel && <span data-route-badge="sim">{option.simLabel}</span>}
-      {showStatus && <span data-route-badge="status" data-gateway-availability={option.availability}>{statusIcon(option.availability)}{option.statusLabel}</span>}
+      {showSim && <span data-route-badge="sim">{option.simLabel}</span>}
+      {option.statusLabel && <span data-route-badge="status" data-gateway-availability={option.availability}>{statusIcon(option.availability)}{option.statusLabel}</span>}
       {option.simulated && <span data-route-badge="simulated">Simulated</span>}
     </span>
   );
 }
 
-export function GatewayPicker({ options, value, placeholder, disabled = false, onChange, describedBy, invalid = false }: GatewayPickerProps): React.JSX.Element {
+export function GatewayPicker({ options, value, placeholder, disabled = false, onChange, describedBy }: GatewayPickerProps): React.JSX.Element {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const typeaheadTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -88,9 +87,9 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
   const [activeValue, setActiveValue] = useState<string>();
   const [popupPosition, setPopupPosition] = useState<PopupPosition>();
   const popupVisible = open && Boolean(popupPosition);
-  const selected = selectedOption(options, value);
+  const selected = findOption(options, value);
   const canOpen = !disabled && options.length > 0;
-  const activeCandidate = selectedOption(options, activeValue ?? "");
+  const activeCandidate = findOption(options, activeValue ?? "");
   const active = activeCandidate && !activeCandidate.disabled
     ? activeCandidate
     : (selected && !selected.disabled ? selected : firstEnabledOption(options));
@@ -106,13 +105,15 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
 
   const openWith = (option: GatewayPickerOption | undefined) => {
     if (!canOpen) return;
+    triggerRef.current?.focus();
     setActiveValue(option?.value ?? firstEnabledOption(options)?.value);
     setOpen(true);
   };
 
   const commit = (option: GatewayPickerOption | undefined) => {
-    if (!option || option.disabled) return;
-    onChange(option.value);
+    const matchingOption = option && findOption(options, option.value);
+    if (!matchingOption || matchingOption.disabled) return;
+    if (matchingOption.value !== value) onChange(matchingOption.value);
     close();
     triggerRef.current?.focus();
   };
@@ -139,7 +140,7 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
       const below = Math.max(0, viewportHeight - rect.bottom - VIEWPORT_GUTTER_PX - POPUP_GAP_PX);
       const above = Math.max(0, rect.top - VIEWPORT_GUTTER_PX - POPUP_GAP_PX);
       const placeAbove = below < Math.min(PREFERRED_POPUP_HEIGHT_PX, above) && above > below;
-      const maxHeight = placeAbove ? above : below;
+      const maxHeight = Math.min(placeAbove ? above : below, PREFERRED_POPUP_HEIGHT_PX);
       const width = Math.min(Math.max(rect.width, 220), viewportWidth - (VIEWPORT_GUTTER_PX * 2));
       setPopupPosition({
         top: placeAbove ? rect.top - POPUP_GAP_PX : rect.bottom + POPUP_GAP_PX,
@@ -151,19 +152,23 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
     };
     positionPopup();
     window.addEventListener("resize", positionPopup);
-    document.addEventListener("scroll", positionPopup, true);
+    const repositionOnExternalScroll = (event: Event) => {
+      if (event.target instanceof Node && popupRef.current?.contains(event.target)) return;
+      positionPopup();
+    };
+    document.addEventListener("scroll", repositionOnExternalScroll, true);
     const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(positionPopup);
     if (triggerRef.current) resizeObserver?.observe(triggerRef.current);
     return () => {
       window.removeEventListener("resize", positionPopup);
-      document.removeEventListener("scroll", positionPopup, true);
+      document.removeEventListener("scroll", repositionOnExternalScroll, true);
       resizeObserver?.disconnect();
     };
   }, [open]);
 
   useLayoutEffect(() => {
     if (!popupVisible || !activeOptionId) return;
-    const activeOption = document.getElementById(activeOptionId) as (HTMLElement & { scrollIntoView?: (options: ScrollIntoViewOptions) => void }) | null;
+    const activeOption = document.getElementById(activeOptionId);
     activeOption?.scrollIntoView?.({ block: "nearest" });
   }, [activeOptionId, popupVisible]);
 
@@ -182,7 +187,8 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
     const last = [...options].reverse().find((option) => !option.disabled);
     if (!open && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault();
-      openWith(event.key === "ArrowUp" || event.key === "End" ? last : first);
+      const selectedEnabled = selected && !selected.disabled ? selected : undefined;
+      openWith(event.key === "Home" ? first : event.key === "End" ? last : selectedEnabled ?? first);
       return;
     }
     if (!open) return;
@@ -194,6 +200,16 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
     if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
       setActiveValue((event.key === "Home" ? first : last)?.value);
+      return;
+    }
+    const isSearchKey = event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey && (event.key !== " " || Boolean(typeaheadRef.current));
+    if (isSearchKey) {
+      event.preventDefault();
+      typeaheadRef.current += event.key.toLocaleLowerCase();
+      if (typeaheadTimerRef.current) clearTimeout(typeaheadTimerRef.current);
+      typeaheadTimerRef.current = setTimeout(() => { typeaheadRef.current = ""; }, TYPEAHEAD_RESET_MS);
+      const match = options.find((option) => !option.disabled && optionSearchText(option).startsWith(typeaheadRef.current));
+      if (match) setActiveValue(match.value);
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -211,17 +227,11 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
       close();
       return;
     }
-    if (event.key.length !== 1 || event.altKey || event.ctrlKey || event.metaKey) return;
-    typeaheadRef.current += event.key.toLocaleLowerCase();
-    if (typeaheadTimerRef.current) clearTimeout(typeaheadTimerRef.current);
-    typeaheadTimerRef.current = setTimeout(() => { typeaheadRef.current = ""; }, TYPEAHEAD_RESET_MS);
-    const match = options.find((option) => !option.disabled && optionSearchText(option).startsWith(typeaheadRef.current));
-    if (match) setActiveValue(match.value);
   };
 
   const popupHost = triggerRef.current?.closest<HTMLElement>(".theme-light, .theme-dark, .theme-system") ?? document.body;
   const popup = open && popupHost && popupPosition && (
-    <div ref={popupRef} id={listboxId} role="listbox" aria-label="Phone routes" data-gateway-picker-popup style={popupPosition}>
+    <div ref={popupRef} id={listboxId} role="listbox" aria-label="Phone routes" data-gateway-picker-popup style={popupPosition} onMouseDown={(event) => event.preventDefault()}>
       {options.map((option) => (
         <div
           key={option.value}
@@ -234,7 +244,6 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
           data-gateway-availability={option.availability}
           data-gateway-choice={option.value}
           data-active={option.value === active?.value || undefined}
-          onMouseDown={(event) => event.preventDefault()}
           onClick={() => commit(option)}
         >
           {routeBadges(option)}
@@ -256,7 +265,6 @@ export function GatewayPicker({ options, value, placeholder, disabled = false, o
         aria-controls={open ? listboxId : undefined}
         aria-activedescendant={open ? activeOptionId : undefined}
         aria-describedby={describedByIds}
-        aria-invalid={invalid || undefined}
         disabled={!canOpen}
         data-gateway-picker-trigger
         onClick={() => open ? close() : openWith(selected && !selected.disabled ? selected : undefined)}

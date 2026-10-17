@@ -428,7 +428,6 @@ function GatewaySelector({
         disabled={!gateways.length}
         onChange={choose}
         describedBy={statusHint || presenceHint ? "gateway-presence-hint" : undefined}
-        invalid={Boolean(problem)}
       />
       <span id="gateway-presence-hint" className="visually-hidden" role="status" aria-live="polite">{statusHint ?? presenceHint}</span>
     </section>

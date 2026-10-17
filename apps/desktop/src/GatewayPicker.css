@@ -1,5 +1,5 @@
 [data-gateway-picker] { display: inline-flex; min-width: 0; max-width: 100%; }
-[data-gateway-picker-trigger], #gateway-selector [data-gateway-picker-trigger] { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius, 4px); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); font: inherit; text-align: left; }
+[data-gateway-picker-trigger] { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius, 4px); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); font: inherit; text-align: left; }
 [data-gateway-picker-trigger]:not(:disabled) { cursor: pointer; }
 [data-gateway-picker-trigger]:disabled { opacity: .6; }
 [data-gateway-picker-trigger]:focus-visible, [data-gateway-picker-popup] [role="option"][data-active] { outline: 2px solid var(--peppy-accent); outline-offset: 1px; }
@@ -17,4 +17,4 @@
 [data-gateway-picker-popup] [role="option"]:not([aria-disabled="true"]) { cursor: pointer; }
 [data-gateway-picker-popup] [role="option"]:hover:not([aria-disabled="true"]), [data-gateway-picker-popup] [role="option"][data-active] { background: var(--peppy-surface-hover); }
 [data-gateway-picker-popup] [role="option"][aria-disabled="true"] { color: var(--peppy-text-muted); opacity: .7; }
-@media (forced-colors: active) { [data-gateway-picker-trigger], [data-route-badge], [data-gateway-picker-popup] { border-color: CanvasText; } [data-gateway-picker-trigger]:focus-visible, [data-gateway-picker-popup] [role="option"][data-active] { outline-color: Highlight; } }
+@media (forced-colors: active) { [data-gateway-picker-trigger], [data-route-badge], [data-gateway-picker-popup] { border-color: CanvasText; } [data-gateway-picker-trigger]:focus-visible, [data-gateway-picker-popup] [role="option"][data-active] { outline-color: Highlight; } [data-gateway-picker-popup] [role="option"][aria-disabled="true"], [data-gateway-picker-popup] [role="option"][aria-disabled="true"] [data-route-badge] { color: GrayText; opacity: 1; } }
