@@ -28,6 +28,8 @@ import {
   formatPhoneNumber,
   normalizePhoneNumber,
 } from "./phone";
+import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
+import { ContactAvatar } from "./ContactAvatar";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
 export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
@@ -38,7 +40,18 @@ export {
   normalizePhoneNumber,
 } from "./phone";
 import "./styles.css";
+import "./avatar-palette.generated.css";
 export { ContactAvatar } from "./ContactAvatar";
+export {
+  AVATAR_PALETTE_SIZE,
+  contactSeed,
+  conversationAvatar,
+  initials,
+  paletteIndex,
+  seedKey,
+  type AvatarIdentity,
+  type AvatarKind,
+} from "./avatar";
 export {
   formatDateTime,
   formatElapsedShort,
@@ -72,7 +85,9 @@ export {
   SquarePen,
   Trash2,
   TriangleAlert,
+  User,
   UserPlus,
+  Users,
   X,
 } from "lucide-react";
 
@@ -91,8 +106,8 @@ export const themeTokens = {
 export type Conversation = {
   id: string;
   name: string;
-  /** Display-only contact photo (data URL); initials are shown otherwise. */
-  avatarUrl?: string;
+  /** Display-only identity, seeded from raw addresses. */
+  avatar?: AvatarIdentity;
   preview: string;
   unread: number;
   status?: string;
@@ -219,20 +234,15 @@ export function BusyIndicator({ id, label }: { id: string; label: string }): Rea
   </span>;
 }
 
-export type RecipientChip = { id: string; label: string; avatarUrl?: string };
+export type RecipientChip = { id: string; label: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
 /** A contact phone offered while typing; `id` is the phone address that becomes the recipient. */
-export type RecipientSuggestion = { id: string; label: string; detail?: string; avatarUrl?: string };
+export type RecipientSuggestion = { id: string; label: string; detail?: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
 export type RecipientPosition = { x: number; y: number };
 
 export function isRecipientPosition(value: unknown): value is RecipientPosition {
   return typeof value === "object" && value !== null
     && Number.isFinite((value as RecipientPosition).x) && (value as RecipientPosition).x >= 0
     && Number.isFinite((value as RecipientPosition).y) && (value as RecipientPosition).y >= 0;
-}
-
-function recipientAvatarLetter(label: string): string {
-  if (/^[+\d]/.test(label.trim())) return "#";
-  return label.match(/[a-z0-9]/i)?.[0]?.toUpperCase() ?? "#";
 }
 
 function recipientLabel(label: string): string {
@@ -276,7 +286,6 @@ export function RecipientPanel({
   const boundaryRef = useRef<HTMLElement>(null);
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [failedAvatars, setFailedAvatars] = useState<Set<string>>(() => new Set());
   const [dimensions, setDimensions] = useState({ boundaryWidth: 0, boundaryHeight: 0, panelWidth: 0, panelHeight: 0 });
   const [livePosition, setLivePosition] = useState<RecipientPosition | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -520,11 +529,8 @@ export function RecipientPanel({
       <span className="recipient-label" aria-hidden>To</span>
       <ul id="recipient-chips" aria-label="Recipient list">
         {recipients.map((recipient) => {
-          const showImage = recipient.avatarUrl && !failedAvatars.has(recipient.id);
           return <li key={recipient.id} data-recipient-id={recipient.id} className="recipient-chip">
-            <span className="recipient-avatar" aria-hidden>
-              {showImage ? <img src={recipient.avatarUrl} alt="" onError={() => setFailedAvatars((current) => new Set(current).add(recipient.id))} /> : recipientAvatarLetter(recipient.label)}
-            </span>
+            <ContactAvatar seed={recipient.avatarSeed ?? seedKey(recipient.id)} photoDataUrl={recipient.avatarUrl} name={recipient.avatarName} size={18} className="recipient-avatar" />
             <span className="recipient-chip-label">{recipientLabel(recipient.label)}</span>
             <button
               type="button"
@@ -621,9 +627,7 @@ export function RecipientPanel({
                 chooseSuggestion(suggestion);
               }}
             >
-              <span className="recipient-avatar" aria-hidden>
-                {suggestion.avatarUrl ? <img src={suggestion.avatarUrl} alt="" /> : recipientAvatarLetter(suggestion.label)}
-              </span>
+              <ContactAvatar seed={suggestion.avatarSeed ?? seedKey(suggestion.id)} photoDataUrl={suggestion.avatarUrl} name={suggestion.avatarName} size={18} className="recipient-avatar" />
               <span className="recipient-suggestion-copy">
                 <b>{suggestion.label}</b>
                 {suggestion.detail && <small>{suggestion.detail}</small>}
@@ -847,9 +851,7 @@ export function ConversationList({
             return <li key={c.id}>
               <div className={`conversation-row ${selectedId === c.id ? "selected" : ""}`} data-conversation-row={c.id}>
                 <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
-                  <span className="avatar" aria-hidden>
-                    {c.avatarUrl ? <img src={c.avatarUrl} alt="" /> : c.name.slice(0, 1).toUpperCase()}
-                  </span>
+                  <ContactAvatar {...(c.avatar ?? conversationAvatar({ id: c.id, name: c.name }))} size={36} className="avatar" />
                   <span className="conversation-copy">
                     <b>{c.name}</b>
                     <small>{c.preview}</small>
@@ -895,7 +897,7 @@ export function ConversationList({
 
 type PickerOption =
   | { kind: "existing"; id: string; name: string }
-  | { kind: "contact"; id: string; name: string; detail?: string; avatarUrl?: string; value: string }
+  | { kind: "contact"; id: string; name: string; detail?: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string; value: string }
   | { kind: "new"; id: string; name: string; value: string };
 const NEW_OPTION_ID = "new-recipient";
 export function RecipientPicker({
@@ -957,6 +959,8 @@ export function RecipientPicker({
       name: match.label,
       detail: match.detail,
       avatarUrl: match.avatarUrl,
+      avatarSeed: match.avatarSeed,
+      avatarName: match.avatarName,
       value: match.id,
     })),
     ...(onNewRecipient && normalizedQuery && !contactMatches.some((match) => match.id === normalizedQuery)
@@ -1073,9 +1077,7 @@ export function RecipientPicker({
             >
               {option.kind === "contact" ? (
                 <>
-                  <span className="recipient-avatar" aria-hidden>
-                    {option.avatarUrl ? <img src={option.avatarUrl} alt="" /> : recipientAvatarLetter(option.name)}
-                  </span>
+                  <ContactAvatar seed={option.avatarSeed ?? seedKey(option.value)} photoDataUrl={option.avatarUrl} name={option.avatarName ?? option.name} size={18} className="recipient-avatar" />
                   <span className="recipient-suggestion-copy">
                     <b>{option.name}</b>
                     {option.detail && <small>{option.detail}</small>}

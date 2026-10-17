@@ -10,7 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatDateTime, isoDateTime } from "@peppy/desktop-ui";
+import { conversationAvatar, formatDateTime, isoDateTime, paletteIndex } from "@peppy/desktop-ui";
 import { App, DraftStore, shouldConfirmPostFlushDelete } from "./App";
 import {
   bridge,
@@ -3681,10 +3681,40 @@ describe("display-only contact names", () => {
     };
     render(<App />);
     const row = await screen.findByText("Ada Lovelace");
-    expect(row.closest("[data-conversation-row]")?.querySelector("img")).toHaveAttribute("src", "data:image/jpeg;base64,AA==");
+    const avatar = row.closest("[data-conversation-row]")?.querySelector("[data-avatar-color]");
+    expect(avatar?.querySelector("img")).toHaveAttribute("src", "data:image/jpeg;base64,AA==");
+    expect(avatar).toHaveAttribute("data-avatar-color", String(paletteIndex("+12025550100")));
     expect(host.conversations.find((c) => c.id === "ada")?.name).toBe("+12025550100");
     // Unresolved conversations keep their stored names.
     expect(document.querySelector('[data-conversation-id="aurora"]')).toHaveTextContent("Aurora");
+  });
+
+  it("uses person and group identities from raw conversation addresses", async () => {
+    host.conversations.push(
+      { id: "short-code", name: "5556", preview: "Ping", unread: 0, messages: [] },
+      { id: "unresolved-number", name: "+18015551234", preview: "Ping", unread: 0, participants: ["+18015551234"], messages: [] },
+      {
+        id: "group-addresses",
+        name: "+18015551234, +15555550199",
+        preview: "Group ping",
+        unread: 0,
+        participants: ["+18015551234", "+15555550199"],
+        messages: [],
+      },
+    );
+    render(<App />);
+    await waitFor(() => expect(document.querySelector('[data-conversation-id="short-code"] [data-avatar-color]')).toBeInTheDocument());
+    expect(document.querySelector('[data-conversation-id="short-code"] [data-avatar-color]')).toHaveAttribute("data-avatar-kind", "person");
+    expect(document.querySelector('[data-conversation-id="unresolved-number"] [data-avatar-color]')).toHaveAttribute("data-avatar-kind", "person");
+    const groupAvatar = document.querySelector('[data-conversation-id="group-addresses"] [data-avatar-color]');
+    expect(groupAvatar).toHaveAttribute("data-avatar-kind", "group");
+    expect(groupAvatar).toHaveAttribute(
+      "data-avatar-color",
+      String(paletteIndex(conversationAvatar({ id: "group-addresses", name: "+18015551234, +15555550199", participants: ["+18015551234", "+15555550199"] }).seed)),
+    );
+
+    fireEvent.click(document.querySelector('[data-conversation-id="group-addresses"]')!);
+    await waitFor(() => expect(document.querySelector("#thread-contact-avatar [data-avatar-color]")).toHaveAttribute("data-avatar-color", groupAvatar?.getAttribute("data-avatar-color")));
   });
 
   it("starts a message to a contact phone that has no conversation, using the phone address", async () => {

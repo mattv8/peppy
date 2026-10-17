@@ -14,11 +14,37 @@ pub struct HeadPosition {
     pub y: f64,
 }
 
+/// Square, opaque sRGB RGBA8 pixels (`edge * edge * 4` bytes, top-down rows).
+#[derive(Clone, Debug)]
+pub struct HeadPhoto {
+    pub edge: u32,
+    pub rgba: Arc<[u8]>,
+}
+
+impl PartialEq for HeadPhoto {
+    fn eq(&self, other: &Self) -> bool {
+        self.edge == other.edge && (Arc::ptr_eq(&self.rgba, &other.rgba) || self.rgba == other.rgba)
+    }
+}
+
+/// What a head draws inside its colored circle.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HeadGlyph {
+    Photo(HeadPhoto),
+    Initials(String),
+    Person,
+    Group,
+}
+
 #[derive(Clone, Debug)]
 pub struct HeadSpec {
     pub conversation_id: String,
     pub generation: u64,
-    pub initials: String,
+    pub glyph: HeadGlyph,
+    /// Circle (and badge ring) color as sRGB bytes.
+    pub color: [u8; 3],
+    /// Accessible name for the head; already privacy-filtered by the runtime.
+    pub label: String,
     pub unread: u64,
     pub position: HeadPosition,
 }

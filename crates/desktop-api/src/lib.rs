@@ -7,6 +7,7 @@ use peppy_client_core::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod avatar;
 pub mod compose;
 pub mod gateways;
 pub mod images;

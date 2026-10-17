@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ContactAvatar, Clock, Smartphone, UserPlus, X, formatPhoneNumber } from "@peppy/desktop-ui";
+import { ContactAvatar, Clock, Smartphone, UserPlus, X, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactScanStatus, type ContactSyncStatus, type ContactView, type RestorableContact } from "./bridge";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import "./contacts.css";
@@ -526,6 +526,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
                   onClick={() => handleSelectContact(contact)}
                 >
                   <ContactAvatar
+                    seed={contactSeed(contact.phones, contact.id)}
                     name={contact.displayName}
                     photoDataUrl={contact.photoDataUrl}
                   />
@@ -629,6 +630,7 @@ function Detail({
       )}
       <header id="contacts-detail-header">
         <ContactAvatar
+          seed={contactSeed(contact.phones, contact.id)}
           name={contact.displayName}
           photoDataUrl={contact.photoDataUrl}
           size={64}
@@ -759,6 +761,7 @@ function Restore({
           {list.map(item => (
             <li key={item.id} data-contact-id={item.id}>
               <ContactAvatar
+                seed={contactSeed(undefined, item.id)}
                 name={item.displayName}
                 photoDataUrl={item.photoDataUrl}
               />
