@@ -237,6 +237,16 @@ impl Server {
     }
 }
 
+pub fn app(state: HealthState) -> Router {
+    let api = api::router_with_initialized_storage(state.database(), state.storage());
+    Router::new()
+        .route("/healthz", get(health::liveness))
+        .route("/readyz", get(health::readiness))
+        .route("/__release", get(health::release))
+        .with_state(state)
+        .merge(api)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,14 +273,4 @@ mod tests {
             TransportOptions::default().storage_cleanup_interval
         );
     }
-}
-
-pub fn app(state: HealthState) -> Router {
-    let api = api::router_with_initialized_storage(state.database(), state.storage());
-    Router::new()
-        .route("/healthz", get(health::liveness))
-        .route("/readyz", get(health::readiness))
-        .route("/__release", get(health::release))
-        .with_state(state)
-        .merge(api)
 }
