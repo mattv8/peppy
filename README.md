@@ -124,6 +124,14 @@ Every passphrase holder has the same cryptographic authority. Credential revocat
 
 SMS and MMS move in plaintext outside Peppy's encryption boundary. A gateway records carrier attempts durably and does not resend an attempt with an unknown carrier outcome. Snapshot history cannot execute carrier work. Copying a client database back behind the application is not detectable. Public attachment copies are separately supplied PNG, JPEG, or WebP plaintext derivatives. Their share tokens and expiry/revocation controls do not encrypt them; never upload private originals as public copies.
 
+### Attachment storage encryption
+
+Private attachment ciphertext and explicitly published plaintext image derivatives are encrypted at rest. Peppy requests automatic, backend-managed S3 SSE-S3 encryption; operators do not create, enter, or configure a separate Peppy storage-encryption key. SeaweedFS Compose deployments generate a hidden machine key once in the `seaweed-filer-data` volume and retain filer metadata and volume data in `seaweed-volume-data`. S3 volume chunks store SSE ciphertext, and `-filer.encryptVolumeData` protects filer-originated writes. Do not enable `-s3.encryptVolumeData` with SSE-S3 on the pinned SeaweedFS image: that interaction corrupts reads. Back up and restore both volumes together. A container or host administrator can read the key from the process environment or persisted filer state, and filer backups contain it. This protects stored data from disk or object access without that state; it does not protect against compromise of the complete host or filer state.
+
+Published derivatives remain plaintext when delivered through their existing `public/` prefix and retain their expiry and revocation behavior. This does not make those derivatives end-to-end encrypted and does not add forward secrecy.
+
+SSE response metadata and ciphertext framing are backend and format assertions, not independent proof that stored bytes are encrypted. Peppy fails startup when a custom S3 backend does not confirm the required SSE-S3 behavior; its initial multichunk storage probe is bounded at 360 seconds, while recurring readiness uses the configured shorter timeout. Hosted-provider support and its image-pin rollout are unverified in this repository and require follow-up in the private deployment repository.
+
 ## Local server and TLS experiments
 
 ### First-run setup and device connections

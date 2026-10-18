@@ -285,10 +285,16 @@ fn resolve_client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[IpNet]) -
 /// Capacity of the in-process commit-hint channel shared by all sockets.
 const HINT_CAPACITY: usize = 1024;
 
-/// Builds the API with transport policy from the environment
-/// (`PEPPY_REPLAY_RETENTION_DAYS`, default 30) and starts the bounded
-/// in-process outbox/retention maintenance task.
+/// Builds a storage-less API for tests that do not require attachments.
+/// Production startup must use [`crate::ServerBuilder`] so storage is verified.
 pub fn router(db: PgPool) -> Router {
+    router_with_initialized_storage(db, None)
+}
+
+pub(crate) fn router_with_initialized_storage(
+    db: PgPool,
+    initialized_storage: Option<Storage>,
+) -> Router {
     let config = Config::from_env().ok();
     let mut options = TransportOptions::default();
     if let Some(config) = &config {
@@ -303,7 +309,7 @@ pub fn router(db: PgPool) -> Router {
     let (router, maintenance) = build_router(
         db.clone(),
         config,
-        None,
+        initialized_storage,
         options,
         None,
         PushConfigAdvertisement::default(),
@@ -439,11 +445,7 @@ pub(crate) fn build_router(
     } = authorization;
     let (committed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
     let (presence_changed, _) = tokio::sync::broadcast::channel(HINT_CAPACITY);
-    let storage = initialized_storage.or_else(|| {
-        config
-            .as_ref()
-            .and_then(|config| config.s3.as_ref().map(Storage::new))
-    });
+    let storage = initialized_storage;
     let relay_url =
         explicit_relay_url.or_else(|| config.as_ref().and_then(|config| config.relay_url.clone()));
     let invitation_origin = config

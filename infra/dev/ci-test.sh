@@ -32,6 +32,7 @@ preflight() {
 run_integration_tests() {
     suite "Disposable integration tests"
     (
+        bash infra/docker/test-seaweedfs-entrypoint.sh
         # shellcheck disable=SC1091
         source infra/compose/test-env.sh
         # shellcheck disable=SC2329

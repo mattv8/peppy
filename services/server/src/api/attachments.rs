@@ -11,8 +11,7 @@
 //! - The worker re-checks references before deleting and retries failures with
 //!   backoff; nothing depends on a single inline delete.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{fs::File, path::PathBuf, time::Duration};
 
 use axum::{
     Json,
@@ -49,6 +48,33 @@ const MAX_DELETE_BACKOFF_SECONDS: i64 = 3_600;
 const RESERVATION_TTL_SECONDS: u16 = 3_600;
 /// Maximum number of attachment references per registration request.
 const MAX_REFERENCES_PER_REQUEST: usize = 128;
+
+async fn validate_private_spool(path: PathBuf) -> ApiResult<()> {
+    let validation = tokio::task::spawn_blocking(move || {
+        let input = File::open(path)?;
+        peppy_crypto::validate_stream_framing(input)
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "private spool framing task failed");
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, "upload_spool_unavailable")
+    })?;
+
+    match validation {
+        Ok(()) => Ok(()),
+        Err(peppy_crypto::CryptoError::InvalidStream) => Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "ciphertext_format_invalid",
+        )),
+        Err(error) => {
+            tracing::error!(?error, "private spool framing failed");
+            Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upload_spool_unavailable",
+            ))
+        }
+    }
+}
 
 fn sha256_hex(value: &str) -> Option<Vec<u8>> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -394,6 +420,7 @@ pub(super) async fn upload_attachment(
             "ciphertext_mismatch",
         ));
     }
+    validate_private_spool(spool.path.clone()).await?;
     // A fresh key per attempt: a slower duplicate PUT can never overwrite or
     // delete the object another attempt attached or finalized.
     let key = format!("private/{}/{}", principal.vault, Uuid::new_v4());

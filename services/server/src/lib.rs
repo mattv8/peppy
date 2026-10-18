@@ -39,6 +39,7 @@ use health::HealthState;
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use crate::{
     api::{
@@ -61,6 +62,7 @@ pub struct ServerBuilder {
     setup_token: Option<String>,
     row_security: bool,
     push_config: PushConfigAdvertisement,
+    transport_options: Option<TransportOptions>,
 }
 
 impl ServerBuilder {
@@ -84,6 +86,7 @@ impl ServerBuilder {
             setup_token: None,
             row_security: false,
             push_config: PushConfigAdvertisement::default(),
+            transport_options: None,
         }
     }
 
@@ -127,6 +130,14 @@ impl ServerBuilder {
         self
     }
 
+    /// Overrides the storage maintenance cadence for this server assembly.
+    pub fn storage_cleanup_interval(mut self, interval: Duration) -> Self {
+        let mut options = self.transport_options.unwrap_or_default();
+        options.storage_cleanup_interval = interval;
+        self.transport_options = Some(options);
+        self
+    }
+
     /// Initializes health/storage dependencies and assembles routes without
     /// spawning maintenance workers. Call [`Server::start_maintenance`] after
     /// the process has completed its startup sequencing.
@@ -154,10 +165,8 @@ impl ServerBuilder {
         let maintenance_db = self
             .maintenance_db
             .unwrap_or_else(|| self.runtime_db.clone());
-        let options = TransportOptions {
-            replay_retention: self.config.replay_retention,
-            ..TransportOptions::default()
-        };
+        let options =
+            assembly_transport_options(self.config.replay_retention, self.transport_options);
         let (api, mut maintenance) = api::build_router(
             self.runtime_db,
             Some(self.config),
@@ -185,6 +194,15 @@ impl ServerBuilder {
             maintenance_started: AtomicBool::new(false),
         })
     }
+}
+
+fn assembly_transport_options(
+    replay_retention: Duration,
+    options: Option<TransportOptions>,
+) -> TransportOptions {
+    let mut options = options.unwrap_or_default();
+    options.replay_retention = replay_retention;
+    options
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -219,8 +237,36 @@ impl Server {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn assembly_transport_options_preserve_replay_retention_and_allow_cleanup_override() {
+        let replay_retention = Duration::from_secs(86_400);
+        let cleanup_interval = Duration::from_millis(200);
+
+        let options = assembly_transport_options(
+            replay_retention,
+            Some(TransportOptions {
+                replay_retention: Duration::from_secs(1),
+                storage_cleanup_interval: cleanup_interval,
+                ..TransportOptions::default()
+            }),
+        );
+
+        assert_eq!(options.replay_retention, replay_retention);
+        assert_eq!(options.storage_cleanup_interval, cleanup_interval);
+        assert_eq!(
+            assembly_transport_options(replay_retention, None).storage_cleanup_interval,
+            TransportOptions::default().storage_cleanup_interval
+        );
+    }
+}
+
 pub fn app(state: HealthState) -> Router {
-    let api = api::router(state.database());
+    let api = api::router_with_initialized_storage(state.database(), state.storage());
     Router::new()
         .route("/healthz", get(health::liveness))
         .route("/readyz", get(health::readiness))

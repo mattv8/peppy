@@ -44,6 +44,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Whole-request bound for an object upload (attachments are at most 64 MiB).
 const PUT_TIMEOUT: Duration = Duration::from_secs(300);
+const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(360);
+const SSE_HEADER: &str = "x-amz-server-side-encryption";
+const SSE_VALUE: &str = "AES256";
+const PROBE_BYTES: usize = 20 * 1024 * 1024;
+const PROBE_RANGE_START: usize = 8 * 1024 * 1024 + 13;
+const PROBE_RANGE_BYTES: usize = 64;
 
 /// Storage failures callers must distinguish: a missing object is a durable
 /// fact (409/404/410 at the API), anything else is transient (503).
@@ -77,17 +83,19 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Constructs storage and idempotently provisions the configured private bucket.
-    /// Normal API startup uses this so a fresh Compose deployment is usable without
-    /// requiring a separate operator-only storage check first.
+    /// Provisions when needed and verifies the backend encryption contract before
+    /// publishing a usable storage instance.
     pub async fn initialize(config: &S3Config) -> Result<Self, StorageError> {
         let storage = Self::new(config);
         if !config.precreated_bucket {
             storage.ensure_bucket().await?;
         }
+        storage.verify_encryption_contract().await?;
         Ok(storage)
     }
 
+    /// Constructs an adapter without performing the startup encryption probe.
+    /// Production startup must use [`Self::initialize`].
     pub fn new(config: &S3Config) -> Self {
         let credentials = Credentials::new(
             config.access_key.clone(),
@@ -144,7 +152,10 @@ impl Storage {
         let request = self.signed_request(
             Method::PUT,
             &url,
-            &[("content-length", length_header.as_str())],
+            &[
+                ("content-length", length_header.as_str()),
+                (SSE_HEADER, SSE_VALUE),
+            ],
             SignableBody::Precomputed(body_hash),
         )?;
         let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
@@ -158,22 +169,35 @@ impl Storage {
         if !response.status().is_success() {
             return Err(StorageError::Unavailable("S3 PUT rejected"));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 PUT encryption acknowledgement missing",
+        )?;
         Ok(())
     }
 
-    /// Uploads a small in-memory object (readiness contract checks only).
+    /// Uploads an in-memory object used by the startup contract check.
     pub async fn put_bytes(&self, key: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
         let url = self.object_url(key)?;
-        let request = self.signed_request(Method::PUT, &url, &[], SignableBody::Bytes(&bytes))?;
+        let request = self.signed_request(
+            Method::PUT,
+            &url,
+            &[(SSE_HEADER, SSE_VALUE)],
+            SignableBody::Bytes(&bytes),
+        )?;
         let response = request
             .body(bytes)
-            .timeout(CONTROL_TIMEOUT)
+            .timeout(PUT_TIMEOUT)
             .send()
             .await
             .map_err(|_| StorageError::Unavailable("S3 PUT request failed"))?;
         if !response.status().is_success() {
             return Err(StorageError::Unavailable("S3 PUT rejected"));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 PUT encryption acknowledgement missing",
+        )?;
         Ok(())
     }
 
@@ -191,6 +215,10 @@ impl Storage {
                 "S3 HEAD rejected",
             ));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 HEAD encryption acknowledgement missing",
+        )?;
         response
             .headers()
             .get(CONTENT_LENGTH)
@@ -232,6 +260,10 @@ impl Storage {
                 "S3 GET rejected",
             ));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 GET encryption acknowledgement missing",
+        )?;
         let stream = response.bytes_stream().map(|chunk| {
             chunk
                 .map(|bytes| bytes.to_vec())
@@ -280,6 +312,10 @@ impl Storage {
             .headers()
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok());
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 GET encryption acknowledgement missing",
+        )?;
         if !range_response_is_valid(content_length, content_range, range, expected_length) {
             return Err(StorageError::Unavailable(
                 "S3 ranged GET response is invalid",
@@ -307,6 +343,68 @@ impl Storage {
             return Err(StorageError::Unavailable("S3 probe rejected"));
         }
         Ok(())
+    }
+
+    async fn verify_encryption_contract(&self) -> Result<(), StorageError> {
+        let key = format!("peppy-storage-probe-{}", uuid::Uuid::new_v4());
+        let result =
+            match tokio::time::timeout(STARTUP_PROBE_TIMEOUT, self.run_encryption_contract(&key))
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(StorageError::Unavailable("S3 encryption probe timed out")),
+            };
+        let cleanup = self.delete(&key).await;
+        match (result, cleanup) {
+            (Err(error), Err(cleanup_error)) => {
+                tracing::warn!(%error, %cleanup_error, "storage encryption probe cleanup failed");
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn run_encryption_contract(&self, key: &str) -> Result<(), StorageError> {
+        let payload = probe_bytes();
+        self.put_bytes(key, payload.clone()).await?;
+        if self.head_bytes(key).await? != payload.len() as i64 {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe has invalid content length",
+            ));
+        }
+        if self.read_exact(key, payload.len()).await? != payload {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe full read mismatch",
+            ));
+        }
+        let range = ObjectRange {
+            start: PROBE_RANGE_START as u64,
+            end: (PROBE_RANGE_START + PROBE_RANGE_BYTES - 1) as u64,
+            total: payload.len() as u64,
+        };
+        if self.read_range_exact(key, range).await?
+            != payload[PROBE_RANGE_START..=range.end as usize]
+        {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe range read mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn read_exact(&self, key: &str, expected_length: usize) -> Result<Vec<u8>, StorageError> {
+        collect_exact(self.get(key).await?, expected_length).await
+    }
+
+    async fn read_range_exact(
+        &self,
+        key: &str,
+        range: ObjectRange,
+    ) -> Result<Vec<u8>, StorageError> {
+        let expected_length = (range.end - range.start + 1) as usize;
+        collect_exact(self.get_range(key, range).await?, expected_length).await
     }
 
     /// Creates the private bucket if needed; an existing bucket is success.
@@ -413,6 +511,49 @@ impl Storage {
         }
         Ok(request)
     }
+}
+
+fn require_sse_acknowledgement(
+    headers: &reqwest::header::HeaderMap,
+    missing_message: &'static str,
+) -> Result<(), StorageError> {
+    if headers
+        .get(SSE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some(SSE_VALUE)
+    {
+        Ok(())
+    } else {
+        Err(StorageError::Unavailable(missing_message))
+    }
+}
+
+async fn collect_exact(
+    mut stream: DataStream,
+    expected_length: usize,
+) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = Vec::with_capacity(expected_length);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| StorageError::Unavailable("S3 probe read failed"))?;
+        if bytes.len().saturating_add(chunk.len()) > expected_length {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe returned too many bytes",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() != expected_length {
+        return Err(StorageError::Unavailable(
+            "S3 encryption probe returned too few bytes",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn probe_bytes() -> Vec<u8> {
+    (0..PROBE_BYTES)
+        .map(|position| (position % 251) as u8)
+        .collect()
 }
 
 fn content_range_matches(value: Option<&str>, expected: ObjectRange) -> bool {
@@ -526,6 +667,17 @@ mod tests {
                 end: (RANGE_START + RANGE_BYTES - 1) as u64,
                 total: OBJECT_BYTES as u64,
             };
+            let actual = storage
+                .get(&key)
+                .await
+                .map_err(|error| error.to_string())?
+                .try_collect::<Vec<Vec<u8>>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .concat();
+            if actual != patterned_bytes(0, OBJECT_BYTES) {
+                return Err("full object bytes do not match the uploaded pattern".into());
+            }
             let actual = storage
                 .get_range(&key, range)
                 .await

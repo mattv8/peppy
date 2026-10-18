@@ -1373,6 +1373,15 @@ mod real_server {
             .run(&pool)
             .await
             .unwrap();
+        let mut config = peppy_server::config::Config::from_env()
+            .expect("complete S3 test configuration is required");
+        config.database_url = isolated.to_string();
+        let mut server = peppy_server::ServerBuilder::community(config, pool.clone())
+            .build()
+            .await
+            .unwrap();
+        server.start_maintenance().unwrap();
+        let router = server.router();
         let vault = VaultId::new();
         let profile = KeyProfile::new(vault.0, 1).unwrap();
         let fingerprint = profile.fingerprint().unwrap();
@@ -1389,9 +1398,8 @@ mod real_server {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server_pool = pool.clone();
         let task = tokio::spawn(async move {
-            axum::serve(listener, peppy_server::api::router(server_pool))
+            axum::serve(listener, router)
                 .await
                 .unwrap();
         });

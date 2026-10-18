@@ -17,6 +17,9 @@ export S3_BUCKET='peppy-test'
 export PUBLIC_API_URL='http://127.0.0.1:8080'
 export PUBLIC_ATTACHMENT_URL='http://127.0.0.1:8080'
 
+PEPPY_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PEPPY_REPO_ROOT
+
 : "${PEPPY_TEST_COMPOSE_PROJECT:=peppy-test-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
 export PEPPY_TEST_COMPOSE_PROJECT
 
@@ -36,20 +39,25 @@ services:
       timeout: 2s
       retries: 30
   seaweedfs:
-    image: chrislusf/seaweedfs:4.09@sha256:353c69c8ddd7e13c85c1290dca9d1690bf3d066237b7ede7920b8fd2864858e7
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    entrypoint: ["/bin/sh", "/usr/local/bin/peppy-seaweedfs-entrypoint.sh"]
     command: >-
       server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -dir=/data -master.volumeSizeLimitMB=64
-      -master.port=9333 -volume.port=8080 -filer -filer.port=8888 -ip=seaweedfs
+      -master.port=9333 -volume.port=8080 -filer -filer.port=8888 -filer.encryptVolumeData -ip=seaweedfs
     ports: ["127.0.0.1:8333:8333"]
     configs:
       - source: s3-config
         target: /etc/seaweedfs/s3.json
+      - source: seaweed-entrypoint
+        target: /usr/local/bin/peppy-seaweedfs-entrypoint.sh
     healthcheck:
       test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:8333/ 2>&1 | grep -Eq 'HTTP/.* (401|403)'"]
       interval: 2s
       timeout: 2s
       retries: 30
 configs:
+  seaweed-entrypoint:
+    file: ${PEPPY_REPO_ROOT}/infra/docker/seaweedfs-entrypoint.sh
   s3-config:
     content: |
       {"identities":[{"name":"peppy-test","credentials":[{"accessKey":"peppy-test-access","secretKey":"peppy-test-secret"}],"actions":["Read","Write","List","Tagging","Admin"]}]}
