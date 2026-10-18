@@ -16,9 +16,10 @@ use peppy_domain::{DeviceId, VaultId};
 use peppy_gateway_simulator::{
     BOOTSTRAP_FILE, CREDENTIAL_FILE, DESKTOP_IMPORT_FILE, DEVELOPER_KEY_FILE, SimulatorError,
     SimulatorState, bootstrap_snapshot, declare_compaction_capability, drain_media, effects_path,
-    publish_capabilities, read_bounded_json, read_or_create_route, read_state,
+    http_client, publish_capabilities, read_bounded_json, read_or_create_route, read_state,
     run_one_carrier_effect_for_route, sync_http, upload_pending, write_state,
 };
+use peppy_hosted_api::enrollment::AdmissionChallenge;
 use peppy_hosted_client::newenrollment::{ClientKind, EnrollmentClient};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -237,11 +238,8 @@ async fn post_enrollment_request(
     path: &str,
     request: String,
 ) -> Result<String, String> {
-    let response = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| "SIMULATED enrollment HTTP client failed")?
+    let response = http_client(origin)
+        .map_err(|error| format!("SIMULATED enrollment HTTP client failed: {error}"))?
         .post(format!("{origin}{path}"))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(request)
@@ -252,6 +250,15 @@ async fn post_enrollment_request(
         .await
         .map_err(|_| "SIMULATED enrollment response invalid")?;
     serde_json::to_string(&response).map_err(|_| "SIMULATED enrollment response invalid".into())
+}
+
+fn completion_path_for_challenge(challenge: &str) -> Result<String, String> {
+    let challenge: AdmissionChallenge =
+        serde_json::from_str(challenge).map_err(|_| "SIMULATED enrollment challenge invalid")?;
+    Ok(format!(
+        "/v1/enrollment/challenges/{}/complete",
+        challenge.enrollment_id
+    ))
 }
 
 fn store_enrollment_identity(
@@ -340,15 +347,11 @@ async fn admit(
         .map_err(|_| "SIMULATED enrollment challenge request failed")?;
     let challenge =
         post_enrollment_request(&origin, "/v1/enrollment/challenges", challenge_request).await?;
+    let completion_path = completion_path_for_challenge(&challenge)?;
     let completion_request = enrollment
         .complete_manual_challenge_request(challenge, passphrase.clone())
         .map_err(|_| "SIMULATED enrollment proof failed")?;
-    let response = post_enrollment_request(
-        &origin,
-        "/v1/enrollment/challenges/complete",
-        completion_request,
-    )
-    .await?;
+    let response = post_enrollment_request(&origin, &completion_path, completion_request).await?;
     let identity = enrollment
         .finish_manual_admission(response, passphrase)
         .map_err(|_| "SIMULATED enrollment completion failed")?;
@@ -599,5 +602,20 @@ mod tests {
         assert!(error.contains("fresh pairing required"));
         assert_eq!(fs::read(credentials).unwrap(), credential_bytes);
         assert_eq!(fs::read(effects).unwrap(), effect_bytes);
+    }
+
+    #[test]
+    fn completion_path_uses_typed_enrollment_id_and_rejects_invalid_challenges() {
+        let enrollment_id = "018f4c6f-78bd-7c8c-8000-000000000001";
+        let challenge = format!(
+            r#"{{"enrollment_id":"{enrollment_id}","origin":"https://localhost","vault_id":"018f4c6f-78bd-7c8c-8000-000000000002","profile":{{}},"fingerprint":"fingerprint","key_epoch":1,"device":{{"device_id":"018f4c6f-78bd-7c8c-8000-000000000003","kind":"android","name":"gateway","signing_public_key":"key"}},"requested_role":"gateway","nonce":"nonce","credential_digest":"digest","expires_in_seconds":300}}"#
+        );
+
+        assert_eq!(
+            completion_path_for_challenge(&challenge).unwrap(),
+            format!("/v1/enrollment/challenges/{enrollment_id}/complete")
+        );
+        assert!(completion_path_for_challenge("{}").is_err());
+        assert!(completion_path_for_challenge("not JSON").is_err());
     }
 }

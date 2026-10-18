@@ -47,6 +47,10 @@ class DevelopmentTlsTests(unittest.TestCase):
             self.assertEqual((tls / "ca-key.pem").stat().st_mode & 0o777, 0o600)
             text = subprocess.run(["openssl", "x509", "-in", str(tls / "server.pem"), "-noout", "-text"], text=True, capture_output=True, check=True).stdout
             self.assertIn("CA:FALSE", text)
+            self.assertIn("Subject Key Identifier", text)
+            self.assertIn("Authority Key Identifier", text)
+            ca_text = subprocess.run(["openssl", "x509", "-in", str(tls / "ca.pem"), "-noout", "-text"], text=True, capture_output=True, check=True).stdout
+            self.assertIn("Subject Key Identifier", ca_text)
             for name in ("localhost", "127.0.0.1", "10.0.2.2"):
                 self.assertIn(name, text)
 
@@ -77,6 +81,27 @@ class DevelopmentTlsTests(unittest.TestCase):
             renewed = self.run_helper("prepare", str(dotenv), **environment)
             self.assertEqual(renewed.returncode, 0, renewed.stderr)
             self.assertEqual((tls / "ca.pem").read_bytes(), ca)
+
+    def test_prepare_renews_missing_aki_leaf_without_replacing_legacy_ca(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dotenv = root / ".env"
+            dotenv.write_text("DEBUG=true\n")
+            tls = root / "tls"
+            tls.mkdir()
+            subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(tls / "ca-key.pem")], check=True, capture_output=True)
+            subprocess.run(["openssl", "req", "-x509", "-new", "-key", str(tls / "ca-key.pem"), "-sha256", "-days", "3650", "-subj", "/CN=Peppy Local Development CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-out", str(tls / "ca.pem")], check=True, capture_output=True)
+            ca, key = (tls / "ca.pem").read_bytes(), (tls / "ca-key.pem").read_bytes()
+            result = self.run_helper("prepare", str(dotenv), PEPPY_DEV_TLS_DIR=str(tls))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((tls / "ca.pem").read_bytes(), ca)
+            self.assertEqual((tls / "ca-key.pem").read_bytes(), key)
+            details = subprocess.run(["openssl", "x509", "-in", str(tls / "server.pem"), "-noout", "-text"], text=True, capture_output=True, check=True).stdout
+            self.assertIn("Authority Key Identifier", details)
+            self.assertEqual((tls / "ca.pem").stat().st_mode & 0o777, 0o644)
+            self.assertEqual((tls / "ca-key.pem").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((tls / "server.pem").stat().st_mode & 0o777, 0o644)
+            self.assertEqual((tls / "server-key.pem").stat().st_mode & 0o777, 0o600)
 
     def test_prepare_preserves_current_leaf(self):
         with tempfile.TemporaryDirectory() as directory:
