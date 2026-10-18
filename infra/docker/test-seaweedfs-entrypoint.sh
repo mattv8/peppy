@@ -7,6 +7,9 @@ readonly ROOT
 readonly ENTRYPOINT="$ROOT/infra/docker/seaweedfs-entrypoint.sh"
 readonly CONTAINER_ENTRYPOINT='/usr/local/bin/peppy-seaweedfs-entrypoint.sh'
 
+# Pull up front so image download progress never reaches the output assertions.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull --quiet "$IMAGE" >/dev/null
+
 scratch_root="$ROOT/.opencode/sessions"
 mkdir -p "$scratch_root"
 fixture=$(mktemp -d "$scratch_root/seaweed-entrypoint.XXXXXX")
