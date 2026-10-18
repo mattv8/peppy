@@ -75,7 +75,7 @@ def write_ca(directory: Path) -> None:
     with tempfile.TemporaryDirectory(dir=directory) as temporary:
         staged_key, staged_certificate = Path(temporary) / key.name, Path(temporary) / certificate.name
         run_openssl(["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(staged_key)], "could not generate local CA key")
-        run_openssl(["req", "-x509", "-new", "-key", str(staged_key), "-sha256", "-days", "3650", "-subj", "/CN=Peppy Local Development CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-out", str(staged_certificate)], "could not generate local CA")
+        run_openssl(["req", "-x509", "-new", "-key", str(staged_key), "-sha256", "-days", "3650", "-subj", "/CN=Peppy Local Development CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash", "-out", str(staged_certificate)], "could not generate local CA")
         publish(staged_key, key, 0o600)
         publish(staged_certificate, certificate, 0o644)
 
@@ -94,7 +94,7 @@ def leaf_is_current(directory: Path) -> bool:
     san_line = re.search(r"X509v3 Subject Alternative Name:\s*\n\s*([^\n]*)", details)
     required_sans = {"DNS:localhost", "IP Address:127.0.0.1", "IP Address:0:0:0:0:0:0:0:1", "IP Address:10.0.2.2"}
     actual_sans = set(re.findall(r"DNS:[^,\s]+|IP Address:[^,\s]+", san_line.group(1) if san_line else ""))
-    return "CA:FALSE" in details and required_sans <= actual_sans
+    return "CA:FALSE" in details and "Subject Key Identifier" in details and "Authority Key Identifier" in details and required_sans <= actual_sans
 
 
 def write_leaf(directory: Path) -> None:
@@ -102,16 +102,22 @@ def write_leaf(directory: Path) -> None:
     temporary = Path(tempfile.mkdtemp(dir=directory))
     staged_key, staged_request, staged_certificate = temporary / key.name, temporary / request.name, temporary / certificate.name
     config = temporary / "server-openssl.cnf"
-    config.write_text("""[req]
+    ca_details = subprocess.run(["openssl", "x509", "-in", str(directory / "ca.pem"), "-noout", "-text"], text=True, capture_output=True, check=True).stdout
+    authority_key_identifier = "keyid:always" if "Subject Key Identifier" in ca_details else "issuer"
+    config.write_text(f"""[req]
 distinguished_name = subject
 prompt = no
-req_extensions = extensions
+req_extensions = request_extensions
 [subject]
 CN = localhost
+[request_extensions]
+subjectAltName = @sans
 [extensions]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = {authority_key_identifier}
 subjectAltName = @sans
 [sans]
 DNS.1 = localhost

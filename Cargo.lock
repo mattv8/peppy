@@ -1981,6 +1981,7 @@ dependencies = [
  "peppy-client-core",
  "peppy-crypto",
  "peppy-domain",
+ "peppy-hosted-api",
  "peppy-hosted-client",
  "peppy-server",
  "rand 0.8.8",
