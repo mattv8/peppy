@@ -1,7 +1,8 @@
-use std::time::Duration;
+use std::{io::Cursor, time::Duration};
 
 use peppy_server::{
-    api::{TransportOptions, create_owner, router_with_options},
+    ServerBuilder,
+    api::create_owner,
     config::Config,
     storage::{Storage, StorageError},
 };
@@ -37,7 +38,7 @@ impl TestServer {
     async fn start() -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
-        let config = Config::from_env().expect("complete S3 test configuration is required");
+        let mut config = Config::from_env().expect("complete S3 test configuration is required");
         let storage = Storage::new(
             config
                 .s3
@@ -64,6 +65,14 @@ impl TestServer {
             .await
             .unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        config.database_url = isolated_url.to_string();
+        let mut server = ServerBuilder::community(config, pool.clone())
+            .storage_cleanup_interval(Duration::from_millis(200))
+            .build()
+            .await
+            .unwrap();
+        server.start_maintenance().unwrap();
+        let router = server.router();
 
         let vault = Uuid::new_v4();
         let (profile, fingerprint) = profile(vault);
@@ -72,16 +81,8 @@ impl TestServer {
             .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_pool = pool.clone();
         let task = tokio::spawn(async move {
-            // Fast storage maintenance so cleanup is observable within the test.
-            let options = TransportOptions {
-                storage_cleanup_interval: Duration::from_millis(200),
-                ..TransportOptions::default()
-            };
-            axum::serve(listener, router_with_options(server_pool, options))
-                .await
-                .unwrap();
+            axum::serve(listener, router).await.unwrap();
         });
         Self {
             pool,
@@ -248,6 +249,14 @@ fn profile(vault: Uuid) -> (Value, String) {
     )
 }
 
+fn ciphertext(plaintext: &[u8]) -> Vec<u8> {
+    let key = peppy_crypto::FileKey::generate().unwrap();
+    let mut encrypted = Vec::new();
+    peppy_crypto::encrypt_stream(Cursor::new(plaintext), &mut encrypted, &key, b"attachment")
+        .unwrap();
+    encrypted
+}
+
 async fn foreign_owner(pool: &PgPool) -> String {
     let vault = Uuid::new_v4();
     let (profile, fingerprint) = profile(vault);
@@ -261,9 +270,10 @@ async fn foreign_owner(pool: &PgPool) -> String {
 async fn ciphertext_roundtrip_streams_through_real_postgres_router_and_seaweed() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = (0..256 * 1024)
+    let plaintext = (0..256 * 1024)
         .map(|offset| (offset % 251) as u8)
         .collect::<Vec<_>>();
+    let ciphertext = ciphertext(&plaintext);
     let attachment = server.reserve_id(&ciphertext).await;
     let key = server.object_key(attachment).await;
     assert!(key.starts_with(&format!("private/{}/", server.vault)));
@@ -299,6 +309,44 @@ async fn ciphertext_roundtrip_streams_through_real_postgres_router_and_seaweed()
         download.bytes().await.unwrap().as_ref(),
         ciphertext.as_slice()
     );
+    let range = server
+        .auth(
+            Client::new()
+                .get(format!("{}/v1/attachments/{attachment}", server.base_url))
+                .header("range", "bytes=17-64"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(range.bytes().await.unwrap().as_ref(), &ciphertext[17..=64]);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn private_upload_rejects_invalid_framing_before_storage() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let valid = ciphertext(b"valid private attachment");
+    let mut cases = vec![b"plaintext with a matching hash".to_vec()];
+    let mut truncated = valid.clone();
+    truncated.pop();
+    cases.push(truncated);
+    let mut trailing = valid;
+    trailing.push(0);
+    cases.push(trailing);
+
+    for bytes in cases {
+        let attachment = server.reserve_id(&bytes).await;
+        let response = server.upload(attachment, bytes).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["code"],
+            "ciphertext_format_invalid"
+        );
+    }
+    assert_eq!(server.queued("upload_attempt").await, 0);
+    assert_eq!(spool_entries(), 0, "invalid framing");
     server.shutdown().await;
 }
 
@@ -306,7 +354,7 @@ async fn ciphertext_roundtrip_streams_through_real_postgres_router_and_seaweed()
 async fn private_attachment_routes_require_auth_and_do_not_cross_vaults() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"private ciphertext".to_vec();
+    let ciphertext = ciphertext(b"private ciphertext");
     let attachment = server.reserve_id(&ciphertext).await;
     let foreign_token = foreign_owner(&server.pool).await;
     let foreign_upload = Client::new()
@@ -370,16 +418,18 @@ async fn size_hash_and_missing_object_failures_are_typed() {
     let too_large = server.reserve(&[1], Some(64 * 1024 * 1024 + 1), None).await;
     assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    let expected = b"1234";
-    let overrun = server.reserve_id(expected).await;
+    let expected = ciphertext(b"1234");
+    let overrun = server.reserve_id(&expected).await;
+    let mut oversized = expected.clone();
+    oversized.push(0);
     let chunked_body = reqwest::Body::wrap_stream(futures_util::stream::iter([
-        Ok::<_, std::io::Error>(b"12".to_vec()),
-        Ok::<_, std::io::Error>(b"345".to_vec()),
+        Ok::<_, std::io::Error>(oversized[..expected.len()].to_vec()),
+        Ok::<_, std::io::Error>(oversized[expected.len()..].to_vec()),
     ]));
     let response = server.upload(overrun, chunked_body).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    let wrong_hash = server.reserve_id(expected).await;
+    let wrong_hash = server.reserve_id(&expected).await;
     let response = server.upload(wrong_hash, b"4321".to_vec()).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
@@ -387,7 +437,7 @@ async fn size_hash_and_missing_object_failures_are_typed() {
         "ciphertext_mismatch"
     );
 
-    let missing_before_finalize = server.reserve_id(expected).await;
+    let missing_before_finalize = server.reserve_id(&expected).await;
     assert_eq!(
         server
             .upload(missing_before_finalize, expected.to_vec())
@@ -404,7 +454,7 @@ async fn size_hash_and_missing_object_failures_are_typed() {
         "attachment_unavailable"
     );
 
-    let missing_after_finalize = server.reserve_id(expected).await;
+    let missing_after_finalize = server.reserve_id(&expected).await;
     assert_eq!(
         server
             .upload(missing_after_finalize, expected.to_vec())
@@ -438,7 +488,7 @@ async fn size_hash_and_missing_object_failures_are_typed() {
 async fn client_attachment_ids_are_idempotent_and_public_copies_are_separate_and_revocable() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"encrypted original".to_vec();
+    let ciphertext = ciphertext(b"encrypted original");
     let attachment = Uuid::new_v4();
     assert_eq!(
         server
@@ -590,12 +640,12 @@ async fn concurrent_reservations_cannot_overbook_the_vault_quota() {
 async fn expired_cleanup_fences_an_upload_already_streaming() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"cleanup-race-ciphertext".to_vec();
-    let attachment = server.reserve_id(&ciphertext).await;
+    let upload_bytes = ciphertext(b"cleanup-race-ciphertext");
+    let attachment = server.reserve_id(&upload_bytes).await;
     let key = server.object_key(attachment).await;
     let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let body_bytes = ciphertext.clone();
+    let body_bytes = upload_bytes.clone();
     let body = reqwest::Body::wrap_stream(futures_util::stream::once(async move {
         let _ = polled_tx.send(());
         let _ = release_rx.await;
@@ -653,7 +703,7 @@ async fn expired_cleanup_fences_an_upload_already_streaming() {
         StatusCode::NOT_FOUND
     );
 
-    let retained_bytes = b"finalized objects survive cleanup".to_vec();
+    let retained_bytes = ciphertext(b"finalized objects survive cleanup");
     let retained = server.reserve_id(&retained_bytes).await;
     assert_eq!(
         server.upload(retained, retained_bytes).await.status(),
@@ -682,7 +732,7 @@ async fn expired_cleanup_fences_an_upload_already_streaming() {
 async fn public_copies_reject_unsafe_media_expiry_names_and_cross_vault_idor() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"private source".to_vec();
+    let ciphertext = ciphertext(b"private source");
     let attachment = server.reserve_id(&ciphertext).await;
     assert_eq!(
         server.upload(attachment, ciphertext).await.status(),
@@ -941,7 +991,8 @@ impl TestServer {
     }
 
     async fn finalized_attachment(&self, bytes: &[u8]) -> Uuid {
-        let attachment = self.reserve_id(bytes).await;
+        let bytes = ciphertext(bytes);
+        let attachment = self.reserve_id(&bytes).await;
         assert_eq!(
             self.upload(attachment, bytes.to_vec()).await.status(),
             StatusCode::NO_CONTENT
@@ -994,11 +1045,12 @@ impl TestServer {
     }
 
     async fn tracked_attachment(&self, bytes: &[u8]) -> Uuid {
+        let bytes = ciphertext(bytes);
         let response = self
             .auth(Client::new().post(format!("{}/v1/attachments/reserve", self.base_url)))
             .json(&json!({
                 "declared_ciphertext_bytes": bytes.len(),
-                "declared_ciphertext_sha256": hex::encode(Sha256::digest(bytes)),
+                "declared_ciphertext_sha256": hex::encode(Sha256::digest(&bytes)),
                 "reference_tracking": true,
             }))
             .send()
@@ -1011,7 +1063,7 @@ impl TestServer {
             .parse()
             .unwrap();
         assert_eq!(
-            self.upload(attachment, bytes.to_vec()).await.status(),
+            self.upload(attachment, bytes).await.status(),
             StatusCode::NO_CONTENT
         );
         assert_eq!(self.finalize(attachment).await.status(), StatusCode::OK);
@@ -1316,7 +1368,7 @@ async fn untracked_or_unreferenced_attachments_are_never_released() {
 async fn late_duplicate_upload_cannot_delete_the_finalized_object() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"duplicate-put-ciphertext".to_vec();
+    let ciphertext = ciphertext(b"duplicate-put-ciphertext");
     let attachment = server.reserve_id(&ciphertext).await;
 
     // PUT-A starts and is held mid-body.
@@ -1386,7 +1438,7 @@ async fn late_duplicate_upload_cannot_delete_the_finalized_object() {
 async fn reupload_before_finalize_supersedes_and_deletes_only_the_old_attempt() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"reupload-ciphertext".to_vec();
+    let ciphertext = ciphertext(b"reupload-ciphertext");
     let attachment = server.reserve_id(&ciphertext).await;
     assert_eq!(
         server.upload(attachment, ciphertext.clone()).await.status(),
@@ -1450,7 +1502,7 @@ async fn deletion_queue_never_deletes_referenced_objects_and_retries_failures() 
 
     // Expired uploaded reservations are cleaned by the background worker even
     // when no new reservation is made.
-    let bytes = b"expired background cleanup".to_vec();
+    let bytes = ciphertext(b"expired background cleanup");
     let expired = server.reserve_id(&bytes).await;
     assert_eq!(
         server.upload(expired, bytes).await.status(),
@@ -1609,14 +1661,16 @@ async fn public_copies_count_against_quota_and_cleanup_removes_their_objects() {
 async fn spool_files_are_removed_on_every_failure_and_cancellation_path() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let expected = b"1234";
-    let overrun = server.reserve_id(expected).await;
+    let expected = ciphertext(b"1234");
+    let overrun = server.reserve_id(&expected).await;
+    let mut oversized = expected.clone();
+    oversized.push(0);
     assert_eq!(
-        server.upload(overrun, b"12345".to_vec()).await.status(),
+        server.upload(overrun, oversized).await.status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
     assert_eq!(spool_entries(), 0, "overrun");
-    let mismatch = server.reserve_id(expected).await;
+    let mismatch = server.reserve_id(&expected).await;
     assert_eq!(
         server.upload(mismatch, b"4321".to_vec()).await.status(),
         StatusCode::UNPROCESSABLE_ENTITY
@@ -1675,10 +1729,15 @@ async fn spool_files_are_removed_on_every_failure_and_cancellation_path() {
 async fn attachment_usage_is_authenticated_scoped_and_matches_admission_accounting() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let finalized = b"finalized";
-    let attachment = server.finalized_attachment(finalized).await;
-    let reserved = b"reserved";
-    let reservation = server.reserve_id(reserved).await;
+    let finalized = ciphertext(b"finalized");
+    let attachment = server.reserve_id(&finalized).await;
+    assert_eq!(
+        server.upload(attachment, finalized.clone()).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(server.finalize(attachment).await.status(), StatusCode::OK);
+    let reserved = ciphertext(b"reserved");
+    let reservation = server.reserve_id(&reserved).await;
     let public_bytes = png(12);
     let public_copy = server.public_copy(attachment, public_bytes.clone()).await;
     assert_eq!(public_copy.status(), StatusCode::OK);
@@ -1744,9 +1803,16 @@ async fn attachment_usage_is_authenticated_scoped_and_matches_admission_accounti
 async fn private_attachment_downloads_validate_and_serve_single_byte_ranges() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let ciphertext = b"0123456789";
-    let attachment = server.finalized_attachment(ciphertext).await;
+    let ciphertext = ciphertext(b"0123456789");
+    let attachment = server.reserve_id(&ciphertext).await;
+    assert_eq!(
+        server.upload(attachment, ciphertext.clone()).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(server.finalize(attachment).await.status(), StatusCode::OK);
     let url = format!("{}/v1/attachments/{attachment}", server.base_url);
+    let total = ciphertext.len();
+    let tail_start = total - 3;
 
     assert_eq!(
         Client::new()
@@ -1771,19 +1837,32 @@ async fn private_attachment_downloads_validate_and_serve_single_byte_ranges() {
         StatusCode::NOT_FOUND
     );
 
-    for (range, expected_range, expected_bytes) in [
-        ("bytes=2-5", "bytes 2-5/10", &b"2345"[..]),
-        ("bytes=7-", "bytes 7-9/10", &b"789"[..]),
-        ("bytes=-3", "bytes 7-9/10", &b"789"[..]),
+    for (range, start, end, expected_bytes) in [
+        ("bytes=2-5".to_owned(), 2, 5, &ciphertext[2..=5]),
+        (
+            format!("bytes={tail_start}-"),
+            tail_start,
+            total - 1,
+            &ciphertext[tail_start..],
+        ),
+        (
+            "bytes=-3".to_owned(),
+            tail_start,
+            total - 1,
+            &ciphertext[tail_start..],
+        ),
     ] {
         let response = server
             .auth(Client::new().get(&url))
-            .header("range", range)
+            .header("range", &range)
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()["content-range"], expected_range);
+        assert_eq!(
+            response.headers()["content-range"],
+            format!("bytes {start}-{end}/{total}")
+        );
         assert_eq!(
             response.headers()["content-length"].to_str().unwrap(),
             expected_bytes.len().to_string()
@@ -1792,15 +1871,23 @@ async fn private_attachment_downloads_validate_and_serve_single_byte_ranges() {
         assert_eq!(response.bytes().await.unwrap().as_ref(), expected_bytes);
     }
 
-    for range in ["bytes=", "bytes=5-4", "bytes=10-", "bytes=0-1,3-4"] {
+    for range in [
+        "bytes=".to_owned(),
+        "bytes=5-4".to_owned(),
+        format!("bytes={total}-"),
+        "bytes=0-1,3-4".to_owned(),
+    ] {
         let response = server
             .auth(Client::new().get(&url))
-            .header("range", range)
+            .header("range", &range)
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        assert_eq!(response.headers()["content-range"], "bytes */10");
+        assert_eq!(
+            response.headers()["content-range"],
+            format!("bytes */{total}")
+        );
         assert_eq!(
             response.json::<Value>().await.unwrap()["code"],
             "invalid_range"

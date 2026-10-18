@@ -158,7 +158,11 @@ test:
     cargo test --workspace --locked
 
 integration-test:
+    just seaweedfs-entrypoint-test
     source infra/compose/test-env.sh; trap peppy_test_infra_down EXIT; peppy_test_infra_up; cargo test --workspace --locked
+
+seaweedfs-entrypoint-test:
+    bash infra/docker/test-seaweedfs-entrypoint.sh
 
 server-test:
     cargo test -p peppy-server --locked

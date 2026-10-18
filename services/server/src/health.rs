@@ -37,10 +37,7 @@ impl HealthState {
         database: PgPool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let storage = match config.s3.as_ref() {
-            Some(s3) => Some((
-                tokio::time::timeout(s3.readiness_timeout, Storage::initialize(s3)).await??,
-                s3.readiness_timeout,
-            )),
+            Some(s3) => Some((Storage::initialize(s3).await?, s3.readiness_timeout)),
             None => None,
         };
         Ok(Self(Arc::new(Dependencies {
@@ -83,16 +80,11 @@ pub async fn storage_contract_check(
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let s3 = config.s3.as_ref().ok_or("S3 configuration is required")?;
-    let storage = Storage::new(s3);
+    let storage = Storage::initialize(s3).await?;
     let key = format!(
         "peppy-readiness-check-{}.txt",
         OffsetDateTime::now_utc().unix_timestamp_nanos()
     );
-    if !s3.precreated_bucket {
-        storage.ensure_bucket().await?;
-    } else {
-        storage.probe().await?;
-    }
     let payload = b"peppy-private-s3-contract";
     storage.put_bytes(&key, payload.to_vec()).await?;
     let mut stream = storage.get(&key).await?;

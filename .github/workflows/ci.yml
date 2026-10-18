@@ -163,6 +163,7 @@ jobs:
           key: ubuntu-24.04
       - name: Run workspace integration tests
         run: |
+          bash infra/docker/test-seaweedfs-entrypoint.sh
           source infra/compose/test-env.sh
           cleanup() {
             status=$?
@@ -239,6 +240,7 @@ jobs:
         if: runner.os == 'Linux' && needs.changes.outputs.integration == 'true'
         shell: bash
         run: |
+          bash infra/docker/test-seaweedfs-entrypoint.sh
           source infra/compose/test-env.sh
           cleanup() {
             status=$?

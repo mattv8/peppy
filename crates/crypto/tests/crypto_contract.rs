@@ -1,5 +1,5 @@
 use peppy_crypto::*;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use uuid::Uuid;
@@ -253,4 +253,118 @@ fn stream_rejects_tampering_without_promotion() {
         assert!(!dest.exists());
         bad.zeroize();
     }
+}
+
+fn encrypted_stream(plaintext: &[u8]) -> Vec<u8> {
+    let key = FileKey::generate().unwrap();
+    let mut output = Vec::new();
+    encrypt_stream(Cursor::new(plaintext), &mut output, &key, b"object").unwrap();
+    output
+}
+
+#[test]
+fn stream_framing_accepts_encrypt_stream_output_at_chunk_boundaries() {
+    for plaintext in [
+        Vec::new(),
+        vec![42],
+        vec![42; STREAM_CHUNK_BYTES],
+        vec![42; STREAM_CHUNK_BYTES + 1],
+    ] {
+        validate_stream_framing(Cursor::new(encrypted_stream(&plaintext))).unwrap();
+    }
+}
+
+#[test]
+fn stream_framing_rejects_malformed_streams() {
+    let valid = encrypted_stream(b"valid ciphertext");
+    let mut wrong_version = valid.clone();
+    wrong_version[4] = 2;
+    let mut zero_length_record = valid.clone();
+    zero_length_record[29..33].copy_from_slice(&0_u32.to_be_bytes());
+    let mut sub_abytes_record = valid.clone();
+    sub_abytes_record[29..33].copy_from_slice(&16_u32.to_be_bytes());
+    let mut oversized_record = valid.clone();
+    oversized_record[29..33].copy_from_slice(&((STREAM_CHUNK_BYTES + 18) as u32).to_be_bytes());
+
+    for malformed in [
+        b"\xff\xd8\xff\xe0plaintext jpeg".to_vec(),
+        valid[..4].to_vec(),
+        valid[..28].to_vec(),
+        valid[..31].to_vec(),
+        valid[..valid.len() - 21].to_vec(),
+        valid[..valid.len() - 1].to_vec(),
+        wrong_version,
+        zero_length_record,
+        sub_abytes_record,
+        oversized_record,
+        {
+            let mut trailing = valid;
+            trailing.push(1);
+            trailing
+        },
+    ] {
+        assert_eq!(
+            validate_stream_framing(Cursor::new(malformed)),
+            Err(CryptoError::InvalidStream)
+        );
+    }
+}
+
+struct BoundedReader {
+    input: Cursor<Vec<u8>>,
+    largest_read: usize,
+}
+
+impl Read for BoundedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.largest_read = self.largest_read.max(buffer.len());
+        self.input.read(buffer)
+    }
+}
+
+#[test]
+fn stream_framing_reads_at_most_one_framed_chunk() {
+    let mut input = BoundedReader {
+        input: Cursor::new(encrypted_stream(&vec![42; STREAM_CHUNK_BYTES + 1])),
+        largest_read: 0,
+    };
+
+    validate_stream_framing(&mut input).unwrap();
+
+    assert!(input.largest_read <= STREAM_CHUNK_BYTES + 17);
+}
+
+struct ShortInterruptedReader {
+    input: Cursor<Vec<u8>>,
+    interrupted: bool,
+}
+
+impl Read for ShortInterruptedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.interrupted {
+            self.interrupted = true;
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
+        let read_length = buffer.len().min(1);
+        self.input.read(&mut buffer[..read_length])
+    }
+}
+
+struct FailingReader;
+
+impl Read for FailingReader {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("reader failure"))
+    }
+}
+
+#[test]
+fn stream_framing_handles_short_and_interrupted_reads_and_preserves_io_errors() {
+    let mut short_reader = ShortInterruptedReader {
+        input: Cursor::new(encrypted_stream(b"short reads")),
+        interrupted: false,
+    };
+
+    validate_stream_framing(&mut short_reader).unwrap();
+    assert_eq!(validate_stream_framing(FailingReader), Err(CryptoError::Io));
 }

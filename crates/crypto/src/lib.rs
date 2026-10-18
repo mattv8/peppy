@@ -2,6 +2,7 @@
 pub mod enrollment;
 pub mod filesystem;
 pub mod passphrase;
+mod stream_format;
 use hmac::{Hmac, Mac};
 use libsodium_rs::{
     crypto_aead::xchacha20poly1305 as aead, crypto_pwhash::argon2id,
@@ -348,7 +349,7 @@ pub fn encrypt_stream(
     ensure_sodium()?;
     let (mut state, header) = stream::PushState::init_push(&stream_key(key)?)
         .map_err(|_| CryptoError::OperationFailed)?;
-    output.write_all(b"PPSS\x01")?;
+    output.write_all(stream_format::MAGIC)?;
     output.write_all(&header)?;
     let mut buf = vec![0; STREAM_CHUNK_BYTES];
     loop {
@@ -367,6 +368,12 @@ pub fn encrypt_stream(
     write_frame(&mut output, &final_frame)?;
     Ok(())
 }
+/// Validates the structure of a PPSS v1-framed stream without decrypting it.
+///
+/// This only checks framing. It cannot establish ciphertext authenticity or verify final tags.
+pub fn validate_stream_framing(mut input: impl Read) -> Result<(), CryptoError> {
+    stream_format::validate(&mut input)
+}
 /// Decrypts a fully verified stream to a temporary sibling and atomically promotes it only after its final tag.
 pub fn decrypt_stream_to_path(
     mut input: impl Read,
@@ -379,10 +386,10 @@ pub fn decrypt_stream_to_path(
     input
         .read_exact(&mut prefix)
         .map_err(|_| CryptoError::InvalidStream)?;
-    if &prefix != b"PPSS\x01" {
+    if prefix != *stream_format::MAGIC {
         return Err(CryptoError::InvalidStream);
     }
-    let mut header = [0; stream::HEADERBYTES];
+    let mut header = [0; stream_format::HEADER_BYTES];
     input
         .read_exact(&mut header)
         .map_err(|_| CryptoError::InvalidStream)?;
@@ -523,7 +530,7 @@ fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, CryptoError> {
         .read_exact(&mut len)
         .map_err(|_| CryptoError::InvalidStream)?;
     let len = u32::from_be_bytes(len) as usize;
-    if !(stream::ABYTES..=STREAM_CHUNK_BYTES + stream::ABYTES).contains(&len) {
+    if !stream_format::is_frame_len(len) {
         return Err(CryptoError::InvalidStream);
     }
     let mut frame = vec![0; len];

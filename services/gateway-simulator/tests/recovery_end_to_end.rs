@@ -4,7 +4,10 @@ mod common;
 use common::{ADDRESS, NETWORK_TIMEOUT, PHRASE, Paired, VaultFixture, create_vault};
 use peppy_client_core::*;
 use peppy_gateway_simulator::{drain_media, effects_path, run_one_carrier_effect, upload_pending};
-use peppy_server::{api::router, config::S3Config, storage::Storage};
+use peppy_server::{
+    ServerBuilder,
+    config::{Config, S3Config},
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -22,7 +25,11 @@ use uuid::Uuid;
 
 const PG_IMAGE: &str =
     "postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f";
-const SEAWEED_IMAGE: &str = "chrislusf/seaweedfs:4.09@sha256:353c69c8ddd7e13c85c1290dca9d1690bf3d066237b7ede7920b8fd2864858e7";
+const SEAWEED_IMAGE: &str = "chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d";
+const SEAWEED_ENTRYPOINT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../infra/docker/seaweedfs-entrypoint.sh"
+);
 
 async fn bounded<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
     common::network(phase, future).await
@@ -76,13 +83,17 @@ services:
       retries: 30
   seaweedfs:
     image: {SEAWEED_IMAGE}
+    entrypoint: ["/bin/sh", "/usr/local/bin/peppy-seaweedfs-entrypoint.sh"]
     command: >-
       server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -dir=/data
       -master.port=9333 -master.volumeSizeLimitMB=32 -volume.port=8080 -volume.max=8
-      -filer -filer.port=8888 -ip=seaweedfs
+      -filer -filer.port=8888 -ip=seaweedfs -filer.encryptVolumeData
     configs:
       - source: seaweed-s3-config
         target: /etc/seaweedfs/s3.json
+      - source: seaweed-entrypoint
+        target: /usr/local/bin/peppy-seaweedfs-entrypoint.sh
+        mode: 0555
     volumes:
       - seaweed-volume-data:/data
       - seaweed-filer-data:/root/.seaweedfs
@@ -106,6 +117,8 @@ configs:
   seaweed-s3-config:
     content: |
       {{"identities":[{{"name":"recovery","credentials":[{{"accessKey":"${{S3_ACCESS_KEY}}","secretKey":"${{S3_SECRET_KEY}}"}}],"actions":["Read","Write","List","Tagging","Admin"]}}]}}
+  seaweed-entrypoint:
+    file: {SEAWEED_ENTRYPOINT}
 "#
         );
         fs::write(path.join("docker-compose.yml"), compose).unwrap();
@@ -258,22 +271,22 @@ fn s3_config(fixture: &ComposeFixture) -> S3Config {
     }
 }
 
-fn configure_router(database_url: &str, s3: &S3Config) {
-    unsafe {
-        std::env::set_var("PEPPY_ENV", "development");
-        std::env::set_var("DATABASE_URL", database_url);
-        std::env::set_var("BIND_ADDR", "127.0.0.1:0");
-        std::env::set_var("S3_INTERNAL_ENDPOINT", s3.endpoint.as_str());
-        std::env::set_var("S3_ACCESS_KEY", &s3.access_key);
-        std::env::set_var("S3_SECRET_KEY", &s3.secret_key);
-        std::env::set_var("S3_BUCKET", &s3.bucket);
-    }
-}
-
 async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime {
     let database_url = database_url(fixture);
     let s3 = s3_config(fixture);
-    configure_router(&database_url, &s3);
+    let config = Config {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        database_url: database_url.clone(),
+        release_identity: "recovery-fixture".into(),
+        s3: Some(s3),
+        public_api_url: None,
+        public_attachment_url: None,
+        vault_attachment_quota_bytes: 512 * 1024 * 1024,
+        trusted_proxy_cidrs: vec![],
+        replay_retention: Duration::from_secs(30 * 86_400),
+        relay_url: None,
+        web_client: None,
+    };
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(NETWORK_TIMEOUT)
@@ -285,13 +298,17 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
             .run(&pool)
             .await
             .unwrap();
-        Storage::new(&s3).ensure_bucket().await.unwrap();
     }
+    let mut server = ServerBuilder::community(config, pool.clone())
+        .build()
+        .await
+        .unwrap();
+    server.start_maintenance().unwrap();
+    let router = server.router();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server_pool = pool.clone();
     let task = tokio::spawn(async move {
-        axum::serve(listener, router(server_pool)).await.unwrap();
+        axum::serve(listener, router).await.unwrap();
     });
     RouterRuntime {
         pool,

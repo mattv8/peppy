@@ -15,7 +15,7 @@ use peppy_gateway_simulator::{
     drain_media, effects_path, publish_capabilities, run_one_carrier_effect,
     run_one_carrier_effect_for_route, sync_http, upload_pending,
 };
-use peppy_server::api::router;
+use peppy_server::{ServerBuilder, config::Config};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -86,12 +86,19 @@ impl Server {
             .run(&pool)
             .await
             .unwrap();
+        let mut config = Config::from_env().expect("complete S3 test configuration is required");
+        config.database_url = isolated.to_string();
+        let mut server = ServerBuilder::community(config, pool.clone())
+            .build()
+            .await
+            .unwrap();
+        server.start_maintenance().unwrap();
+        let router = server.router();
         let fixture = create_vault(&pool).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_pool = pool.clone();
         let task = tokio::spawn(async move {
-            axum::serve(listener, router(server_pool)).await.unwrap();
+            axum::serve(listener, router).await.unwrap();
         });
         Self {
             pool,

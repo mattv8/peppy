@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{io::Cursor, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
@@ -839,9 +839,13 @@ async fn quota_policy_callback_does_not_reacquire_a_one_connection_pool_inside_t
 #[tokio::test]
 async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
     let _guard = TEST_LOCK.lock().await;
+    let key = peppy_crypto::FileKey::generate().unwrap();
+    let mut ciphertext = Vec::new();
+    peppy_crypto::encrypt_stream(Cursor::new(b"x"), &mut ciphertext, &key, b"attachment").unwrap();
+    let png = b"\x89PNG\r\n\x1a\n";
     let policy = Arc::new(Policy {
         allowed: vec![Operation::Upload, Operation::Publish],
-        quota: Some(8),
+        quota: Some(ciphertext.len() as i64 + png.len() as i64 - 1),
         ..Policy::default()
     });
     let server = TestServer::start(policy).await;
@@ -852,8 +856,8 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
             "/v1/attachments/reserve",
             &owner.device_token,
             json!({
-                "declared_ciphertext_bytes": 1,
-                "declared_ciphertext_sha256": hex::encode(Sha256::digest(b"x")),
+                "declared_ciphertext_bytes": ciphertext.len(),
+                "declared_ciphertext_sha256": hex::encode(Sha256::digest(&ciphertext)),
             }),
         )
         .await;
@@ -864,7 +868,7 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
                 "PUT",
                 &format!("/v1/attachments/{attachment}/upload"),
                 &owner.device_token,
-                Body::from("x"),
+                Body::from(ciphertext),
                 &[],
             )
             .await
@@ -884,7 +888,6 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
             .0,
         StatusCode::OK
     );
-    let png = b"\x89PNG\r\n\x1a\n";
     let response = server
         .raw_request(
             "POST",
