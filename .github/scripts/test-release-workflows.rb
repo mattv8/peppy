@@ -44,14 +44,61 @@ assert.call(desktop_steps.fetch(desktop_guard_index - 2).fetch('run').include?(t
 assert.call(publisher_steps.fetch(publisher_guard_index - 2).fetch('run').include?(trusted_contexts), 'publish pre-check must match the context helper matrix')
 
 image_needs = release.fetch('jobs').fetch('publish-server-image').fetch('needs')
-assert.call(image_needs.sort == %w[artifacts container prepare], 'stable server image promotion must wait for trusted artifacts')
+assert.call(!release.fetch('jobs').key?('container'), 'release must not rebuild container images after the CI gate')
+assert.call(image_needs.sort == %w[artifacts prepare signing], 'stable server image promotion must wait for trusted artifacts')
 relay_needs = release.fetch('jobs').fetch('publish-relay-image').fetch('needs')
-assert.call(relay_needs.sort == %w[artifacts container prepare], 'stable relay image promotion must wait for trusted artifacts')
+assert.call(relay_needs.sort == %w[artifacts prepare signing], 'stable relay image promotion must wait for trusted artifacts')
+
+signing = release.fetch('jobs').fetch('signing')
+assert.call(signing.fetch('environment') == 'updates-stable', 'signing readiness must resolve protected stable environment inputs')
+signing_steps = signing.fetch('steps')
+signing_checkout_index = signing_steps.index { |step| step['uses']&.start_with?('actions/checkout@') }
+signing_helper_index = signing_steps.index { |step| step['run']&.include?('release-signing-readiness.sh') }
+assert.call(!signing_checkout_index.nil? && !signing_helper_index.nil? && signing_checkout_index < signing_helper_index, 'signing readiness helper must run after checkout')
+signing_env = signing_steps.fetch(signing_helper_index).fetch('env')
+assert.call(signing_env.fetch('PEPPY_MACOS_SIGNING_MODE').include?("vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id'"), 'stable readiness must default an absent macOS mode to strict')
+assert.call(signing_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?("vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode'"), 'stable readiness must default an absent Windows mode to strict')
+
+release_artifacts = release.fetch('jobs').fetch('artifacts')
+assert.call(release_artifacts.fetch('needs').sort == %w[prepare signing], 'trusted artifacts must wait for signing readiness')
+assert.call(release_artifacts.fetch('if').include?("needs.signing.outputs.ready == 'true'"), 'trusted artifacts must require ready signing inputs')
+assert.call(release_artifacts.fetch('if').include?('!cancelled()'), 'trusted artifacts must not begin after cancellation')
+
+publish_needs = release.fetch('jobs').fetch('publish').fetch('needs')
+assert.call(publish_needs.sort == %w[artifacts prepare publish-relay-image publish-server-image signing], 'stable publish must wait for trusted artifacts and both image publishers')
+assert.call(release.fetch('jobs').fetch('publish').fetch('if').include?('!cancelled()'), 'release publishing must not begin after cancellation')
+%w[publish-server-image publish-relay-image].each do |job_name|
+  assert.call(release.fetch('jobs').fetch(job_name).fetch('if').include?('!cancelled()'), "#{job_name} must not begin after cancellation")
+end
 
 artifacts = load_workflow.call('build-artifacts.yml').fetch('jobs')
+desktop_steps = artifacts.fetch('desktop-development-artifacts').fetch('steps')
+mode_validation = desktop_steps.find { |step| step['run'] == 'bash .github/scripts/release-signing-readiness.sh --validate-modes' }
+assert.call(!mode_validation.nil?, 'trusted builds must validate both signing modes before platform work')
+mode_env = mode_validation.fetch('env')
+assert.call(mode_env.fetch('PEPPY_MACOS_SIGNING_MODE').include?("vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id'"), 'trusted build policy validation must default an absent macOS mode to strict')
+assert.call(mode_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?("vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode'"), 'trusted build policy validation must default an absent Windows mode to strict')
+bundle_step = desktop_steps.find { |step| step['run'] == 'infra/release/build-desktop-bundles.sh' }
+bundle_env = bundle_step.fetch('env')
+assert.call(bundle_env.fetch('PEPPY_MACOS_SIGNING_MODE').include?('vars.PEPPY_MACOS_SIGNING_MODE'), 'desktop bundling must receive the macOS mode')
+assert.call(bundle_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?('vars.PEPPY_WINDOWS_SIGNING_MODE'), 'desktop bundling must receive the Windows mode')
+windows_import = desktop_steps.find { |step| step['name'] == 'Import protected Authenticode certificate' }
+windows_cleanup = desktop_steps.find { |step| step['name'] == 'Remove protected Authenticode certificate' }
+assert.call(windows_import.fetch('if').include?("vars.PEPPY_WINDOWS_SIGNING_MODE != 'none'"), 'Windows none mode must skip certificate import')
+assert.call(windows_cleanup.fetch('if').include?("vars.PEPPY_WINDOWS_SIGNING_MODE != 'none'"), 'Windows none mode must skip certificate cleanup')
+mode_validation_index = desktop_steps.index(mode_validation)
+windows_import_index = desktop_steps.index(windows_import)
+bundle_step_index = desktop_steps.index(bundle_step)
+assert.call(mode_validation_index < windows_import_index && mode_validation_index < bundle_step_index, 'policy validation must precede Windows certificate import and desktop bundling')
 android = artifacts.fetch('android-development-artifacts').fetch('steps').find { |step| step.dig('with', 'name')&.start_with?('android-') }
 ios = artifacts.fetch('ios-development-artifacts').fetch('steps').find { |step| step.dig('with', 'name')&.start_with?('ios-') }
 assert.call(android.dig('with', 'name').include?("inputs.trusted_update_build && 'release' || 'development'"), 'Android artifacts must separate release and development namespaces')
 assert.call(ios.dig('with', 'name').include?("inputs.trusted_update_build && 'release' || 'development'"), 'iOS artifacts must separate release and development namespaces')
+
+notes_step = publisher_steps.find { |step| step['run'] == 'infra/release/release-notes.sh "$VERSION" > dist/notes.md' }
+notes_env = notes_step.fetch('env')
+assert.call(notes_env.fetch('TRUSTED_UPDATE_BUILD') == '${{ inputs.trusted_update_build }}', 'release notes must receive trusted-build status')
+assert.call(notes_env.fetch('PEPPY_MACOS_SIGNING_MODE').include?("vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id'"), 'release notes must receive the strict-default macOS mode')
+assert.call(notes_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?("vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode'"), 'release notes must receive the strict-default Windows mode')
 
 puts 'release workflow tests passed'

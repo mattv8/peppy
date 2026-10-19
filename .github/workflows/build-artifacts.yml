@@ -185,6 +185,13 @@ jobs:
           CHANNEL: ${{ inputs.update_channel }}
           REQUESTED_SHA: ${{ inputs.ref }}
         run: bash .github/scripts/release-context-guard.sh
+      - name: Validate protected signing policy
+        if: inputs.trusted_update_build
+        shell: bash
+        env:
+          PEPPY_MACOS_SIGNING_MODE: ${{ vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id' }}
+          PEPPY_WINDOWS_SIGNING_MODE: ${{ vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode' }}
+        run: bash .github/scripts/release-signing-readiness.sh --validate-modes
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
@@ -221,7 +228,7 @@ jobs:
             throw "Native Perl at $perl cannot load IPC::Cmd"
           }
           "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - if: runner.os == 'Windows' && inputs.trusted_update_build
+      - if: runner.os == 'Windows' && inputs.trusted_update_build && vars.PEPPY_WINDOWS_SIGNING_MODE != 'none'
         name: Import protected Authenticode certificate
         shell: pwsh
         env:
@@ -246,6 +253,8 @@ jobs:
           PEPPY_UPDATE_PUBLIC_KEY: ${{ inputs.trusted_update_build && vars.PEPPY_UPDATE_PUBLIC_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD || '' }}
+          PEPPY_MACOS_SIGNING_MODE: ${{ inputs.trusted_update_build && (vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id') || '' }}
+          PEPPY_WINDOWS_SIGNING_MODE: ${{ inputs.trusted_update_build && (vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode') || '' }}
           APPLE_CERTIFICATE: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
           APPLE_SIGNING_IDENTITY: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
@@ -253,7 +262,7 @@ jobs:
           APPLE_PASSWORD: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ inputs.trusted_update_build && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
         run: infra/release/build-desktop-bundles.sh
-      - if: always() && runner.os == 'Windows' && inputs.trusted_update_build
+      - if: always() && runner.os == 'Windows' && inputs.trusted_update_build && vars.PEPPY_WINDOWS_SIGNING_MODE != 'none'
         name: Remove protected Authenticode certificate
         shell: pwsh
         run: |

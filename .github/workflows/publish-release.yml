@@ -146,6 +146,9 @@ jobs:
       - if: steps.guard.outputs.skip != 'true'
         env:
           VERSION: ${{ inputs.version }}
+          TRUSTED_UPDATE_BUILD: ${{ inputs.trusted_update_build }}
+          PEPPY_MACOS_SIGNING_MODE: ${{ vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id' }}
+          PEPPY_WINDOWS_SIGNING_MODE: ${{ vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode' }}
         run: infra/release/release-notes.sh "$VERSION" > dist/notes.md
       - if: steps.guard.outputs.skip != 'true'
         env:
