@@ -37,6 +37,29 @@ on:
         required: false
         type: string
         default: ''
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY:
+        required: false
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD:
+        required: false
+      PEPPY_RELEASE_RPM_GPG_KEY:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
   workflow_dispatch:
     inputs:
       ref:

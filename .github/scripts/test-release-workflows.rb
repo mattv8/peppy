@@ -210,4 +210,46 @@ assert.call(notes_env.fetch('TRUSTED_UPDATE_BUILD') == '${{ inputs.trusted_updat
 assert.call(notes_env.fetch('PEPPY_MACOS_SIGNING_MODE').include?("vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id'"), 'release notes must receive the strict-default macOS mode')
 assert.call(notes_env.fetch('PEPPY_WINDOWS_SIGNING_MODE').include?("vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode'"), 'release notes must receive the strict-default Windows mode')
 
+read_workflow = ->(name) { File.read(File.join(root, 'workflows', name)) }
+declared_secrets = lambda do |workflow, name|
+  declarations = workflow.fetch(true).fetch('workflow_call').fetch('secrets', {})
+  assert.call(declarations.values.all? { |spec| spec == { 'required' => false } }, "#{name} secrets must be declared optional")
+  declarations.keys.sort
+end
+referenced_secrets = ->(text) { text.scan(/secrets\.([A-Za-z0-9_]+)/).flatten.uniq.sort }
+artifact_secret_names = %w[
+  APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_SIGNING_IDENTITY
+  APPLE_TEAM_ID PEPPY_RELEASE_RPM_GPG_KEY PEPPY_UPDATER_PRIVATE_KEY PEPPY_UPDATER_PRIVATE_KEY_PASSWORD
+  WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD
+].freeze
+publish_secret_names = %w[
+  PEPPY_RELEASE_GPG_KEY PEPPY_RELEASE_GPG_PASSPHRASE PEPPY_UPDATER_PRIVATE_KEY PEPPY_UPDATER_PRIVATE_KEY_PASSWORD
+].freeze
+named_secret_map = lambda do |job, names, caller_name|
+  secrets = job['secrets']
+  assert.call(secrets.is_a?(Hash), "#{caller_name} must pass secrets by explicit name, not inherit")
+  assert.call(secrets.keys.sort == names, "#{caller_name} must map exactly the callee's declared secrets")
+  names.each do |name|
+    assert.call(secrets.fetch(name) == "${{ secrets.#{name} }}", "#{caller_name} must map #{name} by identity")
+  end
+end
+
+build_text = read_workflow.call('build-artifacts.yml')
+publish_text = read_workflow.call('publish-release.yml')
+build_workflow = YAML.load(build_text)
+publish_workflow = YAML.load(publish_text)
+assert.call(declared_secrets.call(build_workflow, 'build-artifacts') == artifact_secret_names, 'build-artifacts must declare exactly its signing secrets')
+assert.call(referenced_secrets.call(build_text) == artifact_secret_names, 'build-artifacts must not reference undeclared secrets')
+assert.call(declared_secrets.call(publish_workflow, 'publish-release') == publish_secret_names, 'publish-release must declare exactly its signing secrets')
+assert.call(referenced_secrets.call(publish_text) == publish_secret_names, 'publish-release must not reference undeclared secrets')
+
+named_secret_map.call(release.fetch('jobs').fetch('artifacts'), artifact_secret_names, 'release artifacts')
+named_secret_map.call(ci_jobs.fetch('development-artifacts'), artifact_secret_names, 'CI development artifacts')
+named_secret_map.call(release.fetch('jobs').fetch('publish'), publish_secret_names, 'release publish')
+named_secret_map.call(ci_jobs.fetch('publish-prerelease'), publish_secret_names, 'CI prerelease publish')
+
+assert.call(build_workflow.fetch('jobs').fetch('desktop-development-artifacts').fetch('environment') == "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}", 'artifact environment selection must stay unchanged')
+assert.call(publish_workflow.fetch('jobs').fetch('publish').fetch('environment') == "${{ inputs.channel == 'stable' && 'updates-stable' || inputs.channel == 'staging' && 'updates-staging' || 'invalid-update-channel' }}", 'publish environment selection must stay unchanged')
+assert.call(ci_jobs.fetch('development-artifacts').fetch('with').fetch('trusted_update_build') == "${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' }}", 'CI artifact trust predicate must stay unchanged')
+
 puts 'release workflow tests passed'
