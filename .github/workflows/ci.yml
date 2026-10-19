@@ -390,7 +390,7 @@ jobs:
         run: bash .github/scripts/ci-gate.sh
 
   publish-prerelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success'"
     needs: [version, gate]
     permissions:
       contents: write
@@ -401,7 +401,7 @@ jobs:
       sha: ${{ github.sha }}
       trusted_update_build: true
   publish-staging-server:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -413,7 +413,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   publish-staging-relay:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -425,7 +425,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   publish-production-server:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -437,7 +437,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   publish-production-relay:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -449,7 +449,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   stable-release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'"
     needs: [gate, version, publish-production-server, publish-production-relay]
     permissions:
       contents: write
