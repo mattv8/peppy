@@ -116,6 +116,18 @@ repo=$tmp/notes; new_repo "$repo"; git -C "$repo" tag v0.1.0; git -C "$repo" com
 notes=$(cd "$repo" && "$script_dir/release-notes.sh" 0.2.0-staging.9)
 printf '%s\n' "$notes" | grep -F 'unsigned development-grade prerelease' >/dev/null
 printf '%s\n' "$notes" | grep -F 'note' >/dev/null
+notes=$(cd "$repo" && TRUSTED_UPDATE_BUILD=true PEPPY_MACOS_SIGNING_MODE=adhoc PEPPY_WINDOWS_SIGNING_MODE=none "$script_dir/release-notes.sh" 0.2.0-staging.9)
+printf '%s\n' "$notes" | grep -F 'Tauri-signed updater artifacts' >/dev/null
+printf '%s\n' "$notes" | grep -F 'GPG-signed SHA256SUMS' >/dev/null
+printf '%s\n' "$notes" | grep -F 'GPG-signed RPM packages' >/dev/null
+printf '%s\n' "$notes" | grep -F 'macOS is ad-hoc signed and not notarized' >/dev/null
+printf '%s\n' "$notes" | grep -F 'Windows installers are not Authenticode publisher-signed' >/dev/null
+printf '%s\n' "$notes" | grep -F 'Android artifacts remain unsigned' >/dev/null
+printf '%s\n' "$notes" | grep -F 'iOS archive remains unsigned' >/dev/null
+notes=$(cd "$repo" && TRUSTED_UPDATE_BUILD=true PEPPY_MACOS_SIGNING_MODE=developer-id PEPPY_WINDOWS_SIGNING_MODE=authenticode "$script_dir/release-notes.sh" 0.2.0-staging.9)
+if printf '%s\n' "$notes" | grep -Eq 'ad-hoc signed|not Authenticode publisher-signed'; then exit 1; fi
+if (cd "$repo" && TRUSTED_UPDATE_BUILD=true PEPPY_MACOS_SIGNING_MODE=invalid "$script_dir/release-notes.sh" 0.2.0-staging.9) >/dev/null 2>&1; then exit 1; fi
+if (cd "$repo" && TRUSTED_UPDATE_BUILD=true PEPPY_WINDOWS_SIGNING_MODE='' "$script_dir/release-notes.sh" 0.2.0-staging.9) >/dev/null 2>&1; then exit 1; fi
 repo=$tmp/groups; new_repo "$repo"; git -C "$repo" tag v0.1.0
 git -C "$repo" commit --allow-empty -qm 'fix: thing!'
 git -C "$repo" commit --allow-empty -qm 'feat!: x'

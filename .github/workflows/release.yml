@@ -151,9 +151,40 @@ jobs:
           BUMP: ${{ steps.compute.outputs.bump }}
         run: |
           printf '## Release preparation\n\n- Version: %s\n- Last stable: %s\n- Bump: %s\n- SHA: %s\n- Dry run: %s\n' "$VERSION" "$LAST_STABLE" "$BUMP" "$SHA" "$DRY_RUN" >> "$GITHUB_STEP_SUMMARY"
-  artifacts:
+  signing:
     needs: prepare
     if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: updates-stable
+    outputs:
+      ready: ${{ steps.readiness.outputs.ready }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - id: readiness
+        env:
+          PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+          PEPPY_UPDATE_PUBLIC_KEY: ${{ vars.PEPPY_UPDATE_PUBLIC_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PEPPY_RELEASE_RPM_GPG_KEY: ${{ secrets.PEPPY_RELEASE_RPM_GPG_KEY }}
+          PEPPY_RELEASE_RPM_GPG_KEY_ID: ${{ vars.PEPPY_RELEASE_RPM_GPG_KEY_ID }}
+          PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+          PEPPY_RELEASE_GPG_KEY_ID: ${{ vars.PEPPY_RELEASE_GPG_KEY_ID }}
+          PEPPY_MACOS_SIGNING_MODE: ${{ vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id' }}
+          PEPPY_WINDOWS_SIGNING_MODE: ${{ vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode' }}
+        run: bash .github/scripts/release-signing-readiness.sh
+  artifacts:
+    needs: [prepare, signing]
+    if: ${{ !cancelled() && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' }}
     uses: ./.github/workflows/build-artifacts.yml
     with:
       ref: ${{ needs.prepare.outputs.sha }}
@@ -162,16 +193,9 @@ jobs:
       wix_version: ${{ needs.prepare.outputs.wix_version }}
       trusted_update_build: true
       update_channel: stable
-  container:
-    needs: prepare
-    if: needs.prepare.outputs.skip != 'true'
-    uses: ./.github/workflows/build-container.yml
-    with:
-      ref: ${{ needs.prepare.outputs.sha }}
-      version: ${{ needs.prepare.outputs.version }}
   publish:
-    if: ${{ always() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.artifacts.result == 'success' && needs.container.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
-    needs: [prepare, artifacts, container, publish-server-image, publish-relay-image]
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
+    needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image]
     permissions:
       contents: write
     uses: ./.github/workflows/publish-release.yml
@@ -181,8 +205,8 @@ jobs:
       sha: ${{ needs.prepare.outputs.sha }}
       trusted_update_build: true
   publish-server-image:
-    if: ${{ !inputs.dry_run && needs.prepare.outputs.skip != 'true' }}
-    needs: [prepare, artifacts, container]
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
+    needs: [prepare, signing, artifacts]
     uses: ./.github/workflows/publish-community-image.yml
     with:
       image: hub.docker.visnovsky.us/library/peppy-server
@@ -193,8 +217,8 @@ jobs:
       sha: ${{ needs.prepare.outputs.sha }}
     secrets: inherit
   publish-relay-image:
-    if: ${{ !inputs.dry_run && needs.prepare.outputs.skip != 'true' }}
-    needs: [prepare, artifacts, container]
+    if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
+    needs: [prepare, signing, artifacts]
     uses: ./.github/workflows/publish-community-image.yml
     with:
       image: hub.docker.visnovsky.us/library/peppy-push-relay

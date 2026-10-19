@@ -3,14 +3,22 @@ set -euo pipefail
 
 config=''
 if [ "$TRUSTED_UPDATE_BUILD" = true ]; then
+  macos_mode="${PEPPY_MACOS_SIGNING_MODE-developer-id}"
+  windows_mode="${PEPPY_WINDOWS_SIGNING_MODE-authenticode}"
+  case "$macos_mode" in developer-id|adhoc) ;; *) echo 'PEPPY_MACOS_SIGNING_MODE must be developer-id or adhoc' >&2; exit 1 ;; esac
+  case "$windows_mode" in authenticode|none) ;; *) echo 'PEPPY_WINDOWS_SIGNING_MODE must be authenticode or none' >&2; exit 1 ;; esac
   case "$PEPPY_UPDATE_CHANNEL" in stable|staging) ;; *) echo 'trusted update builds require stable or staging channel' >&2; exit 1 ;; esac
   for required in VERSION PEPPY_UPDATE_PUBLIC_KEY TAURI_SIGNING_PRIVATE_KEY; do
     [ -n "${!required:-}" ] || { echo "$required is required for trusted update builds" >&2; exit 1; }
   done
-  if [ "$RUNNER_OS" = macOS ]; then
+  if [ "$RUNNER_OS" = macOS ] && [ "$macos_mode" = developer-id ]; then
     for required in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
       [ -n "${!required:-}" ] || { echo "$required is required for trusted macOS builds" >&2; exit 1; }
     done
+  fi
+  if [ "$RUNNER_OS" = macOS ] && [ "$macos_mode" = adhoc ]; then
+    unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+    export APPLE_SIGNING_IDENTITY='-'
   fi
   config=$(node -e 'process.stdout.write(JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.PEPPY_UPDATE_PUBLIC_KEY}}}))')
 else
@@ -35,7 +43,7 @@ if [[ -n "$VERSION" ]]; then
   fi
   json="$json}"
   # shellcheck disable=SC2016
-  if [ -n "$config" ]; then json=$(node -e 'const [base, overlay] = process.argv.slice(1).map(JSON.parse); const bundle={...base.bundle,...overlay.bundle}; if (process.env.RUNNER_OS === "Windows") { const script = `${process.env.GITHUB_WORKSPACE}\\infra\\release\\sign-windows-artifact.ps1`; bundle.windows={...(base.bundle?.windows ?? {}),signCommand:`powershell -NoProfile -ExecutionPolicy Bypass -File \"${script}\" %1`}; } console.log(JSON.stringify({...base,...overlay,bundle}));' "$json" "$config"); fi
+  if [ -n "$config" ]; then json=$(node -e 'const [base, overlay] = process.argv.slice(1).map(JSON.parse); const bundle={...base.bundle,...overlay.bundle}; if (process.env.RUNNER_OS === "Windows" && process.env.PEPPY_WINDOWS_SIGNING_MODE !== "none") { const script = `${process.env.GITHUB_WORKSPACE}\\infra\\release\\sign-windows-artifact.ps1`; bundle.windows={...(base.bundle?.windows ?? {}),signCommand:`powershell -NoProfile -ExecutionPolicy Bypass -File \"${script}\" %1`}; } console.log(JSON.stringify({...base,...overlay,bundle}));' "$json" "$config"); fi
 else
   json=''
 fi
@@ -70,9 +78,12 @@ else
 fi
 
 if [ "$TRUSTED_UPDATE_BUILD" = true ] && [ "$RUNNER_OS" = macOS ]; then
+  bundle_output_dir="${PEPPY_BUNDLE_OUTPUT_DIR:-apps/desktop/src-tauri/target/release/bundle/macos}"
   while IFS= read -r -d '' application; do
     codesign --verify --deep --strict --verbose=2 "$application"
-    spctl --assess --type execute --verbose=4 "$application"
-    xcrun stapler validate "$application"
-  done < <(find apps/desktop/src-tauri/target/release/bundle/macos -name '*.app' -type d -print0)
+    if [ "$macos_mode" = developer-id ]; then
+      spctl --assess --type execute --verbose=4 "$application"
+      xcrun stapler validate "$application"
+    fi
+  done < <(find "$bundle_output_dir" -name '*.app' -type d -print0)
 fi

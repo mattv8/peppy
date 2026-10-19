@@ -27,12 +27,13 @@ expect_failure() {
   fi
 }
 
-scope_cases=(force_full docs_only rust desktop android ios mobile_design server build ci unclassified)
+scope_cases=(force_full production_push docs_only rust desktop android ios mobile_design server build ci unclassified)
 for case_name in "${scope_cases[@]}"; do
   output="$temp_dir/$case_name"
   : > "$output"
   case "$case_name" in
     force_full) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true "$SCOPE" ;;
+    production_push) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true PRODUCTION_PUSH=true "$SCOPE" ;;
     docs_only) env GITHUB_OUTPUT="$output" "$SCOPE" ;;
     rust) env GITHUB_OUTPUT="$output" FILTER_RUST=true "$SCOPE" ;;
     desktop) env GITHUB_OUTPUT="$output" FILTER_DESKTOP=true "$SCOPE" ;;
@@ -45,6 +46,10 @@ for case_name in "${scope_cases[@]}"; do
     unclassified) env GITHUB_OUTPUT="$output" FILTER_UNCLASSIFIED=true "$SCOPE" ;;
   esac
 done
+
+expect_output "$temp_dir/production_push" 'rust=true'
+expect_output "$temp_dir/production_push" 'container_image=true'
+expect_output "$temp_dir/production_push" 'development_artifacts=false'
 
 for case_name in "${scope_cases[@]}"; do
   output="$temp_dir/$case_name"
@@ -135,4 +140,5 @@ expect_output "$summary" '| job | required | result |'
 echo 'CI script tests passed'
 bash "$SCRIPT_DIR/test-release-context-guard.sh"
 ruby "$SCRIPT_DIR/test-release-workflows.rb"
+"$SCRIPT_DIR/test-release-signing-readiness.sh"
 "$SCRIPT_DIR/test-publish-community-image.sh"

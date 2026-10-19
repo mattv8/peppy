@@ -11,12 +11,19 @@ Configure the following protected inputs before enabling an update release:
   public key compiled into official desktop builds.
 - `PEPPY_UPDATER_PRIVATE_KEY` and optional
   `PEPPY_UPDATER_PRIVATE_KEY_PASSWORD` secrets: Tauri updater signing key.
-- `APPLE_CERTIFICATE` (base64 P12), `APPLE_CERTIFICATE_PASSWORD`,
-  `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`
-  secrets: Developer ID signing and notarization inputs.
-- `WINDOWS_CERTIFICATE` (base64 PFX) and `WINDOWS_CERTIFICATE_PASSWORD`
-  secrets: Authenticode signing inputs. The runner timestamps installers with
-  DigiCert's timestamp service.
+- `PEPPY_MACOS_SIGNING_MODE` protected environment variable: `developer-id`
+  (the default when unset) requires `APPLE_CERTIFICATE` (base64 P12),
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+  `APPLE_PASSWORD`, and `APPLE_TEAM_ID` secrets for Developer ID signing and
+  notarization. Set it explicitly to `adhoc` for a free macOS build: it uses
+  Tauri's `-` ad-hoc identity, verifies code-signature integrity, and neither
+  notarizes nor claims Gatekeeper approval. It deliberately ignores stale Apple
+  certificate and notary inputs.
+- `PEPPY_WINDOWS_SIGNING_MODE` protected environment variable: `authenticode`
+  (the default when unset) requires `WINDOWS_CERTIFICATE` (base64 PFX) and
+  `WINDOWS_CERTIFICATE_PASSWORD` secrets. Set it explicitly to `none` for a
+  free Windows build; updater signatures remain required, but installers do not
+  carry an Authenticode publisher signature.
 - `PEPPY_RELEASE_GPG_KEY`, `PEPPY_RELEASE_GPG_KEY_ID`, and optional
   `PEPPY_RELEASE_GPG_PASSPHRASE`: detached-sign `SHA256SUMS` for repository
   handoff. Linux repository operators pin and verify its public key.
@@ -26,8 +33,9 @@ Configure the following protected inputs before enabling an update release:
   unprotected, isolated CI RPM signing key: `rpmsign` has no safe passphrase
   input, so passphrase-protected RPM keys are rejected.
 
-The trusted build fails closed when its channel, updater key, or platform
-credentials are absent. It compiles the stable or staging channel and public
+The trusted build fails closed when its channel, updater key, required selected
+platform credentials, or explicit mode value is invalid. It never downgrades a
+strict platform because credentials are absent. It compiles the stable or staging channel and public
 key into a temporary Tauri overlay, enables `createUpdaterArtifacts`, and does
 not alter the base Tauri configuration. The publishing job signs each final
 renamed updater payload with its release version, then creates `latest.json`.
@@ -49,11 +57,14 @@ to the organization key-incident procedure. Never replace a pinned public key
 without a signed bridge release.
 
 If an updater key or release pipeline is unavailable, publish a manually
-downloadable, platform-signed bootstrap installer as a new GitHub Release.
+downloadable bootstrap installer as a new GitHub Release using the selected
+platform policy.
 Existing installations must not accept an unsigned rescue artifact. Operators
-need GitHub Releases write permission, protected environments, Apple notarization
-access, Windows certificate access, and the Linux repository operator's signed
-metadata hosting inputs. The Linux repository lane consumes the exact
+need GitHub Releases write permission, protected environments, updater and Linux
+signing keys, and the Linux repository operator's signed metadata hosting inputs.
+Developer ID notarization and Authenticode credentials are required only when
+their strict modes are selected; free-mode recovery does not require an Apple
+account or store enrollment. The Linux repository lane consumes the exact
 `dist/release` directory after `sign-update-assets.sh` and
 `generate-update-manifest.sh`; it must publish those immutable final assets and
 their signatures without renaming them.
@@ -68,6 +79,26 @@ release credentials only as environment secrets or variables, never repository
 or organization secrets. Require deployment reviewers and forbid administrator
 bypass for both environments; any configured reviewer or administrator bypass
 can authorize release-key use and is therefore an operational security decision.
+Use protected-environment variables (not repository defaults) for the two mode
+values. Both are validated before trusted build work; unavailable GitHub
+environment variables are mapped to the strict defaults, while an explicitly
+empty or unknown script policy value fails. These GitHub
+Release artifacts are not App Store, Mac App Store, Microsoft Store, Android
+store, or iOS store submissions.
+
+## Public verification keys
+
+Channel-specific public verification material is committed under
+`infra/release/keys/`: `stable-checksums.asc`, `stable-rpm.asc`,
+`staging-checksums.asc`, and `staging-rpm.asc`, with each channel's updater
+public key alongside them. Release operators must verify that each committed
+fingerprint matches the corresponding protected-environment key before using or
+rotating it; do not treat an arbitrary repository file as authoritative merely
+because it has a familiar name. The repository and release assets distribute
+public keys, but they cannot bootstrap first trust by themselves. Record the
+expected public fingerprints independently (for example beside the recovery
+password in a password manager) and treat an encrypted-backup decrypt failure
+as a tamper signal rather than trying alternate passwords.
 
 Linux packages use distro ordering without changing the canonical runtime,
 manifest, or updater-signature version. Stable `1.2.3` packages are normalized
