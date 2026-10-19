@@ -15,6 +15,15 @@ on:
       trusted_update_build:
         required: true
         type: boolean
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY:
+        required: false
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD:
+        required: false
+      PEPPY_RELEASE_GPG_KEY:
+        required: false
+      PEPPY_RELEASE_GPG_PASSPHRASE:
+        required: false
 
 permissions:
   contents: read

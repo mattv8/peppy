@@ -193,6 +193,18 @@ jobs:
       wix_version: ${{ needs.prepare.outputs.wix_version }}
       trusted_update_build: true
       update_channel: stable
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_RPM_GPG_KEY: ${{ secrets.PEPPY_RELEASE_RPM_GPG_KEY }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
   publish:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
     needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image]
@@ -204,6 +216,11 @@ jobs:
       channel: stable
       sha: ${{ needs.prepare.outputs.sha }}
       trusted_update_build: true
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+      PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-server-image:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' }}
     needs: [prepare, signing, artifacts]

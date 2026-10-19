@@ -344,6 +344,18 @@ jobs:
       wix_version: ${{ needs.version.outputs.wix_version }}
       trusted_update_build: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' }}
       update_channel: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' && 'staging' || '' }}
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_RPM_GPG_KEY: ${{ secrets.PEPPY_RELEASE_RPM_GPG_KEY }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
   container-image:
     uses: ./.github/workflows/build-container.yml
@@ -400,6 +412,11 @@ jobs:
       channel: staging
       sha: ${{ github.sha }}
       trusted_update_build: true
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+      PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-staging-server:
     if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
     needs: gate
