@@ -1,6 +1,20 @@
 name: Release
 
 on:
+  workflow_call:
+    inputs:
+      bump:
+        required: false
+        type: string
+        default: auto
+      version:
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       bump:
@@ -16,6 +30,11 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  # Reusable calls inherit the caller event; only dispatches own this lock.
+  group: ${{ github.event_name == 'workflow_dispatch' && 'stable-release' || format('release-{0}', github.run_id) }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -33,15 +52,35 @@ jobs:
       android_version_code: ${{ steps.compute.outputs.android_version_code }}
       wix_version: ${{ steps.compute.outputs.wix_version }}
       sha: ${{ steps.target.outputs.sha }}
+      skip: ${{ steps.target.outputs.skip == 'true' || steps.compute.outputs.skip == 'true' }}
     steps:
-      - if: github.ref != 'refs/heads/production'
-        run: exit 1
+      - name: Require production release event before checkout
+        run: |
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            workflow_dispatch:refs/heads/production|push:refs/heads/production) ;;
+            *) echo 'stable releases require a production dispatch or push' >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - name: Require trusted stable release context
+        env:
+          CHANNEL: stable
+        run: REQUESTED_SHA="$(git rev-parse HEAD)" bash .github/scripts/release-context-guard.sh
       - id: target
-        run: echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            production_sha=$(git ls-remote origin refs/heads/production | awk '{print $1}')
+            if [ "$GITHUB_SHA" != "$production_sha" ]; then
+              echo '::notice::A newer production commit exists; skipping stale automatic release'
+              echo 'skip=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo 'skip=false' >> "$GITHUB_OUTPUT"
       - name: Require green CI
+        if: steps.target.outputs.skip != 'true'
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           GH_TOKEN: ${{ github.token }}
@@ -64,44 +103,47 @@ jobs:
               exit 1
             fi
           fi
-      - run: infra/release/install-git-cliff.sh "$RUNNER_TEMP/bin"
-      - run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - if: steps.target.outputs.skip != 'true'
+        run: infra/release/install-git-cliff.sh "$RUNNER_TEMP/bin"
+      - if: steps.target.outputs.skip != 'true'
+        run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - id: compute
+        if: steps.target.outputs.skip != 'true'
         env:
           BUMP: ${{ inputs.bump }}
           VERSION_INPUT: ${{ inputs.version }}
         run: |
-          if [ -n "$VERSION_INPUT" ]; then
-            infra/release/compute-version.sh --channel stable --version "$VERSION_INPUT" | tee -a "$GITHUB_OUTPUT"
-          else
-            infra/release/compute-version.sh --channel stable --bump "$BUMP" | tee -a "$GITHUB_OUTPUT"
+          args=(--channel stable)
+          if [ -n "$VERSION_INPUT" ]; then args+=(--version "$VERSION_INPUT"); else args+=(--bump "$BUMP"); fi
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$BUMP" = auto ] && [ -z "$VERSION_INPUT" ]; then args+=(--allow-auto-patch-fallback); fi
+          set +e
+          output=$(infra/release/compute-version.sh "${args[@]}")
+          status=$?
+          set -e
+          if [ "$status" -eq 4 ] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            echo '::notice::This production SHA already has a stable release; skipping duplicate automatic release'
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi
+          printf '%s\n' "$output" | tee -a "$GITHUB_OUTPUT"
+          echo 'skip=false' >> "$GITHUB_OUTPUT"
       - name: Reject stable version below published prereleases
+        if: steps.target.outputs.skip != 'true' && steps.compute.outputs.skip != 'true'
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           VERSION: ${{ steps.compute.outputs.version }}
         run: |
-          # shellcheck source=infra/release/lib.sh
-          source infra/release/lib.sh
-          highest=
-          while IFS= read -r tag; do
-            if ! printf '%s\n' "$tag" | grep -Eq "$PEPPY_PRERELEASE_TAG_REGEX"; then
-              continue
-            fi
-            if [ -z "$highest" ] || [ "$(semver_compare "$tag" "$highest")" -gt 0 ]; then
-              highest=$tag
-            fi
-          done < <(git tag --list)
-          if [ -n "$highest" ] && [ "$(semver_compare "$VERSION" "$highest")" -lt 0 ]; then
-            message="chosen stable version $VERSION is below existing prerelease $highest"
-            if [ "$DRY_RUN" = true ]; then
-              echo "::warning::$message"
-            else
-              echo "::error::$message"
-              exit 1
-            fi
+          if ! message=$(bash infra/release/check-stable-prerelease-floor.sh 2>&1); then
+            if [ "$DRY_RUN" = true ]; then echo "::warning::$message"; else echo "::error::$message"; exit 1; fi
           fi
-      - env:
+      # This summary is deliberately skipped for stale or duplicate auto runs.
+      - name: Summarize release preparation
+        if: steps.target.outputs.skip != 'true' && steps.compute.outputs.skip != 'true'
+        env:
           DRY_RUN: ${{ inputs.dry_run }}
           SHA: ${{ steps.target.outputs.sha }}
           VERSION: ${{ steps.compute.outputs.version }}
@@ -111,6 +153,7 @@ jobs:
           printf '## Release preparation\n\n- Version: %s\n- Last stable: %s\n- Bump: %s\n- SHA: %s\n- Dry run: %s\n' "$VERSION" "$LAST_STABLE" "$BUMP" "$SHA" "$DRY_RUN" >> "$GITHUB_STEP_SUMMARY"
   artifacts:
     needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
     uses: ./.github/workflows/build-artifacts.yml
     with:
       ref: ${{ needs.prepare.outputs.sha }}
@@ -121,12 +164,13 @@ jobs:
       update_channel: stable
   container:
     needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
     uses: ./.github/workflows/build-container.yml
     with:
       ref: ${{ needs.prepare.outputs.sha }}
       version: ${{ needs.prepare.outputs.version }}
   publish:
-    if: ${{ !inputs.dry_run }}
+    if: ${{ always() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.artifacts.result == 'success' && needs.container.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
     needs: [prepare, artifacts, container, publish-server-image, publish-relay-image]
     permissions:
       contents: write
@@ -137,8 +181,8 @@ jobs:
       sha: ${{ needs.prepare.outputs.sha }}
       trusted_update_build: true
   publish-server-image:
-    if: ${{ !inputs.dry_run }}
-    needs: [prepare, container]
+    if: ${{ !inputs.dry_run && needs.prepare.outputs.skip != 'true' }}
+    needs: [prepare, artifacts, container]
     uses: ./.github/workflows/publish-community-image.yml
     with:
       image: hub.docker.visnovsky.us/library/peppy-server
@@ -149,8 +193,8 @@ jobs:
       sha: ${{ needs.prepare.outputs.sha }}
     secrets: inherit
   publish-relay-image:
-    if: ${{ !inputs.dry_run }}
-    needs: [prepare, container]
+    if: ${{ !inputs.dry_run && needs.prepare.outputs.skip != 'true' }}
+    needs: [prepare, artifacts, container]
     uses: ./.github/workflows/publish-community-image.yml
     with:
       image: hub.docker.visnovsky.us/library/peppy-push-relay

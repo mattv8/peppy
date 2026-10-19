@@ -49,6 +49,9 @@ git -C "$repo" tag v0.7.0; git -C "$repo" commit --allow-empty -qm 'docs!: break
 git -C "$repo" tag v0.8.0; git -C "$repo" commit --allow-empty -qm 'docs: only'
 assert_eq "$(field "$(run "$repo" --channel prerelease)" bump)" none-patch
 if run "$repo" --channel stable >/dev/null 2>&1; then exit 1; else [[ $? == 3 ]]; fi
+fallback=$(run "$repo" --channel stable --allow-auto-patch-fallback)
+assert_eq "$(field "$fallback" version)" 0.8.1
+assert_eq "$(field "$fallback" bump)" none-patch
 git -C "$repo" commit --allow-empty -qm 'fix: alongside docs'; assert_eq "$(field "$(run "$repo" --channel stable)" version)" 0.8.1
 git -C "$repo" tag v0.8.1; git -C "$repo" commit --allow-empty -qm 'unconventional message'; assert_eq "$(field "$(run "$repo" --channel stable)" version)" 0.8.2
 git -C "$repo" tag v0.8.2; git -C "$repo" commit --allow-empty -qm 'chore: only'

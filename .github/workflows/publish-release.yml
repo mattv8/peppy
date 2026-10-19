@@ -41,14 +41,19 @@ jobs:
         run: |
           [ "$REQUESTED_SHA" = "$GITHUB_SHA" ] || { echo 'release SHA must equal the triggering SHA' >&2; exit 1; }
           case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
-            workflow_dispatch:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
-            *) echo 'release publishing requires production Release dispatch or staging push' >&2; exit 1 ;;
+            workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
+            *) echo 'release publishing requires a production stable dispatch/push or staging push' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify checked-out trusted publish context
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          REQUESTED_SHA: ${{ inputs.sha }}
+        run: bash .github/scripts/release-context-guard.sh
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version

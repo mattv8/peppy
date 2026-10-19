@@ -10,6 +10,15 @@ if [[ ${1:-} == buildx && ${2:-} == imagetools && ${3:-} == inspect ]]; then
   if [[ ${4:-} != --format || ${5:-} != '{{json .Manifest.Digest}}' || $# -ne 6 ]]; then
     printf 'unexpected inspect arguments:' >&2; printf ' %q' "$@" >&2; printf '\n' >&2; exit 64
   fi
+  if [[ ${6:-} =~ :[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    case ${VERSION_INSPECT_MODE:-missing} in
+      missing) echo 'ERROR: image not found: manifest unknown' >&2; exit 1 ;;
+      same) echo '"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' ;;
+      different) echo '"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"' ;;
+      uncertain) echo 'ERROR: failed to do request: i/o timeout' >&2; exit 1 ;;
+    esac
+    exit 0
+  fi
   if [[ -f "$BUILD_STATE_FILE" ]]; then
     echo '"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'; exit 0
   fi
@@ -33,7 +42,7 @@ MOCK
 chmod +x "$root/bin/docker" "$root/bin/cosign"
 reset_case() { : > "$root/log"; : > "$root/output"; rm -f "$root/build_state"; }
 run_publisher() {
-  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG=staging SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
+  env -u HARBOR_USERNAME -u HARBOR_PASSWORD PATH="$root/bin:$PATH" LOG="$root/log" GITHUB_OUTPUT="$root/output" BUILD_STATE_FILE="$root/build_state" GITHUB_REPOSITORY=test/peppy IMAGE="${IMAGE:-hub.docker.visnovsky.us/library/peppy-server}" CONTEXT=. DOCKERFILE=infra/docker/server.Dockerfile TAG="${TAG:-staging}" SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa COSIGN_PRIVATE_KEY=x COSIGN_PASSWORD=x COSIGN_PUBLIC_KEY=x infra/release/publish-image.sh
 }
 assert_no_mutation() {
   if grep -Eq 'docker buildx build|docker buildx imagetools create|cosign sign' "$root/log"; then echo 'unexpected registry mutation' >&2; cat "$root/log" >&2; exit 1; fi
@@ -68,4 +77,13 @@ done
 reset_case
 if IMAGE=hub.docker.visnovsky.us/private-library/peppy-server INSPECT_MODE=exists run_publisher >/dev/null 2>"$root/stderr"; then echo 'private namespace should fail' >&2; exit 1; fi
 assert_no_mutation
+reset_case
+if TAG=1.2.3 INSPECT_MODE=exists VERSION_INSPECT_MODE=different run_publisher >/dev/null 2>"$root/stderr"; then echo 'different existing stable tag should fail' >&2; exit 1; fi
+grep -Fq 'already points at a different digest' "$root/stderr"; assert_no_mutation
+reset_case
+TAG=1.2.3 INSPECT_MODE=exists VERSION_INSPECT_MODE=same run_publisher
+grep -Fq 'docker buildx imagetools create --tag hub.docker.visnovsky.us/library/peppy-server:1.2.3' "$root/log"
+reset_case
+if TAG=1.2.3 INSPECT_MODE=exists VERSION_INSPECT_MODE=uncertain run_publisher >/dev/null 2>"$root/stderr"; then echo 'uncertain stable tag inspection should fail' >&2; exit 1; fi
+grep -Fq 'refusing to promote' "$root/stderr"; assert_no_mutation
 echo 'community image publisher tests passed'
