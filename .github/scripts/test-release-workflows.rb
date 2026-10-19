@@ -8,7 +8,116 @@ load_workflow = ->(name) { YAML.load_file(File.join(root, 'workflows', name)) }
 assert = ->(condition, message) { abort(message) unless condition }
 
 ci = load_workflow.call('ci.yml')
-stable = ci.fetch('jobs').fetch('stable-release')
+ci_jobs = ci.fetch('jobs')
+publish_job_names = %w[
+  publish-prerelease
+  publish-staging-server
+  publish-staging-relay
+  publish-production-server
+  publish-production-relay
+  stable-release
+]
+
+condition_allows = lambda do |condition, event:, ref:, cancelled:, implicit_success:, results:, head_released: false|
+  has_status_guard = condition.match?(/(?:^|\s)(?:!cancelled|always|failure|success)\(\)/)
+  next false if !has_status_guard && !implicit_success
+
+  condition.split(' && ').all? do |term|
+    case term
+    when '!cancelled()'
+      !cancelled
+    when "github.event_name == 'push'"
+      event == 'push'
+    when /\Agithub\.ref == '([^']+)'\z/
+      ref == Regexp.last_match(1)
+    when /\Aneeds\.([a-z0-9-]+)\.result == 'success'\z/
+      results.fetch(Regexp.last_match(1)) == 'success'
+    when "needs.version.outputs.head_released != 'true'"
+      !head_released
+    else
+      abort("unsupported CI publish condition term: #{term}")
+    end
+  end
+end
+
+publish_conditions = publish_job_names.to_h do |job_name|
+  [job_name, ci_jobs.fetch(job_name).fetch('if')]
+end
+publish_conditions.each do |job_name, condition|
+  assert.call(condition.include?('!cancelled()'), "#{job_name} must override implicit success without running after cancellation")
+  assert.call(!condition.include?('always()'), "#{job_name} must not use always() for publication")
+end
+
+successful_results = {
+  'gate' => 'success',
+  'version' => 'success',
+  'publish-production-server' => 'success',
+  'publish-production-relay' => 'success'
+}.freeze
+staging_context = {
+  event: 'push', ref: 'refs/heads/staging', cancelled: false,
+  implicit_success: false, results: successful_results
+}.freeze
+production_context = {
+  event: 'push', ref: 'refs/heads/production', cancelled: false,
+  implicit_success: false, results: successful_results
+}.freeze
+
+staging_publishers = %w[publish-prerelease publish-staging-server publish-staging-relay]
+production_publishers = %w[publish-production-server publish-production-relay stable-release]
+staging_publishers.each do |job_name|
+  condition = publish_conditions.fetch(job_name)
+  assert.call(condition_allows.call(condition, **staging_context.merge(implicit_success: true)), "#{job_name} must run for an ordinary successful staging push")
+  assert.call(condition_allows.call(condition, **staging_context), "#{job_name} must remain eligible after an optional prerequisite skips")
+end
+production_publishers.each do |job_name|
+  condition = publish_conditions.fetch(job_name)
+  assert.call(condition_allows.call(condition, **production_context.merge(implicit_success: true)), "#{job_name} must run for an ordinary successful production push")
+  assert.call(condition_allows.call(condition, **production_context), "#{job_name} must remain eligible after an optional prerequisite skips")
+end
+pull_request_context = staging_context.merge(event: 'pull_request', ref: 'refs/pull/1/merge', implicit_success: true)
+publish_conditions.each do |job_name, condition|
+  assert.call(!condition_allows.call(condition, **pull_request_context), "#{job_name} must not run for a pull request")
+end
+%w[staging production].each do |branch|
+  dispatch_context = production_context.merge(event: 'workflow_dispatch', ref: "refs/heads/#{branch}", implicit_success: true)
+  publish_conditions.each do |job_name, condition|
+    assert.call(!condition_allows.call(condition, **dispatch_context), "#{job_name} must not run for a manual #{branch} dispatch")
+  end
+end
+staging_publishers.each do |job_name|
+  assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **production_context), "#{job_name} must not run on production")
+end
+production_publishers.each do |job_name|
+  assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **staging_context), "#{job_name} must not run on staging")
+end
+%w[publish-prerelease stable-release].each do |job_name|
+  context = staging_publishers.include?(job_name) ? staging_context : production_context
+  assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **context.merge(head_released: true)), "#{job_name} must not republish an already released head")
+end
+publish_conditions.each do |job_name, condition|
+  context = staging_publishers.include?(job_name) ? staging_context : production_context
+  assert.call(!condition_allows.call(condition, **context.merge(cancelled: true)), "#{job_name} must not run after cancellation")
+  %w[failure skipped cancelled].each do |gate_result|
+    results = successful_results.merge('gate' => gate_result)
+    assert.call(!condition_allows.call(condition, **context.merge(results: results)), "#{job_name} must require a successful gate, not #{gate_result}")
+  end
+end
+%w[publish-prerelease stable-release].each do |job_name|
+  context = job_name == 'publish-prerelease' ? staging_context : production_context
+  %w[failure skipped cancelled].each do |version_result|
+    results = successful_results.merge('version' => version_result)
+    assert.call(!condition_allows.call(publish_conditions.fetch(job_name), **context.merge(results: results)), "#{job_name} must require a successful version job, not #{version_result}")
+  end
+end
+%w[publish-production-server publish-production-relay].each do |publisher|
+  %w[failure skipped cancelled].each do |publisher_result|
+    results = successful_results.merge(publisher => publisher_result)
+    assert.call(!condition_allows.call(publish_conditions.fetch('stable-release'), **production_context.merge(results: results)), "stable release must require #{publisher} success, not #{publisher_result}")
+  end
+end
+
+stable = ci_jobs.fetch('stable-release')
 assert.call(stable.fetch('needs').sort == %w[gate publish-production-relay publish-production-server version], 'stable release must wait for the gate and both edge publishers')
 assert.call(stable.fetch('permissions') == { 'contents' => 'write', 'actions' => 'read' }, 'stable release needs only contents write and actions read')
 assert.call(stable.fetch('concurrency').fetch('group') == 'stable-release', 'automatic stable release must serialize with manual release')
