@@ -124,8 +124,9 @@ describe("InstanceManagement", () => {
     render(<InstanceManagement bridge={bridge({ enrollment_revoke_device: vi.fn(async () => revoked) })} />);
     fireEvent.click(await screen.findByRole("button", { name: "Revoke" }));
     fireEvent.click(screen.getByRole("button", { name: "Revoke device" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull());
-    expect(document.activeElement?.id).toBe("instance-management-devices-heading");
+    const devicesHeading = screen.getByRole("heading", { name: "Devices" });
+    await waitFor(() => expect(document.activeElement).toBe(devicesHeading));
+    expect(screen.queryByRole("dialog", { name: "Revoke device?" })).toBeNull();
   });
 
   it("closes revoke on Escape without calling revoke", async () => {
