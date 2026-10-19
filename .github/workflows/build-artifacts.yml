@@ -127,7 +127,7 @@ jobs:
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-release-artifacts
+          name: android-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
           path: |
             dist/android-release/peppy-android-unsigned.apk
             dist/android-release/peppy-android-unsigned.aab
@@ -172,12 +172,19 @@ jobs:
         run: |
           [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted updater build ref must equal the triggering SHA' >&2; exit 1; }
           case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
-            workflow_dispatch:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
-            *) echo 'trusted updater builds require production Release dispatch or staging push' >&2; exit 1 ;;
+            workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
+            *) echo 'trusted updater builds require a production stable dispatch/push or staging push' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.ref || github.sha }}
+      - name: Verify checked-out trusted updater context
+        if: inputs.trusted_update_build
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.update_channel }}
+          REQUESTED_SHA: ${{ inputs.ref }}
+        run: bash .github/scripts/release-context-guard.sh
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
@@ -303,7 +310,7 @@ jobs:
         run: infra/build/build-ios-artifacts.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ios-development-artifacts
+          name: ios-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
           path: dist/ios/
           if-no-files-found: error
           retention-days: 14

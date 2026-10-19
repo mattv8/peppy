@@ -51,11 +51,11 @@ jobs:
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
     # A workflow dispatch is accepted only for the protected stable-release
-    # caller; branch pushes may publish only their matching channel alias.
+    # caller; production pushes may also promote the computed stable version.
     if: >-
       github.sha == inputs.sha &&
-      ((github.event_name == 'push' &&
-        ((inputs.environment == 'production' && github.ref == 'refs/heads/production' && inputs.tag == 'edge') ||
+        ((github.event_name == 'push' &&
+          ((inputs.environment == 'production' && github.ref == 'refs/heads/production' && inputs.tag != 'staging') ||
          (inputs.environment == 'staging' && github.ref == 'refs/heads/staging' && inputs.tag == 'staging'))) ||
        (github.event_name == 'workflow_dispatch' && inputs.environment == 'production' && github.ref == 'refs/heads/production' &&
         inputs.tag != 'edge' && inputs.tag != 'staging'))
@@ -82,6 +82,11 @@ jobs:
           test -f "$DOCKERFILE"
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TAG" =~ ^(edge|staging|[0-9]+\.[0-9]+\.[0-9]+)$ ]]
+          if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then CHANNEL=stable
+          elif [[ "$TAG" == edge ]]; then CHANNEL=edge
+          else CHANNEL=staging
+          fi
+          if [[ "$CHANNEL" != edge ]]; then CHANNEL="$CHANNEL" REQUESTED_SHA="$SHA" bash .github/scripts/release-context-guard.sh; fi
       - name: Log in to Harbor
         env:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}

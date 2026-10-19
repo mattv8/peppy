@@ -438,3 +438,18 @@ jobs:
       environment: production
       sha: ${{ github.sha }}
     secrets: inherit
+  stable-release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true'
+    needs: [gate, version, publish-production-server, publish-production-relay]
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: stable-release
+      cancel-in-progress: false
+    uses: ./.github/workflows/release.yml
+    with:
+      bump: auto
+      version: ''
+      dry_run: false
+    secrets: inherit

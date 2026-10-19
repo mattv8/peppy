@@ -57,6 +57,20 @@ printf tampered >> "$root/stable/peppy-0.2.0-linux-x86_64.AppImage"
 if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected tampered-asset verification failure\n' >&2; exit 1; fi
 cp "$root/original-appimage" "$root/stable/peppy-0.2.0-linux-x86_64.AppImage"
 if cargo run --quiet --locked --manifest-path "$script_dir/manifest-verifier/Cargo.toml" -- 0.2.0 "$root/stable" 0.2.1 >/dev/null 2>&1; then printf 'expected version-binding verification failure\n' >&2; exit 1; fi
+floor_repo="$root/prerelease-floor"
+git init -q "$floor_repo"
+git -C "$floor_repo" config user.name release-test
+git -C "$floor_repo" config user.email release-test@example.com
+git -C "$floor_repo" commit --allow-empty -qm init
+git -C "$floor_repo" tag v0.1.0
+branch=$(git -C "$floor_repo" branch --show-current)
+git -C "$floor_repo" checkout -q --orphan staging-only
+git -C "$floor_repo" commit --allow-empty -qm 'feat: staging only'
+git -C "$floor_repo" tag v0.3.0-staging.1
+git -C "$floor_repo" checkout -q "$branch"
+(cd "$floor_repo" && VERSION=0.2.0 bash "$script_dir/check-stable-prerelease-floor.sh")
+git -C "$floor_repo" tag v0.3.0-staging.2
+if (cd "$floor_repo" && VERSION=0.2.0 bash "$script_dir/check-stable-prerelease-floor.sh") >/dev/null 2>&1; then printf 'expected reachable prerelease floor failure\n' >&2; exit 1; fi
 rm "$root/stable/peppy-0.2.0-linux-x86_64.rpm.sig"
 if "$script_dir/generate-update-manifest.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected missing signature failure\n' >&2; exit 1; fi
 rm "$fixture/android-release-artifacts/peppy-android-unsigned.apk"

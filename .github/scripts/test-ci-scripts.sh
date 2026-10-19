@@ -133,4 +133,6 @@ expect_failure env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" RUST_REQUIRED
 expect_output "$summary" '| job | required | result |'
 
 echo 'CI script tests passed'
+bash "$SCRIPT_DIR/test-release-context-guard.sh"
+ruby "$SCRIPT_DIR/test-release-workflows.rb"
 "$SCRIPT_DIR/test-publish-community-image.sh"
