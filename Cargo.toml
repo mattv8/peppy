@@ -45,3 +45,7 @@ zeroize = "=1.9.0"
 
 [patch.crates-io]
 libsodium-sys-stable = { path = "vendor/libsodium-sys-stable" }
+
+# Argon2id's 256 MiB KDF in libsodium is ~8x slower at -O0.
+[profile.dev.package."*"]
+opt-level = 3

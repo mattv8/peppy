@@ -6,7 +6,7 @@ Peppy is a self-hosted messaging foundation for developer and operator evaluatio
 
 ## Status
 
-Development remains in progress. The simulator exercises synthetic messages, not a carrier. CI builds development artifacts on pushes to `production` and `staging`; staging publishes prerelease artifacts automatically, and each green production push automatically publishes a stable release. The "Release" workflow remains available from `production` for a selected version bump, explicit version override, or a `dry_run` test. Download prerelease and CI artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases) and [CI runs](https://github.com/mattv8/peppy/actions/workflows/ci.yml). All artifacts provide build evidence only:
+Development remains in progress. The simulator exercises synthetic messages, not a carrier. CI builds development artifacts on pushes to `staging`; a production push rebuilds trusted artifacts only when stable signing is ready. Staging publishes prerelease artifacts automatically, and each green production push with ready signing automatically publishes a stable release. The "Release" workflow remains available from `production` for a selected version bump, explicit version override, or a `dry_run` test. Download prerelease and CI artifacts from [GitHub Releases](https://github.com/mattv8/peppy/releases) and [CI runs](https://github.com/mattv8/peppy/actions/workflows/ci.yml). All artifacts provide build evidence only:
 
 - Android release APK/AAB artifacts are unsigned.
 - macOS bundles and DMGs, Windows installers, and Linux packages are development outputs. macOS bundles are development bundles, not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
@@ -15,7 +15,7 @@ Development remains in progress. The simulator exercises synthetic messages, not
 Official desktop update releases are separate protected artifacts. Stable releases
 run only for `production` dispatches or green `production` pushes; staging updates run only from pushes to
 `staging`. They use protected signing environments, version-bound updater
-signatures, signed checksums, and platform signing/notarization credentials.
+signatures, signed checksums, and an explicit per-platform signing policy.
 Development artifacts and direct artifact dispatches are never update feeds and
 must not be treated as signed installers. Provisioning, key rotation, rescue
 bootstrap, Linux package version mapping, and repository-key trust requirements
@@ -300,10 +300,19 @@ Operators must read [backup and restore guidance](infra/compose/README.md) befor
 Releases are git tags; checked-in manifests keep development placeholder versions and CI stamps the computed version into each build.
 
 - **Staging prereleases:** when CI passes for a push to `staging`, it publishes the GitHub prerelease `vX.Y.Z-staging.N`, where `X.Y.Z` is the next version predicted from Conventional Commits and `N` counts commits since the last stable tag. The Android and WiX version codes retain the monotonic prerelease sequence. The newest 10 prereleases are kept. The server and relay images are pushed only after the same SHA's `gate` job succeeds, as `hub.docker.visnovsky.us/library/peppy-server:staging` and `hub.docker.visnovsky.us/library/peppy-push-relay:staging`, plus immutable `sha-<commit>` tags.
-- **Production edge and stable:** after CI's gate and both production `:edge` image publishers succeed for a `production` push, the same SHA automatically creates the next stable release and publishes both Harbor images as `X.Y.Z`, `X.Y`, `latest`, and `X` from `1.0.0`; the immutable SHA tags are promoted rather than rebuilt. Conventional Commits choose the automatic major/minor/patch bump; pushes with no releasable commits use a patch fallback. A stale or duplicate automatic release no-ops. CI and stable-release concurrency each retain only one pending run, so a burst can cancel an intermediate whole CI run before it gets a gate or edge image; a pending manual or automatic stable release can likewise replace the other and is shown as cancelled. The **Release** workflow remains available from `production` with inputs for `bump` (`auto`, `patch`, `minor`, `major`), an optional explicit `version` (`X.Y.Z`, for example `1.0.0`), and `dry_run` (build without publishing); these manual controls preserve their existing behavior. Every stable release requires a successful CI push run for its exact production commit.
+- **Production edge and stable:** after CI's gate and both production `:edge` image publishers succeed for a `production` push, the same SHA automatically creates the next stable release and publishes both Harbor images as `X.Y.Z`, `X.Y`, `latest`, and `X` from `1.0.0`; the immutable SHA tags are promoted rather than rebuilt. Conventional Commits choose the automatic major/minor/patch bump; pushes with no releasable commits use a patch fallback. A stale or duplicate automatic release no-ops. When all stable signing inputs are unconfigured, an automatic release visibly skips with a warning until they are provisioned; partial configuration fails, and manual releases remain fail-closed. CI and stable-release concurrency each retain only one pending run, so a burst can cancel an intermediate whole CI run before it gets a gate or edge image; a pending manual or automatic stable release can likewise replace the other and is shown as cancelled. The **Release** workflow remains available from `production` with inputs for `bump` (`auto`, `patch`, `minor`, `major`), an optional explicit `version` (`X.Y.Z`, for example `1.0.0`), and `dry_run` (build without publishing); these manual controls preserve their existing behavior. Every stable release requires a successful CI push run for its exact production commit.
 - **Assets:** unsigned Android `peppy-<version>-android-unsigned.apk` and `.aab`; Linux AppImage, deb, and rpm (stable only); macOS DMG and app archive; Windows MSI and NSIS installer; `SHA256SUMS`; generated release notes. iOS artifacts stay in CI runs and are not published.
 - On Windows, uninstall a prerelease MSI before installing the stable MSI of the same `X.Y.Z`.
 
-Releases do not sign, notarize, publish to stores, or turn unsigned artifacts into signed releases. Store readiness additionally requires the appropriate Apple, Windows, Android, update-signing, privacy, policy, recovery, and review work. Keep signing credentials only in protected CI environment secrets; never generate or commit them in this repository.
+Trusted desktop releases always include Tauri updater signatures, GPG-signed
+checksums, and GPG-signed RPM packages. Their protected environments select
+macOS `developer-id` (the strict default) or explicit free `adhoc`, and Windows
+`authenticode` (the strict default) or explicit free `none`; strict modes fail
+closed rather than silently downgrading. Ad-hoc macOS builds are not notarized
+or Gatekeeper-approved, and Windows `none` installers have no Authenticode
+publisher signature. Android assets and the iOS archive remain unsigned. These
+are GitHub Release artifacts, not store submissions. Keep signing credentials
+only in protected CI environment secrets; never generate or commit them in this
+repository.
 
 Preview the next version with `just version --channel prerelease`. Run `just release-test` after changing `infra/release/` or the release workflows; it needs git-cliff 2.14.2 on `PATH`, which `infra/release/install-git-cliff.sh <dir>` installs. Harbor publication requires protected `staging` and `production` environments with `HARBOR_USERNAME`, `HARBOR_PASSWORD`, `COSIGN_PRIVATE_KEY`, and `COSIGN_PASSWORD`; no billing capability is included in these public images.
