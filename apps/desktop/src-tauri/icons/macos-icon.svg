@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- From repository root: pnpm -C apps/desktop exec tauri icon src-tauri/icons/macos-icon.svg -o ../../.opencode/sessions/macos-icon/generated; copy only .opencode/sessions/macos-icon/generated/icon.icns to this icons directory. -->
+  <g id="macos-icon-artwork">
+    <rect id="rounded-white-tile" x="100" y="100" width="824" height="824" rx="185" fill="#fff"/>
+    <g id="inset-logo-composition" transform="translate(100 100) scale(0.8046875)">
+      <g id="peppy-coral-mark" transform="translate(195.6512 194.3872) scale(1.6)">
+        <path id="peppy-p-path" fill="#e5533d" d="M112.9 0 L278.733 0 C348.358 0 395.436 50.807 395.436 120.817 L395.436 185.433 C395.436 257.413 344.842 305.44 278.733 305.44 L217.071 305.44 C204.962 305.44 193.785 310.04 185.403 318.32 L104.37 394.312 C97.646 400.77 87.084 394.708 89.84 386.142 L170.467 133.474 C179.42 110.06 185.403 99.646 204.91 99.646 L230.242 99.646 C259.639 99.646 276.275 114.045 276.275 137.08 C276.275 162.746 259.639 175.155 232.145 175.155 L196.752 175.155 C178.627 175.155 173.295 187.923 173.295 202.4 C173.295 216.835 182.343 228.637 196.752 228.637 L233.215 228.637 C285.197 228.637 323.458 192.062 323.458 137.08 C323.458 79.267 281.371 50.807 231.042 50.807 L175.157 50.807 C147.36 50.807 135.478 71.8 129.89 89.28 L76.374 254.079 C72.462 266.039 65.584 277.077 50.026 275.789 C28.073 271.041 0 252.513 0 185.433 L0 120.817 C0 50.807 49.026 0 112.9 0 Z"/>
+      </g>
+    </g>
+  </g>
+</svg>

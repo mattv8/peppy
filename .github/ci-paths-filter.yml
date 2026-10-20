@@ -11,6 +11,9 @@ rust:
 
 desktop:
   - 'apps/desktop/**'
+  - 'vendor/block/**'
+  - 'packaging/macos/**'
+  - 'packaging/windows/**'
   - 'packages/**'
   - 'package.json'
   - 'pnpm-lock.yaml'
@@ -71,6 +74,8 @@ unclassified:
   - '!rust-toolchain.toml'
   - '!deny.toml'
   - '!apps/desktop/**'
+  - '!packaging/macos/**'
+  - '!packaging/windows/**'
   - '!packages/**'
   - '!package.json'
   - '!pnpm-lock.yaml'

@@ -57,6 +57,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_open_billing").mockResolvedValue();
     vi.spyOn(bridge, "hosted_sign_in").mockResolvedValue(account());
     vi.spyOn(bridge, "hosted_sign_out").mockResolvedValue();
+    Object.assign(bridge, { hosted_origin_url: vi.fn().mockResolvedValue("https://peppy.pro") });
     vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
     vi.spyOn(bridge, "enrollment_start_over").mockResolvedValue(view({ stage: "setup" }));
     vi.spyOn(bridge, "enrollment_status").mockResolvedValue(view({ stage: "ready", owner: true, hasGateway: false }));
@@ -172,12 +173,66 @@ describe("SetupLanding", () => {
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
   });
 
-  it("starts the hosted enrollment only after the existing-phone choice", async () => {
+  it("starts hosted enrollment only after the existing-phone choice with the native origin", async () => {
+    vi.spyOn(bridge, "enrollment_discover").mockImplementation(async origin => {
+      if (!origin) throw { code: "server-required" };
+      return waitingView({ mode: "hosted", origin });
+    });
     renderLanding();
     await chooseExisting();
-    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://peppy.pro"));
     expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("secret-qr-payload");
+  });
+
+  it("uses the native loopback hosted origin for existing-device discovery", async () => {
+    Object.assign(bridge, { hosted_origin_url: vi.fn().mockResolvedValue("http://127.0.0.1:8787") });
+    renderLanding();
+
+    await chooseExisting();
+
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("http://127.0.0.1:8787"));
+    expect(bridge.enrollment_discover).not.toHaveBeenCalledWith("https://peppy.pro");
+  });
+
+  it("does not discover after Back while the native hosted origin is pending", async () => {
+    const origin = deferred<string>();
+    Object.assign(bridge, { hosted_origin_url: vi.fn().mockReturnValue(origin.promise) });
+    renderLanding();
+
+    await chooseExisting();
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    await act(async () => origin.resolve("http://127.0.0.1:8787"));
+
+    expect(bridge.enrollment_discover).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /already use peppy/i })).toBeInTheDocument();
+  });
+
+  it("retries a native hosted-origin failure without leaving the existing-device path", async () => {
+    Object.assign(bridge, {
+      hosted_origin_url: vi.fn()
+        .mockRejectedValueOnce({ code: "offline" })
+        .mockResolvedValueOnce("http://127.0.0.1:8787"),
+    });
+    renderLanding();
+
+    await chooseExisting();
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("http://127.0.0.1:8787"));
+    expect(screen.queryByRole("button", { name: /already use peppy/i })).not.toBeInTheDocument();
+  });
+
+  it("retries hosted discovery with the production origin", async () => {
+    vi.spyOn(bridge, "enrollment_discover")
+      .mockRejectedValueOnce({ code: "server-required" })
+      .mockResolvedValueOnce(waitingView({ mode: "hosted", origin: "https://peppy.pro" }));
+    renderLanding();
+    await chooseExisting();
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenNthCalledWith(2, "https://peppy.pro"));
+    expect(await screen.findByRole("img", { name: /pairing qr/i })).toBeInTheDocument();
   });
 
   it("records the default Hosted choice when starting either hosted path", async () => {
@@ -262,6 +317,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, hasVault: true, access: "read_write" }));
     renderLanding();
     await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledOnce());
+    expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://peppy.pro");
     expect(document.getElementById("hosted-path-chooser")).not.toBeInTheDocument();
   });
 
@@ -270,7 +326,7 @@ describe("SetupLanding", () => {
     renderLanding();
     fireEvent.click(await screen.findByRole("button", { name: /i'm new to peppy/i }));
     fireEvent.click(await screen.findByRole("button", { name: /continue with google/i }));
-    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalledWith("https://peppy.pro"));
   });
 
   it("does not route a deferred sign-in after Back", async () => {
@@ -288,6 +344,7 @@ describe("SetupLanding", () => {
   it("resets the transient hosted path when controlled mode changes", async () => {
     const view1 = renderLanding();
     await chooseExisting();
+    await waitFor(() => expect(bridge.enrollment_discover).toHaveBeenCalled());
     view1.rerender(<SetupLanding mode="self-hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
     expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
     view1.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
@@ -1456,6 +1513,7 @@ describe("SetupLanding", () => {
       ["response too large", "response-too-large"],
       ["host state", "host-state"],
       ["invalid origin", "invalid-origin"],
+      ["server selection", "server-required"],
       ["enrollment", "enrollment"],
       ["saved credential missing", "credentials-required"],
       ["local database key missing", "database-key-missing"],

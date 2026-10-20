@@ -53,6 +53,7 @@ const COMMANDS: &[&str] = &[
     "popout_conversation",
     "acknowledge_lifecycle",
     "hosted_account",
+    "hosted_origin_url",
     "hosted_sign_in",
     "hosted_sign_out",
     "hosted_open_billing",

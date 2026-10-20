@@ -80,6 +80,7 @@ import { notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { DevicesSettings } from "./DevicesSettings";
+import { HostedAccountSettings } from "./HostedAccountSettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { UpdatesSettings } from "./UpdatesSettings";
@@ -821,10 +822,14 @@ function SettingsView({
     scrollEndTimer.current = window.setTimeout(() => {
       pendingSectionRef.current = null;
     }, 100);
-    section?.scrollIntoView?.({
-      block: "start",
-      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-    });
+    const content = settingsContentRef.current;
+    if (content && section) {
+      const margin = Number.parseFloat(getComputedStyle(section).scrollMarginTop) || 0;
+      content.scrollTo?.({
+        top: content.scrollTop + section.getBoundingClientRect().top - content.getBoundingClientRect().top - content.clientTop - margin,
+        behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+      });
+    }
   };
 
   useEffect(() => {
@@ -991,6 +996,7 @@ function SettingsView({
       {hasAccount && <section id="settings-account-billing" className="settings-card" data-settings-section="account-billing">
         <h2>Account &amp; billing</h2>
         <p>Manage your Peppy subscription and account on Peppy&rsquo;s website.</p>
+        {!browserHost && <HostedAccountSettings />}
         {!browserHost ? <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button> : <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {actionAlert("account")}
       </section>}

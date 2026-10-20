@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "sidebarImage": "../../../packaging/windows/installer/nsis-sidebar.bmp",
+        "headerImage": "../../../packaging/windows/installer/nsis-header.bmp"
+      },
+      "wix": {
+        "dialogImagePath": "../../../packaging/windows/installer/wix-dialog.bmp",
+        "bannerPath": "../../../packaging/windows/installer/wix-banner.bmp"
+      }
+    }
+  }
+}

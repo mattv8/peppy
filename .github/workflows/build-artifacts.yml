@@ -60,6 +60,8 @@ on:
         required: false
       APPLE_TEAM_ID:
         required: false
+      PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET:
+        required: false
   workflow_dispatch:
     inputs:
       ref:
@@ -274,6 +276,8 @@ jobs:
           TRUSTED_UPDATE_BUILD: ${{ inputs.trusted_update_build }}
           PEPPY_UPDATE_CHANNEL: ${{ inputs.update_channel }}
           PEPPY_UPDATE_PUBLIC_KEY: ${{ inputs.trusted_update_build && vars.PEPPY_UPDATE_PUBLIC_KEY || '' }}
+          PEPPY_DESKTOP_GOOGLE_CLIENT_ID: ${{ inputs.trusted_update_build && vars.PEPPY_DESKTOP_GOOGLE_CLIENT_ID || '' }}
+          PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ inputs.trusted_update_build && secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD || '' }}
           PEPPY_MACOS_SIGNING_MODE: ${{ inputs.trusted_update_build && (vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id') || '' }}

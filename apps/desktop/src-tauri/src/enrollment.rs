@@ -21,7 +21,6 @@ use tauri::{AppHandle, State, WebviewWindow};
 use zeroize::Zeroizing;
 
 const DEVICE_NAME: &str = "Peppy Desktop";
-const HOSTED_ORIGIN: &str = "https://peppy.pro";
 const OWNER_CHECKPOINT_PREFIX: &str = "enrollment-owner:v1:";
 const OWNER_SECRET_PREFIX: &str = "enrollment-owner-secret:v1:";
 const VAULT_REQUEST_CHECKPOINT_PREFIX: &str = "enrollment-vault-request:v1:";
@@ -818,17 +817,33 @@ where
 }
 
 async fn fetch_instance(origin: String) -> BridgeResult<InstanceInfo> {
-    serde_json::from_str(
+    discover_instance(origin, &crate::hosted::hosted_origin()?).await
+}
+
+async fn discover_instance(origin: String, hosted_origin: &str) -> BridgeResult<InstanceInfo> {
+    let discovery_path = if origin == hosted_origin {
+        enrollment::routes::HOSTED_ENROLLMENT_CONFIG
+    } else {
+        enrollment::routes::INSTANCE
+    };
+    let response: InstanceInfo = serde_json::from_str(
         &body(
             http(&origin)?
-                .get(format!("{origin}{}", enrollment::routes::INSTANCE))
+                .get(format!("{origin}{discovery_path}"))
                 .send()
                 .await
                 .map_err(|_| NetError::Offline)?,
         )
         .await?,
     )
-    .map_err(|_| enrollment_error())
+    .map_err(|_| enrollment_error())?;
+    if response.mode == DeploymentMode::Hosted && origin != hosted_origin {
+        return Err(BridgeError::new(
+            "invalid-origin",
+            "Hosted enrollment is only available at Peppy Hosted.",
+        ));
+    }
+    Ok(response)
 }
 
 fn http(origin: &str) -> BridgeResult<reqwest::Client> {
@@ -1121,32 +1136,7 @@ pub async fn enrollment_discover(
             .ok_or_else(|| BridgeError::new("server-required", "Enter a server URL first."))?,
     };
     let discovery_epoch = cancel_owner_operation(&state.enrollment)?;
-    let discovery_path = if selected == HOSTED_ORIGIN {
-        enrollment::routes::HOSTED_ENROLLMENT_CONFIG
-    } else {
-        enrollment::routes::INSTANCE
-    };
-    let response = if discovery_path == enrollment::routes::INSTANCE {
-        fetch_instance(selected.clone()).await?
-    } else {
-        serde_json::from_str(
-            &body(
-                http(&selected)?
-                    .get(format!("{selected}{discovery_path}"))
-                    .send()
-                    .await
-                    .map_err(|_| NetError::Offline)?,
-            )
-            .await?,
-        )
-        .map_err(|_| enrollment_error())?
-    };
-    if response.mode == DeploymentMode::Hosted && selected != HOSTED_ORIGIN {
-        return Err(BridgeError::new(
-            "invalid-origin",
-            "Hosted enrollment is only available at Peppy Hosted.",
-        ));
-    }
+    let response = fetch_instance(selected.clone()).await?;
     let existing = existing_identity(&state, &selected).await?;
     let existing_role = existing.as_ref().map(ExistingIdentity::role);
     if existing_role == Some(EnrollmentRole::Owner) {
@@ -3013,6 +3003,7 @@ mod owner_retry_tests {
     use super::*;
     use crate::secure_store::{MemoryStore, SecretStore};
     use crate::tests::gateway;
+    use axum::{http::StatusCode, routing::get, Router};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use peppy_hosted_api::enrollment::{
         ClaimInstanceRequest, ClaimInstanceResponse, ClaimInvitationRequest,
@@ -3026,6 +3017,27 @@ mod owner_retry_tests {
     const ORIGIN: &str = "https://community.example";
     const OTHER_ORIGIN: &str = "https://other.example";
     const RECOVERY_SECRET: &str = "alpha bravo charlie delta echo foxtrot";
+
+    #[tokio::test]
+    async fn loopback_hosted_discovery_uses_the_hosted_endpoint() {
+        let router = Router::new().route(
+            enrollment::routes::HOSTED_ENROLLMENT_CONFIG,
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"mode":"hosted","claimed":true,"setup_required":false,"password_auth":false,"qr_pairing":false,"shared_secret_pairing":false}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let result = discover_instance(origin.clone(), &origin).await;
+        server.abort();
+        assert_eq!(result.unwrap().mode, DeploymentMode::Hosted);
+    }
 
     struct CountingStore {
         reads: AtomicUsize,

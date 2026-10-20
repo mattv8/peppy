@@ -232,6 +232,7 @@ pub fn remove_cached(root: &Path) -> BridgeResult<()> {
 
 /// Removes only UUID-named cache generations and known private download partials. It never
 /// traverses a symlink and preserves the supplied active relative payload generation.
+#[cfg(test)]
 pub fn sweep_orphans(root: &Path) -> BridgeResult<()> {
     let pointer = directory(root).join("pending.json");
     let active = fs::read(pointer)

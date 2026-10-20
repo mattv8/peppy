@@ -42,6 +42,7 @@ const nativeSetupPromptHint = (mode: "open" | "protected") => {
 const diagnosticErrorCodes = new Set<string>([
   "offline", "network", "local-tls-config", "secure-store-unavailable", "enrollment", "server-rejected",
   "response-too-large", "host-state", "invalid-origin",
+  "server-required",
   "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
   "host-config", "server-response", "revoked", "wrong-passphrase", "vault-secret-mismatch", "credential-changed", "enrollment-state", "database-key-conflict",
   "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
@@ -61,6 +62,7 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "response-too-large") return "The server sent a response that is too large for Peppy to accept.";
   if (errorCode === "host-state") return "Peppy's local state is unavailable. Restart Peppy, then try again.";
   if (errorCode === "invalid-origin") return "That server address is not allowed. Check it, then try again.";
+  if (errorCode === "server-required") return "This device has no server selected. Choose Peppy Hosted or enter your server address, then try again.";
   if (errorCode === "host-config") return "Peppy's native host configuration could not be read or saved. Try again.";
   if (errorCode === "server-response") return "The server's response could not be read or verified by this device. Check the server and this Peppy build, then try again.";
   if (errorCode === "revoked") return "The server no longer accepts this device's saved credential. It was revoked or is invalid.";
@@ -308,6 +310,14 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   };
 
   const discover = (origin?: string) => runEnrollment({ action: () => bridge.enrollment_discover(origin), retry: () => discover(origin), label: "production_pairing_connecting" });
+  const discoverHosted = () => runEnrollment({
+    action: async isCurrent => {
+      const origin = await bridge.hosted_origin_url();
+      return isCurrent() ? bridge.enrollment_discover(origin) : failedView();
+    },
+    retry: discoverHosted,
+    label: "production_pairing_connecting",
+  });
   const createOwner = () => {
     onInitialEnrollmentStart?.();
     return runEnrollment({ action: () => bridge.enrollment_create_owner({ username }), retry: createOwner, label: "production_pairing_connecting", reconcileCreateOwner: true });
@@ -576,10 +586,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       : hostedPath === "existing" ? "enrollment" : hostedPath === "new" ? "new" : "chooser";
 
   useEffect(() => {
-    if (addingPhone || route !== "enrollment" || discoverStarted.current) return;
+    if (addingPhone || community || route !== "enrollment" || discoverStarted.current) return;
     discoverStarted.current = true;
-    void discover();
-  }, [addingPhone, route, account?.signedIn]);
+    void discoverHosted();
+  }, [addingPhone, community, route]);
   useEffect(() => {
     if (route !== "enrollment") discoverStarted.current = false;
   }, [route]);
@@ -837,7 +847,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
         return hosted ? (
           <Stage stage="server">
             <Heading>Connecting to Peppy Hosted</Heading>
-            <div className="enrollment-actions"><button className="secondary-button" disabled={busy} onClick={() => void discover()}>{copy("try_again")}</button></div>
+            <div className="enrollment-actions"><button className="secondary-button" disabled={busy} onClick={() => void discoverHosted()}>{copy("try_again")}</button></div>
           </Stage>
         ) : null;
       case "setup":

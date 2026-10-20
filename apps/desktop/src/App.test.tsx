@@ -2714,6 +2714,36 @@ describe("host state display", () => {
     expect(document.getElementById("settings-account-billing")).toHaveAttribute("data-settings-section", "account-billing");
   });
 
+  it.each([false, true])("scrolls only the settings content when selecting Account (reduced motion: %s)", async (reducedMotion) => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: reducedMotion && query === "(prefers-reduced-motion: reduce)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const content = document.getElementById("settings-content")!;
+    const account = document.getElementById("settings-account-billing")!;
+    content.scrollTop = 80;
+    Object.defineProperty(content, "clientTop", { value: 2 });
+    vi.spyOn(content, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 120, 500, 400));
+    vi.spyOn(account, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 820, 500, 160));
+    account.style.scrollMarginTop = "8px";
+    const scrollContent = vi.fn();
+    const scrollAncestors = vi.fn();
+    const scrollWindow = vi.spyOn(window, "scrollTo");
+    content.scrollTo = scrollContent;
+    account.scrollIntoView = scrollAncestors;
+
+    fireEvent.click(screen.getByRole("link", { name: "Account" }));
+
+    expect(scrollContent).toHaveBeenCalledWith({ top: 770, behavior: reducedMotion ? "instant" : "smooth" });
+    expect(scrollAncestors).not.toHaveBeenCalled();
+    expect(scrollWindow).not.toHaveBeenCalled();
+  });
+
   it("keeps a titlebar compose fallback when the thread list is hidden by another view", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
