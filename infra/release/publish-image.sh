@@ -69,7 +69,24 @@ if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     fi
 fi
 
-promote() { docker buildx imagetools create --tag "$IMAGE:$1" "$IMAGE@$digest"; }
+promote() {
+    local alias=$1 promoted promoted_digest
+    docker buildx imagetools create --prefer-index=false --tag "$IMAGE:$alias" "$IMAGE@$digest"
+    if ! promoted=$(docker buildx imagetools inspect --format "$digest_format" "$IMAGE:$alias" 2>"$inspect_error"); then
+        echo "Unable to verify promoted image digest: $IMAGE:$alias" >&2
+        head -c 4096 "$inspect_error" >&2
+        echo >&2
+        exit 1
+    fi
+    promoted_digest=$(decode_digest "$promoted") || {
+        echo "Registry returned an invalid promoted image digest for $IMAGE:$alias" >&2
+        exit 1
+    }
+    if [[ "$promoted_digest" != "$digest" ]]; then
+        echo "Promoted image digest does not match verified source digest: $IMAGE:$alias" >&2
+        exit 1
+    fi
+}
 promote "$TAG"
 if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     IFS=. read -r major minor _ <<<"$TAG"
