@@ -2,6 +2,7 @@
 name = "peppy-desktop"
 version = "0.0.0"
 description = "Peppy desktop host"
+license = "Apache-2.0"
 edition = "2021"
 publish = false
 
