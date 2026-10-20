@@ -37,6 +37,25 @@ PEPPY_UPDATE_PUBLIC_KEY=$(<"$key.pub")
 "$script_dir/sign-update-assets.sh" 0.2.0 stable "$root/stable"
 "$script_dir/generate-update-manifest.sh" 0.2.0 stable "$root/stable"
 "$script_dir/verify-update-assets.sh" 0.2.0 stable "$root/stable"
+relative_stable="$root/relative assets/stable"
+mkdir -p "$relative_stable"
+while IFS='|' read -r _ asset; do cp "$root/stable/$asset" "$relative_stable/$asset"; done < <(release_update_targets 0.2.0)
+relative_stable_from_caller=$(python3 - "$relative_stable" "$PWD" <<'PY'
+import os
+import sys
+
+print(os.path.relpath(sys.argv[1], sys.argv[2]))
+PY
+)
+mutated_signer="$root/sign-update-assets-without-path-normalization.sh"
+# shellcheck disable=SC2016
+sed '/^asset_dir=$(CDPATH=.*pwd -P)$/d' "$script_dir/sign-update-assets.sh" > "$mutated_signer"
+chmod +x "$mutated_signer"
+if PEPPY_RELEASE_LIB="$script_dir/lib.sh" "$mutated_signer" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected relative signing failure without asset path normalization\n' >&2; exit 1; fi
+"$script_dir/sign-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller"
+test "$(find "$relative_stable" -maxdepth 1 -type f -name '*.sig' | wc -l | tr -d ' ')" = 6
+"$script_dir/generate-update-manifest.sh" 0.2.0 stable "$relative_stable_from_caller"
+"$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller"
 grep -Fq 'linux-x86_64-appimage' "$root/stable/latest.json"
 grep -Fq '"signature"' "$root/stable/latest.json"
 cp "$root/stable/latest.json" "$root/latest.json"
@@ -50,13 +69,13 @@ jq '.platforms["linux-x86_64-appimage"].signature = "invalid"' "$root/latest.jso
 if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected invalid embedded signature failure\n' >&2; exit 1; fi
 cp "$root/latest.json" "$root/stable/latest.json"
 PEPPY_UPDATE_PUBLIC_KEY=$(<"$alternate_key.pub")
-if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected wrong-key verification failure\n' >&2; exit 1; fi
+if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected wrong-key verification failure\n' >&2; exit 1; fi
 PEPPY_UPDATE_PUBLIC_KEY=$(<"$key.pub")
-cp "$root/stable/peppy-0.2.0-linux-x86_64.AppImage" "$root/original-appimage"
-printf tampered >> "$root/stable/peppy-0.2.0-linux-x86_64.AppImage"
-if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected tampered-asset verification failure\n' >&2; exit 1; fi
-cp "$root/original-appimage" "$root/stable/peppy-0.2.0-linux-x86_64.AppImage"
-if cargo run --quiet --locked --manifest-path "$script_dir/manifest-verifier/Cargo.toml" -- 0.2.0 "$root/stable" 0.2.1 >/dev/null 2>&1; then printf 'expected version-binding verification failure\n' >&2; exit 1; fi
+cp "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage" "$root/original-appimage"
+printf tampered >> "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage"
+if "$script_dir/verify-update-assets.sh" 0.2.0 stable "$relative_stable_from_caller" >/dev/null 2>&1; then printf 'expected tampered-asset verification failure\n' >&2; exit 1; fi
+cp "$root/original-appimage" "$relative_stable/peppy-0.2.0-linux-x86_64.AppImage"
+if cargo run --quiet --locked --manifest-path "$script_dir/manifest-verifier/Cargo.toml" -- 0.2.0 "$relative_stable_from_caller" 0.2.1 >/dev/null 2>&1; then printf 'expected version-binding verification failure\n' >&2; exit 1; fi
 floor_repo="$root/prerelease-floor"
 git init -q "$floor_repo"
 git -C "$floor_repo" config user.name release-test

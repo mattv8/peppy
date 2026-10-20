@@ -11,6 +11,7 @@ asset_dir=$3
 case "$channel" in stable|staging) ;; *) echo "invalid channel: $channel" >&2; exit 2 ;; esac
 [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || { echo 'TAURI_SIGNING_PRIVATE_KEY is required for update releases' >&2; exit 1; }
 [ -d "$asset_dir" ] || { echo "asset directory not found: $asset_dir" >&2; exit 1; }
+asset_dir=$(CDPATH='' cd -- "$asset_dir" && pwd -P)
 
 while IFS='|' read -r _ asset; do
   path="$asset_dir/$asset"
