@@ -54,14 +54,14 @@ class DesktopHelperTests(unittest.TestCase):
         (source / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.98.1"\n')
         return source
 
-    def test_desktop_configs_keep_production_identity_and_define_exact_dev_overlay(self):
+    def test_desktop_configs_default_to_development_identity_and_keep_the_explicit_overlay(self):
         self.assertEqual(
             json.loads(BASE_CONFIG.read_text())["productName"],
-            "Peppy",
+            "Peppy_dev",
         )
         self.assertEqual(
             json.loads(BASE_CONFIG.read_text())["identifier"],
-            "org.peppy.desktop",
+            "org.peppy.desktop.dev",
         )
         self.assertEqual(
             json.loads(DEV_CONFIG.read_text()),

@@ -4,16 +4,16 @@
 //! webview receives only `HostedAccountView`.
 
 use crate::{
-    AppState,
     error::{BridgeError, BridgeResult},
-    net::{NetError, read_bounded},
+    net::{read_bounded, NetError},
     secure_store::SecretStore,
+    AppState,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use peppy_hosted_api::routes;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use peppy_hosted_api::{routes, IdentityProvider, NativeAuthConfigResponse};
 use peppy_hosted_client::{
-    HostedProvisioning, hosted_login_request, hosted_session_request, parse_hosted_account,
-    parse_hosted_login_attempt, parse_hosted_session, prepare, restore,
+    hosted_login_request, hosted_session_request, parse_hosted_account, parse_hosted_login_attempt,
+    parse_hosted_session, prepare, restore, HostedProvisioning,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +43,9 @@ pub struct HostedState {
     /// Tests send requests to a local fake server while keeping an HTTPS credential origin.
     #[cfg(test)]
     base_override: std::sync::Mutex<Option<String>>,
+    /// Tests isolate provider discovery failures from a valid account endpoint.
+    #[cfg(test)]
+    auth_config_base_override: std::sync::Mutex<Option<String>>,
 }
 
 /// Native-only account session for hosted enrollment headers. It is never an IPC value.
@@ -51,7 +54,7 @@ pub(crate) async fn enrollment_account_session(
     hosted: &HostedState,
     origin: &str,
 ) -> BridgeResult<Zeroizing<String>> {
-    if origin != PRODUCTION_ORIGIN {
+    if origin != hosted_origin()? {
         return Err(BridgeError::new(
             "invalid-origin",
             "Hosted enrollment is only available at Peppy Hosted.",
@@ -99,6 +102,14 @@ impl HostedState {
             return base;
         }
         origin.to_owned()
+    }
+
+    fn auth_config_base(&self, origin: &str) -> String {
+        #[cfg(test)]
+        if let Some(base) = self.auth_config_base_override.lock().unwrap().clone() {
+            return base;
+        }
+        self.api_base(origin)
     }
 }
 
@@ -170,9 +181,13 @@ fn now_unix() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-fn hosted_origin() -> BridgeResult<String> {
+pub(crate) fn hosted_origin() -> BridgeResult<String> {
+    resolve_hosted_origin(std::env::var("PEPPY_HOSTED_ORIGIN").ok().as_deref())
+}
+
+fn resolve_hosted_origin(override_origin: Option<&str>) -> BridgeResult<String> {
     #[cfg(debug_assertions)]
-    if let Ok(value) = std::env::var("PEPPY_HOSTED_ORIGIN") {
+    if let Some(value) = override_origin {
         let url = url::Url::parse(&value).map_err(|_| {
             BridgeError::new(
                 "invalid-origin",
@@ -194,6 +209,8 @@ fn hosted_origin() -> BridgeResult<String> {
             "The hosted development origin must be HTTPS or loopback HTTP.",
         ));
     }
+    #[cfg(not(debug_assertions))]
+    let _ = override_origin;
     Ok(PRODUCTION_ORIGIN.into())
 }
 fn client_id() -> Option<&'static str> {
@@ -208,7 +225,7 @@ fn checkpoint_key(origin: &str, account_id: &str) -> String {
 fn hosted_error() -> BridgeError {
     BridgeError::new(
         "hosted-unavailable",
-        "Peppy Hosted sign-in is not available in this build.",
+        "Google sign-in is currently unavailable.",
     )
 }
 fn invalid_response() -> BridgeError {
@@ -253,6 +270,63 @@ async fn read_response(response: reqwest::Response) -> Result<Vec<u8>, NetError>
     }
     read_bounded(response, MAX_BODY).await
 }
+async fn sign_in_available(
+    hosted: &HostedState,
+    origin: &str,
+    configured_client_id: Option<&str>,
+) -> BridgeResult<bool> {
+    if configured_client_id.is_none() {
+        return Ok(false);
+    }
+    let base = hosted.auth_config_base(origin);
+    let client = http(&base)?;
+    let response = client
+        .get(format!("{base}{}", routes::AUTH_CONFIG))
+        .send()
+        .await
+        .map_err(|_| NetError::Offline)?;
+    let response = read_response(response).await?;
+    let config: NativeAuthConfigResponse =
+        serde_json::from_slice(&response).map_err(|_| NetError::Invalid)?;
+    Ok(config
+        .available_providers
+        .contains(&IdentityProvider::Google))
+}
+
+async fn begin_sign_in(
+    hosted: &HostedState,
+    origin: &str,
+    configured_client_id: Option<&str>,
+) -> BridgeResult<u64> {
+    let generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    if !sign_in_available(hosted, origin, configured_client_id).await? {
+        return Err(hosted_error());
+    }
+    ensure_sign_in_current(hosted, generation)?;
+    Ok(generation)
+}
+
+fn ensure_sign_in_current(hosted: &HostedState, generation: u64) -> BridgeResult<()> {
+    if hosted.sign_in_generation.load(Ordering::SeqCst) != generation {
+        return Err(BridgeError::new(
+            "hosted-sign-in-cancelled",
+            "The sign-in attempt was replaced.",
+        ));
+    }
+    Ok(())
+}
+
+async fn signed_out_view(
+    hosted: &HostedState,
+    origin: &str,
+    configured_client_id: Option<&str>,
+) -> BridgeResult<HostedAccountView> {
+    if sign_in_available(hosted, origin, configured_client_id).await? {
+        Ok(HostedAccountView::signed_out())
+    } else {
+        Ok(HostedAccountView::unavailable())
+    }
+}
 async fn authenticated(
     client: &reqwest::Client,
     origin: &str,
@@ -279,10 +353,14 @@ pub async fn hosted_account(
 ) -> BridgeResult<HostedAccountView> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    if client_id().is_none() {
-        return Ok(HostedAccountView::unavailable());
-    }
-    account_view(&*state.store, &hosted, &hosted_origin()?).await
+    account_view(&*state.store, &hosted, &hosted_origin()?, client_id()).await
+}
+
+/// Returns the native-validated Peppy Hosted public origin without accepting renderer input.
+#[tauri::command]
+pub fn hosted_origin_url(window: tauri::WebviewWindow) -> BridgeResult<String> {
+    crate::require_main(window.label())?;
+    hosted_origin()
 }
 
 #[tauri::command]
@@ -320,11 +398,14 @@ pub async fn hosted_sign_in(
 ) -> BridgeResult<HostedAccountView> {
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    if provider != "google" || client_id().is_none() {
+    let Some(client_id) = client_id() else {
+        return Err(hosted_error());
+    };
+    if provider != "google" {
         return Err(hosted_error());
     }
-    let generation = hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let origin = hosted_origin()?;
+    let generation = begin_sign_in(&hosted, &origin, Some(client_id)).await?;
     let client = http(&origin)?;
     let request = hosted_login_request("google".into()).map_err(client_error)?;
     let attempt_body = read_response(
@@ -343,12 +424,13 @@ pub async fn hosted_sign_in(
     )
     .map_err(client_error)?;
     let redirect = Loopback::bind().await?;
+    ensure_sign_in_current(&hosted, generation)?;
     let redirect_uri = redirect.uri.clone();
     let mut verifier = Zeroizing::new(random_b64url(32)?);
     let state_token = Zeroizing::new(random_b64url(32)?);
     let challenge = pkce_challenge(&verifier);
     let auth = google_url(
-        client_id().expect("checked"),
+        client_id,
         &redirect_uri,
         &challenge,
         &state_token,
@@ -358,15 +440,10 @@ pub async fn hosted_sign_in(
         .open_url(auth, None::<String>)
         .map_err(|_| BridgeError::new("open-url", "Could not open Google sign-in."))?;
     let code = redirect.receive(&state_token).await?;
-    if hosted.sign_in_generation.load(Ordering::SeqCst) != generation {
-        return Err(BridgeError::new(
-            "hosted-sign-in-cancelled",
-            "The sign-in attempt was replaced.",
-        ));
-    }
+    ensure_sign_in_current(&hosted, generation)?;
     let mut form = vec![
         ("code", code.to_string()),
-        ("client_id", client_id().unwrap().to_owned()),
+        ("client_id", client_id.to_owned()),
         ("redirect_uri", redirect_uri),
         ("grant_type", "authorization_code".into()),
         ("code_verifier", verifier.to_string()),
@@ -420,21 +497,8 @@ pub async fn hosted_sign_in(
         bearer: Zeroizing::new(parsed.bearer_token()),
         expires_at_unix: now_unix().saturating_add(parsed.expires_in_seconds() as u64),
     };
-    let encoded = Zeroizing::new(
-        serde_json::to_vec(&HostedSessionWire {
-            account_id: record.account_id.clone(),
-            bearer: record.bearer.to_string(),
-            expires_at_unix: record.expires_at_unix,
-        })
-        .map_err(|_| BridgeError::new("host-state", "Could not save the hosted session."))?,
-    );
-    state.store.set(&session_key(&origin), &encoded)?;
-    *hosted.session.lock().await = Some(HostedSessionRecord {
-        account_id: record.account_id.clone(),
-        bearer: Zeroizing::new(record.bearer.to_string()),
-        expires_at_unix: record.expires_at_unix,
-    });
-    account_view(&*state.store, &hosted, &origin).await
+    commit_sign_in_session(&*state.store, &hosted, &origin, generation, record).await?;
+    account_view(&*state.store, &hosted, &origin, Some(client_id)).await
 }
 
 #[tauri::command]
@@ -534,23 +598,23 @@ async fn post_bearer_status(
         .map_err(|error| (status, BridgeError::from(error)))
 }
 
-/// Pure seam: load session from store with expiry/tombstone handling.
-/// Assumes client_id is already checked by the caller.
+/// Pure seam: load account state without coupling existing sessions to sign-in availability.
 pub(crate) async fn account_view(
     store: &dyn SecretStore,
     hosted: &HostedState,
     origin: &str,
+    configured_client_id: Option<&str>,
 ) -> BridgeResult<HostedAccountView> {
     let Some(session) = load_session_from_store(store, hosted, origin).await? else {
-        return Ok(HostedAccountView::signed_out());
+        return signed_out_view(hosted, origin, configured_client_id).await;
     };
     let base = hosted.api_base(origin);
     let client = http(&base)?;
     let bytes = match authenticated(&client, &base, routes::ACCOUNT, &session.bearer).await {
         Ok(bytes) => bytes,
         Err(NetError::Revoked) => {
-            tombstone_session(store, hosted, origin).await?;
-            return Ok(HostedAccountView::signed_out());
+            tombstone_observed_session(store, hosted, origin, &session.bearer).await?;
+            return signed_out_view(hosted, origin, configured_client_id).await;
         }
         Err(error) => return Err(error.into()),
     };
@@ -563,7 +627,9 @@ pub(crate) async fn account_view(
         .get(&checkpoint_key(origin, &session.account_id))?
         .is_some_and(|value| !value.is_empty());
     Ok(HostedAccountView {
-        available: true,
+        available: sign_in_available(hosted, origin, configured_client_id)
+            .await
+            .unwrap_or(false),
         signed_in: true,
         account_label: None,
         classification: Some(account.classification),
@@ -600,7 +666,9 @@ where
     let account_bytes = match authenticated(&client, &base, routes::ACCOUNT, &session.bearer).await
     {
         Ok(bytes) => bytes,
-        Err(NetError::Revoked) => return Err(session_expired(store, hosted, origin).await),
+        Err(NetError::Revoked) => {
+            return Err(session_expired(store, hosted, origin, &session.bearer).await)
+        }
         Err(error) => return Err(error.into()),
     };
     let account = parse_hosted_account(
@@ -735,12 +803,13 @@ async fn request_grant(
         return Ok(());
     }
     let body = provisioning.grant_request().map_err(client_error)?;
-    let grant =
-        match post_bearer_status(client, base, routes::PROVISIONING, &session.bearer, body).await {
-            Ok(grant) => grant,
-            Err((401, _)) => return Err(session_expired(store, hosted, origin).await),
-            Err((_, error)) => return Err(error),
-        };
+    let grant = match post_bearer_status(client, base, routes::PROVISIONING, &session.bearer, body)
+        .await
+    {
+        Ok(grant) => grant,
+        Err((401, _)) => return Err(session_expired(store, hosted, origin, &session.bearer).await),
+        Err((_, error)) => return Err(error),
+    };
     provisioning
         .accept_grant(String::from_utf8(grant).map_err(|_| invalid_response())?)
         .map_err(client_error)?;
@@ -751,8 +820,9 @@ async fn session_expired(
     store: &dyn SecretStore,
     hosted: &HostedState,
     origin: &str,
+    observed_bearer: &str,
 ) -> BridgeError {
-    if let Err(error) = tombstone_session(store, hosted, origin).await {
+    if let Err(error) = tombstone_observed_session(store, hosted, origin, observed_bearer).await {
         return error;
     }
     BridgeError::new(
@@ -772,31 +842,27 @@ async fn load_session_from_store(
     hosted: &HostedState,
     origin: &str,
 ) -> BridgeResult<Option<HostedSessionRecord>> {
-    if let Some(value) = hosted.session.lock().await.as_ref() {
+    let mut cached = hosted.session.lock().await;
+    if let Some(value) = cached.as_ref() {
         if value.expires_at_unix > now_unix() {
-            return Ok(Some(HostedSessionRecord {
-                account_id: value.account_id.clone(),
-                bearer: Zeroizing::new(value.bearer.to_string()),
-                expires_at_unix: value.expires_at_unix,
-            }));
+            return Ok(Some(copy_session(value)));
         }
     }
     let key = session_key(origin);
     let Some(bytes) = store.get(&key)? else {
+        *cached = None;
         return Ok(None);
     };
     let Some(record) = decode_session(&bytes) else {
+        *cached = None;
         return Ok(None);
     };
     if record.expires_at_unix <= now_unix() {
         tombstone(store, &key)?;
+        *cached = None;
         return Ok(None);
     }
-    *hosted.session.lock().await = Some(HostedSessionRecord {
-        account_id: record.account_id.clone(),
-        bearer: Zeroizing::new(record.bearer.to_string()),
-        expires_at_unix: record.expires_at_unix,
-    });
+    *cached = Some(copy_session(&record));
     Ok(Some(record))
 }
 
@@ -805,8 +871,69 @@ async fn tombstone_session(
     hosted: &HostedState,
     origin: &str,
 ) -> BridgeResult<()> {
-    *hosted.session.lock().await = None;
-    tombstone(store, &session_key(origin))
+    let mut cached = hosted.session.lock().await;
+    tombstone(store, &session_key(origin))?;
+    hosted.sign_in_generation.fetch_add(1, Ordering::SeqCst);
+    *cached = None;
+    Ok(())
+}
+
+fn copy_session(record: &HostedSessionRecord) -> HostedSessionRecord {
+    HostedSessionRecord {
+        account_id: record.account_id.clone(),
+        bearer: Zeroizing::new(record.bearer.to_string()),
+        expires_at_unix: record.expires_at_unix,
+    }
+}
+
+async fn commit_sign_in_session(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+    generation: u64,
+    record: HostedSessionRecord,
+) -> BridgeResult<()> {
+    let mut cached = hosted.session.lock().await;
+    if hosted.sign_in_generation.load(Ordering::SeqCst) != generation {
+        return Err(BridgeError::new(
+            "hosted-sign-in-cancelled",
+            "The sign-in attempt was replaced.",
+        ));
+    }
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(&HostedSessionWire {
+            account_id: record.account_id.clone(),
+            bearer: record.bearer.to_string(),
+            expires_at_unix: record.expires_at_unix,
+        })
+        .map_err(|_| BridgeError::new("host-state", "Could not save the hosted session."))?,
+    );
+    store.set(&session_key(origin), &encoded)?;
+    *cached = Some(record);
+    Ok(())
+}
+
+async fn tombstone_observed_session(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+    observed_bearer: &str,
+) -> BridgeResult<bool> {
+    let mut cached = hosted.session.lock().await;
+    let stored = store.get(&session_key(origin))?;
+    let Some(stored) = stored.and_then(|value| decode_session(&value)) else {
+        return Ok(false);
+    };
+    if stored.bearer.as_str() != observed_bearer
+        || cached
+            .as_ref()
+            .is_some_and(|session| session.bearer.as_str() != observed_bearer)
+    {
+        return Ok(false);
+    }
+    tombstone(store, &session_key(origin))?;
+    *cached = None;
+    Ok(true)
 }
 
 struct Loopback {

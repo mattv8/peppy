@@ -52,6 +52,7 @@ mod sync;
 mod tests;
 mod tls;
 mod tray;
+#[cfg(any(target_os = "linux", test))]
 mod update_linux;
 mod update_safety;
 mod updates;
@@ -3502,7 +3503,10 @@ pub fn run() {
             let updates = state.updates.clone();
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    updates::STARTUP_DELAY_SECS,
+                ))
+                .await;
                 loop {
                     if updates.check_due() {
                         let _ = updates.check_automatic(&update_handle).await;
@@ -3794,6 +3798,7 @@ pub fn run() {
         }
         let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
             hosted::hosted_account,
+            hosted::hosted_origin_url,
             hosted::hosted_sign_in,
             hosted::hosted_sign_out,
             hosted::hosted_open_billing,

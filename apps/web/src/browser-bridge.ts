@@ -444,6 +444,7 @@ export class BrowserBridge implements DesktopBridge {
 
   public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your device sync passphrase to access your messages.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "current-password" }] }); if (secret) await this.call("unlock", secret); }
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
+  public hosted_origin_url(): Promise<string> { return Promise.resolve(location.origin); }
   public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }
   public set_app_lock(_enabled: boolean): Promise<boolean> { return unsupported("App lock"); }
   public unlock_app(): Promise<boolean> { return unsupported("App lock"); }

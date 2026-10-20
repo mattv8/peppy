@@ -1,0 +1,26 @@
+{
+  "bitmaps": {
+    "nsis-header.bmp": {
+      "sha256": "2085904f85ee5236ba4aa41b631bf737a88febd5ebd1a2cfd5755980c11aac81",
+      "source": "nsis-header.svg"
+    },
+    "nsis-sidebar.bmp": {
+      "sha256": "14c7b25b55aeae49d6191c6a7e98f044ec7c782f2543a011d873f348ad373387",
+      "source": "nsis-sidebar.svg"
+    },
+    "wix-banner.bmp": {
+      "sha256": "e13ebffaca25ece27e906e2d4cede562bc59211f06ea6b60f310795517c207af",
+      "source": "wix-banner.svg"
+    },
+    "wix-dialog.bmp": {
+      "sha256": "467f76a51b335b7265aa889d0643a0be5da031f27150c9ea67035adf3f78a5de",
+      "source": "installer-art.svg"
+    }
+  },
+  "sources": {
+    "installer-art.svg": "e19a1e9eef7faf75b156ad4e7e7bcda75263ca3b52dbd0470e98ba21a2e1351a",
+    "nsis-header.svg": "38e7c7bf372220180c2045c439d52b52f3940c2e051ef64f7812c5bd8f02f37b",
+    "nsis-sidebar.svg": "0bb60dc768d7ab612abd634d6eca3f61bd6a4b4eb42e564459ac89a2dd2e6112",
+    "wix-banner.svg": "a49eb97e159524d8789566e7b73d8b324ff616ab26afbf921a4b48b3b9dcc3cf"
+  }
+}

@@ -16,6 +16,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::error::{BridgeError, BridgeResult};
 
+pub(crate) use self::policy::STARTUP_DELAY_SECS;
 use self::{
     policy::{LATER_SECS, RetrySchedule, defer_is_active, parse_channel, strictly_newer},
     types::{UpdateChannel, UpdatePhase, UpdateStatus},
@@ -427,6 +428,7 @@ impl UpdateManager {
             && !visible_window_blocks
     }
 
+    #[cfg(target_os = "linux")]
     pub fn should_restart_external(&self, app: &AppHandle, installed_version: &str) -> bool {
         let mut inner = self.0.lock().expect("update state poisoned");
         let now = Instant::now();
@@ -552,6 +554,7 @@ impl UpdateManager {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn finish_external_update(&self, installed_version: &str) -> BridgeResult<()> {
         let (root, persistence) = {
             let inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
@@ -708,6 +711,7 @@ fn suppresses_attempt(attempted_version: &Option<String>, candidate_version: &st
     attempted_version.as_deref() == Some(candidate_version)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn external_restart_eligible(inner: &Inner, installed_version: &str) -> bool {
     inner.status.automatic
         && inner.operation == Operation::Idle

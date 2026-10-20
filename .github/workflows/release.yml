@@ -205,6 +205,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET }}
   publish:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
     needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image]

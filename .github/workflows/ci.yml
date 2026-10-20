@@ -212,6 +212,13 @@ jobs:
       - run: pnpm --filter @peppy/web typecheck
       - run: pnpm --filter @peppy/web test
       - run: pnpm --filter @peppy/web build
+      - name: Verify native installer artwork
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/installer-tests"
+          "$RUNNER_TEMP/installer-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r packaging/macos/dmg/requirements.txt
+          PYTHONPATH=packaging/macos/dmg "$RUNNER_TEMP/installer-tests/bin/python" -m unittest discover -s packaging/macos/dmg/tests
+          python3 packaging/windows/installer/tests/test_installer_assets.py
       - if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -File tests/dev/windows-desktop.Tests.ps1
@@ -356,6 +363,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET }}
 
   container-image:
     uses: ./.github/workflows/build-container.yml

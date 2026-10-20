@@ -121,6 +121,7 @@ pub fn preflight(package_kind: &str, intent: InstallIntent) -> BridgeResult<()> 
     Ok(())
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn requires_windows_authorization(
     package_kind: &str,
     intent: InstallIntent,

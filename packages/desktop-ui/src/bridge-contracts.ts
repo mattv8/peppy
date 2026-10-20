@@ -149,6 +149,8 @@ export interface DesktopBridge {
   list_restorable_contacts(bookId: string): Promise<RestorableContact[]>;
   restore_contact(bookId: string, contactId: string): Promise<ContactEditOutcome>;
   hosted_account(): Promise<HostedAccountView>;
+  /** Returns the host-validated public Peppy Hosted origin. */
+  hosted_origin_url(): Promise<string>;
   hosted_sign_in(provider: "google"): Promise<HostedAccountView>;
   hosted_sign_out(): Promise<void>;
   hosted_open_billing(): Promise<void>;

@@ -110,7 +110,7 @@ Development uses a separate Keychain namespace. The first dev launch creates an 
 
 Each ad-hoc rebuild has a new code identity, so macOS asks again before the dev app can read its Keychain record. To stop the prompts across rebuilds, set `PEPPY_MACOS_SIGNING_IDENTITY` to the exact name or SHA-1 of an Apple Development identity (Xcode, signed in with your Apple ID) or a Developer ID identity, then choose **Always Allow** once. This applies when `just desktop-bundle` or `just desktop-run` builds the bundle; `just desktop-open` only opens the existing bundle, and `just desktop-dev` does not use it. Switching identities asks once more, and Apple Development certificates expire after a year.
 
-Production installers use the `tauri.conf.json` configuration (`productName: Peppy`, identifier: `org.peppy.desktop`) and are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
+The base `tauri.conf.json` defaults to the development identity (`productName: Peppy_dev`, identifier: `org.peppy.desktop.dev`) so direct Tauri commands do not collide with an installed release. The supported macOS commands retain the explicit `tauri.dev.conf.json` overlay for compatibility. Trusted production installers override that base configuration to `productName: Peppy` and identifier `org.peppy.desktop`; they are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
 
 ## Windows from WSL
 
