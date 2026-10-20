@@ -32,10 +32,10 @@ for rpm in "$bundle_dir"/rpm/*.rpm; do
   original_arch=$(rpm -qp --qf '%{ARCH}' "$rpm")
   original_license=$(rpm -qp --qf '%{LICENSE}' "$rpm")
   trimmed_license=${original_license//[[:space:]]/}
-  [ -n "$trimmed_license" ] && [ "$trimmed_license" != '(none)' ] || {
+  if [[ -z "$trimmed_license" || "$trimmed_license" == '(none)' ]]; then
     echo 'RPM License metadata is empty; set apps/desktop/src-tauri/Cargo.toml package.license or tauri.conf.json bundle.license before trusted packaging' >&2
     exit 1
-  }
+  fi
   output_dir=$(mktemp -d)
   rpmrebuild --package --notest --directory "$output_dir" --change-spec-preamble="sed -e 's/^Version:.*/Version: $package_version/' -e 's/^Release:.*/Release: $rpm_release/'" "$rpm"
   mapfile -t rebuilt < <(find "$output_dir" -type f -name '*.rpm' -print)
@@ -43,7 +43,10 @@ for rpm in "$bundle_dir"/rpm/*.rpm; do
   rebuilt_metadata=$(rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}' "${rebuilt[0]}")
   rebuilt_license=$(rpm -qp --qf '%{LICENSE}' "${rebuilt[0]}")
   expected_metadata="$original_name|$package_version|$rpm_release|$original_arch"
-  [ "$rebuilt_metadata" = "$expected_metadata" ] && [ "$rebuilt_license" = "$original_license" ] || { echo "rebuilt RPM metadata mismatch: $rebuilt_metadata|$rebuilt_license" >&2; exit 1; }
+  if [[ "$rebuilt_metadata" != "$expected_metadata" || "$rebuilt_license" != "$original_license" ]]; then
+    echo "rebuilt RPM metadata mismatch: $rebuilt_metadata|$rebuilt_license" >&2
+    exit 1
+  fi
   mv -f "${rebuilt[0]}" "$rpm"
   rm -rf "$output_dir"
   output_dir=''
