@@ -54,7 +54,7 @@ describe("HostedAccountSettings", () => {
 
     await waitFor(() => expect(bridge.hosted_sign_out).toHaveBeenCalledOnce());
     const signIn = await screen.findByRole("button", { name: "Sign in with Google" });
-    expect(signIn).toHaveFocus();
+    await waitFor(() => expect(signIn).toHaveFocus());
   });
 
   it("keeps the signed-in state when sign-out fails", async () => {
