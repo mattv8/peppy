@@ -214,12 +214,37 @@ key_id=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { p
 export PEPPY_RELEASE_RPM_GPG_KEY PEPPY_RELEASE_RPM_GPG_KEY_ID
 PEPPY_RELEASE_RPM_GPG_KEY=$(gpg --batch --armor --export-secret-keys "$key_id")
 PEPPY_RELEASE_RPM_GPG_KEY_ID=$key_id
+signed_rpm=$(echo "$bundle_dir/rpm"/*.rpm)
+updater_signature="$signed_rpm.sig"
+printf 'Tauri updater signature fixture\n' > "$updater_signature"
+updater_signature_hash=$(sha256sum "$updater_signature" | awk '{ print $1 }')
+rpm_mode=$(stat -c '%a' "$signed_rpm")
 "$script_dir/sign-rpm.sh" "$bundle_dir/rpm"
+test "$(sha256sum "$updater_signature" | awk '{ print $1 }')" = "$updater_signature_hash"
+test "$(stat -c '%a' "$signed_rpm")" = "$rpm_mode"
 public_key="$root/fixture-public-key.asc"
 gpg --batch --armor --export "$key_id" > "$public_key"
 rpm_db="$root/rpm-db"
 mkdir "$rpm_db"
 rpm --dbpath "$rpm_db" --import "$public_key"
-rpm --dbpath "$rpm_db" -Kv "$bundle_dir/rpm"/*.rpm | grep -Eiq '(RSA|DSA).*: OK'
+rpm --dbpath "$rpm_db" -Kv "$signed_rpm" | grep -Eiq '(RSA|DSA).*: OK'
+
+signed_rpm_hash=$(sha256sum "$signed_rpm" | awk '{ print $1 }')
+"$script_dir/sign-rpm.sh" "$bundle_dir/rpm"
+test "$(sha256sum "$signed_rpm" | awk '{ print $1 }')" = "$signed_rpm_hash"
+test "$(sha256sum "$updater_signature" | awk '{ print $1 }')" = "$updater_signature_hash"
+
+public_only_key=$(cat "$public_key")
+set +e
+PEPPY_RELEASE_RPM_GPG_KEY="$public_only_key" "$script_dir/sign-rpm.sh" "$bundle_dir/rpm" >/dev/null 2>&1
+missing_secret_key_status=$?
+set -e
+test "$missing_secret_key_status" -ne 0
+test "$(sha256sum "$signed_rpm" | awk '{ print $1 }')" = "$signed_rpm_hash"
+test "$(sha256sum "$updater_signature" | awk '{ print $1 }')" = "$updater_signature_hash"
+if compgen -G "$bundle_dir/rpm/.peppy-rpm-sign.*" >/dev/null; then
+  echo 'RPM signing staging directory was not cleaned up' >&2
+  exit 1
+fi
 
 printf 'Linux package metadata integration tests passed\n'
