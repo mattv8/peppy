@@ -22,6 +22,7 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "Transitive zvariant via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
   { id = "RUSTSEC-2026-0371", reason = "Transitive zbus_names via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
   { id = "RUSTSEC-2026-0372", reason = "Transitive zvariant_derive via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
+  { id = "RUSTSEC-2026-0374", reason = "Transitive build-time parser via UniFFI CLI bindgen and Askama 0.16.1; no released compatible replacement. Remove after Askama replaces basic-toml in a release." },
 ]
 
 [bans]
