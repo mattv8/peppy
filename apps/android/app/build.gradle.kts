@@ -35,6 +35,26 @@ fun strictDebugBoolean(name: String): Boolean = providers.gradleProperty(name).o
 
 val peppySmsDiagnostics = strictDebugBoolean("peppySmsDiagnostics")
 
+// Robolectric's own runtime download has no network timeout and can hang the test worker, so
+// Gradle stages the framework jars and tests run Robolectric offline. These must match the SDKs
+// in the tests' @Config annotations (30, 31, 34, 35) for this Robolectric version; a missing jar
+// fails the test immediately. Each needs its own configuration, or Gradle keeps only the newest.
+val robolectricDependencyDirectory = layout.buildDirectory.dir("robolectric-dependencies")
+val robolectricDependencies = listOf(
+    "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
+    "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
+    "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",
+    "org.robolectric:android-all-instrumented:15-robolectric-12650502-i7",
+).mapIndexed { index, coordinate ->
+    configurations.create("robolectricDependency$index").also { configuration ->
+        dependencies.add(configuration.name, coordinate)
+    }
+}
+val prepareRobolectricDependencies = tasks.register<Sync>("prepareRobolectricDependencies") {
+    from(robolectricDependencies)
+    into(robolectricDependencyDirectory)
+}
+
 private val certificatePemPattern = Regex(
     """\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----\s*\z""",
 )
@@ -147,12 +167,22 @@ android {
             all { test ->
                 // Robolectric tests exercise the real generated bindings against the host build of
                 // the same Rust crate (SQLCipher + libsodium); there is no mock message store.
-                test.systemProperty(
-                    "uniffi.component.peppy_mobile_bindings.libraryOverride",
-                    rootProject.projectDir.resolve(
-                        "../../target/debug/" + System.mapLibraryName("peppy_mobile_bindings")
-                    ).canonicalPath,
-                )
+                test.dependsOn(prepareRobolectricDependencies)
+                test.systemProperty("robolectric.offline", "true")
+                test.systemProperty("robolectric.dependency.dir", robolectricDependencyDirectory.get().asFile.canonicalPath)
+                val nativeLibrary = rootProject.projectDir.resolve(
+                    "../../target/debug/" + System.mapLibraryName("peppy_mobile_bindings")
+                ).canonicalFile
+                test.systemProperty("uniffi.component.peppy_mobile_bindings.libraryOverride", nativeLibrary.path)
+                // Track the library's contents so a native-only change can never reuse a cached test result.
+                test.inputs.file(nativeLibrary)
+                    .withPropertyName("peppyBindingsLibrary")
+                    .withPathSensitivity(PathSensitivity.NONE)
+                if (System.getenv("CI") == "true") {
+                    test.testLogging {
+                        events("started", "passed", "skipped", "failed")
+                    }
+                }
             }
         }
     }
