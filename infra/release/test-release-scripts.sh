@@ -111,4 +111,76 @@ test "$selected" = v0.1.0-staging.99
 test "$(printf '%s\n' 'v0.2.0-staging.6' | "$script_dir/prune-prereleases.sh" --keep 10 --select)" = ''
 check_guard() { expected=$1; tags=$2; actual=$(printf '%s\n' "$tags" | "$script_dir/prerelease-guard.sh" --tags-from-stdin 0.2.0-staging.5); test "$actual" = "skip=$expected"; }
 check_guard true v0.2.0-staging.6; check_guard true v0.2.0-staging.5; check_guard true v0.2.0; check_guard false v0.1.9-staging.99; check_guard false ''
+checksum_root="$root/checksum"
+checksum_dir="$checksum_root/checksum assets"
+checksum_names=(peppy-0.2.0-linux-x86_64.AppImage peppy-0.2.0-linux-x86_64.AppImage.sig peppy-0.2.0-linux-x86_64.rpm)
+verify_checksum_hashes() {
+  (cd "$1" && if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi) >/dev/null
+}
+assert_checksum_manifest() {
+  local dir=$1
+  test "$(grep -c . "$dir/SHA256SUMS")" = 3
+  diff <(sed -E 's/^[0-9a-f]{64}  //' "$dir/SHA256SUMS" | LC_ALL=C sort) <(printf '%s\n' "${checksum_names[@]}" | LC_ALL=C sort)
+  test ! -e "$dir/SHA256SUMS.tmp"
+  verify_checksum_hashes "$dir"
+}
+mkdir -p "$checksum_dir"
+echo appimage > "$checksum_dir/${checksum_names[0]}"
+echo minisig > "$checksum_dir/${checksum_names[1]}"
+echo rpm > "$checksum_dir/${checksum_names[2]}"
+echo stale > "$checksum_dir/SHA256SUMS"
+echo stale > "$checksum_dir/SHA256SUMS.sig"
+echo stale > "$checksum_dir/SHA256SUMS.tmp"
+"$script_dir/write-checksums.sh" "$checksum_dir"
+assert_checksum_manifest "$checksum_dir"
+cp "$checksum_dir/SHA256SUMS" "$checksum_root/first-SHA256SUMS"
+echo stale > "$checksum_dir/SHA256SUMS.tmp"
+echo stale > "$checksum_dir/SHA256SUMS.sig"
+"$script_dir/write-checksums.sh" "$checksum_dir"
+assert_checksum_manifest "$checksum_dir"
+cmp "$checksum_dir/SHA256SUMS" "$checksum_root/first-SHA256SUMS"
+echo stale > "$checksum_dir/SHA256SUMS.tmp"
+(cd "$checksum_root" && "$script_dir/write-checksums.sh" "checksum assets")
+assert_checksum_manifest "$checksum_dir"
+echo stale > "$checksum_dir/SHA256SUMS.tmp"
+(cd "$checksum_dir" && "$script_dir/write-checksums.sh" .)
+assert_checksum_manifest "$checksum_dir"
+cmp "$checksum_dir/SHA256SUMS" "$checksum_root/first-SHA256SUMS"
+decoy_root="$checksum_root/cdpath-decoy"
+mkdir -p "$decoy_root/checksum assets"
+echo decoy > "$decoy_root/checksum assets/decoy.bin"
+rm -f "$checksum_dir/SHA256SUMS"
+(cd "$checksum_root" && CDPATH="$decoy_root" "$script_dir/write-checksums.sh" "checksum assets")
+assert_checksum_manifest "$checksum_dir"
+cmp "$checksum_dir/SHA256SUMS" "$checksum_root/first-SHA256SUMS"
+test ! -e "$decoy_root/checksum assets/SHA256SUMS"
+test ! -e "$decoy_root/checksum assets/SHA256SUMS.tmp"
+dash_dir="$checksum_root/-dash-assets"
+mkdir -p "$dash_dir"
+echo dashed > "$dash_dir/only.bin"
+(cd "$checksum_root" && "$script_dir/write-checksums.sh" "-dash-assets")
+test "$(grep -c . "$dash_dir/SHA256SUMS")" = 1
+verify_checksum_hashes "$dash_dir"
+bash_bin=$(command -v bash)
+fallback_bin="$checksum_root/shasum-only-bin"
+mkdir -p "$fallback_bin"
+for tool in find sed sort mv shasum; do ln -s "$(command -v "$tool")" "$fallback_bin/$tool"; done
+test -z "$(PATH="$fallback_bin" "$bash_bin" -c 'command -v sha256sum || true')"
+echo stale > "$checksum_dir/SHA256SUMS.tmp"
+PATH="$fallback_bin" "$bash_bin" "$script_dir/write-checksums.sh" "$checksum_dir"
+assert_checksum_manifest "$checksum_dir"
+cmp "$checksum_dir/SHA256SUMS" "$checksum_root/first-SHA256SUMS"
+real_shasum=$(command -v shasum)
+mismatch_bin="$checksum_root/shasum-mismatch-bin"
+mkdir -p "$mismatch_bin"
+for tool in find sed sort mv; do ln -s "$(command -v "$tool")" "$mismatch_bin/$tool"; done
+cat > "$mismatch_bin/shasum" <<SH
+#!/bin/sh
+for arg in "\$@"; do if [ "\$arg" = -c ]; then echo 'simulated checksum mismatch' >&2; exit 1; fi; done
+exec "$real_shasum" "\$@"
+SH
+chmod +x "$mismatch_bin/shasum"
+test -z "$(PATH="$mismatch_bin" "$bash_bin" -c 'command -v sha256sum || true')"
+if err=$(PATH="$mismatch_bin" "$bash_bin" "$script_dir/write-checksums.sh" "$checksum_dir" 2>&1 >/dev/null); then printf 'expected checksum self-validation failure\n' >&2; exit 1; fi
+grep -Fq 'simulated checksum mismatch' <<<"$err"
 printf 'release script tests passed\n'
