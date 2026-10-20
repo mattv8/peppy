@@ -73,7 +73,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dw
 tempfile = "3"
 # Real local server/core loopback test (ignored unless TEST_DATABASE_URL is provided).
 peppy-server = { path = "../../../services/server", version = "0.1.0" }
-sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio-rustls", "migrate", "macros"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-native-roots", "migrate", "macros"] }
 axum = "=0.8.6"
 ed25519-dalek = "=2.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
