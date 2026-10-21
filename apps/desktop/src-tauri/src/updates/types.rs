@@ -36,6 +36,7 @@ pub enum UpdatePhase {
     Checking,
     Downloading,
     Ready,
+    Installed,
     Deferred,
     AuthorizationRequired,
     Installing,
@@ -160,5 +161,13 @@ mod tests {
         assert_eq!(status.current_version, "1.2.3");
         assert!(status.available_version.is_none());
         assert!(!status.can_restart);
+    }
+
+    #[test]
+    fn serializes_installed_phase() {
+        assert_eq!(
+            serde_json::to_value(UpdatePhase::Installed).unwrap(),
+            "installed"
+        );
     }
 }

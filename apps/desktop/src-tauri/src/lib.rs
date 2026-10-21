@@ -3107,6 +3107,17 @@ async fn restart_for_update(
     state: State<'_, AppState>,
 ) -> BridgeResult<updates::types::UpdateStatus> {
     require_main(window.label())?;
+    if let Some(version) = state.updates.installed_pending() {
+        state.updates.clear_attempted()?;
+        let never = restart_into_installed(
+            &app,
+            &state,
+            &version,
+            restart_in_background(main_window_visible(&app)),
+        )
+        .await?;
+        match never {}
+    }
     install_staged_update(&app, &state, updates::install::InstallIntent::User).await
 }
 
@@ -3325,6 +3336,54 @@ fn packagekit_message(outcome: update_linux::InstallOutcome) -> String {
     }
 }
 
+async fn restart_into_installed(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    version: &str,
+    background: bool,
+) -> BridgeResult<std::convert::Infallible> {
+    let permit = lifecycle::prepare_update(app).await?;
+    if !sync::drain_all(std::time::Duration::from_secs(30)).await {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
+            let state = app.state::<AppState>();
+            state.updates.install_failed(
+                "Background work finished. Restart the installed update when ready.",
+            );
+            state.updates.emit(&app);
+            drop(permit);
+        });
+        return Err(BridgeError::new(
+            "update-busy",
+            "Peppy is still finishing background work.",
+        ));
+    }
+    if let Err(error) = updates::install::write_restart_marker(
+        &state.root,
+        version,
+        background,
+    ) {
+        state
+            .updates
+            .install_failed("Could not record the update restart state.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    let guard = permit.commit();
+    if let Err(error) = state.updates.finish_external_update(version) {
+        updates::install::clear_restart_marker(&state.root);
+        state
+            .updates
+            .install_failed("Could not finalize the installed update.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    guard.finish();
+    state.allow_exit.store(true, Ordering::Release);
+    app.restart();
+}
+
 #[cfg(target_os = "linux")]
 async fn restart_after_external_package_update(
     app: &tauri::AppHandle,
@@ -3343,46 +3402,42 @@ async fn restart_after_external_package_update(
     {
         return Ok(());
     }
-    let permit = lifecycle::prepare_update(app).await?;
-    if !sync::drain_all(std::time::Duration::from_secs(30)).await {
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
-            let state = app.state::<AppState>();
-            state.updates.install_failed(
-                "Background work finished. Restart the installed system update when ready.",
-            );
-            state.updates.emit(&app);
-            drop(permit);
-        });
-        return Err(BridgeError::new(
-            "update-busy",
-            "Peppy is still finishing background work.",
-        ));
-    }
-    if let Err(error) = updates::install::write_restart_marker(
-        &state.root,
+    restart_into_installed(
+        app,
+        state,
         &installed,
         restart_in_background(main_window_visible(app)),
-    ) {
-        state
-            .updates
-            .install_failed("Could not record the update restart state.");
-        state.updates.emit(app);
-        return Err(error);
-    }
-    let guard = permit.commit();
-    if let Err(error) = state.updates.finish_external_update(&installed) {
-        updates::install::clear_restart_marker(&state.root);
-        state
-            .updates
-            .install_failed("Could not finalize the installed system update.");
-        state.updates.emit(app);
-        return Err(error);
-    }
-    guard.finish();
-    state.allow_exit.store(true, Ordering::Release);
-    app.restart();
+    )
+    .await
+    .map(|never| match never {})
+}
+
+fn activate_main(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        #[cfg(target_os = "macos")]
+        if let Some(state) = app.try_state::<AppState>() {
+            let current_version = state.updates.status().current_version;
+            if let updates::installed::Installed::Differs(version) = updates::installed::compare(
+                &current_version,
+                updates::installed::running_bundle_version(&app).as_deref(),
+            ) {
+                if state.updates.note_installed(&version) {
+                    state.updates.emit(&app);
+                }
+                if state.updates.activation_should_restart(&version) {
+                    match restart_into_installed(&app, &state, &version, false).await {
+                        Ok(never) => match never {},
+                        Err(error) => eprintln!(
+                            "peppy: installed-update restart failed: {}",
+                            error.code
+                        ),
+                    }
+                }
+            }
+        }
+        tray::show_main(&app);
+    });
 }
 
 fn main_window_visible(app: &tauri::AppHandle) -> bool {
@@ -3440,7 +3495,7 @@ pub fn run() {
         // main window before it can open another database/session.
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !startup::background_requested(args) {
-                tray::show_main(app);
+                activate_main(app);
             }
         }))
         .plugin(tauri_plugin_autostart::init(
@@ -3547,6 +3602,44 @@ pub fn run() {
                     });
                 }
             }
+            #[cfg(target_os = "macos")]
+            {
+                let update_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut poll = updates::installed::StablePoll::default();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        let state = update_handle.state::<AppState>();
+                        let current_version = state.updates.status().current_version;
+                        let installed = updates::installed::compare(
+                            &current_version,
+                            updates::installed::running_bundle_version(&update_handle).as_deref(),
+                        );
+                        let Some(version) = poll.observe(installed) else {
+                            continue;
+                        };
+                        if state.updates.note_installed(&version) {
+                            state.updates.emit(&update_handle);
+                        }
+                        if state.updates.should_auto_restart_installed(&update_handle) {
+                            match restart_into_installed(
+                                &update_handle,
+                                &state,
+                                &version,
+                                restart_in_background(main_window_visible(&update_handle)),
+                            )
+                            .await
+                            {
+                                Err(error) => eprintln!(
+                                    "peppy: installed-update restart failed: {}",
+                                    error.code
+                                ),
+                                Ok(never) => match never {},
+                            }
+                        }
+                    }
+                });
+            }
             // The state hint is emitted after normal live applies and snapshot work alike. Core's
             // queue contains only live first-insert candidates, so this native drain cannot turn
             // history/snapshot replay into banners.
@@ -3590,15 +3683,35 @@ pub fn run() {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let state = app.state::<AppState>();
-                        if let Err(error) = install_staged_update(
-                            &app,
-                            &state,
-                            updates::install::InstallIntent::User,
-                        )
-                        .await
-                        {
+                        let installed = state.updates.installed_pending();
+                        let result = if let Some(version) = installed.as_deref() {
+                            match state.updates.clear_attempted() {
+                                Ok(()) => {
+                                    restart_into_installed(
+                                        &app,
+                                        &state,
+                                        version,
+                                        restart_in_background(main_window_visible(&app)),
+                                    )
+                                    .await
+                                    .map(|never| match never {})
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            install_staged_update(
+                                &app,
+                                &state,
+                                updates::install::InstallIntent::User,
+                            )
+                            .await
+                            .map(|_| ())
+                        };
+                        if let Err(error) = result {
                             tray::show_main(&app);
-                            dialogs::inform(&app, "Could not restart for update", &error.message);
+                            if installed.is_none() || error.code != "update-busy" {
+                                dialogs::inform(&app, "Could not restart for update", &error.message);
+                            }
                         }
                     });
                 },
@@ -3827,7 +3940,7 @@ pub fn run() {
         .expect("error while building Peppy desktop");
     app.run(|app, event| match event {
         #[cfg(target_os = "macos")]
-        RunEvent::Reopen { .. } => tray::show_main(app),
+        RunEvent::Reopen { .. } => activate_main(app),
         RunEvent::ExitRequested { api, .. } => {
             if let Some(state) = app.try_state::<AppState>() {
                 if !state.allow_exit.load(Ordering::Acquire) {

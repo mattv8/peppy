@@ -1,6 +1,7 @@
 mod cache;
 mod feed;
 pub mod install;
+pub mod installed;
 mod policy;
 pub mod types;
 
@@ -35,6 +36,7 @@ struct Inner {
     activity: HashMap<String, Activity>,
     root: Option<PathBuf>,
     staged: Option<StagedUpdate>,
+    installed: Option<String>,
     attempted_version: Option<String>,
     retry_schedule: RetrySchedule,
     last_progress_emit: Instant,
@@ -100,6 +102,7 @@ impl UpdateManager {
             activity: HashMap::new(),
             root: None,
             staged: None,
+            installed: None,
             attempted_version: None,
             retry_schedule: RetrySchedule::new(),
             last_progress_emit: Instant::now(),
@@ -206,11 +209,11 @@ impl UpdateManager {
 
     pub fn status(&self) -> UpdateStatus {
         let mut inner = self.0.lock().expect("update state poisoned");
-        if inner.status.phase == UpdatePhase::Deferred
-            && !defer_is_active_option(inner.status.deferred_until.as_deref())
-        {
+        if !defer_is_active_option(inner.status.deferred_until.as_deref()) {
             inner.status.deferred_until = None;
-            restore_staged_phase(&mut inner.status);
+            if inner.status.phase == UpdatePhase::Deferred {
+                restore_available_phase(&mut inner);
+            }
         }
         inner.status.clone()
     }
@@ -227,13 +230,10 @@ impl UpdateManager {
     }
 
     pub fn defer(&self) -> BridgeResult<UpdateStatus> {
-        if !self
-            .0
-            .lock()
-            .map_err(|_| BridgeError::host_state())?
-            .staged
-            .is_some()
-        {
+        let inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
+        let has_update = inner.staged.is_some() || inner.installed.is_some();
+        drop(inner);
+        if !has_update {
             return Ok(self.status());
         }
         let deferred_until = timestamp_after(Duration::from_secs(LATER_SECS));
@@ -275,7 +275,10 @@ impl UpdateManager {
     ) -> BridgeResult<UpdateStatus> {
         let (channel, root, current_version) = {
             let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
-            if inner.status.channel == UpdateChannel::Disabled || !begin_check(&mut inner) {
+            if inner.installed.is_some()
+                || inner.status.channel == UpdateChannel::Disabled
+                || !begin_check(&mut inner)
+            {
                 return Ok(inner.status.clone());
             }
             (
@@ -324,6 +327,9 @@ impl UpdateManager {
         }
         let root = root
             .ok_or_else(|| BridgeError::new("update-cache", "Update cache is not initialized."))?;
+        if self.installed_pending().is_some() {
+            return Ok(None);
+        }
         self.set_downloading(app)?;
         let manager = self.clone();
         let handle = app.clone();
@@ -349,6 +355,18 @@ impl UpdateManager {
     ) -> BridgeResult<UpdateStatus> {
         let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
         inner.operation = Operation::Idle;
+        if inner.installed.is_some() {
+            restore_available_phase(&mut inner);
+            inner.status.progress_percent = None;
+            let remove_cached = matches!(&result, Ok(Some(_))).then(|| inner.root.clone()).flatten();
+            let status = inner.status.clone();
+            drop(inner);
+            if let Some(root) = remove_cached {
+                let _ = cache::remove_cached(&root);
+            }
+            self.emit(app);
+            return Ok(status);
+        }
         inner.status.last_checked_at = Some(timestamp_now());
         match result {
             Ok(Some(staged)) => {
@@ -367,7 +385,7 @@ impl UpdateManager {
                 if inner.staged.is_none() {
                     inner.status.reset_to_idle();
                 } else {
-                    restore_staged_phase(&mut inner.status);
+                    restore_available_phase(&mut inner);
                 }
                 inner.retry_schedule.record_success();
             }
@@ -387,6 +405,9 @@ impl UpdateManager {
     pub fn staged(&self) -> Option<StagedUpdate> {
         self.0.lock().ok()?.staged.clone()
     }
+    pub fn installed_pending(&self) -> Option<String> {
+        self.0.lock().ok()?.installed.clone()
+    }
     pub fn automatic(&self) -> bool {
         self.status().automatic
     }
@@ -395,7 +416,7 @@ impl UpdateManager {
             && self
                 .0
                 .lock()
-                .map(|inner| inner.operation == Operation::Idle)
+                .map(|inner| inner.operation == Operation::Idle && inner.installed.is_none())
                 .unwrap_or(false)
     }
     pub fn next_check_delay(&self) -> Duration {
@@ -408,17 +429,7 @@ impl UpdateManager {
     pub fn should_auto_restart(&self, app: &AppHandle) -> bool {
         let mut inner = self.0.lock().expect("update state poisoned");
         let now = Instant::now();
-        let webviews = app.webview_windows();
-        inner
-            .activity
-            .retain(|label, _| webviews.contains_key(label));
-        let webview_facts = webviews
-            .into_iter()
-            .map(|(label, window)| WebviewFact {
-                label,
-                visible: window.is_visible().unwrap_or(true),
-            })
-            .collect::<Vec<_>>();
+        let webview_facts = webview_facts(app, &mut inner.activity);
         let visible_window_blocks = webviews_block_restart(&inner.activity, &webview_facts, now);
         inner.staged.is_some()
             && inner.status.automatic
@@ -428,21 +439,75 @@ impl UpdateManager {
             && !visible_window_blocks
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    pub fn should_auto_restart_installed(&self, app: &AppHandle) -> bool {
+        let mut inner = self.0.lock().expect("update state poisoned");
+        let now = Instant::now();
+        let facts = webview_facts(app, &mut inner.activity);
+        installed_restart_eligible(&inner) && !webviews_block_restart(&inner.activity, &facts, now)
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub fn activation_should_restart(&self, version: &str) -> bool {
+        self.0
+            .lock()
+            .map(|inner| {
+                inner.operation != Operation::Installing
+                    && !defer_is_active_option(inner.status.deferred_until.as_deref())
+                    && !suppresses_attempt(&inner.attempted_version, version)
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    pub fn note_installed(&self, version: &str) -> bool {
+        let version = version.trim();
+        if version.is_empty() {
+            return false;
+        }
+        let root = {
+            let inner = match self.0.lock() {
+                Ok(inner) => inner,
+                Err(_) => return false,
+            };
+            if inner.operation == Operation::Installing
+                || (matches!(
+                    inner.status.phase,
+                    UpdatePhase::Installed | UpdatePhase::Deferred
+                ) && inner.installed.as_deref() == Some(version))
+            {
+                return false;
+            }
+            inner.root.clone()
+        };
+        if let Some(root) = root {
+            let _ = cache::remove_cached(&root);
+        }
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        if inner.operation == Operation::Installing {
+            return false;
+        }
+        inner.staged = None;
+        inner.installed = Some(version.into());
+        inner.status.phase = UpdatePhase::Installed;
+        inner.status.available_version = Some(version.into());
+        inner.status.progress_percent = None;
+        inner.status.message = Some(format!(
+            "Version {version} is installed. Restart Peppy to use it."
+        ));
+        inner.status.release_notes_url =
+            (inner.status.channel != UpdateChannel::Disabled).then(|| release_notes(version));
+        inner.status.can_restart = true;
+        true
+    }
+
     #[cfg(target_os = "linux")]
     pub fn should_restart_external(&self, app: &AppHandle, installed_version: &str) -> bool {
         let mut inner = self.0.lock().expect("update state poisoned");
         let now = Instant::now();
-        let webviews = app.webview_windows();
-        inner
-            .activity
-            .retain(|label, _| webviews.contains_key(label));
-        let facts = webviews
-            .into_iter()
-            .map(|(label, window)| WebviewFact {
-                label,
-                visible: window.is_visible().unwrap_or(true),
-            })
-            .collect::<Vec<_>>();
+        let facts = webview_facts(app, &mut inner.activity);
         external_restart_eligible(&inner, installed_version)
             && !webviews_block_restart(&inner.activity, &facts, now)
     }
@@ -554,7 +619,6 @@ impl UpdateManager {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub fn finish_external_update(&self, installed_version: &str) -> BridgeResult<()> {
         let (root, persistence) = {
             let inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
@@ -575,6 +639,7 @@ impl UpdateManager {
         }
         let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
         inner.staged = None;
+        inner.installed = None;
         inner.operation = Operation::Idle;
         inner.attempted_version = Some(installed_version.into());
         inner.status.reset_to_idle();
@@ -584,9 +649,13 @@ impl UpdateManager {
     pub fn install_failed(&self, message: &str) {
         if let Ok(mut inner) = self.0.lock() {
             inner.operation = Operation::Idle;
-            inner.status.phase = UpdatePhase::Error;
+            if inner.installed.is_some() {
+                restore_available_phase(&mut inner);
+            } else {
+                inner.status.phase = UpdatePhase::Error;
+            }
             inner.status.message = Some(message.into());
-            inner.status.can_restart = inner.staged.is_some();
+            inner.status.can_restart = inner.staged.is_some() || inner.installed.is_some();
         }
     }
 
@@ -596,6 +665,9 @@ impl UpdateManager {
 
     fn set_downloading(&self, app: &AppHandle) -> BridgeResult<()> {
         let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
+        if inner.installed.is_some() {
+            return Ok(());
+        }
         inner.status.phase = UpdatePhase::Downloading;
         inner.status.progress_percent = None;
         drop(inner);
@@ -606,6 +678,9 @@ impl UpdateManager {
     fn update_progress(&self, app: &AppHandle, received: u64, total: Option<u64>) {
         let mut should_emit = false;
         if let Ok(mut inner) = self.0.lock() {
+            if inner.installed.is_some() {
+                return;
+            }
             let progress = total
                 .filter(|total| *total > 0)
                 .map(|total| ((received.saturating_mul(100) / total).min(100)) as u8);
@@ -624,6 +699,14 @@ impl UpdateManager {
 
     fn attempted_version(&self) -> Option<String> {
         self.0.lock().ok()?.attempted_version.clone()
+    }
+
+    pub fn clear_attempted(&self) -> BridgeResult<()> {
+        self.persist_preference(
+            |settings| settings.attempted_version = None,
+            |inner| inner.attempted_version = None,
+        )
+        .map(|_| ())
     }
 
     fn persist_preference(
@@ -677,6 +760,18 @@ fn webviews_block_restart(
     })
 }
 
+fn webview_facts(app: &AppHandle, activity: &mut HashMap<String, Activity>) -> Vec<WebviewFact> {
+    let webviews = app.webview_windows();
+    activity.retain(|label, _| webviews.contains_key(label));
+    webviews
+        .into_iter()
+        .map(|(label, window)| WebviewFact {
+            label,
+            visible: window.is_visible().unwrap_or(true),
+        })
+        .collect()
+}
+
 fn begin_check(inner: &mut Inner) -> bool {
     if inner.operation != Operation::Idle {
         return false;
@@ -694,14 +789,16 @@ fn mark_check_failure(inner: &mut Inner) {
         inner.status.message = Some("Could not check for updates. Try again later.".into());
     }
     if inner.staged.is_some() {
-        restore_staged_phase(&mut inner.status);
+        restore_available_phase(inner);
     }
     inner.retry_schedule.record_failure();
 }
 
-fn restore_staged_phase(status: &mut UpdateStatus) {
-    status.phase = if defer_is_active_option(status.deferred_until.as_deref()) {
+fn restore_available_phase(inner: &mut Inner) {
+    inner.status.phase = if defer_is_active_option(inner.status.deferred_until.as_deref()) {
         UpdatePhase::Deferred
+    } else if inner.installed.is_some() {
+        UpdatePhase::Installed
     } else {
         UpdatePhase::Ready
     };
@@ -709,6 +806,16 @@ fn restore_staged_phase(status: &mut UpdateStatus) {
 
 fn suppresses_attempt(attempted_version: &Option<String>, candidate_version: &str) -> bool {
     attempted_version.as_deref() == Some(candidate_version)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn installed_restart_eligible(inner: &Inner) -> bool {
+    inner.installed.as_deref().is_some_and(|version| {
+        inner.status.automatic
+            && inner.operation == Operation::Idle
+            && !defer_is_active_option(inner.status.deferred_until.as_deref())
+            && !suppresses_attempt(&inner.attempted_version, version)
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -766,6 +873,7 @@ mod tests {
             activity: HashMap::new(),
             root: None,
             staged: None,
+            installed: None,
             attempted_version: None,
             retry_schedule: RetrySchedule::new(),
             last_progress_emit: Instant::now(),
@@ -864,5 +972,136 @@ mod tests {
         inner.attempted_version = Some("1.0.1".into());
         assert!(!external_restart_eligible(&inner, "1.0.1"));
         assert!(!external_restart_eligible(&inner, "1.0.0"));
+    }
+
+    #[test]
+    fn installed_state_supersedes_staged_updates_and_blocks_checks() {
+        let manager = UpdateManager(Arc::new(Mutex::new(state())));
+        assert!(manager.note_installed("1.0.1"));
+        let status = manager.status();
+        assert_eq!(status.phase, UpdatePhase::Installed);
+        assert_eq!(status.available_version.as_deref(), Some("1.0.1"));
+        assert!(status.can_restart);
+        assert!(!manager.check_due());
+        assert!(!manager.note_installed("1.0.1"));
+    }
+
+    #[test]
+    fn installed_check_completion_restores_installed_phase() {
+        let mut inner = state();
+        inner.installed = Some("1.0.1".into());
+        inner.status.phase = UpdatePhase::Downloading;
+        inner.status.progress_percent = Some(50);
+        restore_available_phase(&mut inner);
+        inner.status.progress_percent = None;
+        assert_eq!(inner.status.phase, UpdatePhase::Installed);
+        assert_eq!(inner.status.progress_percent, None);
+    }
+
+    #[test]
+    fn installed_restart_eligibility_requires_idle_automatic_unattempted_state() {
+        let mut inner = state();
+        inner.installed = Some("0.9.0".into());
+        assert!(installed_restart_eligible(&inner));
+        inner.attempted_version = Some("0.9.0".into());
+        assert!(!installed_restart_eligible(&inner));
+        inner.attempted_version = None;
+        inner.operation = Operation::Checking;
+        assert!(!installed_restart_eligible(&inner));
+    }
+
+    #[test]
+    fn activation_restart_respects_attempt_suppression_and_installing() {
+        let manager = UpdateManager(Arc::new(Mutex::new(state())));
+        assert!(manager.activation_should_restart("1.0.1"));
+        let mut inner = manager.0.lock().unwrap();
+        inner.attempted_version = Some("1.0.1".into());
+        drop(inner);
+        assert!(!manager.activation_should_restart("1.0.1"));
+        let mut inner = manager.0.lock().unwrap();
+        inner.attempted_version = None;
+        inner.operation = Operation::Idle;
+        inner.status.deferred_until = Some(timestamp_after(Duration::from_secs(LATER_SECS)));
+        drop(inner);
+        assert!(!manager.activation_should_restart("1.0.1"));
+        let mut inner = manager.0.lock().unwrap();
+        inner.status.deferred_until = None;
+        inner.operation = Operation::Installing;
+        drop(inner);
+        assert!(!manager.activation_should_restart("1.0.1"));
+    }
+
+    #[test]
+    fn failed_install_keeps_installed_restart_available() {
+        let manager = UpdateManager(Arc::new(Mutex::new(state())));
+        manager.note_installed("1.0.1");
+        manager.install_failed("restart failed");
+        let status = manager.status();
+        assert_eq!(status.phase, UpdatePhase::Installed);
+        assert_eq!(status.message.as_deref(), Some("restart failed"));
+        assert!(status.can_restart);
+    }
+
+    #[test]
+    fn expired_installed_defer_restores_installed_phase() {
+        let mut inner = state();
+        inner.installed = Some("1.0.1".into());
+        inner.status.phase = UpdatePhase::Deferred;
+        inner.status.deferred_until = None;
+        restore_available_phase(&mut inner);
+        assert_eq!(inner.status.phase, UpdatePhase::Installed);
+    }
+
+    #[test]
+    fn defer_accepts_an_installed_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut inner = state();
+        inner.root = Some(temp.path().to_path_buf());
+        inner.installed = Some("1.0.1".into());
+        inner.status.phase = UpdatePhase::Installed;
+        inner.status.available_version = Some("1.0.1".into());
+        let manager = UpdateManager(Arc::new(Mutex::new(inner)));
+        assert_eq!(manager.defer().unwrap().phase, UpdatePhase::Deferred);
+        {
+            let mut inner = manager.0.lock().unwrap();
+            inner.status.deferred_until = None;
+        }
+        assert_eq!(manager.status().phase, UpdatePhase::Installed);
+    }
+
+    #[test]
+    fn clear_attempted_persists_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut inner = state();
+        inner.root = Some(temp.path().to_path_buf());
+        inner.attempted_version = Some("1.0.1".into());
+        let manager = UpdateManager(Arc::new(Mutex::new(inner)));
+        manager.clear_attempted().unwrap();
+        assert_eq!(manager.attempted_version(), None);
+        assert_eq!(cache::load_settings(temp.path()).unwrap().attempted_version, None);
+    }
+
+    #[test]
+    fn finish_external_update_clears_installed_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut inner = state();
+        inner.root = Some(temp.path().to_path_buf());
+        inner.installed = Some("1.0.1".into());
+        let manager = UpdateManager(Arc::new(Mutex::new(inner)));
+        manager.finish_external_update("1.0.1").unwrap();
+        assert_eq!(manager.installed_pending(), None);
+    }
+
+    #[test]
+    fn note_installed_removes_cached_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let pending = cache::directory(temp.path()).join("pending.json");
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&pending, "{}").unwrap();
+        let mut inner = state();
+        inner.root = Some(temp.path().to_path_buf());
+        let manager = UpdateManager(Arc::new(Mutex::new(inner)));
+        assert!(manager.note_installed("1.0.1"));
+        assert!(!pending.exists());
     }
 }
