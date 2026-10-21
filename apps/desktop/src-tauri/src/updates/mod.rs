@@ -427,24 +427,22 @@ impl UpdateManager {
     }
 
     pub fn should_auto_restart(&self, app: &AppHandle) -> bool {
-        let mut inner = self.0.lock().expect("update state poisoned");
-        let now = Instant::now();
-        let webview_facts = webview_facts(app, &mut inner.activity);
-        let visible_window_blocks = webviews_block_restart(&inner.activity, &webview_facts, now);
-        inner.staged.is_some()
-            && inner.status.automatic
-            && inner.operation == Operation::Idle
-            && !defer_is_active_option(inner.status.deferred_until.as_deref())
-            && inner.attempted_version.as_deref() != inner.status.available_version.as_deref()
-            && !visible_window_blocks
+        self.restart_eligible_with_webviews(
+            || webview_facts(app),
+            |inner| {
+                inner.staged.is_some()
+                    && inner.status.automatic
+                    && inner.operation == Operation::Idle
+                    && !defer_is_active_option(inner.status.deferred_until.as_deref())
+                    && inner.attempted_version.as_deref()
+                        != inner.status.available_version.as_deref()
+            },
+        )
     }
 
     #[cfg(any(target_os = "macos", test))]
     pub fn should_auto_restart_installed(&self, app: &AppHandle) -> bool {
-        let mut inner = self.0.lock().expect("update state poisoned");
-        let now = Instant::now();
-        let facts = webview_facts(app, &mut inner.activity);
-        installed_restart_eligible(&inner) && !webviews_block_restart(&inner.activity, &facts, now)
+        self.restart_eligible_with_webviews(|| webview_facts(app), installed_restart_eligible)
     }
 
     #[cfg(any(target_os = "macos", test))]
@@ -505,11 +503,10 @@ impl UpdateManager {
 
     #[cfg(target_os = "linux")]
     pub fn should_restart_external(&self, app: &AppHandle, installed_version: &str) -> bool {
-        let mut inner = self.0.lock().expect("update state poisoned");
-        let now = Instant::now();
-        let facts = webview_facts(app, &mut inner.activity);
-        external_restart_eligible(&inner, installed_version)
-            && !webviews_block_restart(&inner.activity, &facts, now)
+        self.restart_eligible_with_webviews(
+            || webview_facts(app),
+            |inner| external_restart_eligible(inner, installed_version),
+        )
     }
 
     pub fn set_installing(&self, expected_version: &str) -> BridgeResult<()> {
@@ -663,6 +660,21 @@ impl UpdateManager {
         let _ = app.emit(STATE_EVENT, ());
     }
 
+    fn restart_eligible_with_webviews(
+        &self,
+        collect_webview_facts: impl FnOnce() -> Vec<WebviewFact>,
+        eligible: impl FnOnce(&Inner) -> bool,
+    ) -> bool {
+        // Window queries may wait for the UI thread, which also reports activity through this lock.
+        let webview_facts = collect_webview_facts();
+        let mut inner = self.0.lock().expect("update state poisoned");
+        inner
+            .activity
+            .retain(|label, _| webview_facts.iter().any(|fact| fact.label == *label));
+        let now = Instant::now();
+        eligible(&inner) && !webviews_block_restart(&inner.activity, &webview_facts, now)
+    }
+
     fn set_downloading(&self, app: &AppHandle) -> BridgeResult<()> {
         let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
         if inner.installed.is_some() {
@@ -760,9 +772,8 @@ fn webviews_block_restart(
     })
 }
 
-fn webview_facts(app: &AppHandle, activity: &mut HashMap<String, Activity>) -> Vec<WebviewFact> {
+fn webview_facts(app: &AppHandle) -> Vec<WebviewFact> {
     let webviews = app.webview_windows();
-    activity.retain(|label, _| webviews.contains_key(label));
     webviews
         .into_iter()
         .map(|(label, window)| WebviewFact {
@@ -923,6 +934,37 @@ mod tests {
             &[fact("main", false)],
             now,
         ));
+    }
+
+    #[test]
+    fn restart_eligibility_collects_webview_facts_before_locking_and_cleans_activity() {
+        let manager = UpdateManager(Arc::new(Mutex::new(state())));
+        manager.0.lock().unwrap().activity.insert(
+            "stale".into(),
+            Activity {
+                heartbeat: Instant::now(),
+                input: Instant::now(),
+            },
+        );
+        let reporter = manager.clone();
+
+        let restart_eligible = manager.restart_eligible_with_webviews(
+            move || {
+                // Check first so a lock-order regression fails instead of hanging in report_activity.
+                assert!(
+                    reporter.0.try_lock().is_ok(),
+                    "webview fact collection must not hold the updater mutex"
+                );
+                reporter.report_activity("main", true);
+                vec![fact("main", false)]
+            },
+            |_| true,
+        );
+
+        assert!(!restart_eligible);
+        let inner = manager.0.lock().unwrap();
+        assert!(!inner.activity.contains_key("stale"));
+        assert!(inner.activity.contains_key("main"));
     }
 
     #[test]
