@@ -76,6 +76,13 @@ run_bundles() {
     "$script_dir/build-desktop-bundles.sh"
 }
 
+assert_trusted_updater_config() {
+  node -e 'const updater = JSON.parse(process.argv[1]).plugins?.updater; if (updater?.pubkey !== "public-key" || JSON.stringify(updater?.endpoints) !== JSON.stringify(["https://github.com/mattv8/peppy/releases/latest/download/latest.json"])) process.exit(1)' "$1" || {
+    echo 'trusted updater config must keep the public key and stable endpoint' >&2
+    exit 1
+  }
+}
+
 run_bundles Linux 'appimage,deb,rpm' 1.2.3 false
 test "$(grep -c '^ARGV' "$log")" = 1
 grep -Fq '|build|--bundles|appimage,deb,rpm|--config|{"version":"1.2.3"}|--|--locked' "$log"
@@ -103,6 +110,10 @@ grep -Fq '|bundle|--bundles|rpm|--config|' "$log"
 grep -Fq '"version":"1.2.3"' "$log"
 grep -Fq '"release":"0~staging.5"' "$log"
 grep -Fq '"createUpdaterArtifacts":false' "$log"
+staging_build_config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p' | head -n 1)
+assert_trusted_updater_config "$staging_build_config"
+staging_bundle_config=$(grep '^ARGV' "$log" | grep '|bundle|' | sed -n 's/.*|--config|\(.*\)$/\1/p' | head -n 1)
+assert_trusted_updater_config "$staging_bundle_config"
 node -e 'const entries = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(line => line.startsWith("ARGV")); if (!entries.every(line => line.includes("\"productName\":\"Peppy\"") && line.includes("\"identifier\":\"org.peppy.desktop\""))) process.exit(1)' "$log"
 
 : > "$log"
@@ -142,6 +153,8 @@ grep -Fq "repair|packaging/macos/dmg/repair_dmg.py --dmg $root/dmg/Peppy.dmg --s
 grep -Fq '"createUpdaterArtifacts":true' "$log"
 test "$(grep -c '^spctl|' "$log")" = 0
 test "$(grep -c '^xcrun|' "$log")" = 0
+macos_adhoc_config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p' | head -n 1)
+assert_trusted_updater_config "$macos_adhoc_config"
 test "$(grep -c '^codesign|' "$log")" = 1
 
 if PATH="$fake_bin:$PATH" PNPM_LOG="$log" RUNNER_OS=macOS BUNDLES=app,dmg VERSION=1.2.3 TRUSTED_UPDATE_BUILD=true \
@@ -209,10 +222,12 @@ grep -Fq 'sign-windows-artifact.ps1' "$log"
 grep -Fq '/fixture path' "$log"
 config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p' | head -n 1)
 node -e 'const config = JSON.parse(process.argv[1]); if (!config.bundle.windows.signCommand) process.exit(1)' "$config"
+assert_trusted_updater_config "$config"
 
 GITHUB_WORKSPACE='/fixture path' run_bundles Windows 'nsis,msi' 1.2.3 true stable public-key private-key developer-id none
 config=$(grep '^ARGV' "$log" | sed -n 's/.*|--config|\(.*\)|--|--locked/\1/p' | head -n 1)
 node -e 'const config = JSON.parse(process.argv[1]); if (config.bundle.createUpdaterArtifacts !== true || config.bundle.windows?.signCommand) process.exit(1)' "$config"
+assert_trusted_updater_config "$config"
 
 : > "$log"
 env -u PEPPY_MACOS_SIGNING_MODE -u PEPPY_WINDOWS_SIGNING_MODE PATH="$fake_bin:$PATH" PNPM_LOG="$log" \
