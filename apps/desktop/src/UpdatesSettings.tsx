@@ -57,6 +57,6 @@ export function UpdatesSettings() {
     </>}
     {error && <p role="alert">{error}</p>}
     {notesError && <p role="alert">{notesError}</p>}
-    {error && <button className="secondary-button" type="button" disabled={busy} onClick={() => void refresh(true)}>Retry loading updates</button>}
+    {error && !status && <button className="secondary-button" type="button" disabled={busy} onClick={() => void refresh(true)}>Retry loading updates</button>}
   </section>;
 }

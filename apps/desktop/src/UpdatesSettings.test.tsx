@@ -106,6 +106,41 @@ describe("UpdatesSettings", () => {
     expect(screen.queryByLabelText("Automatically download updates")).not.toBeInTheDocument();
   });
 
+  it("offers one inline retry when a loaded error status also has a hook error", () => {
+    const updateStatus = result({ ...UPDATE_STATUS_SERDE_FIXTURE, phase: "error", message: "Network unavailable" }, "Update check failed.");
+    vi.mocked(useUpdateStatus).mockReturnValue(updateStatus);
+    render(<UpdatesSettings />);
+
+    expect(screen.getByText("Update check failed.")).toBeInTheDocument();
+    expect(screen.getByText("Network unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry loading updates" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(updateStatus.run).toHaveBeenCalledWith(updateApi.check);
+    expect(updateStatus.refresh).not.toHaveBeenCalled();
+  });
+
+  it("reloads status when the hook fails before any status loads", () => {
+    const updateStatus = result(null, "Update manifest could not be verified. (update-feed)");
+    vi.mocked(useUpdateStatus).mockReturnValue(updateStatus);
+    render(<UpdatesSettings />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Update manifest could not be verified. (update-feed)");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading updates" }));
+    expect(updateStatus.refresh).toHaveBeenCalledWith(true);
+    expect(updateStatus.run).not.toHaveBeenCalled();
+  });
+
+  it("shows no retry button for a loaded non-error status with a hook error", () => {
+    vi.mocked(useUpdateStatus).mockReturnValue(result({ ...UPDATE_STATUS_SERDE_FIXTURE, phase: "idle" }, "Network unavailable"));
+    render(<UpdatesSettings />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Network unavailable");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry loading updates" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check now" })).toBeInTheDocument();
+  });
+
   it("uses indeterminate progress while a download has no percentage", () => {
     vi.mocked(useUpdateStatus).mockReturnValue(result({ ...UPDATE_STATUS_SERDE_FIXTURE, phase: "downloading", progressPercent: null }));
     render(<UpdatesSettings />);
