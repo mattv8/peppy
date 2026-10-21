@@ -211,6 +211,10 @@ jobs:
       - run: npm install --global corepack@0.36.0
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: node --test apps/desktop/scripts/generate-tray-icons.test.mjs
+      - name: Verify committed tray icons
+        if: runner.os == 'macOS'
+        run: pnpm --filter @peppy/desktop icons:tray:check
       - run: pnpm --filter @peppy/browser-runtime typecheck
       - run: pnpm --filter @peppy/browser-runtime test
       - run: pnpm --filter @peppy/desktop-ui test

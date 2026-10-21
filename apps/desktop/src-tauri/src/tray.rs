@@ -8,10 +8,10 @@ use crate::{
 };
 use peppy_client_core::ConversationId;
 use tauri::{
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
     image::Image,
     menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 pub const MAIN: &str = "main";
@@ -41,32 +41,19 @@ fn menu_state() -> &'static Mutex<MenuState> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn template_icon_rgba(size: u32) -> Vec<u8> {
-    let mut rgba = vec![0; (size * size * 4) as usize];
-    let center = (size as i32 - 1) / 2;
-    let radius = (size as i32 / 2).saturating_sub(2);
-    for y in 0..size as i32 {
-        for x in 0..size as i32 {
-            let alpha = if (x - center).abs() + (y - center).abs() <= radius {
-                255
-            } else {
-                0
-            };
-            let offset = ((y as u32 * size + x as u32) * 4) as usize;
-            rgba[offset..offset + 4].copy_from_slice(&[0, 0, 0, alpha]);
-        }
-    }
-    rgba
-}
+const MACOS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/macos-template.png");
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/windows-color.png");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const DEFAULT_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
 
 fn tray_icon() -> tauri::Result<Image<'static>> {
     #[cfg(target_os = "macos")]
-    {
-        const SIZE: u32 = 18;
-        Ok(Image::new_owned(template_icon_rgba(SIZE), SIZE, SIZE))
-    }
-    #[cfg(not(target_os = "macos"))]
-    Image::from_bytes(include_bytes!("../icons/icon.png"))
+    return Image::from_bytes(MACOS_TRAY_ICON);
+    #[cfg(target_os = "windows")]
+    return Image::from_bytes(WINDOWS_TRAY_ICON);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Image::from_bytes(DEFAULT_TRAY_ICON)
 }
 
 /// Builds the tray; returns false when the platform/session offers no tray.
@@ -557,6 +544,35 @@ pub fn place_head_panel(app: &AppHandle, conversation_id: &str, frame: &crate::w
 mod tests {
     use super::*;
     use crate::windows::HeadFrame;
+    use image::{Rgba, RgbaImage};
+
+    fn decoded_icon(bytes: &[u8]) -> RgbaImage {
+        image::load_from_memory(bytes).unwrap().into_rgba8()
+    }
+
+    fn assert_transparent_outer_edges(icon: &RgbaImage) {
+        let width = icon.width();
+        let height = icon.height();
+        for x in 0..width {
+            assert_eq!(icon.get_pixel(x, 0)[3], 0);
+            assert_eq!(icon.get_pixel(x, height - 1)[3], 0);
+        }
+        for y in 0..height {
+            assert_eq!(icon.get_pixel(0, y)[3], 0);
+            assert_eq!(icon.get_pixel(width - 1, y)[3], 0);
+        }
+    }
+
+    fn assert_antialiased_visible_pixels(icon: &RgbaImage) {
+        assert!(icon.pixels().any(|pixel| pixel[3] == 255));
+        assert!(icon.pixels().any(|pixel| (1..255).contains(&pixel[3])));
+    }
+
+    fn assert_images_match(image: &Image<'_>, expected: &RgbaImage) {
+        assert_eq!(image.width(), expected.width());
+        assert_eq!(image.height(), expected.height());
+        assert_eq!(image.rgba(), expected.as_raw());
+    }
 
     fn frame(x: f64, y: f64, work_width: f64, work_height: f64, scale: f64) -> HeadFrame {
         HeadFrame {
@@ -687,13 +703,47 @@ mod tests {
     }
 
     #[test]
-    fn template_icon_has_transparent_corners_and_visible_diamond() {
-        let size = 18;
-        let rgba = template_icon_rgba(size);
-        assert_eq!(rgba[3], 0);
-        assert_eq!(rgba[(((size / 2) * size + size / 2) * 4 + 3) as usize], 255);
-        assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 0));
-        assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 255));
+    fn macos_template_asset_is_a_padded_black_antialiased_icon() {
+        let icon = decoded_icon(MACOS_TRAY_ICON);
+        assert_eq!(icon.dimensions(), (36, 36));
+        assert_transparent_outer_edges(&icon);
+        assert_antialiased_visible_pixels(&icon);
+        assert!(icon
+            .pixels()
+            .filter(|pixel| pixel[3] != 0)
+            .all(|pixel| { pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 }));
+    }
+
+    #[test]
+    fn windows_color_asset_is_a_padded_coral_antialiased_icon() {
+        let icon = decoded_icon(WINDOWS_TRAY_ICON);
+        assert_eq!(icon.dimensions(), (32, 32));
+        assert_transparent_outer_edges(&icon);
+        assert_antialiased_visible_pixels(&icon);
+        assert!(icon
+            .pixels()
+            .filter(|pixel| pixel[3] == 255)
+            .all(|pixel| color_is_close_to_coral(*pixel)));
+    }
+
+    fn color_is_close_to_coral(pixel: Rgba<u8>) -> bool {
+        const CORAL: [u8; 3] = [229, 83, 61];
+        const TOLERANCE: u8 = 2;
+        pixel.0[..3]
+            .iter()
+            .zip(CORAL)
+            .all(|(channel, expected)| channel.abs_diff(expected) <= TOLERANCE)
+    }
+
+    #[test]
+    fn tray_icon_uses_the_current_platform_asset() {
+        let icon = tray_icon().unwrap();
+        #[cfg(target_os = "macos")]
+        assert_images_match(&icon, &decoded_icon(MACOS_TRAY_ICON));
+        #[cfg(target_os = "windows")]
+        assert_images_match(&icon, &decoded_icon(WINDOWS_TRAY_ICON));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_images_match(&icon, &decoded_icon(DEFAULT_TRAY_ICON));
     }
 
     #[test]
