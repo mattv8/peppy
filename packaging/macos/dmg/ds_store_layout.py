@@ -16,6 +16,7 @@ ICON_SIZE = 128.0
 TEXT_SIZE = 16.0
 GRID_SPACING = 54.0
 BACKGROUND_PATH = ".background/background.tiff"
+BACKGROUND_POSIX_PATH = f"/{BACKGROUND_PATH}"
 HIDDEN_WINDOW_FIELDS = (
     "ContainerShowSidebar", "ShowStatusBar", "ShowToolbar", "ShowPathbar",
     "ShowTabView", "ShowSidebar", "PreviewPaneVisibility",
@@ -56,9 +57,11 @@ def volume_application(volume: Path) -> Path:
 
 
 def background_alias(background: Path) -> Alias:
+    """Keep portable POSIX hints; the Carbon-only alias resolves to the parent folder."""
     alias = Alias.for_file(str(background))
-    alias.volume.posix_path = None
-    alias.target.posix_path = None
+    volume_name = alias.volume.name.decode() if isinstance(alias.volume.name, bytes) else alias.volume.name
+    alias.target.posix_path = BACKGROUND_POSIX_PATH
+    alias.volume.posix_path = f"/Volumes/{volume_name}"
     return alias
 
 
@@ -91,7 +94,15 @@ def assert_layout(volume: Path, device: str | None = None) -> None:
     icvp = layout["icvp"]
     alias = icvp.get("backgroundImageAlias") if isinstance(icvp, dict) else None
     expected_name = volume_name(device) if device else volume.name
-    alias_valid = isinstance(alias, bytes) and (decoded := Alias.from_bytes(alias)).target.filename == Path(BACKGROUND_PATH).name and decoded.volume.name == expected_name and b"/Users/" not in alias and b"/private/" not in alias
+    alias_valid = (
+        isinstance(alias, bytes)
+        and (decoded := Alias.from_bytes(alias)).target.filename == Path(BACKGROUND_PATH).name
+        and decoded.target.posix_path == BACKGROUND_POSIX_PATH
+        and decoded.volume.name == expected_name
+        and decoded.volume.posix_path == f"/Volumes/{expected_name}"
+        and b"/Users/" not in alias
+        and b"/private/" not in alias
+    )
     if not isinstance(icvp, dict) or any((
         icvp.get("backgroundType") != 2, icvp.get("arrangeBy") != "none", icvp.get("iconSize") != ICON_SIZE,
         any(icvp.get(f"backgroundColor{channel}") != 1.0 for channel in ("Red", "Green", "Blue")),
