@@ -3912,6 +3912,7 @@ dependencies = [
  "peppy-hosted-client",
  "peppy-protocol",
  "peppy-server",
+ "plist",
  "reqwest 0.13.5",
  "rustls",
  "rustls-native-certs",

@@ -214,6 +214,9 @@ fn update_item(status: &UpdateStatus) -> Option<UpdateItem> {
         UpdatePhase::Deferred if status.can_restart => Some(UpdateItem {
             label: "Update ready — Restart Peppy".into(),
         }),
+        UpdatePhase::Installed if status.can_restart => Some(UpdateItem {
+            label: "Update installed — Restart Peppy".into(),
+        }),
         UpdatePhase::AuthorizationRequired => Some(UpdateItem {
             label: "Update requires authorization".into(),
         }),
@@ -715,6 +718,11 @@ mod tests {
         assert_eq!(
             update_item(&status).unwrap().label,
             "Update requires authorization"
+        );
+        status.phase = UpdatePhase::Installed;
+        assert_eq!(
+            update_item(&status).unwrap().label,
+            "Update installed — Restart Peppy"
         );
     }
 }

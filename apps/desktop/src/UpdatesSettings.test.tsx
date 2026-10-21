@@ -34,13 +34,43 @@ describe("UpdatesSettings", () => {
   it("preserves deferred readiness and exposes explicit OS authorization", () => {
     vi.mocked(useUpdateStatus).mockReturnValue(result({ ...UPDATE_STATUS_SERDE_FIXTURE, phase: "deferred", deferredUntil: "2026-10-16T13:00:00Z" }));
     const { rerender } = render(<UpdatesSettings />);
-    expect(screen.getByText(/is ready\. Restart is deferred/)).toBeInTheDocument();
+    expect(screen.getByText("Restart into version 1.2.4 is deferred until 2026-10-16T13:00:00Z.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Later" })).not.toBeInTheDocument();
 
     vi.mocked(useUpdateStatus).mockReturnValue(result({ ...UPDATE_STATUS_SERDE_FIXTURE, phase: "authorization_required", packageKind: "deb", unattended: false }));
     rerender(<UpdatesSettings />);
     expect(screen.getByRole("button", { name: "Authorize and restart" })).toBeInTheDocument();
     expect(screen.getByText(/Package updates require operating system authorization/)).toBeInTheDocument();
+  });
+
+  it("presents an installed update with restart controls", () => {
+    const updateStatus = result({
+      ...UPDATE_STATUS_SERDE_FIXTURE,
+      phase: "installed",
+      availableVersion: "1.2.4",
+      message: "Version 1.2.4 is installed. Restart Peppy to use it.",
+    });
+    vi.mocked(useUpdateStatus).mockReturnValue(updateStatus);
+    render(<UpdatesSettings />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Version 1.2.4 is installed. Restart Peppy to use it.");
+    expect(screen.getAllByText("Version 1.2.4 is installed. Restart Peppy to use it.")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Restart now" }));
+    expect(updateStatus.run).toHaveBeenCalledWith(updateApi.restart);
+    expect(screen.getByRole("button", { name: "Later" })).toBeEnabled();
+  });
+
+  it("announces installed-update restart failures while keeping restart available", () => {
+    vi.mocked(useUpdateStatus).mockReturnValue(result({
+      ...UPDATE_STATUS_SERDE_FIXTURE,
+      phase: "installed",
+      availableVersion: "1.2.4",
+      message: "Peppy could not restart into version 1.2.4.",
+    }));
+    render(<UpdatesSettings />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Peppy could not restart into version 1.2.4.");
+    expect(screen.getByRole("button", { name: "Restart now" })).toBeEnabled();
   });
 
   it("does not present a network failure as up to date", () => {
@@ -58,6 +88,22 @@ describe("UpdatesSettings", () => {
     expect(screen.queryByLabelText("Automatically download updates")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Last checked:/)).not.toBeInTheDocument();
+  });
+
+  it("keeps installed update restart controls visible on disabled channels", () => {
+    vi.mocked(useUpdateStatus).mockReturnValue(result({
+      ...UPDATE_STATUS_SERDE_FIXTURE,
+      channel: "disabled",
+      phase: "installed",
+      availableVersion: "1.2.4",
+    }));
+    render(<UpdatesSettings />);
+
+    expect(screen.getByRole("button", { name: "Restart now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Later" })).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Version 1.2.4 is installed. Restart Peppy to use it.");
+    expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Automatically download updates")).not.toBeInTheDocument();
   });
 
   it("uses indeterminate progress while a download has no percentage", () => {

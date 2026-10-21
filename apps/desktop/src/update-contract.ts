@@ -8,6 +8,7 @@ export type UpdatePhase =
   | "checking"
   | "downloading"
   | "ready"
+  | "installed"
   | "deferred"
   | "authorization_required"
   | "installing"
