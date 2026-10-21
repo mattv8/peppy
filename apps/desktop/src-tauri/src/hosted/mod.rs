@@ -30,6 +30,8 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+mod callback_page;
+
 const PRODUCTION_ORIGIN: &str = "https://peppy.pro";
 const MAX_BODY: usize = 64 * 1024;
 const SESSION_PREFIX: &str = "hosted-session:";
@@ -992,12 +994,14 @@ impl Loopback {
             .map_err(|_| BridgeError::new("hosted-sign-in", "The sign-in callback was invalid."))?;
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         let cancelled = query.contains_key("error");
-        let page = if cancelled {
-            "Sign-in cancelled. You can return to Peppy."
+        let outcome = if cancelled {
+            callback_page::CallbackOutcome::Cancelled
         } else {
-            "You can return to Peppy."
+            callback_page::CallbackOutcome::Received
         };
-        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", page.len(), page).as_bytes()).await;
+        let _ = stream
+            .write_all(callback_page::response(outcome).as_bytes())
+            .await;
         if cancelled {
             return Err(BridgeError::new(
                 "hosted-sign-in-cancelled",
