@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 import repair_dmg
 import dmg_signing
-from ds_store_layout import assert_layout
+from ds_store_layout import assert_layout, read_layout
+from native_alias_resolution import resolve_alias
 
 
 class RepairDmgTests(unittest.TestCase):
@@ -202,6 +203,9 @@ class RepairDmgTests(unittest.TestCase):
                 entities = plistlib.loads(attached.stdout)["system-entities"]
                 device = next(entity["dev-entry"] for entity in entities if entity.get("mount-point"))
                 assert_layout(verify_mount, device)
+                background_alias = read_layout(verify_mount)["icvp"]["backgroundImageAlias"]
+                expected_background = verify_mount / ".background" / "background.tiff"
+                self.assertEqual(resolve_alias(background_alias).resolve(), expected_background.resolve())
                 manifest = repair_dmg.app_manifest(verify_mount)
                 self.assertIn("Fixture.app/Contents/payload-link", manifest)
                 self.assertIn("link:", manifest["Fixture.app/Contents/payload-link"])
