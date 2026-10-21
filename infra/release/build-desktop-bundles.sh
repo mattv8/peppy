@@ -20,7 +20,8 @@ if [ "$TRUSTED_UPDATE_BUILD" = true ]; then
     unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
     export APPLE_SIGNING_IDENTITY='-'
   fi
-  config=$(node -e 'process.stdout.write(JSON.stringify({productName:"Peppy",identifier:"org.peppy.desktop",bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.PEPPY_UPDATE_PUBLIC_KEY}}}))')
+  # Tauri's updater builder requires an endpoint, and offline restore_update still needs it; the actual fetch uses Peppy's restricted channel-aware feed.
+  config=$(node -e 'process.stdout.write(JSON.stringify({productName:"Peppy",identifier:"org.peppy.desktop",bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.PEPPY_UPDATE_PUBLIC_KEY,endpoints:["https://github.com/mattv8/peppy/releases/latest/download/latest.json"]}}}))')
 else
   # Tauri interprets even empty Apple credentials as a request to sign.
   unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
