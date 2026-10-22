@@ -190,6 +190,22 @@ This reference records non-obvious Peppy domain constraints. Related references:
   generated or logged as a fallback. Configure the same token on every replica.
   Existing unclaimed installations upgraded without the setting become open;
   operators who require protection must configure it before upgrade.
+- Community admin password and generated vault secret are separate secrets with
+  separate checks. `validate_password` in
+  [instance policy](../services/server/src/instance.rs) accepts 12–1024 UTF-8
+  bytes for the admin password. Generated vault secrets are six EFF words from
+  [passphrase generation](../crates/crypto/src/passphrase.rs); the shared
+  `passphrase_acceptable` check (at least four words and 24 characters) applies to
+  that secret. The 24-character check is not a password requirement for users. Do
+  not apply vault-secret rules to the admin password, and do not require users to
+  create vault passphrases to satisfy them. A "weak secret" error on a user-supplied
+  password means the value reached the wrong check: trace the actual hosted or
+  community command before changing either validator. The intended contract is
+  that the admin password goes only to instance validation and never becomes vault
+  encryption input; a regression test should assert the command's input routing.
+  Do not claim a legacy path is fixed without that test. Hosted provider sign-in
+  has no community admin-password bootstrap, and instance management is
+  self-hosted only. App lock is a separate local gate.
 - A stranger's completed first claim has no automatic reclaim or password
   recovery path. Recovery requires stopping the affected deployment and removing
   only its dedicated PostgreSQL and attachment state. For root Compose, inspect

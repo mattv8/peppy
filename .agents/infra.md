@@ -105,3 +105,24 @@ checkout.
   OAuth secrets. Changing them requires rebuilding the mobile app. Changing the
   server audience allowlist does not rewrite bundled configuration. See
   [Android setup](../apps/android/README.md) and [iOS setup](../apps/ios/README.md).
+- An installed desktop app and the checkout are separate evidence. Before
+  comparing them, record the executable path, bundle version, and available build
+  provenance of the installed binary. An equal version string does not prove that
+  a newer checkout is installed.
+- Desktop updater endpoint, channel, and public key are compiled into the artifact
+  by [`build-desktop-bundles.sh`](../infra/release/build-desktop-bundles.sh). A
+  checkout fix cannot repair an already-installed binary. It needs an update from a
+  build that contains the fix, or a manual replacement.
+- Peppy's update feed ([`feed.rs`](../apps/desktop/src-tauri/src/updates/feed.rs))
+  fetches the stable manifest itself. Tauri's updater builder also needs a
+  configured endpoint. If it has none, `build()` returns `EmptyEndpoints` before the
+  manifest is checked. [`updates/mod.rs`](../apps/desktop/src-tauri/src/updates/mod.rs)
+  reports that failure as the generic `update-feed` "could not be verified" message.
+  That message does not prove a bad signature or manifest. Check the builder error
+  first.
+- The endpoint and public-key overlay are asserted by
+  [`test-desktop-bundles.sh`](../infra/release/test-desktop-bundles.sh). Run it after
+  changing the overlay.
+- A build that lacks the endpoint cannot update itself. Recover it with a manual
+  install of a post-fix release over the existing app. Preserve user data; do not
+  reset application state.
