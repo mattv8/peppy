@@ -16,7 +16,7 @@ use aws_sigv4::{
 use futures_util::{Stream, StreamExt};
 use reqwest::{
     Client, Method, RequestBuilder, StatusCode,
-    header::{CONTENT_LENGTH, HeaderName, HeaderValue},
+    header::{CONTENT_LENGTH, CONTENT_RANGE, HeaderName, HeaderValue},
     redirect::Policy,
 };
 use sha2::{Digest, Sha256};
@@ -29,6 +29,13 @@ use crate::config::S3Config;
 
 pub type DataStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, IoError>> + Send + Sync + 'static>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectRange {
+    pub start: u64,
+    pub end: u64,
+    pub total: u64,
+}
+
 /// TCP connect bound for every S3 request.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum silence while reading any S3 response, including streamed bodies.
@@ -37,6 +44,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Whole-request bound for an object upload (attachments are at most 64 MiB).
 const PUT_TIMEOUT: Duration = Duration::from_secs(300);
+const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(360);
+const SSE_HEADER: &str = "x-amz-server-side-encryption";
+const SSE_VALUE: &str = "AES256";
+const PROBE_BYTES: usize = 20 * 1024 * 1024;
+const PROBE_RANGE_START: usize = 8 * 1024 * 1024 + 13;
+const PROBE_RANGE_BYTES: usize = 64;
 
 /// Storage failures callers must distinguish: a missing object is a durable
 /// fact (409/404/410 at the API), anything else is transient (503).
@@ -70,17 +83,19 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Constructs storage and idempotently provisions the configured private bucket.
-    /// Normal API startup uses this so a fresh Compose deployment is usable without
-    /// requiring a separate operator-only storage check first.
+    /// Provisions when needed and verifies the backend encryption contract before
+    /// publishing a usable storage instance.
     pub async fn initialize(config: &S3Config) -> Result<Self, StorageError> {
         let storage = Self::new(config);
         if !config.precreated_bucket {
             storage.ensure_bucket().await?;
         }
+        storage.verify_encryption_contract().await?;
         Ok(storage)
     }
 
+    /// Constructs an adapter without performing the startup encryption probe.
+    /// Production startup must use [`Self::initialize`].
     pub fn new(config: &S3Config) -> Self {
         let credentials = Credentials::new(
             config.access_key.clone(),
@@ -137,7 +152,10 @@ impl Storage {
         let request = self.signed_request(
             Method::PUT,
             &url,
-            &[("content-length", length_header.as_str())],
+            &[
+                ("content-length", length_header.as_str()),
+                (SSE_HEADER, SSE_VALUE),
+            ],
             SignableBody::Precomputed(body_hash),
         )?;
         let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
@@ -151,22 +169,35 @@ impl Storage {
         if !response.status().is_success() {
             return Err(StorageError::Unavailable("S3 PUT rejected"));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 PUT encryption acknowledgement missing",
+        )?;
         Ok(())
     }
 
-    /// Uploads a small in-memory object (readiness contract checks only).
+    /// Uploads an in-memory object used by the startup contract check.
     pub async fn put_bytes(&self, key: &str, bytes: Vec<u8>) -> Result<(), StorageError> {
         let url = self.object_url(key)?;
-        let request = self.signed_request(Method::PUT, &url, &[], SignableBody::Bytes(&bytes))?;
+        let request = self.signed_request(
+            Method::PUT,
+            &url,
+            &[(SSE_HEADER, SSE_VALUE)],
+            SignableBody::Bytes(&bytes),
+        )?;
         let response = request
             .body(bytes)
-            .timeout(CONTROL_TIMEOUT)
+            .timeout(PUT_TIMEOUT)
             .send()
             .await
             .map_err(|_| StorageError::Unavailable("S3 PUT request failed"))?;
         if !response.status().is_success() {
             return Err(StorageError::Unavailable("S3 PUT rejected"));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 PUT encryption acknowledgement missing",
+        )?;
         Ok(())
     }
 
@@ -184,6 +215,10 @@ impl Storage {
                 "S3 HEAD rejected",
             ));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 HEAD encryption acknowledgement missing",
+        )?;
         response
             .headers()
             .get(CONTENT_LENGTH)
@@ -225,6 +260,67 @@ impl Storage {
                 "S3 GET rejected",
             ));
         }
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 GET encryption acknowledgement missing",
+        )?;
+        let stream = response.bytes_stream().map(|chunk| {
+            chunk
+                .map(|bytes| bytes.to_vec())
+                .map_err(|_| IoError::other("S3 response stream failed"))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    /// Streams an inclusive byte range after verifying that S3 returned exactly
+    /// the bytes requested. The caller's known object size prevents a malformed
+    /// storage response from being relayed with a false Content-Range.
+    pub(crate) async fn get_range(
+        &self,
+        key: &str,
+        range: ObjectRange,
+    ) -> Result<DataStream, StorageError> {
+        let url = self.object_url(key)?;
+        let requested = format!("bytes={}-{}", range.start, range.end);
+        let response = self
+            .signed_request(
+                Method::GET,
+                &url,
+                &[("range", requested.as_str())],
+                SignableBody::empty(),
+            )?
+            .send()
+            .await
+            .map_err(|_| StorageError::Unavailable("S3 ranged GET request failed"))?;
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(StorageError::from_status(
+                response.status(),
+                "S3 ranged GET rejected",
+            ));
+        }
+        let expected_length = range
+            .end
+            .checked_sub(range.start)
+            .and_then(|length| length.checked_add(1))
+            .ok_or(StorageError::Invalid("invalid requested S3 range"))?;
+        let content_length = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        let content_range = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok());
+        require_sse_acknowledgement(
+            response.headers(),
+            "S3 GET encryption acknowledgement missing",
+        )?;
+        if !range_response_is_valid(content_length, content_range, range, expected_length) {
+            return Err(StorageError::Unavailable(
+                "S3 ranged GET response is invalid",
+            ));
+        }
         let stream = response.bytes_stream().map(|chunk| {
             chunk
                 .map(|bytes| bytes.to_vec())
@@ -247,6 +343,68 @@ impl Storage {
             return Err(StorageError::Unavailable("S3 probe rejected"));
         }
         Ok(())
+    }
+
+    async fn verify_encryption_contract(&self) -> Result<(), StorageError> {
+        let key = format!("peppy-storage-probe-{}", uuid::Uuid::new_v4());
+        let result =
+            match tokio::time::timeout(STARTUP_PROBE_TIMEOUT, self.run_encryption_contract(&key))
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(StorageError::Unavailable("S3 encryption probe timed out")),
+            };
+        let cleanup = self.delete(&key).await;
+        match (result, cleanup) {
+            (Err(error), Err(cleanup_error)) => {
+                tracing::warn!(%error, %cleanup_error, "storage encryption probe cleanup failed");
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    async fn run_encryption_contract(&self, key: &str) -> Result<(), StorageError> {
+        let payload = probe_bytes();
+        self.put_bytes(key, payload.clone()).await?;
+        if self.head_bytes(key).await? != payload.len() as i64 {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe has invalid content length",
+            ));
+        }
+        if self.read_exact(key, payload.len()).await? != payload {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe full read mismatch",
+            ));
+        }
+        let range = ObjectRange {
+            start: PROBE_RANGE_START as u64,
+            end: (PROBE_RANGE_START + PROBE_RANGE_BYTES - 1) as u64,
+            total: payload.len() as u64,
+        };
+        if self.read_range_exact(key, range).await?
+            != payload[PROBE_RANGE_START..=range.end as usize]
+        {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe range read mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn read_exact(&self, key: &str, expected_length: usize) -> Result<Vec<u8>, StorageError> {
+        collect_exact(self.get(key).await?, expected_length).await
+    }
+
+    async fn read_range_exact(
+        &self,
+        key: &str,
+        range: ObjectRange,
+    ) -> Result<Vec<u8>, StorageError> {
+        let expected_length = (range.end - range.start + 1) as usize;
+        collect_exact(self.get_range(key, range).await?, expected_length).await
     }
 
     /// Creates the private bucket if needed; an existing bucket is success.
@@ -355,9 +513,73 @@ impl Storage {
     }
 }
 
+fn require_sse_acknowledgement(
+    headers: &reqwest::header::HeaderMap,
+    missing_message: &'static str,
+) -> Result<(), StorageError> {
+    if headers
+        .get(SSE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some(SSE_VALUE)
+    {
+        Ok(())
+    } else {
+        Err(StorageError::Unavailable(missing_message))
+    }
+}
+
+async fn collect_exact(
+    mut stream: DataStream,
+    expected_length: usize,
+) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = Vec::with_capacity(expected_length);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| StorageError::Unavailable("S3 probe read failed"))?;
+        if bytes.len().saturating_add(chunk.len()) > expected_length {
+            return Err(StorageError::Unavailable(
+                "S3 encryption probe returned too many bytes",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() != expected_length {
+        return Err(StorageError::Unavailable(
+            "S3 encryption probe returned too few bytes",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn probe_bytes() -> Vec<u8> {
+    (0..PROBE_BYTES)
+        .map(|position| (position % 251) as u8)
+        .collect()
+}
+
+fn content_range_matches(value: Option<&str>, expected: ObjectRange) -> bool {
+    value.is_some_and(|value| {
+        value
+            == format!(
+                "bytes {}-{}/{}",
+                expected.start, expected.end, expected.total
+            )
+    })
+}
+
+fn range_response_is_valid(
+    content_length: Option<u64>,
+    content_range: Option<&str>,
+    expected: ObjectRange,
+    expected_length: u64,
+) -> bool {
+    content_length == Some(expected_length) && content_range_matches(content_range, expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::TryStreamExt;
+    use std::io::Write;
 
     #[test]
     fn only_not_found_is_a_durable_absence() {
@@ -375,5 +597,109 @@ mod tests {
                 StorageError::Unavailable("x")
             );
         }
+    }
+
+    #[test]
+    fn content_range_requires_exact_storage_response() {
+        let range = ObjectRange {
+            start: 2,
+            end: 5,
+            total: 10,
+        };
+        assert!(content_range_matches(Some("bytes 2-5/10"), range));
+        assert!(!content_range_matches(Some("bytes 2-6/10"), range));
+        assert!(!content_range_matches(Some("bytes 2-5/*"), range));
+        assert!(!content_range_matches(None, range));
+        assert!(range_response_is_valid(
+            Some(4),
+            Some("bytes 2-5/10"),
+            range,
+            4
+        ));
+        assert!(!range_response_is_valid(
+            Some(3),
+            Some("bytes 2-5/10"),
+            range,
+            4
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable S3 configuration; run explicitly"]
+    async fn disposable_storage_contract_accepts_a_64_mib_put_and_exact_ranges() {
+        assert_eq!(
+            std::env::var("PEPPY_DISPOSABLE_STORAGE_CONTRACT").as_deref(),
+            Ok("1"),
+            "set PEPPY_DISPOSABLE_STORAGE_CONTRACT=1 for this disposable-only test"
+        );
+        assert_ne!(
+            std::env::var("PEPPY_ENV").ok().as_deref(),
+            Some("production"),
+            "refusing to contact production storage"
+        );
+        let config = crate::config::Config::from_env()
+            .expect("complete disposable S3 test configuration is required");
+        let storage = Storage::new(config.s3.as_ref().expect("S3 configuration is required"));
+        let mut file = tempfile::NamedTempFile::new().expect("temporary file");
+        const OBJECT_BYTES: usize = 64 * 1024 * 1024;
+        const RANGE_START: usize = 1024;
+        const RANGE_BYTES: usize = 1024;
+        for offset in (0..OBJECT_BYTES).step_by(64 * 1024) {
+            let bytes = patterned_bytes(offset, (OBJECT_BYTES - offset).min(64 * 1024));
+            file.write_all(&bytes).expect("write patterned object");
+        }
+        let key = format!("storage-contract/{}", uuid::Uuid::new_v4());
+        let result: Result<(), String> = async {
+            storage
+                .put_file(&key, file.path().to_path_buf())
+                .await
+                .map_err(|error| error.to_string())?;
+            if storage
+                .head_bytes(&key)
+                .await
+                .map_err(|error| error.to_string())?
+                != OBJECT_BYTES as i64
+            {
+                return Err("stored object has an unexpected size".into());
+            }
+            let range = ObjectRange {
+                start: RANGE_START as u64,
+                end: (RANGE_START + RANGE_BYTES - 1) as u64,
+                total: OBJECT_BYTES as u64,
+            };
+            let actual = storage
+                .get(&key)
+                .await
+                .map_err(|error| error.to_string())?
+                .try_collect::<Vec<Vec<u8>>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .concat();
+            if actual != patterned_bytes(0, OBJECT_BYTES) {
+                return Err("full object bytes do not match the uploaded pattern".into());
+            }
+            let actual = storage
+                .get_range(&key, range)
+                .await
+                .map_err(|error| error.to_string())?
+                .try_collect::<Vec<Vec<u8>>>()
+                .await
+                .map_err(|error| error.to_string())?
+                .concat();
+            if actual != patterned_bytes(RANGE_START, RANGE_BYTES) {
+                return Err("ranged bytes do not match the uploaded pattern".into());
+            }
+            Ok(())
+        }
+        .await;
+        let cleanup = storage.delete(&key).await;
+        result.expect("disposable storage contract");
+        cleanup.expect("delete contract object");
+    }
+
+    fn patterned_bytes(offset: usize, length: usize) -> Vec<u8> {
+        (offset..offset + length)
+            .map(|position| (position % 251) as u8)
+            .collect()
     }
 }

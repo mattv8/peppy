@@ -19,7 +19,7 @@ use peppy_client_core::{AttachmentId, Client, Error as CoreError};
 use peppy_desktop_api::contacts as shared;
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -97,10 +97,54 @@ pub fn list_books(session: &Session) -> BridgeResult<Vec<Value>> {
         .into_iter()
         .map(|gateway| (gateway.id, gateway.name))
         .collect::<HashMap<_, _>>();
+    let revoked = session.revoked_devices();
     Ok(core_books(&session.client)?
         .iter()
-        .filter_map(|book| shared::book_view(book, own, &device_names, &pending))
+        .filter_map(|book| {
+            let mut view = shared::book_view(book, own, &device_names, &pending)?;
+            if view
+                .get("ownerDeviceId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| revoked.contains(id))
+            {
+                view["sourceRevoked"] = json!(true);
+            }
+            Some(view)
+        })
         .collect())
+}
+
+pub fn request_sync(session: &Session, book_id: &str) -> BridgeResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    let book = find_book(&session.client, book_id)?;
+    if str_field(&book, "owner_device_id").is_some_and(|id| session.revoked_devices().contains(id))
+    {
+        return Err(BridgeError::new(
+            "source_revoked",
+            "This book's source device was removed.",
+        ));
+    }
+    let status = parse_core(
+        session
+            .client
+            .request_contact_sync(&json!({"book_id": book_id}).to_string()),
+    )?;
+    session.request_work();
+    session.notify();
+    Ok(status)
+}
+
+pub fn sync_request_status(session: &Session, book_id: &str) -> BridgeResult<Value> {
+    if !valid_id(book_id) {
+        return Err(invalid("The contact book is invalid."));
+    }
+    parse_core(
+        session
+            .client
+            .contact_sync_request_status(&json!({"book_id": book_id}).to_string()),
+    )
 }
 
 pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {
@@ -141,21 +185,8 @@ pub(crate) fn session_avatar(
         return None;
     }
     *budget -= 1;
-    let value = session
-        .client
-        .open_native_plaintext(id)
-        .ok()
-        .and_then(|file| {
-            let mut bytes = Vec::new();
-            fs::File::open(file.path())
-                .ok()?
-                .take(MAX_AVATAR_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            (bytes.len() as u64 <= MAX_AVATAR_BYTES)
-                .then(|| media::avatar_data_url(&bytes, AVATAR_EDGE, AVATAR_MAX_BYTES))
-                .flatten()
-        });
+    let value = local_photo_bytes(session, id)
+        .and_then(|bytes| media::avatar_data_url(&bytes, AVATAR_EDGE, AVATAR_MAX_BYTES));
     let mut cache = session
         .previews
         .lock()
@@ -165,6 +196,18 @@ pub(crate) fn session_avatar(
     }
     cache.insert(id, value.clone());
     value
+}
+
+/// Reads a verified local contact photo, rejecting data above the avatar budget.
+pub(crate) fn local_photo_bytes(session: &Session, id: AttachmentId) -> Option<Vec<u8>> {
+    let file = session.client.open_native_plaintext(id).ok()?;
+    let mut bytes = Vec::new();
+    fs::File::open(file.path())
+        .ok()?
+        .take(MAX_AVATAR_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_AVATAR_BYTES).then_some(bytes)
 }
 
 /// One page (at most 200, core's cap) of a book's live contacts, starting at `offset`.
@@ -408,21 +451,9 @@ pub fn submit(session: &Session, input: &Value) -> BridgeResult<Value> {
 // Display-only resolution, recipient discovery and repair
 // ---------------------------------------------------------------------------------------------
 
-/// Core's per-call address cap for `resolve_contact_addresses_json`.
-const RESOLVE_BATCH: usize = 100;
-/// Distinct addresses resolved per snapshot; the rest show their raw number.
-const MAX_RESOLVED_ADDRESSES: usize = 1000;
 /// Avatars attached to one snapshot (decrypts are cached, so this bounds snapshot size).
 const SNAPSHOT_AVATARS: usize = 64;
 pub use shared::Resolved;
-
-fn looks_like_phone(address: &str) -> bool {
-    let digits = address.bytes().filter(u8::is_ascii_digit).count();
-    (3..=15).contains(&digits)
-        && address
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b' ' | b'(' | b')' | b'.' | b'-'))
-}
 
 /// Resolves phone-number addresses through core's bounded projection, preferring the given
 /// source device's book. Ambiguous or unknown numbers are simply absent (shown raw). Purely
@@ -431,22 +462,9 @@ pub fn resolve_addresses(
     client: &Client,
     addresses: &[(String, Option<String>)],
 ) -> HashMap<String, Resolved> {
-    let mut by_source: HashMap<Option<&str>, Vec<&str>> = HashMap::new();
-    let mut seen = HashSet::new();
-    for (address, source) in addresses {
-        if address.len() <= 256 && looks_like_phone(address) && seen.insert(address.as_str()) {
-            by_source
-                .entry(source.as_deref().filter(|s| valid_id(s)))
-                .or_default()
-                .push(address);
-        }
-        if seen.len() >= MAX_RESOLVED_ADDRESSES {
-            break;
-        }
-    }
     let mut out = HashMap::new();
-    for (source, list) in by_source {
-        for batch in list.chunks(RESOLVE_BATCH) {
+    for (source, list) in shared::resolution_candidates(addresses) {
+        for batch in list.chunks(shared::RESOLVE_ADDRESS_BATCH) {
             let mut input = json!({"addresses": batch});
             if let Some(source) = source {
                 input["source_device_id"] = json!(source);

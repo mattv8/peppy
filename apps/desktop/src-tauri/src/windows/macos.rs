@@ -7,7 +7,7 @@
 // binding, and objc's macros still emit the legacy cargo-clippy feature check.
 #![allow(deprecated, unexpected_cfgs)]
 
-use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, ffi::c_void, sync::OnceLock};
 
 use cocoa::{
     appkit::{
@@ -26,7 +26,7 @@ use objc::{
 };
 use tauri::{AppHandle, Monitor};
 
-use super::{HeadCallback, HeadEvent, HeadFrame, HeadPosition, HeadSpec};
+use super::{HeadCallback, HeadEvent, HeadFrame, HeadGlyph, HeadPosition, HeadSpec};
 
 const HEAD_SIZE: f64 = 56.0;
 const CIRCLE_SIZE: f64 = 48.0;
@@ -36,19 +36,62 @@ const MAX_HEADS: usize = 8;
 const DRAG_THRESHOLD: f64 = 4.0;
 const NS_NONACTIVATING_PANEL_MASK: u64 = 1 << 7;
 const MONITOR_GEOMETRY_TOLERANCE: f64 = 0.5;
+const IMAGE_SCALING_PROPORTIONALLY_UP_OR_DOWN: i64 = 3;
+const CG_IMAGE_ALPHA_NONE_SKIP_LAST: u32 = 6;
+
+type CFTypeRef = *const c_void;
+type CFDataRef = *const c_void;
+type CFStringRef = *const c_void;
+type CGColorSpaceRef = *mut c_void;
+type CGDataProviderRef = *mut c_void;
+type CGImageRef = *mut c_void;
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFDataCreate(allocator: CFTypeRef, bytes: *const u8, length: isize) -> CFDataRef;
+    fn CFRelease(value: CFTypeRef);
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    static kCGColorSpaceSRGB: CFStringRef;
+    fn CGColorSpaceCreateWithName(name: CFStringRef) -> CGColorSpaceRef;
+    fn CGDataProviderCreateWithCFData(data: CFDataRef) -> CGDataProviderRef;
+    fn CGImageCreate(
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bits_per_pixel: usize,
+        bytes_per_row: usize,
+        space: CGColorSpaceRef,
+        bitmap_info: u32,
+        provider: CGDataProviderRef,
+        decode: *const f64,
+        should_interpolate: BOOL,
+        intent: u32,
+    ) -> CGImageRef;
+}
 
 struct Head {
     panel: id,
-    view: id,
-    initials: id,
-    person: id,
-    badge: id,
+    views: HeadViews,
     spec: HeadSpec,
     frame: HeadFrame,
     events: HeadCallback,
     drag_origin: Option<NSPoint>,
     drag_frame: Option<HeadFrame>,
     dragged: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HeadViews {
+    view: id,
+    circle: id,
+    initials: id,
+    photo: id,
+    person: id,
+    group: id,
+    badge: id,
 }
 
 #[derive(Default)]
@@ -682,31 +725,63 @@ unsafe fn set_panel_frame(panel: id, frame: &HeadFrame) {
     let _: () = msg_send![panel, setFrameOrigin: point];
 }
 
-fn update_labels(view: id, initials: id, person: id, badge: id, spec: &HeadSpec) {
+fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option<&HeadGlyph>) {
     unsafe {
-        let _: () = msg_send![initials, setStringValue: ns_string(&spec.initials)];
-        let is_person = spec.initials.is_empty();
-        let _: () = msg_send![initials, setHidden: if is_person { YES } else { NO }];
-        let _: () = msg_send![person, setHidden: if is_person { NO } else { YES }];
+        apply_color(views.circle, views.badge, spec.color);
+        apply_glyph(views, &spec.glyph, previous_glyph);
         let text = if spec.unread >= 100 {
             "99+".to_owned()
         } else {
             spec.unread.to_string()
         };
-        let _: () = msg_send![badge, setStringValue: ns_string(&text)];
-        let _: () = msg_send![badge, setFrame: badge_frame(spec.unread)];
-        let _: () = msg_send![badge, setHidden: if spec.unread == 0 { YES } else { NO }];
-        let label = ns_string(&format!(
-            "{}, {} unread messages",
-            if is_person {
-                "Unknown contact"
-            } else {
-                &spec.initials
-            },
-            spec.unread,
-        ));
-        let _: () = msg_send![view, setAccessibilityLabel: label];
-        let _: () = msg_send![view, setToolTip: label];
+        let _: () = msg_send![views.badge, setStringValue: ns_string(&text)];
+        let _: () = msg_send![views.badge, setFrame: badge_frame(spec.unread)];
+        let _: () = msg_send![views.badge, setHidden: if spec.unread == 0 { YES } else { NO }];
+        let label = ns_string(&format!("{}, {} unread messages", spec.label, spec.unread));
+        let _: () = msg_send![views.view, setAccessibilityLabel: label];
+        let _: () = msg_send![views.view, setToolTip: label];
+    }
+}
+
+unsafe fn apply_color(circle: id, badge: id, color: [u8; 3]) {
+    let color = srgb_color(color);
+    let color: id = msg_send![color, CGColor];
+    let circle_layer: id = msg_send![circle, layer];
+    let _: () = msg_send![circle_layer, setBackgroundColor: color];
+    let badge_layer: id = msg_send![badge, layer];
+    let _: () = msg_send![badge_layer, setBorderColor: color];
+}
+
+unsafe fn apply_glyph(views: HeadViews, glyph: &HeadGlyph, previous: Option<&HeadGlyph>) {
+    let mut visible = views.person;
+    let mut keeps_photo = false;
+    if let HeadGlyph::Initials(value) = glyph {
+        if !value.is_empty() {
+            let _: () = msg_send![views.initials, setStringValue: ns_string(value)];
+            visible = views.initials;
+        }
+    } else if let HeadGlyph::Photo(photo_spec) = glyph {
+        keeps_photo = matches!(previous, Some(HeadGlyph::Photo(previous_photo)) if previous_photo == photo_spec);
+        if !keeps_photo {
+            let image = photo_image(photo_spec.edge, &photo_spec.rgba);
+            if image != nil {
+                let _: () = msg_send![views.photo, setImage: image];
+                let _: () = msg_send![image, release];
+                keeps_photo = true;
+            }
+        }
+        if keeps_photo {
+            visible = views.photo;
+        }
+    } else if matches!(glyph, HeadGlyph::Group) {
+        visible = views.group;
+    }
+    // Never retain a contact photo the head no longer shows.
+    if !keeps_photo {
+        let _: () = msg_send![views.photo, setImage: nil];
+    }
+    for glyph_view in [views.initials, views.photo, views.person, views.group] {
+        let _: () = msg_send![glyph_view, setHidden: if glyph_view == visible { NO } else { YES }];
     }
 }
 
@@ -746,23 +821,26 @@ fn create_head(
         );
         circle.setWantsLayer(YES);
         let circle_layer: id = msg_send![circle, layer];
-        let color: id =
-            NSColor::colorWithCalibratedRed_green_blue_alpha_(nil, 0.15, 0.32, 0.58, 1.0);
-        let color: id = msg_send![color, CGColor];
-        let _: () = msg_send![circle_layer, setBackgroundColor: color];
+        let _: () = msg_send![circle_layer, setMasksToBounds: YES];
         let _: () = msg_send![circle_layer, setCornerRadius: CIRCLE_SIZE / 2.0];
         let initials = label(NSRect::new(
             NSPoint::new(1.0, 10.0),
             NSSize::new(46.0, 28.0),
         ));
         style_initials(initials);
+        let photo = photo_view();
         let person = person_icon();
+        let group = group_icon();
         let badge = label(badge_frame(spec.unread));
         style_badge(badge);
         let _: () = msg_send![circle, addSubview: initials];
         let _: () = msg_send![initials, release];
+        let _: () = msg_send![circle, addSubview: photo];
+        let _: () = msg_send![photo, release];
         let _: () = msg_send![circle, addSubview: person];
         let _: () = msg_send![person, release];
+        let _: () = msg_send![circle, addSubview: group];
+        let _: () = msg_send![group, release];
         let _: () = msg_send![view, addSubview: circle];
         let _: () = msg_send![circle, release];
         let _: () = msg_send![view, addSubview: badge];
@@ -775,10 +853,15 @@ fn create_head(
         spec.position = position.clone();
         let head = Head {
             panel,
-            view,
-            initials,
-            person,
-            badge,
+            views: HeadViews {
+                view,
+                circle,
+                initials,
+                photo,
+                person,
+                group,
+                badge,
+            },
             spec,
             frame: frame.clone(),
             events,
@@ -786,18 +869,12 @@ fn create_head(
             drag_frame: None,
             dragged: false,
         };
-        update_labels(
-            head.view,
-            head.initials,
-            head.person,
-            head.badge,
-            &head.spec,
-        );
+        update_head_content(head.views, &head.spec, None);
         HEADS.with(|registry| {
             let mut registry = registry.borrow_mut();
             registry
                 .views
-                .insert(view as usize, head.spec.conversation_id.clone());
+                .insert(head.views.view as usize, head.spec.conversation_id.clone());
             registry
                 .heads
                 .insert(head.spec.conversation_id.clone(), head);
@@ -829,11 +906,81 @@ unsafe fn style_initials(initials: id) {
     let _: () = msg_send![initials, setFont: font];
 }
 
+unsafe fn srgb_color([red, green, blue]: [u8; 3]) -> id {
+    msg_send![class!(NSColor), colorWithSRGBRed: red as f64 / 255.0f64 green: green as f64 / 255.0f64 blue: blue as f64 / 255.0f64 alpha: 1.0f64]
+}
+
+unsafe fn photo_view() -> id {
+    let image: id = msg_send![class!(NSImageView), alloc];
+    let image: id = msg_send![image, initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(CIRCLE_SIZE, CIRCLE_SIZE))];
+    let _: () = msg_send![image, setImageScaling: IMAGE_SCALING_PROPORTIONALLY_UP_OR_DOWN];
+    image
+}
+
+unsafe fn photo_image(edge: u32, rgba: &[u8]) -> id {
+    let edge = edge as usize;
+    let Some(byte_count) = edge
+        .checked_mul(edge)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return nil;
+    };
+    if edge == 0 || rgba.len() != byte_count || byte_count > isize::MAX as usize {
+        return nil;
+    }
+    let data = CFDataCreate(std::ptr::null(), rgba.as_ptr(), byte_count as isize);
+    if data.is_null() {
+        return nil;
+    }
+    let color_space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    let provider = CGDataProviderCreateWithCFData(data);
+    let image = if color_space.is_null() || provider.is_null() {
+        std::ptr::null_mut()
+    } else {
+        CGImageCreate(
+            edge,
+            edge,
+            8,
+            32,
+            edge * 4,
+            color_space,
+            CG_IMAGE_ALPHA_NONE_SKIP_LAST,
+            provider,
+            std::ptr::null(),
+            YES,
+            0,
+        )
+    };
+    if !provider.is_null() {
+        CFRelease(provider.cast());
+    }
+    if !color_space.is_null() {
+        CFRelease(color_space.cast());
+    }
+    CFRelease(data);
+    if image.is_null() {
+        return nil;
+    }
+    let ns_image: id = msg_send![class!(NSImage), alloc];
+    let ns_image: id =
+        msg_send![ns_image, initWithCGImage: image size: NSSize::new(CIRCLE_SIZE, CIRCLE_SIZE)];
+    CFRelease(image.cast());
+    ns_image
+}
+
 unsafe fn person_icon() -> id {
+    symbol_icon("person.fill")
+}
+
+unsafe fn group_icon() -> id {
+    symbol_icon("person.2.fill")
+}
+
+unsafe fn symbol_icon(name: &str) -> id {
     let frame = NSRect::new(NSPoint::new(12.0, 12.0), NSSize::new(24.0, 24.0));
     let symbol: BOOL = msg_send![class!(NSImage), respondsToSelector: sel!(imageWithSystemSymbolName:accessibilityDescription:)];
     if symbol == YES {
-        let image: id = msg_send![class!(NSImage), imageWithSystemSymbolName: ns_string("person.fill") accessibilityDescription: nil];
+        let image: id = msg_send![class!(NSImage), imageWithSystemSymbolName: ns_string(name) accessibilityDescription: nil];
         if image != nil {
             let config: id = msg_send![class!(NSImageSymbolConfiguration), configurationWithPointSize: 24.0f64 weight: 0.23f64 scale: 1i64];
             let image: id = msg_send![image, imageWithSymbolConfiguration: config];
@@ -856,9 +1003,6 @@ unsafe fn style_badge(badge: id) {
     let red: id = msg_send![red, CGColor];
     let _: () = msg_send![layer, setBackgroundColor: red];
     let _: () = msg_send![layer, setCornerRadius: 9.0f64];
-    let ring: id = NSColor::colorWithCalibratedRed_green_blue_alpha_(nil, 0.15, 0.32, 0.58, 1.0);
-    let ring: id = msg_send![ring, CGColor];
-    let _: () = msg_send![layer, setBorderColor: ring];
     let _: () = msg_send![layer, setBorderWidth: 2.0f64];
     let font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 10.0f64];
     let _: () = msg_send![badge, setFont: font];
@@ -961,23 +1105,24 @@ pub fn show_head(app: &AppHandle, spec: &HeadSpec, events: HeadCallback) -> Resu
     let existing = HEADS.with(|registry| {
         let mut registry = registry.borrow_mut();
         registry.heads.get_mut(&spec.conversation_id).map(|head| {
-            head.spec.initials = spec.initials.clone();
+            let previous_glyph = head.spec.glyph.clone();
+            head.spec.glyph = spec.glyph.clone();
+            head.spec.color = spec.color;
+            head.spec.label = spec.label.clone();
             head.spec.unread = spec.unread;
             head.spec.generation = spec.generation;
             head.events = events.clone();
             (
-                head.view,
-                head.initials,
-                head.person,
-                head.badge,
+                head.views,
                 head.spec.clone(),
+                previous_glyph,
                 head.frame.clone(),
                 head.events.clone(),
             )
         })
     });
-    if let Some((view, initials, person, badge, current, frame, callback)) = existing {
-        update_labels(view, initials, person, badge, &current);
+    if let Some((views, current, previous_glyph, frame, callback)) = existing {
+        update_head_content(views, &current, Some(&previous_glyph));
         emit(
             callback,
             HeadEvent::Moved {
@@ -1008,20 +1153,17 @@ pub fn update_head(app: &AppHandle, spec: &HeadSpec) -> Result<(), String> {
     let update = HEADS.with(|registry| {
         let mut registry = registry.borrow_mut();
         registry.heads.get_mut(&spec.conversation_id).map(|head| {
-            head.spec.initials = spec.initials.clone();
+            let previous_glyph = head.spec.glyph.clone();
+            head.spec.glyph = spec.glyph.clone();
+            head.spec.color = spec.color;
+            head.spec.label = spec.label.clone();
             head.spec.unread = spec.unread;
             head.spec.generation = spec.generation;
-            (
-                head.view,
-                head.initials,
-                head.person,
-                head.badge,
-                head.spec.clone(),
-            )
+            (head.views, head.spec.clone(), previous_glyph)
         })
     });
-    if let Some((view, initials, person, badge, current)) = update {
-        update_labels(view, initials, person, badge, &current);
+    if let Some((views, current, previous_glyph)) = update {
+        update_head_content(views, &current, Some(&previous_glyph));
     }
     let _ = app; // Updates are content-only; monitor reconciliation is notification-driven.
     Ok(())
@@ -1032,7 +1174,7 @@ pub fn hide_head(app: &AppHandle, conversation_id: &str) -> Result<(), String> {
         let mut registry = registry.borrow_mut();
         let head = registry.heads.remove(conversation_id);
         if let Some(head) = &head {
-            registry.views.remove(&(head.view as usize));
+            registry.views.remove(&(head.views.view as usize));
         }
         head
     });

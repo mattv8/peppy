@@ -201,6 +201,16 @@ class AndroidContactsProviderTest {
         assertEquals(setOf(created.rawContactId), contacts.findCreateMatches(null, nameOnly))
     }
 
+    @Test fun createEvidenceRetainsSubsetMatchingForNullValuesAndDuplicateRows() {
+        fake.contact(2, "Duplicate phones")
+        fake.raw(20, contactId = 2, account = null)
+        fake.data(200, 20, Phone.CONTENT_ITEM_TYPE, "data1" to "+12025550199", "data2" to "2")
+        fake.data(201, 20, Phone.CONTENT_ITEM_TYPE, "data1" to "+12025550199", "data2" to "3")
+
+        val expected = List(2) { NewField(Kind.PHONE, mapOf(Phone.NUMBER to "+12025550199", Phone.TYPE to null)) }
+        assertEquals(setOf(20L), contacts.findCreateMatches(null, expected))
+    }
+
     @Test fun createWithoutProviderEvidenceIsOutcomeUnknownAndMatchesStayAmbiguous() {
         val draft = listOf(NewField(Kind.NAME, mapOf(StructuredName.DISPLAY_NAME to "Ada Lovelace")))
         val before = contacts.findCreateMatches(null, listOf(

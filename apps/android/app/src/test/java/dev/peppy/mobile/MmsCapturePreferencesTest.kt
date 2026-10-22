@@ -1,6 +1,7 @@
 package dev.peppy.mobile
 
 import android.content.Intent
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
 import androidx.work.WorkManager
@@ -14,6 +15,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -34,32 +36,6 @@ class MmsCapturePreferencesTest {
         assertTrue(restarted.importHistory)
     }
 
-    @Test fun historyBaselinePersistsAfterImportAndResetsOnNextEnable() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        context.getSharedPreferences("peppy-mms-capture", android.content.Context.MODE_PRIVATE).edit().clear().commit()
-        val prefs = MmsPreferences(context)
-        prefs.enabled = true
-        prefs.setHistoryBaseline(42)
-        prefs.importHistory = true
-        prefs.completeHistoryImport()
-        assertEquals(42L, MmsPreferences(context).historyBaseline())
-        assertFalse(MmsPreferences(context).importHistory)
-
-        prefs.enabled = false
-        prefs.enabled = true
-        assertEquals(null, MmsPreferences(context).historyBaseline())
-    }
-
-    @Test fun pendingRecheckCursorPersistsAndCanBeCleared() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        context.getSharedPreferences("peppy-mms-capture", android.content.Context.MODE_PRIVATE).edit().clear().commit()
-        val prefs = MmsPreferences(context)
-        prefs.setRecheckCursor("acquisition-50")
-        assertEquals("acquisition-50", MmsPreferences(context).recheckCursor())
-        prefs.setRecheckCursor(null)
-        assertNull(MmsPreferences(context).recheckCursor())
-    }
-
     @Test fun capturedMessagesWakeNetworkSyncExactlyThroughUniqueGatewayWork() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         WorkManagerTestInitHelper.initializeTestWorkManager(
@@ -75,5 +51,24 @@ class MmsCapturePreferencesTest {
         assertTrue(MmsNotificationReceiver.isMmsWapPush(Intent(MmsNotificationReceiver.WAP_PUSH_RECEIVED).setType(MmsNotificationReceiver.MMS_MIME)))
         assertFalse(MmsNotificationReceiver.isMmsWapPush(Intent(MmsNotificationReceiver.WAP_PUSH_RECEIVED).setType("text/plain")))
         assertFalse(MmsNotificationReceiver.isMmsWapPush(Intent("other").setType(MmsNotificationReceiver.MMS_MIME)))
+    }
+
+    @Test fun providerObserverDebouncesHintsAndCancelsPendingDispatch() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        var dispatches = 0
+        val observer = MmsCaptureLifecycle.observer(
+            context,
+            SmsCaptureDebouncePolicy(quietMs = 0),
+        ) { dispatches++ }
+
+        observer.onChange(false)
+        observer.onChange(false)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(1, dispatches)
+
+        observer.onChange(false)
+        observer.cancel()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(1, dispatches)
     }
 }

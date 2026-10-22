@@ -18,6 +18,12 @@ use peppy_client_core::{
 use peppy_crypto::{create_vault_check_header, derive_root_key};
 use std::{path::Path, sync::Arc};
 
+#[test]
+fn restart_marker_preserves_visible_windows_and_backgrounds_hidden_windows() {
+    assert!(!crate::restart_in_background(true));
+    assert!(crate::restart_in_background(false));
+}
+
 pub const PHRASE: &str = "correct horse battery staple";
 
 pub(crate) fn noop() -> Notifier {
@@ -85,6 +91,51 @@ pub(crate) fn routed(mut draft: DraftInput, gateway: &str, sim: &str) -> DraftIn
     draft
 }
 
+#[test]
+fn history_row_with_new_compose_intent_is_not_recipientless() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let history = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: None,
+            sender_address: "+14155552671".into(),
+            body: "history".into(),
+            provider_message_id: Some("history-draft-flag".into()),
+            imported: false,
+        })
+        .unwrap();
+    let source = session.client.recipientless_compose_draft().unwrap();
+    let moved = session
+        .save_draft(&input(
+            &source.draft_id.to_string(),
+            &source.conversation_id.to_string(),
+            "draft",
+            &["+14155552671"],
+            &source.revision.to_string(),
+        ))
+        .unwrap();
+    assert_eq!(moved.conversation_id, history.conversation_id.to_string());
+
+    let (snapshot, _) = session
+        .snapshot(
+            Some(&moved.conversation_id),
+            None,
+            crate::head(),
+            None,
+            crate::notifications::NotificationPreferences::default(),
+        )
+        .unwrap();
+    let row = snapshot
+        .conversations
+        .iter()
+        .find(|row| row.id == moved.conversation_id)
+        .unwrap();
+    assert!(!row.recipientless_draft);
+    assert!(row.draft_only);
+}
+
 pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
     GatewayView {
         id: id.into(),
@@ -94,6 +145,10 @@ pub(crate) fn gateway(id: &str, sms: bool, mms: bool) -> GatewayView {
         simulated: true,
         supports_sms: sms,
         supports_mms: mms,
+        availability: peppy_desktop_api::GatewayAvailability::Unknown,
+        last_seen_age_seconds: None,
+        presence: None,
+        wake_route: false,
         capability_note: None,
         mms_content_version: mms.then_some(2),
         mms_max_bytes: mms.then_some(300 * 1024),
@@ -170,6 +225,147 @@ fn completed_mms(
         .complete_mms_acquisition(&acquisition.acquisition_id)
         .unwrap()
         .conversation_id
+}
+
+#[test]
+fn media_pages_do_not_omit_items_when_preview_budget_is_exhausted() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let source = fixture.dir.path().join("media-page.png");
+    std::fs::write(&source, sample_png(1, 1)).unwrap();
+    let mut conversation = None;
+    for index in 0..13 {
+        let attachment = session.prepare_attachment(&source).unwrap();
+        conversation = Some(completed_mms(
+            &session,
+            &format!("media-page-{index}"),
+            "media-page-thread",
+            Direction::Incoming,
+            Some("+12025550123"),
+            &[],
+            vec![attachment.id.parse().unwrap()],
+        ));
+    }
+    let first = session.media_page(conversation.unwrap(), None, 40).unwrap();
+    assert_eq!(first.items.len(), 12);
+    let cursor = first.next_cursor.as_ref().map(|cursor| peppy_client_core::MediaCursor {
+            sort_at_ms: cursor.sort_at_ms.parse().unwrap(),
+            local_order: cursor.local_order.parse().unwrap(),
+            message_id: cursor.message_id.parse().unwrap(),
+            attachment_position: cursor.attachment_position,
+        });
+    let second = session.media_page(conversation.unwrap(), cursor.as_ref(), 40).unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn snapshot_and_history_emit_v3_thumbnail_metadata_without_promoting_the_original() {
+    let fixture = fixture();
+    let session = open(&fixture, &fixture.binding, &[]);
+    unlock(&session, &fixture);
+    let original_path = fixture.dir.path().join("timeline-original.png");
+    let thumbnail_path = fixture.dir.path().join("timeline-thumbnail.png");
+    std::fs::write(&original_path, sample_png(2, 2)).unwrap();
+    std::fs::write(&thumbnail_path, sample_png(1, 1)).unwrap();
+    let original = session.prepare_attachment(&original_path).unwrap();
+    let thumbnail = session.prepare_attachment(&thumbnail_path).unwrap();
+    let acquisition = session
+        .client
+        .begin_mms_acquisition(MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "desktop-native-test".into(),
+                subscription_id: "sim-1".into(),
+                provider_message_id: "timeline-v3".into(),
+                provider_thread_id: Some("timeline-v3-thread".into()),
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+12025550123".into()),
+            recipients: vec![],
+            subject: None,
+            body: "timeline v3".into(),
+            imported: false,
+            observed_at_ms: 1,
+            transaction_id: None,
+        })
+        .unwrap();
+    let original_id = original.id.parse().unwrap();
+    let thumbnail_id = thumbnail.id.parse().unwrap();
+    session
+        .client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "original", original_id)
+        .unwrap();
+    session
+        .client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "original",
+            Some(2),
+            Some(2),
+            None,
+            Some(thumbnail_id),
+        )
+        .unwrap();
+    session
+        .client
+        .mark_attachment_uploaded(thumbnail_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let conversation = session
+        .client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap()
+        .conversation_id;
+    let later = session
+        .client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: "+12025550123".into(),
+            body: "later".into(),
+            provider_message_id: Some("timeline-v3-later".into()),
+            imported: false,
+        })
+        .unwrap();
+    let (snapshot, _) = session
+        .snapshot(
+            Some(&conversation.to_string()),
+            None,
+            crate::head(),
+            None,
+            crate::notifications::NotificationPreferences::default(),
+        )
+        .unwrap();
+    let attachment = snapshot.conversations[0]
+        .messages
+        .iter()
+        .find_map(|message| message.attachments.first())
+        .unwrap();
+    assert_ne!(attachment.state, "ready");
+    let thumbnail = attachment
+        .media_meta
+        .as_ref()
+        .and_then(|meta| meta.thumbnail.as_ref())
+        .unwrap();
+    assert_eq!(thumbnail.state, "ready");
+    assert!(thumbnail
+        .preview_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+
+    let history = session
+        .history_page(&conversation.to_string(), &later.message_id.to_string())
+        .unwrap();
+    let history_attachment = &history.messages[0].attachments[0];
+    assert_ne!(history_attachment.state, "ready");
+    assert_eq!(
+        history_attachment
+            .media_meta
+            .as_ref()
+            .and_then(|meta| meta.thumbnail.as_ref())
+            .unwrap()
+            .state,
+        "ready"
+    );
 }
 
 fn set_gateway(session: &Session, mut route: GatewayView) {
@@ -661,7 +857,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
             "0",
         ))
         .unwrap();
-    assert_eq!(draft.revision, "1");
+    assert_eq!(draft.revision, "0");
     assert_eq!(draft.recipient_ids, vec!["+15555550100".to_string()]);
     assert!(session
         .save_draft(&input(
@@ -669,12 +865,12 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
             &draft.conversation_id,
             "x",
             &["not a phone"],
-            "1"
+            "0"
         ))
         .is_err());
     assert_eq!(
         session
-            .save_draft(&input(&draft.id, &draft.conversation_id, "stale", &[], "0"))
+            .save_draft(&input(&draft.id, &draft.conversation_id, "stale", &[], "1"))
             .unwrap_err()
             .code,
         "stale-draft"
@@ -682,7 +878,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
 
     // Gateway capabilities not loaded yet: refused, draft untouched.
     let send = routed(
-        input(&draft.id, &draft.conversation_id, "", &[], "1"),
+        input(&draft.id, &draft.conversation_id, "", &[], "0"),
         &gateway_id,
         "sim-1",
     );
@@ -698,7 +894,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     assert_eq!(
         session
             .send_draft(&routed(
-                input(&draft.id, "", "", &[], "1"),
+                input(&draft.id, "", "", &[], "0"),
                 &gateway_id,
                 "sim-9"
             ))
@@ -709,7 +905,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     assert_eq!(
         session
             .send_draft(&routed(
-                input(&draft.id, "", "", &[], "0"),
+                input(&draft.id, "", "", &[], "1"),
                 &gateway_id,
                 "sim-1"
             ))
@@ -731,6 +927,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             Some("http://127.0.0.1:9".into()),
             crate::notifications::NotificationPreferences::default(),
@@ -802,6 +999,7 @@ fn drafts_send_atomically_through_checked_routes_and_map_to_sanitized_dtos() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -854,6 +1052,7 @@ fn clearing_saved_draft_recipients_persists_and_new_draft_cannot_send() {
     let (snapshot, _) = session
         .snapshot(
             Some(&draft.conversation_id),
+            None,
             crate::head(),
             None,
             crate::notifications::NotificationPreferences::default(),
@@ -1123,13 +1322,12 @@ fn missing_credential_or_origin_mismatch_fails_closed() {
 mod real_server {
     use super::*;
     use crate::{session::VaultSummary, sync, AppState};
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use ed25519_dalek::{Signer, SigningKey};
     use peppy_client_core::{
         Client, ClientConfig, Cursor, DatabaseKey, DeviceId, IncomingSms, PermitDecision,
         SendResult, VaultId,
     };
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
     use sqlx::postgres::PgPoolOptions;
     use std::{str::FromStr, time::Duration};
 
@@ -1175,6 +1373,15 @@ mod real_server {
             .run(&pool)
             .await
             .unwrap();
+        let mut config = peppy_server::config::Config::from_env()
+            .expect("complete S3 test configuration is required");
+        config.database_url = isolated.to_string();
+        let mut server = peppy_server::ServerBuilder::community(config, pool.clone())
+            .build()
+            .await
+            .unwrap();
+        server.start_maintenance().unwrap();
+        let router = server.router();
         let vault = VaultId::new();
         let profile = KeyProfile::new(vault.0, 1).unwrap();
         let fingerprint = profile.fingerprint().unwrap();
@@ -1191,9 +1398,8 @@ mod real_server {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server_pool = pool.clone();
         let task = tokio::spawn(async move {
-            axum::serve(listener, peppy_server::api::router(server_pool))
+            axum::serve(listener, router)
                 .await
                 .unwrap();
         });
@@ -1212,28 +1418,36 @@ mod real_server {
     }
 
     impl Server {
-        async fn pair(&self, role: &str) -> (DeviceId, String) {
-            let key = SigningKey::from_bytes(&[11; 32]);
+        async fn add_test_device(&self, role: &str) -> (DeviceId, String) {
             let id = DeviceId::new();
-            let public = json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-            let http = reqwest::Client::new();
-            let challenge: Value = http.post(format!("{}/v1/pairing", self.url)).bearer_auth(&self.owner)
-                .json(&json!({"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"requested_role":role}))
-                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-            let token = challenge["challenge_token"].as_str().unwrap();
-            let raw: [u8; 32] = URL_SAFE_NO_PAD.decode(token).unwrap().try_into().unwrap();
-            let proof = peppy_protocol::pairing_proof_message(
-                &raw,
-                self.vault,
-                id,
-                &self.fingerprint,
-                1,
-                role,
+            let token = format!(
+                "{:032x}{:032x}{:032x}",
+                uuid::Uuid::new_v4().as_u128(),
+                uuid::Uuid::new_v4().as_u128(),
+                uuid::Uuid::new_v4().as_u128()
             );
-            let body: Value = http.post(format!("{}/v1/pairing/consume", self.url))
-                .json(&json!({"challenge_token":token,"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())}))
-                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-            (id, body["device_token"].as_str().unwrap().to_owned())
+            let mut transaction = self.pool.begin().await.unwrap();
+            sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,$4,$5,$6)")
+                .bind(self.vault.0)
+                .bind(id.0)
+                .bind(role)
+                .bind(json!({}))
+                .bind(&self.fingerprint)
+                .bind(1_i32)
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
+            )
+            .bind(Sha256::digest(token.as_bytes()).as_slice())
+            .bind(self.vault.0)
+            .bind(id.0)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+            (id, token)
         }
         async fn shutdown(self) {
             self.task.abort();
@@ -1304,8 +1518,8 @@ mod real_server {
     async fn real_server_import_unlock_ws_send_status_and_incoming() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (desktop_id, desktop_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (desktop_id, desktop_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         // The gateway reports one simulated SIM through the capability contract.
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","label":"SIM 1","sms":"available","mms":"unsupported"}]}}))
@@ -1353,7 +1567,7 @@ mod real_server {
         ))
         .unwrap();
         assert_eq!(
-            crate::import_credential(&state, Arc::new(foreign))
+            crate::verify_and_activate_test_credential(&state, Arc::new(foreign))
                 .await
                 .unwrap_err()
                 .code,
@@ -1368,7 +1582,7 @@ mod real_server {
         ))
         .unwrap();
         assert_eq!(
-            crate::import_credential(&state, Arc::new(wrong))
+            crate::verify_and_activate_test_credential(&state, Arc::new(wrong))
                 .await
                 .unwrap_err()
                 .code,
@@ -1381,7 +1595,7 @@ mod real_server {
             &desktop_token,
         ))
         .unwrap();
-        crate::import_credential(&state, Arc::new(credential))
+        crate::verify_and_activate_test_credential(&state, Arc::new(credential))
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
@@ -1400,7 +1614,7 @@ mod real_server {
             &desktop_token,
         ))
         .unwrap();
-        crate::import_credential(&state, Arc::new(again))
+        crate::verify_and_activate_test_credential(&state, Arc::new(again))
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
@@ -1525,6 +1739,7 @@ mod real_server {
         let (snapshot, _) = session
             .snapshot(
                 None,
+                None,
                 crate::head(),
                 Some(server.url.clone()),
                 crate::notifications::NotificationPreferences::default(),
@@ -1559,6 +1774,7 @@ mod real_server {
         let (snapshot, _) = session
             .snapshot(
                 None,
+                None,
                 crate::head(),
                 None,
                 crate::notifications::NotificationPreferences::default(),
@@ -1592,7 +1808,7 @@ mod real_server {
             token,
         ))
         .unwrap();
-        crate::import_credential(&state, Arc::new(credential))
+        crate::verify_and_activate_test_credential(&state, Arc::new(credential))
             .await
             .unwrap();
         let session = state.session().await.unwrap().unwrap();
@@ -1622,9 +1838,9 @@ mod real_server {
     async fn real_server_mms_streaming_transfer_and_public_copy() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (sender_id, sender_token) = server.pair("device").await;
-        let (receiver_id, receiver_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (sender_id, sender_token) = server.add_test_device("device").await;
+        let (receiver_id, receiver_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}))
             .send().await.unwrap().error_for_status().unwrap();
@@ -1676,6 +1892,7 @@ mod real_server {
         let (snapshot, _) = receiver
             .snapshot(
                 Some(&draft.conversation_id),
+                None,
                 crate::head(),
                 None,
                 crate::notifications::NotificationPreferences::default(),
@@ -1760,9 +1977,9 @@ mod real_server {
     async fn real_server_expired_cursor_resyncs_by_staged_snapshot_then_goes_live() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (first_id, first_token) = server.pair("device").await;
-        let (late_id, late_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (first_id, first_token) = server.add_test_device("device").await;
+        let (late_id, late_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"unsupported"}]}}))
             .send().await.unwrap().error_for_status().unwrap();
@@ -1890,9 +2107,9 @@ mod real_server {
     async fn real_server_received_image_can_be_published_as_a_separate_copy() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = start().await;
-        let (sender_id, sender_token) = server.pair("device").await;
-        let (receiver_id, receiver_token) = server.pair("device").await;
-        let (gateway_id, gateway_token) = server.pair("gateway").await;
+        let (sender_id, sender_token) = server.add_test_device("device").await;
+        let (receiver_id, receiver_token) = server.add_test_device("device").await;
+        let (gateway_id, gateway_token) = server.add_test_device("gateway").await;
         reqwest::Client::new().post(format!("{}/v1/capabilities", server.url)).bearer_auth(&gateway_token)
             .json(&json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":"sim-1","sms":"available","mms":"available","mms_content_version":2}]}}))
             .send().await.unwrap().error_for_status().unwrap();
@@ -2188,7 +2405,9 @@ async fn retained_android_notification_round_trip_smoke() {
         Arc::new(MemoryStore::default()),
         Arc::new(|| {}),
     );
-    crate::import_credential(&state, credential).await.unwrap();
+    crate::verify_and_activate_test_credential(&state, credential)
+        .await
+        .unwrap();
     let session = state.session().await.unwrap().unwrap();
     let vault = sync::fetch_vault(
         &session.api,

@@ -7,14 +7,14 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
-use peppy_domain::{DeviceId, VaultId};
-use peppy_protocol::pairing_proof_message;
+use peppy_crypto::{KeyProfile, derive_root_key, enrollment::derive_admission_keypair};
+use peppy_hosted_api::PresenceState;
 use peppy_server::api::{
-    TransportOptions, compact_records, create_owner, prune_expired_pairing_intents,
-    prune_replay_log, router_with_options, router_with_options_and_relay,
+    TransportOptions, compact_records, create_owner, prune_replay_log, router_with_options,
+    router_with_options_and_relay,
 };
+use peppy_server::{presence, scope};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -25,6 +25,117 @@ use url::Url;
 use uuid::Uuid;
 
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn presence_leases_require_a_responsive_pong_and_cleanup_on_close() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let connection = Uuid::new_v4();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    presence::open(&mut tx, server.vault, server.owner_device, connection)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let responsive: bool = sqlx::query_scalar(
+        "SELECT responsive FROM device_sockets WHERE vault_id=$1 AND device_id=$2 AND connection_id=$3",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .bind(connection)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(!responsive);
+
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    assert!(
+        presence::renew(&mut tx, server.vault, server.owner_device, connection)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let touched: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM device_presence WHERE vault_id=$1 AND device_id=$2)",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert!(touched);
+    assert!(
+        presence::close(&server.pool, server.vault, connection)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn presence_caps_sockets_and_revocation_invalidates_renewal() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let mut connections = Vec::new();
+    for _ in 0..32 {
+        let connection = Uuid::new_v4();
+        let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+        presence::open(&mut tx, server.vault, server.owner_device, connection)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        connections.push(connection);
+    }
+    let overflow = Uuid::new_v4();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    presence::open(&mut tx, server.vault, server.owner_device, overflow)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM device_sockets WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(server.vault)
+    .bind(server.owner_device)
+    .fetch_one(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 32);
+
+    sqlx::query("UPDATE devices SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2")
+        .bind(server.vault)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    assert!(
+        !presence::renew(&mut tx, server.vault, server.owner_device, connections[0])
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn presence_batch_and_direct_lookup_keep_never_seen_devices_never() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let batch = presence::lookup_many_best_effort(
+        &server.pool,
+        server.vault,
+        &[(server.owner_device, false)],
+    )
+    .await;
+    assert_eq!(batch[&server.owner_device].state, PresenceState::Never);
+    assert_eq!(batch[&server.owner_device].last_seen_age_seconds, None);
+
+    let mut tx = scope::begin(&server.pool, server.vault).await.unwrap();
+    let direct = presence::lookup(&mut tx, server.vault, server.owner_device, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(direct.state, PresenceState::Never);
+    assert_eq!(direct.last_seen_age_seconds, None);
+}
 
 struct TestServer {
     pool: PgPool,
@@ -61,10 +172,6 @@ impl TestServer {
             profile.vault_id,
         );
         Self::start_custom(TransportOptions::default(), Some(real), None).await
-    }
-
-    async fn start_without_maintenance() -> Self {
-        Self::start_custom_mode(TransportOptions::default(), None, None, false).await
     }
 
     async fn start_custom(
@@ -172,136 +279,35 @@ impl TestServer {
         request.bearer_auth(&self.owner_token)
     }
 
-    async fn pair(&self, role: &str) -> PairedDevice {
-        let key = SigningKey::from_bytes(&rand_bytes());
-        self.pair_with_key(role, key).await
-    }
-
-    async fn pair_for(
-        &self,
-        owner_token: &str,
-        vault: Uuid,
-        fingerprint: &str,
-        role: &str,
-    ) -> PairedDevice {
-        let key = SigningKey::from_bytes(&rand_bytes());
-        let device = Uuid::new_v4();
-        let public_key =
-            json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-        let response = Client::new()
-            .post(format!("{}/v1/pairing", self.base_url))
-            .bearer_auth(owner_token)
-            .json(&json!({
-                "device_id": device,
-                "public_key": public_key,
-                "profile_fingerprint": fingerprint,
-                "key_epoch": 1,
-                "requested_role": role,
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let challenge: Value = response.json().await.unwrap();
-        let token = challenge["challenge_token"].as_str().unwrap();
-        let challenge_bytes: [u8; 32] = URL_SAFE_NO_PAD.decode(token).unwrap().try_into().unwrap();
-        let proof = pairing_proof_message(
-            &challenge_bytes,
-            VaultId(vault),
-            DeviceId(device),
-            fingerprint,
-            1,
-            role,
-        );
-        let response = Client::new()
-            .post(format!("{}/v1/pairing/consume", self.base_url))
-            .json(&json!({
-                "challenge_token": token,
-                "device_id": device,
-                "public_key": public_key,
-                "profile_fingerprint": fingerprint,
-                "key_epoch": 1,
-                "signature": URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes()),
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value = response.json().await.unwrap();
-        PairedDevice {
-            id: device,
-            token: body["device_token"].as_str().unwrap().to_owned(),
-            role: body["role"].as_str().unwrap().to_owned(),
-        }
-    }
-
-    async fn pair_with_key(&self, role: &str, key: SigningKey) -> PairedDevice {
-        let device = Uuid::new_v4();
-        let public_key =
-            json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-        let client = Client::new();
-        let response = self
-            .auth(client.post(format!("{}/v1/pairing", self.base_url)))
-            .json(&json!({
-                "device_id": device,
-                "public_key": public_key,
-                "profile_fingerprint": self.fingerprint,
-                "key_epoch": 1,
-                "requested_role": role,
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let challenge: Value = response.json().await.unwrap();
-        self.consume(&challenge, device, &public_key, &key, None)
+    async fn provision_device(&self, role: &str) -> TestDevice {
+        self.provision_device_for(self.vault, &self.fingerprint, role)
             .await
     }
 
-    async fn consume(
-        &self,
-        challenge: &Value,
-        device: Uuid,
-        public_key: &Value,
-        key: &SigningKey,
-        attempted_role: Option<&str>,
-    ) -> PairedDevice {
-        let token = challenge["challenge_token"].as_str().unwrap();
-        let challenge_bytes: [u8; 32] = URL_SAFE_NO_PAD.decode(token).unwrap().try_into().unwrap();
-        let approved_role = challenge["requested_role"].as_str().unwrap();
-        let message = pairing_proof_message(
-            &challenge_bytes,
-            VaultId(self.vault),
-            DeviceId(device),
-            &self.fingerprint,
-            1,
-            approved_role,
-        );
-        let signature = URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes());
-        let mut body = json!({
-            "challenge_token": token,
-            "device_id": device,
-            "public_key": public_key,
-            "profile_fingerprint": self.fingerprint,
-            "key_epoch": 1,
-            "signature": signature,
-        });
-        if let Some(role) = attempted_role {
-            body["requested_role"] = json!(role);
-        }
-        let response = Client::new()
-            .post(format!("{}/v1/pairing/consume", self.base_url))
-            .json(&body)
-            .send()
+    async fn provision_device_for(&self, vault: Uuid, fingerprint: &str, role: &str) -> TestDevice {
+        let id = Uuid::new_v4();
+        let token = (0..3)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect::<String>();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,$4,$5,1)")
+            .bind(vault)
+            .bind(id)
+            .bind(role)
+            .bind(json!({"fixture": true}))
+            .bind(fingerprint)
+            .execute(&self.pool)
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value = response.json().await.unwrap();
-        PairedDevice {
-            id: device,
-            token: body["device_token"].as_str().unwrap().to_owned(),
-            role: body["role"].as_str().unwrap().to_owned(),
-        }
+        sqlx::query(
+            "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
+        )
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(vault)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        TestDevice { id, token }
     }
 
     async fn shutdown(self) {
@@ -316,19 +322,9 @@ impl TestServer {
     }
 }
 
-struct PairedDevice {
+struct TestDevice {
     id: Uuid,
     token: String,
-    role: String,
-}
-
-fn rand_bytes() -> [u8; 32] {
-    let first = Uuid::new_v4();
-    let second = Uuid::new_v4();
-    let mut bytes = [0; 32];
-    bytes[..16].copy_from_slice(first.as_bytes());
-    bytes[16..].copy_from_slice(second.as_bytes());
-    bytes
 }
 
 fn profile(vault: Uuid, epoch: u32) -> (Value, String) {
@@ -343,6 +339,13 @@ fn profile(vault: Uuid, epoch: u32) -> (Value, String) {
         json!({"crypto_suite": 1, "salt": salt, "vault_id": vault, "key_epoch": epoch}),
         hex::encode(digest.finalize()),
     )
+}
+
+fn admission_public_key(vault: Uuid, epoch: u32) -> String {
+    let profile = KeyProfile::new(vault, epoch).unwrap();
+    let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+    let admission = derive_admission_keypair(&root).unwrap();
+    URL_SAFE_NO_PAD.encode(admission.public_key())
 }
 
 fn event(vault: Uuid, producer: Uuid, sequence: u64, envelope: Uuid, payload: u8) -> Value {
@@ -457,7 +460,7 @@ async fn newer_commit_during_inflight_wake_rotates_the_delivery_hint() {
     let _guard = TEST_LOCK.lock().await;
     let (relay_url, relay, relay_task) = start_fake_relay().await;
     let server = TestServer::start_with_relay(relay_url).await;
-    let gateway = server.pair("gateway").await;
+    let gateway = server.provision_device("gateway").await;
     assert_eq!(
         Client::new()
             .put(format!("{}/v1/devices/self/wake-route", server.base_url))
@@ -509,7 +512,7 @@ async fn durable_wakes_use_random_opaque_ids_coalesce_and_replace_invalid_routes
     let _guard = TEST_LOCK.lock().await;
     let (relay_url, relay, relay_task) = start_fake_relay().await;
     let server = TestServer::start_with_relay(relay_url).await;
-    let gateway = server.pair("gateway").await;
+    let gateway = server.provision_device("gateway").await;
     let client = Client::new();
     let register = |route_id| {
         client
@@ -595,646 +598,35 @@ async fn durable_wakes_use_random_opaque_ids_coalesce_and_replace_invalid_routes
 }
 
 #[tokio::test]
-async fn owner_vault_identity_and_signed_pairing_are_real_postgres_and_tcp() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start().await;
-    let vault = server
-        .auth(Client::new().get(format!("{}/v1/vault", server.base_url)))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(vault.status(), StatusCode::OK);
-    let vault: Value = vault.json().await.unwrap();
-    assert_eq!(vault["vault_id"], json!(server.vault));
-    assert_eq!(vault["profile_fingerprint"], json!(server.fingerprint));
-    assert_eq!(vault["public_key_profile"]["vault_id"], json!(server.vault));
-    assert_eq!(vault["encrypted_vault_check_header"], "BwgJ");
-
-    let gateway = server.pair("gateway").await;
-    assert_eq!(gateway.role, "gateway");
-    let devices: Value = Client::new()
-        .get(format!("{}/v1/devices", server.base_url))
-        .bearer_auth(&gateway.token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        devices["devices"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["device_id"] == json!(gateway.id) && d["role"] == "gateway")
-    );
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn pairing_rejects_bad_expired_replayed_proofs_and_cannot_escalate_role() {
+async fn legacy_pairing_routes_are_absent_while_instance_discovery_remains_available() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let client = Client::new();
-    let invalid_role = server.auth(client.post(format!("{}/v1/pairing", server.base_url)))
-        .json(&json!({"device_id":Uuid::new_v4(),"public_key":{"ed25519_public_key":URL_SAFE_NO_PAD.encode([1;32])},"profile_fingerprint":server.fingerprint,"key_epoch":1,"requested_role":"owner"}))
-        .send().await.unwrap();
-    assert_eq!(invalid_role.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let key = SigningKey::from_bytes(&rand_bytes());
-    let device = Uuid::new_v4();
-    let public_key =
-        json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-    let challenge: Value = server.auth(client.post(format!("{}/v1/pairing", server.base_url)))
-        .json(&json!({"device_id":device,"public_key":public_key,"profile_fingerprint":server.fingerprint,"key_epoch":1,"requested_role":"device"}))
-        .send().await.unwrap().json().await.unwrap();
-    let mut bad = json!({
-        "challenge_token":challenge["challenge_token"],"device_id":device,"public_key":public_key,
-        "profile_fingerprint":server.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode([0;64])
-    });
-    let response = client
-        .post(format!("{}/v1/pairing/consume", server.base_url))
-        .json(&bad)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-    let paired = server
-        .consume(&challenge, device, &public_key, &key, Some("gateway"))
-        .await;
-    assert_eq!(
-        paired.role, "device",
-        "consumer-supplied role must not escalate approval"
-    );
-    let replay = client
-        .post(format!("{}/v1/pairing/consume", server.base_url))
-        .json(&bad)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
-
-    let expired_key = SigningKey::from_bytes(&rand_bytes());
-    let expired_device = Uuid::new_v4();
-    let expired_public = json!({"ed25519_public_key":URL_SAFE_NO_PAD.encode(expired_key.verifying_key().as_bytes())});
-    let expired: Value = server.auth(client.post(format!("{}/v1/pairing", server.base_url)))
-        .json(&json!({"device_id":expired_device,"public_key":expired_public,"profile_fingerprint":server.fingerprint,"key_epoch":1,"requested_role":"device"}))
-        .send().await.unwrap().json().await.unwrap();
-    let digest = Sha256::digest(expired["challenge_token"].as_str().unwrap().as_bytes());
-    sqlx::query("UPDATE pairing_challenges SET expires_at=now()-interval '1 second' WHERE challenge_digest=$1")
-        .bind(digest.as_slice()).execute(&server.pool).await.unwrap();
-    let token = expired["challenge_token"].as_str().unwrap();
-    let raw: [u8; 32] = URL_SAFE_NO_PAD.decode(token).unwrap().try_into().unwrap();
-    let proof = pairing_proof_message(
-        &raw,
-        VaultId(server.vault),
-        DeviceId(expired_device),
-        &server.fingerprint,
-        1,
-        "device",
-    );
-    bad = json!({"challenge_token":token,"device_id":expired_device,"public_key":expired_public,"profile_fingerprint":server.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(expired_key.sign(&proof).to_bytes())});
-    let response = client
-        .post(format!("{}/v1/pairing/consume", server.base_url))
-        .json(&bad)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn pairing_intent_claim_approval_challenge_and_consume_are_end_to_end() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start().await;
-    let client = Client::new();
-    let (status, intent) = server
-        .post(
-            &server.owner_token,
-            "/v1/pairing/intents",
-            &json!({"https_origin":"https://api.example"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{intent}");
-    assert_eq!(intent["https_origin"], "https://api.example");
-    let intent_token = intent["intent_token"].as_str().unwrap();
-    assert_eq!(intent_token.len(), 43);
-
-    let owner_claim = json!({
-        "device_id": Uuid::new_v4(),
-        "public_key": {"ed25519_public_key":URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&rand_bytes()).verifying_key().as_bytes())},
-        "requested_role": "owner",
-    });
-    let (status, rejected_owner_claim) = server
-        .call(
-            client
-                .post(format!(
-                    "{}/v1/pairing/intents/{intent_token}/claim",
-                    server.base_url
-                ))
-                .json(&owner_claim),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(rejected_owner_claim["code"], "invalid_pairing_claim");
-
-    let key = SigningKey::from_bytes(&rand_bytes());
-    let device = Uuid::new_v4();
-    let public_key =
-        json!({"ed25519_public_key":URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-    let claim_body = json!({
-        "device_id": device,
-        "public_key": public_key,
-        "requested_role": "gateway",
-    });
-    let (status, claim) = server
-        .call(
-            client
-                .post(format!(
-                    "{}/v1/pairing/intents/{intent_token}/claim",
-                    server.base_url
-                ))
-                .json(&claim_body),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{claim}");
-    assert_eq!(claim["key_digest"].as_str().unwrap().len(), 64);
-    assert_eq!(claim["sas"].as_str().unwrap().len(), 6);
-    assert_eq!(claim["claim_secret"].as_str().unwrap().len(), 43);
-
-    let (status, duplicate_claim) = server
-        .call(
-            client
-                .post(format!(
-                    "{}/v1/pairing/intents/{intent_token}/claim",
-                    server.base_url
-                ))
-                .json(&claim_body),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(duplicate_claim["code"], "pairing_intent_claimed");
-
-    let (status, intent_status) = server
-        .get(
-            &server.owner_token,
-            &format!("/v1/pairing/intents/{intent_token}"),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{intent_status}");
-    assert_eq!(intent_status["claimed"], true);
-    assert_eq!(intent_status["approved"], false);
-    assert_eq!(intent_status["device_id"], json!(device));
-    assert_eq!(intent_status["key_digest"], claim["key_digest"]);
-    assert_eq!(intent_status["sas"], claim["sas"]);
-
-    let (status, approved) = server
-        .post(
-            &server.owner_token,
-            &format!("/v1/pairing/intents/{intent_token}/approve"),
-            &json!({
-                "key_digest": claim["key_digest"],
-                "profile_fingerprint": server.fingerprint,
-                "key_epoch": 1,
-            }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{approved}");
-    assert_eq!(approved["requested_role"], "gateway");
-
-    // Approval starts a fresh challenge lifetime. The original QR intent may
-    // expire while the phone is waiting to retrieve that approved challenge.
-    sqlx::query(
-        "UPDATE pairing_intents SET expires_at=now()-interval '1 second' WHERE intent_digest=$1",
-    )
-    .bind(Sha256::digest(intent_token.as_bytes()).as_slice())
-    .execute(&server.pool)
-    .await
-    .unwrap();
-
-    let (status, challenge) = server
-        .call(
-            client
-                .post(format!(
-                    "{}/v1/pairing/intents/{intent_token}/challenge",
-                    server.base_url
-                ))
-                .json(&json!({
-                    "device_id": device,
-                    "key_digest": claim["key_digest"],
-                    "claim_secret": claim["claim_secret"],
-                })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{challenge}");
-    assert_eq!(challenge["challenge_token"], approved["challenge_token"]);
-    assert_eq!(challenge["vault_id"], approved["vault_id"]);
-    assert_eq!(challenge["requested_role"], approved["requested_role"]);
-    assert!(challenge["expires_in_seconds"].as_u64().unwrap() <= 120);
-
-    let paired = server
-        .consume(&challenge, device, &public_key, &key, None)
-        .await;
-    assert_eq!(paired.id, device);
-    assert_eq!(paired.role, "gateway");
-    let secrets_cleared: bool = sqlx::query_scalar(
-        "SELECT claim_secret_digest IS NULL AND challenge_token IS NULL FROM pairing_intents WHERE intent_digest=$1",
-    )
-    .bind(Sha256::digest(intent_token.as_bytes()).as_slice())
-    .fetch_one(&server.pool)
-    .await
-    .unwrap();
-    assert!(secrets_cleared);
-
-    let (status, unavailable) = server
-        .call(
-            client
-                .post(format!(
-                    "{}/v1/pairing/intents/{intent_token}/challenge",
-                    server.base_url
-                ))
-                .json(&json!({
-                    "device_id": device,
-                    "key_digest": claim["key_digest"],
-                    "claim_secret": claim["claim_secret"],
-                })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(unavailable["code"], "pairing_challenge_unavailable");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn unauthenticated_pairing_admission_is_bounded_per_intent_without_global_throttle() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start().await;
-    let client = Client::new();
-    let valid_public_key =
-        URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&[8; 32]).verifying_key().as_bytes());
-    let first = server
-        .post(
-            &server.owner_token,
-            "/v1/pairing/intents",
-            &json!({"https_origin":"https://api.example"}),
-        )
-        .await
-        .1["intent_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let second = server
-        .post(
-            &server.owner_token,
-            "/v1/pairing/intents",
-            &json!({"https_origin":"https://api.example"}),
-        )
-        .await
-        .1["intent_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let claim = |token: &str| {
-        client
-            .post(format!(
-                "{}/v1/pairing/intents/{token}/claim",
-                server.base_url
-            ))
-            .json(&json!({
-                "device_id": Uuid::new_v4(),
-                "public_key": {"ed25519_public_key": valid_public_key},
-                "requested_role": "device",
-            }))
-    };
-    assert_eq!(claim(&first).send().await.unwrap().status(), StatusCode::OK);
-    // The initial successful claim consumes one of the 20 admissions.
-    for _ in 0..19 {
+    for path in [
+        "/v1/pairing",
+        "/v1/pairing/consume",
+        "/v1/pairing/intents",
+        "/v1/pairing/join-requests",
+    ] {
         assert_eq!(
-            claim(&first).send().await.unwrap().status(),
-            StatusCode::CONFLICT
-        );
-    }
-    assert_eq!(
-        claim(&first).send().await.unwrap().status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
-    assert_eq!(
-        claim(&second).send().await.unwrap().status(),
-        StatusCode::OK
-    );
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn pairing_admission_capacity_evicts_random_tokens_without_blocking_valid_claims() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start().await;
-    let client = Client::new();
-    let valid_public_key =
-        URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&[9; 32]).verifying_key().as_bytes());
-    let known = server
-        .post(
-            &server.owner_token,
-            "/v1/pairing/intents",
-            &json!({"https_origin":"https://api.example"}),
-        )
-        .await
-        .1["intent_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let requests = (0..=4096).map(|_| {
-        let client = client.clone();
-        let base_url = server.base_url.clone();
-        let valid_public_key = valid_public_key.clone();
-        async move {
             client
-                .post(format!(
-                    "{base_url}/v1/pairing/intents/{}/claim",
-                    URL_SAFE_NO_PAD.encode(rand_bytes())
-                ))
-                .json(&json!({
-                    "device_id": Uuid::new_v4(),
-                    "public_key": {"ed25519_public_key": valid_public_key},
-                    "requested_role": "device",
-                }))
+                .post(format!("{}{}", server.base_url, path))
                 .send()
                 .await
                 .unwrap()
-                .status()
-        }
-    });
-    let statuses: Vec<StatusCode> = futures_util::stream::iter(requests)
-        .buffer_unordered(16)
-        .collect()
-        .await;
-    assert!(
-        statuses
-            .iter()
-            .all(|status| *status == StatusCode::UNAUTHORIZED)
-    );
-
-    let claim = |token: &str| {
-        client
-            .post(format!(
-                "{}/v1/pairing/intents/{token}/claim",
-                server.base_url
-            ))
-            .json(&json!({
-                "device_id": Uuid::new_v4(),
-                "public_key": {"ed25519_public_key": valid_public_key},
-                "requested_role": "device",
-            }))
-    };
-    assert_eq!(claim(&known).send().await.unwrap().status(), StatusCode::OK);
-    let new = server
-        .post(
-            &server.owner_token,
-            "/v1/pairing/intents",
-            &json!({"https_origin":"https://api.example"}),
-        )
-        .await
-        .1["intent_token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(claim(&new).send().await.unwrap().status(), StatusCode::OK);
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn pairing_intent_maintenance_removes_expired_and_consumed_rows_only() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start_without_maintenance().await;
-    let expired = [7_u8; 32];
-    let active = [8_u8; 32];
-    let consumed = [9_u8; 32];
-    for digest in [expired, active, consumed] {
-        sqlx::query("INSERT INTO pairing_intents(intent_digest,vault_id,origin,created_by_device_id,expires_at) VALUES($1,$2,'https://api.example',$3,now()+interval '1 hour')")
-            .bind(digest.as_slice()).bind(server.vault).bind(server.owner_device).execute(&server.pool).await.unwrap();
-    }
-    sqlx::query(
-        "UPDATE pairing_intents SET expires_at=now()-interval '1 second' WHERE intent_digest=$1",
-    )
-    .bind(expired.as_slice())
-    .execute(&server.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE pairing_intents SET approved_at=now()-interval '10 minutes' WHERE intent_digest=$1",
-    )
-    .bind(consumed.as_slice())
-    .execute(&server.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        prune_expired_pairing_intents(&server.pool).await.unwrap(),
-        2
-    );
-    let survivors: Vec<Vec<u8>> =
-        sqlx::query_scalar("SELECT intent_digest FROM pairing_intents ORDER BY intent_digest")
-            .fetch_all(&server.pool)
-            .await
-            .unwrap();
-    assert_eq!(survivors, vec![active.to_vec()]);
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn join_requests_create_offer_poll_and_prune() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start_without_maintenance().await;
-    let client = Client::new();
-    let create = || client.post(format!("{}/v1/pairing/join-requests", server.base_url));
-    let response = create().send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let created: Value = response.json().await.unwrap();
-    let id = created["join_request_id"].as_str().unwrap();
-    let secret = created["poll_secret"].as_str().unwrap();
-    assert_eq!(secret.len(), 43);
-    assert!(created["expires_in_seconds"].as_i64().unwrap() <= 300);
-
-    for (path, poll_secret) in [
-        (id.to_owned(), "wrong"),
-        (Uuid::new_v4().to_string(), secret),
-    ] {
-        let response = client
-            .get(format!(
-                "{}/v1/pairing/join-requests/{path}",
-                server.base_url
-            ))
-            .header("Peppy-Join-Secret", poll_secret)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    let device = server.pair("device").await;
-    let intent = server
-        .post(
-            &server.owner_token,
-            "/v1/pairing/intents",
-            &json!({"https_origin":"https://api.example"}),
-        )
-        .await
-        .1;
-    let offer = json!({
-        "intent_digest": hex::encode(Sha256::digest(intent["intent_token"].as_str().unwrap().as_bytes())),
-        "sealed_intent_token": URL_SAFE_NO_PAD.encode([1, 2, 3]),
-    });
-    let response = client
-        .post(format!(
-            "{}/v1/pairing/join-requests/{id}/offer",
-            server.base_url
-        ))
-        .bearer_auth(&device.token)
-        .json(&offer)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-
-    let response = server
-        .auth(client.post(format!(
-            "{}/v1/pairing/join-requests/{id}/offer",
-            server.base_url
-        )))
-        .json(&offer)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let poll = || {
-        client
-            .get(format!("{}/v1/pairing/join-requests/{id}", server.base_url))
-            .header("Peppy-Join-Secret", secret)
-    };
-    let first: Value = poll().send().await.unwrap().json().await.unwrap();
-    for _ in 0..24 {
-        let response = poll().send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.json::<Value>().await.unwrap(), first);
-    }
-    assert_eq!(first["state"], "offered");
-    assert_eq!(first["sealed_intent_token"], offer["sealed_intent_token"]);
-    assert_eq!(first["intent_digest"], offer["intent_digest"]);
-
-    // Two earlier offers for this join request already used two of its 20 admissions.
-    for _ in 0..18 {
-        let response = server
-            .auth(client.post(format!(
-                "{}/v1/pairing/join-requests/{id}/offer",
-                server.base_url
-            )))
-            .json(&offer)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            response.json::<Value>().await.unwrap()["code"],
-            "join_request_already_offered"
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path} must not remain as an enrollment alias"
         );
     }
-    let response = server
-        .auth(client.post(format!(
-            "{}/v1/pairing/join-requests/{id}/offer",
-            server.base_url
-        )))
-        .json(&offer)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
-        response.json::<Value>().await.unwrap()["code"],
-        "pairing_admission_limited"
-    );
-
-    let expired: Value = create().send().await.unwrap().json().await.unwrap();
-    let expired_id = expired["join_request_id"].as_str().unwrap();
-    sqlx::query("UPDATE pairing_join_requests SET expires_at=now()-interval '1 second' WHERE join_request_id=$1")
-        .bind(expired_id.parse::<Uuid>().unwrap()).execute(&server.pool).await.unwrap();
-    let response = server
-        .auth(client.post(format!(
-            "{}/v1/pairing/join-requests/{expired_id}/offer",
-            server.base_url
-        )))
-        .json(&offer)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::GONE);
-    assert_eq!(
-        prune_expired_pairing_intents(&server.pool).await.unwrap(),
-        1
-    );
-
-    let revoked: Value = create().send().await.unwrap().json().await.unwrap();
-    sqlx::query("UPDATE device_credentials SET revoked_at=now() WHERE token_digest=$1")
-        .bind(Sha256::digest(server.owner_token.as_bytes()).as_slice())
-        .execute(&server.pool)
-        .await
-        .unwrap();
-    let response = server
-        .auth(client.post(format!(
-            "{}/v1/pairing/join-requests/{}/offer",
-            server.base_url, revoked["join_request_id"]
-        )))
-        .json(&offer)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn join_request_offer_rejects_unofferable_intent_and_cap() {
-    let _guard = TEST_LOCK.lock().await;
-    let server = TestServer::start().await;
-    let client = Client::new();
-    let created: Value = client
-        .post(format!("{}/v1/pairing/join-requests", server.base_url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let id = created["join_request_id"].as_str().unwrap();
-    let digest = [7_u8; 32];
-    sqlx::query("INSERT INTO pairing_intents(intent_digest,vault_id,origin,created_by_device_id,expires_at) VALUES($1,$2,'https://api.example',$3,now()+interval '1 hour')")
-        .bind(digest.as_slice()).bind(server.vault).bind(Uuid::new_v4()).execute(&server.pool).await.unwrap();
-    let response = server
-        .auth(client.post(format!(
-            "{}/v1/pairing/join-requests/{id}/offer",
-            server.base_url
-        )))
-        .json(&json!({"intent_digest":hex::encode(digest),"sealed_intent_token":"AQ"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["code"],
-        "pairing_intent_not_offerable"
-    );
-
-    sqlx::query("INSERT INTO pairing_join_requests(join_request_id,poll_secret_digest,expires_at) SELECT gen_random_uuid(),decode(repeat('00',32),'hex'),now()+interval '1 hour' FROM generate_series(1,10000)")
-        .execute(&server.pool).await.unwrap();
-    let response = client
-        .post(format!("{}/v1/pairing/join-requests", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["code"],
-        "join_requests_unavailable"
+        client
+            .get(format!("{}/v1/instance", server.base_url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
     );
     server.shutdown().await;
 }
@@ -1243,7 +635,7 @@ async fn join_request_offer_rejects_unofferable_intent_and_cap() {
 async fn device_revocation_enforces_owner_scope_last_owner_and_token_cleanup() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let device = server.pair("device").await;
+    let device = server.provision_device("device").await;
 
     let (status, denied) = server
         .post(
@@ -1299,10 +691,66 @@ async fn device_revocation_enforces_owner_scope_last_owner_and_token_cleanup() {
 }
 
 #[tokio::test]
+async fn devices_roster_includes_nullable_names_and_revoked_devices() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+    sqlx::query("UPDATE devices SET name=$1, kind=$2 WHERE vault_id=$3 AND device_id=$4")
+        .bind("Legacy phone")
+        .bind("android")
+        .bind(server.vault)
+        .bind(device.id)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    let (status, roster) = server.get(&device.token, "/v1/devices").await;
+    assert_eq!(status, StatusCode::OK);
+    let devices = roster["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    let owner = devices
+        .iter()
+        .find(|candidate| candidate["device_id"] == json!(server.owner_device))
+        .unwrap();
+    assert_eq!(owner["name"], Value::Null);
+    assert_eq!(owner["kind"], Value::Null);
+    let legacy_phone = devices
+        .iter()
+        .find(|candidate| candidate["device_id"] == json!(device.id))
+        .unwrap();
+    assert_eq!(legacy_phone["name"], "Legacy phone");
+    assert_eq!(legacy_phone["kind"], "android");
+    assert_eq!(legacy_phone["role"], "device");
+    assert_eq!(legacy_phone["revoked"], false);
+    assert_eq!(legacy_phone["profile_fingerprint"], server.fingerprint);
+    assert_eq!(legacy_phone["key_epoch"], 1);
+
+    let (status, body) = server
+        .post(
+            &server.owner_token,
+            &format!("/v1/devices/{}/revoke", device.id),
+            &Value::Null,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, roster) = server.get(&server.owner_token, "/v1/devices").await;
+    assert_eq!(status, StatusCode::OK);
+    let legacy_phone = roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["device_id"] == json!(device.id))
+        .unwrap();
+    assert_eq!(legacy_phone["revoked"], true);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn vault_delete_is_owner_only_requires_echo_and_queues_all_object_cleanup() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let device = server.pair("device").await;
+    let device = server.provision_device("device").await;
     let client = Client::new();
 
     let (status, denied) = server
@@ -1388,8 +836,8 @@ async fn vault_delete_is_owner_only_requires_echo_and_queues_all_object_cleanup(
 async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
     let _guard = TEST_LOCK.lock().await;
     let first = TestServer::start().await;
-    let target = first.pair("gateway").await;
-    let other = first.pair("gateway").await;
+    let target = first.provision_device("gateway").await;
+    let other = first.provision_device("gateway").await;
     let foreign_vault = Uuid::new_v4();
     let (foreign_profile, foreign_fingerprint) = profile(foreign_vault, 1);
     let foreign_owner = create_owner(
@@ -1402,12 +850,7 @@ async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
     .await
     .unwrap();
     let foreign = first
-        .pair_for(
-            &foreign_owner.device_token,
-            foreign_vault,
-            &foreign_fingerprint,
-            "gateway",
-        )
+        .provision_device_for(foreign_vault, &foreign_fingerprint, "gateway")
         .await;
     let client = Client::new();
 
@@ -1494,9 +937,9 @@ async fn cross_vault_foreign_gateway_and_non_target_receipts_are_denied() {
 async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let gateway = server.pair("gateway").await;
-    let ordinary = server.pair("device").await;
-    let desktop_owner = server.pair("gateway").await;
+    let gateway = server.provision_device("gateway").await;
+    let ordinary = server.provision_device("device").await;
+    let desktop_owner = server.provision_device("gateway").await;
     sqlx::query("UPDATE devices SET role='owner' WHERE vault_id=$1 AND device_id=$2")
         .bind(server.vault)
         .bind(desktop_owner.id)
@@ -1660,7 +1103,7 @@ async fn owner_capability_registration_limits_owner_to_its_own_gateway_work() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(foreign_target_rejected["code"], "gateway_not_authorized");
 
-    let revoked_owner = server.pair("gateway").await;
+    let revoked_owner = server.provision_device("gateway").await;
     sqlx::query("UPDATE devices SET role='owner' WHERE vault_id=$1 AND device_id=$2")
         .bind(server.vault)
         .bind(revoked_owner.id)
@@ -1819,10 +1262,81 @@ async fn concurrent_commits_have_gapless_high_water_and_ordered_replay() {
 }
 
 #[tokio::test]
+async fn websocket_presence_hint_is_vault_scoped_and_tracks_pong_and_close() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let device = server.provision_device("device").await;
+
+    let foreign_vault = Uuid::new_v4();
+    let (foreign_profile, foreign_fingerprint) = profile(foreign_vault, 1);
+    let foreign = create_owner(
+        &server.pool,
+        foreign_profile,
+        vec![1],
+        foreign_fingerprint,
+        1,
+    )
+    .await
+    .unwrap();
+
+    let mut observer = server.connect_ws(&server.owner_token).await;
+    send_hello(&mut observer, "0").await;
+    assert_eq!(next_json(&mut observer, 3).await["type"], "ready");
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+
+    let mut foreign_observer = server.connect_ws(&foreign.device_token).await;
+    send_hello(&mut foreign_observer, "0").await;
+    assert_eq!(next_json(&mut foreign_observer, 3).await["type"], "ready");
+    assert_eq!(
+        next_json(&mut foreign_observer, 3).await["type"],
+        "presence_changed"
+    );
+
+    let mut subject = server.connect_ws(&device.token).await;
+    send_hello(&mut subject, "0").await;
+    assert_eq!(next_json(&mut subject, 3).await["type"], "ready");
+    assert_eq!(next_json(&mut subject, 3).await["type"], "presence_changed");
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+    assert_no_text_frame(&mut foreign_observer, Duration::from_millis(500)).await;
+
+    let (_, connected_roster) = server.get(&device.token, "/v1/devices").await;
+    let connected = connected_roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["device_id"] == device.id.to_string())
+        .unwrap();
+    assert_eq!(connected["presence"]["state"], "connected");
+
+    subject.close(None).await.unwrap();
+    assert_eq!(
+        next_json(&mut observer, 3).await["type"],
+        "presence_changed"
+    );
+    assert_no_text_frame(&mut foreign_observer, Duration::from_millis(500)).await;
+
+    let (_, seen_roster) = server.get(&device.token, "/v1/devices").await;
+    let seen = seen_roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["device_id"] == device.id.to_string())
+        .unwrap();
+    assert_eq!(seen["presence"]["state"], "seen");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let device = server.pair("device").await;
+    let device = server.provision_device("device").await;
     let body = set_fingerprint(
         event(server.vault, server.owner_device, 1, Uuid::new_v4(), 4),
         &server.fingerprint,
@@ -1865,12 +1379,7 @@ async fn websocket_handshake_replays_and_revocation_closes_active_socket() {
         .execute(&server.pool)
         .await
         .unwrap();
-    let replayed = tokio::time::timeout(Duration::from_secs(7), ws.next())
-        .await
-        .expect("durable replay timer did not deliver a no-notice commit")
-        .unwrap()
-        .unwrap();
-    let replayed: Value = serde_json::from_str(replayed.to_text().unwrap()).unwrap();
+    let replayed = next_durable_event(&mut ws, 7).await;
     assert_eq!(replayed["cursor"], "2");
 
     let revoked = server
@@ -1977,21 +1486,68 @@ async fn send_hello(ws: &mut Ws, resume_cursor: &str) {
     .unwrap();
 }
 
-/// Next text frame as JSON, skipping control frames.
+/// Reads the next text frame as JSON, responding to control pings.
+async fn next_json_frame(ws: &mut Ws) -> Value {
+    loop {
+        match ws.next().await {
+            Some(Ok(tungstenite::Message::Text(text))) => {
+                return serde_json::from_str::<Value>(&text).unwrap();
+            }
+            Some(Ok(tungstenite::Message::Ping(payload))) => {
+                ws.send(tungstenite::Message::Pong(payload)).await.unwrap();
+            }
+            Some(Ok(tungstenite::Message::Pong(_))) => {}
+            other => panic!("expected a text frame, got {other:?}"),
+        }
+    }
+}
+
 async fn next_json(ws: &mut Ws, seconds: u64) -> Value {
+    tokio::time::timeout(Duration::from_secs(seconds), next_json_frame(ws))
+        .await
+        .expect("timed out waiting for a websocket frame")
+}
+
+/// Waits for a durable event while allowing the advertised non-durable presence hint.
+async fn next_durable_event(ws: &mut Ws, seconds: u64) -> Value {
     tokio::time::timeout(Duration::from_secs(seconds), async {
         loop {
-            match ws.next().await {
-                Some(Ok(tungstenite::Message::Text(text))) => {
-                    return serde_json::from_str::<Value>(&text).unwrap();
-                }
-                Some(Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) => {}
-                other => panic!("expected a text frame, got {other:?}"),
+            let frame = next_json_frame(ws).await;
+            match frame["type"].as_str() {
+                Some("event") => return frame,
+                Some("presence_changed") => {}
+                other => panic!("expected an event or presence hint, got {other:?}: {frame}"),
             }
         }
     })
     .await
-    .expect("timed out waiting for a websocket frame")
+    .expect("timed out waiting for a durable websocket event")
+}
+
+async fn assert_no_text_frame(ws: &mut Ws, duration: Duration) {
+    let received = tokio::time::timeout(duration, next_json_frame(ws)).await;
+    assert!(
+        received.is_err(),
+        "unexpected websocket frame: {received:?}"
+    );
+}
+
+async fn assert_no_durable_event(ws: &mut Ws, duration: Duration) {
+    let received = tokio::time::timeout(duration, async {
+        loop {
+            let frame = next_json_frame(ws).await;
+            match frame["type"].as_str() {
+                Some("presence_changed") => {}
+                Some("event") => return frame,
+                other => panic!("unexpected websocket frame {other:?}: {frame}"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "unexpected duplicate event: {received:?}"
+    );
 }
 
 /// Waits for the server close frame and returns its code. Text frames that
@@ -2182,7 +1738,7 @@ async fn compaction_only_prunes_replay_expired_explicit_targets_and_fences_snaps
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     // A cross-producer cycle has no retained representative and must remain intact.
-    let gateway = server.pair("gateway").await;
+    let gateway = server.provision_device("gateway").await;
     let third = set_fingerprint(
         compacting_event(
             server.vault,
@@ -2460,7 +2016,7 @@ async fn unsaturated_compaction_pass_waits_the_full_daily_interval() {
 async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_retry_identity() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
-    let gateway = server.pair("gateway").await;
+    let gateway = server.provision_device("gateway").await;
     let (o, v, f) = (
         server.owner_device,
         server.vault,
@@ -2507,6 +2063,16 @@ async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_re
             &f,
         ))
         .await; // c6
+    let supersessions: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT target_producer_device_id,target_producer_sequence FROM record_supersessions WHERE vault_id=$1 AND by_cursor=6 ORDER BY target_producer_device_id,target_producer_sequence",
+    )
+    .bind(v)
+    .fetch_all(&server.pool)
+    .await
+    .unwrap();
+    let mut expected_supersessions = vec![(gateway.id, 1), (o, 4)];
+    expected_supersessions.sort_unstable();
+    assert_eq!(supersessions, expected_supersessions);
     // Young terminal 7 superseded by 8: kept for the terminal window.
     server
         .commit(&marked_event(v, o, 7, 7, true, vec![], &f))
@@ -2596,7 +2162,7 @@ async fn compaction_collapses_chains_protects_targets_holds_pending_and_keeps_re
     );
 
     // A newly paired device pauses physical compaction until it declares.
-    let late = server.pair("device").await;
+    let late = server.provision_device("device").await;
     let (_, start) = server.get(&late.token, "/v1/snapshot").await;
     assert_eq!(start["compaction_active"], false);
     server.shutdown().await;
@@ -2748,13 +2314,13 @@ async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
         ..TransportOptions::default()
     })
     .await;
-    let device = server.pair("device").await;
+    let device = server.provision_device("device").await;
     let mut ws = server.connect_ws(&device.token).await;
     send_hello(&mut ws, "0").await;
     assert_eq!(next_json(&mut ws, 3).await["type"], "ready");
 
     assert_eq!(server.commit(&server.owner_event(1)).await, "1");
-    assert_eq!(next_json(&mut ws, 3).await["cursor"], "1");
+    assert_eq!(next_durable_event(&mut ws, 3).await["cursor"], "1");
     let payload_is_null: bool = sqlx::query_scalar(
         "SELECT payload IS NULL FROM outbox_jobs WHERE vault_id=$1 AND cursor=1",
     )
@@ -2803,7 +2369,7 @@ async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
         .execute(&server.pool)
         .await
         .unwrap();
-    assert_eq!(next_json(&mut ws, 3).await["cursor"], "2");
+    assert_eq!(next_durable_event(&mut ws, 3).await["cursor"], "2");
     wait_until(3, "first delivery to be recorded", || async {
         outbox_state(2).await.is_none_or(|(delivered, _)| delivered)
     })
@@ -2825,12 +2391,7 @@ async fn outbox_drainer_recovers_a_lost_hint_and_retires_references() {
             .is_none_or(|(delivered, attempts)| delivered && attempts == 1)
     })
     .await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1_500), ws.next())
-            .await
-            .is_err(),
-        "a repeated hint must not emit a duplicate frame"
-    );
+    assert_no_durable_event(&mut ws, Duration::from_millis(1_500)).await;
     server.shutdown().await;
 }
 
@@ -2844,16 +2405,25 @@ fn with_epoch(mut envelope: Value, epoch: u32, fingerprint: &str) -> Value {
 async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,1,$2,$3)")
+        .bind(server.vault)
+        .bind(&server.fingerprint)
+        .bind(URL_SAFE_NO_PAD.decode(admission_public_key(server.vault, 1)).unwrap())
+        .execute(&server.pool)
+        .await
+        .unwrap();
     let owner = server.owner_token.clone();
-    let gateway = server.pair("gateway").await;
-    let device = server.pair("device").await;
+    let gateway = server.provision_device("gateway").await;
+    let device = server.provision_device("device").await;
     let (profile_two, fingerprint_two) = profile(server.vault, 2);
     let header_two = base64::engine::general_purpose::STANDARD.encode([2_u8; 80]);
+    let admission_key_two = admission_public_key(server.vault, 2);
     let register = json!({
         "key_epoch": 2,
         "public_key_profile": profile_two,
         "encrypted_vault_check_header": header_two,
         "profile_fingerprint": fingerprint_two,
+        "admission_public_key": admission_key_two,
     });
 
     let (status, _) = server
@@ -2865,6 +2435,16 @@ async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["activated"], false);
+    let admission_key: Vec<u8> = sqlx::query_scalar("SELECT admission_public_key FROM vault_admission_keys WHERE vault_id=$1 AND key_epoch=2 AND profile_fingerprint=$2")
+        .bind(server.vault)
+        .bind(&fingerprint_two)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        admission_key,
+        URL_SAFE_NO_PAD.decode(&admission_key_two).unwrap()
+    );
     let (status, duplicate) = server
         .post(&owner, "/v1/vault/key-profiles", &register)
         .await;
@@ -2881,7 +2461,7 @@ async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
     );
     let (foreign_profile, foreign_fingerprint) = profile(Uuid::new_v4(), 3);
     let (status, _) = server
-        .post(&owner, "/v1/vault/key-profiles", &json!({"key_epoch":3,"public_key_profile":foreign_profile,"encrypted_vault_check_header":"AAAA","profile_fingerprint":foreign_fingerprint}))
+        .post(&owner, "/v1/vault/key-profiles", &json!({"key_epoch":3,"public_key_profile":foreign_profile,"encrypted_vault_check_header":"AAAA","profile_fingerprint":foreign_fingerprint,"admission_public_key":admission_public_key(server.vault, 3)}))
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, vault) = server.get(&owner, "/v1/vault").await;
@@ -3008,12 +2588,51 @@ async fn key_profiles_are_owner_only_immutable_forward_and_gate_epochs() {
 }
 
 #[tokio::test]
+async fn key_profile_activation_requires_a_matching_admission_verifier() {
+    let _guard = TEST_LOCK.lock().await;
+    let server = TestServer::start().await;
+    let (profile_two, fingerprint_two) = profile(server.vault, 2);
+    let header_two = vec![2_u8; 80];
+    sqlx::query("INSERT INTO vault_key_profiles(vault_id,key_epoch,public_key_profile,encrypted_vault_check_header,profile_fingerprint,created_by_device_id) VALUES($1,2,$2,$3,$4,$5)")
+        .bind(server.vault)
+        .bind(&profile_two)
+        .bind(&header_two)
+        .bind(&fingerprint_two)
+        .bind(server.owner_device)
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    let activate = "/v1/vault/key-profiles/2/activate";
+    let (status, body) = server.post(&server.owner_token, activate, &json!({})).await;
+    assert_eq!(
+        (status, body["code"].clone()),
+        (
+            StatusCode::CONFLICT,
+            json!("key_profile_admission_key_missing")
+        )
+    );
+
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,2,$2,$3)")
+        .bind(server.vault)
+        .bind(&fingerprint_two)
+        .bind(URL_SAFE_NO_PAD.decode(admission_public_key(server.vault, 2)).unwrap())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let (status, activated) = server.post(&server.owner_token, activate, &json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{activated}");
+    assert_eq!(activated["duplicate"], false);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn pending_command_references_never_retarget_a_gateway() {
     let _guard = TEST_LOCK.lock().await;
     let server = TestServer::start().await;
     let owner = server.owner_token.clone();
-    let first = server.pair("gateway").await;
-    let second = server.pair("gateway").await;
+    let first = server.provision_device("gateway").await;
+    let second = server.provision_device("gateway").await;
     let envelope_id = Uuid::new_v4();
     let command_id = Uuid::new_v4();
     let original = set_fingerprint(

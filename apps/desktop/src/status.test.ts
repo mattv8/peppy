@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DesktopSnapshot } from "./bridge";
-import { connectionText, statusSummary, statusTone, syncStatusText } from "./status";
+import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
 
 type Connection = DesktopSnapshot["connection"];
 type EncryptionState = DesktopSnapshot["encryption"]["state"];
@@ -35,6 +35,7 @@ describe("status severity", () => {
       "Connected — the server rejected queued messages; they stay queued locally",
     );
     expect(connectionText({ state: "offline", errorCode: "live-x" })).toBe("Offline — live-x");
+    expect(connectionText({ state: "offline", errorCode: "server-unavailable" })).toBe("Offline — server offline; reconnecting");
   });
 
   it("includes the changing native connection and sync state in the summary", () => {
@@ -44,5 +45,20 @@ describe("status severity", () => {
         "mismatch",
       ),
     ).toBe("Connection: Offline — live connection timed out; reconnecting. Device sync key mismatch");
+  });
+
+  it.each(["offline", "server-unavailable", "live-unavailable", "live-closed", "live-timeout"])("recognizes confirmed %s outages", (errorCode) => {
+    expect(isServerUnreachable({ state: "offline", errorCode })).toBe(true);
+  });
+
+  it("does not treat connecting, unknown, or connected snapshots as unreachable", () => {
+    expect(isServerUnreachable({ state: "offline", errorCode: "connecting" })).toBe(false);
+    expect(isServerUnreachable({ state: "offline" })).toBe(false);
+    expect(isServerUnreachable({ state: "connected", errorCode: "offline" })).toBe(false);
+  });
+
+  it("uses the warning tone only for an enrolled confirmed outage", () => {
+    expect(statusTone({ state: "offline", errorCode: "server-unavailable" }, "unlocked", true)).toBe("warning");
+    expect(statusTone({ state: "offline", errorCode: "server-required" }, "locked", false)).toBe("neutral");
   });
 });

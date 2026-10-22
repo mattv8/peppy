@@ -77,6 +77,35 @@ fn resolves_international_and_national_per_book_region_without_shortcuts() {
 }
 
 #[test]
+fn refresh_normalizes_each_contact_in_a_book_with_its_cached_region() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "owner", &vault);
+    let client = unlocked(&cfg, &vault);
+    capture(
+        &client,
+        &cfg,
+        "us",
+        "US",
+        "1",
+        json!([
+            contact("us", "ada", "Ada", "(202) 555-0100"),
+            contact("us", "bea", "Bea", "(303) 555-0100")
+        ]),
+    );
+    assert_eq!(
+        resolve(&client, &["+12025550100", "+13035550100"]),
+        json!({
+            "matches":[
+                {"address":"+12025550100","contact_id":"ada","book_id":"us","display_name":"Ada"},
+                {"address":"+13035550100","contact_id":"bea","book_id":"us","display_name":"Bea"}
+            ],
+            "ambiguous":[], "more_indexing":false
+        })
+    );
+}
+
+#[test]
 fn exact_shared_forgotten_and_changed_numbers_do_not_leak_stale_matches() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

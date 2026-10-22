@@ -32,7 +32,10 @@ pub const CHALLENGE_TTL: Duration = Duration::from_secs(600);
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const ADMISSION_LIMIT: u16 = 20;
 const WAKE_ADMISSION_LIMIT: u16 = 120;
+const MAX_WAKE_ADMISSION_LIMIT: u32 = 100_000;
 const ADMISSION_MAP_CAP: usize = 4096;
+const EXPIRED_REGISTRATION_CLEANUP_LIMIT: i64 = 100;
+pub const WAKE_DELIVERY_BATCH_LIMIT: usize = 32;
 const MAX_TOKEN_BYTES: usize = 4096;
 const MAX_IDENTITY_BYTES: usize = 4096;
 const MAX_IDEMPOTENCY_BYTES: usize = 128;
@@ -47,12 +50,13 @@ pub struct AppState {
     provider: Arc<dyn PushProvider>,
     admissions: Arc<Mutex<HashMap<String, Admission>>>,
     wake_admissions: Arc<Mutex<HashMap<String, Admission>>>,
+    wake_admission_limit: u32,
     trusted_proxy_cidrs: Arc<Vec<IpNet>>,
     release_identity: Arc<String>,
 }
 struct Admission {
     window: SystemTime,
-    count: u16,
+    count: u32,
 }
 
 /// Narrow outbound boundary: only provider token and opaque relay hints cross it.
@@ -60,6 +64,9 @@ pub trait PushProvider: Send + Sync {
     fn configured(&self) -> bool;
     fn supports(&self, provider: Provider) -> bool;
     fn provider_name(&self) -> &'static str;
+    fn apns_environment(&self) -> Option<&'static str> {
+        None
+    }
     fn send_challenge<'a>(
         &'a self,
         provider: Provider,
@@ -117,17 +124,20 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterRequest {
     pub provider: Provider,
     pub device_token: String,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmRequest {
     pub challenge: String,
     pub installation_public_identity: Option<String>,
+    pub route_id: Option<Uuid>,
+    pub manage_credential: Option<String>,
+    pub wake_credential: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,6 +167,15 @@ pub struct Health {
     pub status: &'static str,
     pub provider: &'static str,
     pub warning: &'static str,
+    pub providers: Vec<&'static str>,
+    pub apns_environment: Option<&'static str>,
+}
+#[derive(Debug, Serialize)]
+pub struct ProviderCapabilities {
+    pub available: bool,
+    pub confirm_candidates: bool,
+    pub providers: Vec<&'static str>,
+    pub apns_environment: Option<&'static str>,
 }
 #[derive(Debug, Serialize)]
 struct ApiError {
@@ -177,11 +196,27 @@ impl AppState {
         trusted_proxy_cidrs: Vec<IpNet>,
         release_identity: String,
     ) -> Self {
+        Self::with_provider_proxy_cidrs_and_wake_limit(
+            pool,
+            provider,
+            trusted_proxy_cidrs,
+            release_identity,
+            WAKE_ADMISSION_LIMIT.into(),
+        )
+    }
+    pub fn with_provider_proxy_cidrs_and_wake_limit(
+        pool: PgPool,
+        provider: Arc<dyn PushProvider>,
+        trusted_proxy_cidrs: Vec<IpNet>,
+        release_identity: String,
+        wake_admission_limit: u32,
+    ) -> Self {
         Self {
             pool,
             provider,
             admissions: Arc::new(Mutex::new(HashMap::new())),
             wake_admissions: Arc::new(Mutex::new(HashMap::new())),
+            wake_admission_limit,
             trusted_proxy_cidrs: Arc::new(trusted_proxy_cidrs),
             release_identity: Arc::new(release_identity),
         }
@@ -205,7 +240,7 @@ impl AppState {
             window: now,
             count: 0,
         });
-        if entry.count >= ADMISSION_LIMIT {
+        if entry.count >= u32::from(ADMISSION_LIMIT) {
             return Err(ApiError {
                 code: "rate_limited",
             });
@@ -232,7 +267,7 @@ impl AppState {
             window: now,
             count: 0,
         });
-        if entry.count >= WAKE_ADMISSION_LIMIT {
+        if entry.count >= self.wake_admission_limit {
             return Err(ApiError {
                 code: "rate_limited",
             });
@@ -250,6 +285,23 @@ impl AppState {
     fn client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> SocketAddr {
         resolve_client_ip(peer, headers, &self.trusted_proxy_cidrs)
     }
+}
+
+/// Parses the bounded per-IP wake admission budget. The default preserves the
+/// historical 120 requests/minute limit; it never creates an unauthenticated bypass.
+pub fn wake_admission_limit(value: Option<&str>) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(WAKE_ADMISSION_LIMIT.into());
+    };
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| "PEPPY_RELAY_WAKE_ADMISSION_LIMIT must be an integer".to_owned())?;
+    if !(1..=MAX_WAKE_ADMISSION_LIMIT).contains(&parsed) {
+        return Err(format!(
+            "PEPPY_RELAY_WAKE_ADMISSION_LIMIT must be between 1 and {MAX_WAKE_ADMISSION_LIMIT}"
+        ));
+    }
+    Ok(parsed)
 }
 
 /// Parses the comma-separated CIDR allowlist used for proxy forwarding.
@@ -310,6 +362,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
+        .route("/v1/capabilities", get(capabilities))
         .route("/__release", get(release))
         .route("/v1/registrations", post(register))
         .route("/v1/registrations/{id}/confirm", post(confirm))
@@ -338,8 +391,18 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             } else {
                 "no provider adapter configured; relay cannot deliver push"
             },
+            providers: configured_providers(&state),
+            apns_environment: state.provider.apns_environment(),
         }),
     )
+}
+async fn capabilities(State(state): State<AppState>) -> Json<ProviderCapabilities> {
+    Json(ProviderCapabilities {
+        available: state.provider.configured(),
+        confirm_candidates: true,
+        providers: configured_providers(&state),
+        apns_environment: state.provider.apns_environment(),
+    })
 }
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     if sqlx::query("SELECT 1").execute(&state.pool).await.is_err() {
@@ -349,6 +412,8 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
                 status: "unavailable",
                 provider: state.provider.provider_name(),
                 warning: "database unavailable",
+                providers: configured_providers(&state),
+                apns_environment: state.provider.apns_environment(),
             }),
         );
     }
@@ -359,6 +424,8 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
                 status: "unavailable",
                 provider: state.provider.provider_name(),
                 warning: "no provider adapter configured; relay cannot deliver push",
+                providers: configured_providers(&state),
+                apns_environment: state.provider.apns_environment(),
             }),
         );
     }
@@ -368,8 +435,18 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
             status: "ready",
             provider: state.provider.provider_name(),
             warning: "provider configured; delivery is best effort",
+            providers: configured_providers(&state),
+            apns_environment: state.provider.apns_environment(),
         }),
     )
+}
+
+fn configured_providers(state: &AppState) -> Vec<&'static str> {
+    [Provider::Apns, Provider::Fcm]
+        .into_iter()
+        .filter(|provider| state.provider.supports(*provider))
+        .map(provider_name)
+        .collect()
 }
 
 async fn register(
@@ -429,39 +506,100 @@ async fn confirm(
     if let Some(identity) = &request.installation_public_identity {
         valid_nonempty(identity, MAX_IDENTITY_BYTES, "invalid_identity")?;
     }
+    let candidate = confirmation_candidate(&request)?;
     state.admit_request(peer, &headers).await.map_err(rate)?;
     if !state.provider.configured() {
         return Err(unconfigured());
     }
     let mut tx = state.pool.begin().await.map_err(db)?;
-    let row = sqlx::query_as::<_, (String, String, Vec<u8>)>("SELECT provider,token,challenge_digest FROM relay_registrations WHERE id=$1 AND confirmed_at IS NULL AND revoked_at IS NULL AND expires_at>now() FOR UPDATE")
+    let row = sqlx::query_as::<_, (String, String, Vec<u8>, bool, bool)>("SELECT provider,token,challenge_digest,confirmed_at IS NOT NULL,expires_at>now() FROM relay_registrations WHERE id=$1 AND revoked_at IS NULL FOR UPDATE")
         .bind(id).fetch_optional(&mut *tx).await.map_err(db)?;
-    let Some((provider, token, stored)) = row else {
+    let Some((provider, token, stored, confirmed, unexpired)) = row else {
         return Err(unauthorized());
     };
     if !constant_time_eq(&stored, &digest(&request.challenge)) {
         return Err(unauthorized());
     }
-    let route_id = Uuid::new_v4();
-    let manage = secret();
-    let wake = secret();
+    if confirmed {
+        let Some(candidate) = candidate else {
+            return Err(unauthorized());
+        };
+        let route = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>("SELECT manage_digest,wake_digest FROM relay_routes WHERE id=$1 AND registration_id=$2 AND revoked_at IS NULL FOR UPDATE")
+            .bind(candidate.route_id)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db)?;
+        let Some((manage_digest, wake_digest)) = route else {
+            return Err(unauthorized());
+        };
+        if !constant_time_eq(&manage_digest, &digest(&candidate.manage_credential))
+            || !constant_time_eq(&wake_digest, &digest(&candidate.wake_credential))
+        {
+            return Err(unauthorized());
+        }
+        tx.commit().await.map_err(db)?;
+        return Ok((StatusCode::CREATED, Json(candidate.into())));
+    }
+    if !unexpired {
+        return Err(unauthorized());
+    }
+    let candidate = candidate.unwrap_or_else(|| ConfirmationCandidate {
+        route_id: Uuid::new_v4(),
+        manage_credential: secret(),
+        wake_credential: secret(),
+    });
+    let provider = Provider::parse(&provider).ok_or_else(db_error)?;
+    let inserted = sqlx::query("INSERT INTO relay_routes(id,registration_id,provider,token,manage_digest,wake_digest) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING")
+        .bind(candidate.route_id).bind(id).bind(provider_name(provider)).bind(token).bind(digest(&candidate.manage_credential)).bind(digest(&candidate.wake_credential)).execute(&mut *tx).await.map_err(db)?;
+    if inserted.rows_affected() != 1 {
+        return Err(unauthorized());
+    }
     let changed = sqlx::query("UPDATE relay_registrations SET confirmed_at=now(),installation_public_identity=$2 WHERE id=$1 AND confirmed_at IS NULL")
         .bind(id).bind(request.installation_public_identity).execute(&mut *tx).await.map_err(db)?;
     if changed.rows_affected() != 1 {
         return Err(unauthorized());
     }
-    let provider = Provider::parse(&provider).ok_or_else(db_error)?;
-    sqlx::query("INSERT INTO relay_routes(id,registration_id,provider,token,manage_digest,wake_digest) VALUES($1,$2,$3,$4,$5,$6)")
-        .bind(route_id).bind(id).bind(provider_name(provider)).bind(token).bind(digest(&manage)).bind(digest(&wake)).execute(&mut *tx).await.map_err(db)?;
     tx.commit().await.map_err(db)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(RouteCredentials {
-            route_id,
-            manage_credential: manage,
-            wake_credential: wake,
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(candidate.into())))
+}
+
+struct ConfirmationCandidate {
+    route_id: Uuid,
+    manage_credential: String,
+    wake_credential: String,
+}
+
+impl From<ConfirmationCandidate> for RouteCredentials {
+    fn from(candidate: ConfirmationCandidate) -> Self {
+        Self {
+            route_id: candidate.route_id,
+            manage_credential: candidate.manage_credential,
+            wake_credential: candidate.wake_credential,
+        }
+    }
+}
+
+fn confirmation_candidate(
+    request: &ConfirmRequest,
+) -> Result<Option<ConfirmationCandidate>, (StatusCode, Json<ApiError>)> {
+    match (
+        request.route_id,
+        request.manage_credential.as_deref(),
+        request.wake_credential.as_deref(),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(route_id), Some(manage_credential), Some(wake_credential)) => {
+            valid_secret(manage_credential, "invalid_confirmation_candidate")?;
+            valid_secret(wake_credential, "invalid_confirmation_candidate")?;
+            Ok(Some(ConfirmationCandidate {
+                route_id,
+                manage_credential: manage_credential.to_owned(),
+                wake_credential: wake_credential.to_owned(),
+            }))
+        }
+        _ => Err(bad("invalid_confirmation_candidate")),
+    }
 }
 
 async fn wake(
@@ -587,6 +725,16 @@ pub async fn deliver_one(state: &AppState) -> Result<bool, sqlx::Error> {
     .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+/// Deletes a bounded batch of expired registrations that never produced a route.
+/// Confirmed registrations are retained for credential-bound replay recovery.
+pub async fn cleanup_expired_registrations(state: &AppState) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query("WITH expired AS (SELECT id FROM relay_registrations WHERE confirmed_at IS NULL AND expires_at <= now() ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT $1) DELETE FROM relay_registrations registration USING expired WHERE registration.id=expired.id AND registration.confirmed_at IS NULL")
+        .bind(EXPIRED_REGISTRATION_CLEANUP_LIMIT)
+        .execute(&state.pool)
+        .await?;
+    Ok(deleted.rows_affected())
 }
 
 async fn revoke(
@@ -841,6 +989,9 @@ mod tests {
         assert_eq!(registered.status(), StatusCode::CREATED);
         let registration: RegistrationPending = registered.json().await.unwrap();
         let challenge = fake.challenges.lock().unwrap()[0].2.clone();
+        let candidate_route_id = Uuid::new_v4();
+        let candidate_manage = "a".repeat(64);
+        let candidate_wake = "b".repeat(64);
         assert_eq!(
             post(
                 &client,
@@ -852,15 +1003,130 @@ mod tests {
             .status(),
             StatusCode::UNAUTHORIZED
         );
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/registrations/{}/confirm", registration.registration_id),
+                serde_json::json!({"challenge": &challenge, "route_id": candidate_route_id}),
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
         let confirmed = post(
             &client,
             &base,
             &format!("/v1/registrations/{}/confirm", registration.registration_id),
-            serde_json::json!({"challenge":challenge}),
+            serde_json::json!({"challenge":&challenge,"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
         )
         .await;
         assert_eq!(confirmed.status(), StatusCode::CREATED);
         let route: RouteCredentials = confirmed.json().await.unwrap();
+        assert_eq!(route.route_id, candidate_route_id);
+        assert_eq!(route.manage_credential, candidate_manage);
+        assert_eq!(route.wake_credential, candidate_wake);
+        let collision_registration = post(
+            &client,
+            &base,
+            "/v1/registrations",
+            serde_json::json!({"provider":"fcm","device_token":"token-collision"}),
+        )
+        .await
+        .json::<RegistrationPending>()
+        .await
+        .unwrap();
+        let collision_challenge = fake.challenges.lock().unwrap()[1].2.clone();
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/registrations/{}/confirm", collision_registration.registration_id),
+                serde_json::json!({"challenge":&collision_challenge,"route_id":candidate_route_id,"manage_credential":"d".repeat(64),"wake_credential":"e".repeat(64)}),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let replay = post(
+            &client,
+            &base,
+            &format!("/v1/registrations/{}/confirm", registration.registration_id),
+            serde_json::json!({"challenge":&challenge,"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        assert_eq!(
+            replay.json::<RouteCredentials>().await.unwrap().route_id,
+            route.route_id
+        );
+        for request in [
+            serde_json::json!({"challenge":"f".repeat(64),"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
+            serde_json::json!({"challenge":&challenge,"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":"c".repeat(64)}),
+            serde_json::json!({"challenge":&challenge,"route_id":Uuid::new_v4(),"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
+        ] {
+            assert_eq!(
+                post(
+                    &client,
+                    &base,
+                    &format!("/v1/registrations/{}/confirm", registration.registration_id),
+                    request,
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!(
+                    "/v1/registrations/{}/confirm",
+                    collision_registration.registration_id
+                ),
+                serde_json::json!({"challenge":&collision_challenge,"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let route_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM relay_routes WHERE registration_id=$1")
+                .bind(registration.registration_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(route_count, 1);
+        sqlx::query(
+            "UPDATE relay_registrations SET expires_at=now()-interval '1 second' WHERE id=$1",
+        )
+        .bind(registration.registration_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/registrations/{}/confirm", registration.registration_id),
+                serde_json::json!({"challenge":&challenge,"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
+            )
+            .await
+            .status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/registrations/{}/confirm", registration.registration_id),
+                serde_json::json!({"challenge":&challenge,"route_id":candidate_route_id,"manage_credential":"c".repeat(64),"wake_credential":&candidate_wake}),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(
             post(
                 &client,
@@ -911,6 +1177,17 @@ mod tests {
             .await
             .status(),
             StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/registrations/{}/confirm", registration.registration_id),
+                serde_json::json!({"challenge":&challenge,"route_id":candidate_route_id,"manage_credential":&candidate_manage,"wake_credential":&candidate_wake}),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
         );
         let tokens: (String, String) = sqlx::query_as("SELECT r.token,g.token FROM relay_routes r JOIN relay_registrations g ON g.id=r.registration_id WHERE r.id=$1").bind(route.route_id).fetch_one(&pool).await.unwrap();
         assert!(tokens.0.is_empty() && tokens.1.is_empty());
@@ -1016,6 +1293,21 @@ mod tests {
             release_resp.json::<serde_json::Value>().await.unwrap()["revision"],
             "unknown"
         );
+        let capabilities = client
+            .get(format!("{base}/v1/capabilities"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        assert_eq!(
+            capabilities.json::<serde_json::Value>().await.unwrap(),
+            serde_json::json!({
+                "available": false,
+                "confirm_candidates": true,
+                "providers": [],
+                "apns_environment": null,
+            })
+        );
 
         task.abort();
         cleanup(pool, schema).await;
@@ -1058,6 +1350,28 @@ mod tests {
         assert!(trusted_proxy_cidrs(Some("10.0.0.0/8,not-a-cidr")).is_err());
         assert!(trusted_proxy_cidrs(Some(" 10.0.0.0/8")).is_err());
         assert!(trusted_proxy_cidrs(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn wake_admission_limit_is_bounded_and_defaults_to_legacy_value() {
+        assert_eq!(wake_admission_limit(None), Ok(120));
+        assert_eq!(wake_admission_limit(Some("1")), Ok(1));
+        assert_eq!(wake_admission_limit(Some("100000")), Ok(100_000));
+        assert!(wake_admission_limit(Some("0")).is_err());
+        assert!(wake_admission_limit(Some("100001")).is_err());
+        assert!(wake_admission_limit(Some("not-a-number")).is_err());
+    }
+
+    #[test]
+    fn confirmation_candidates_must_be_all_or_none() {
+        let request = ConfirmRequest {
+            challenge: "f".repeat(64),
+            installation_public_identity: None,
+            route_id: Some(Uuid::new_v4()),
+            manage_credential: Some("a".repeat(64)),
+            wake_credential: None,
+        };
+        assert!(confirmation_candidate(&request).is_err());
     }
 
     #[tokio::test]
@@ -1197,6 +1511,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_wake_admission_limit_is_enforced_over_http() {
+        let (pool, schema) = test_pool().await;
+        let (base, task) = serve(AppState::with_provider_proxy_cidrs_and_wake_limit(
+            pool.clone(),
+            Arc::new(FakeProvider::default()),
+            Vec::new(),
+            "test-release".into(),
+            1,
+        ))
+        .await;
+        let client = reqwest::Client::new();
+        let request = serde_json::json!({
+            "wake_credential": "a".repeat(64),
+            "idempotency_id": "one",
+            "opaque_nonce": "nonce",
+        });
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/routes/{}/wake", Uuid::new_v4()),
+                request.clone()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post(
+                &client,
+                &base,
+                &format!("/v1/routes/{}/wake", Uuid::new_v4()),
+                request
+            )
+            .await
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        task.abort();
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
     async fn admission_map_cap_protects_against_unbounded_ipv6_state() {
         let (pool, schema) = test_pool().await;
         let fake = Arc::new(FakeProvider::default());
@@ -1214,6 +1571,37 @@ mod tests {
         assert_eq!(ADMISSION_MAP_CAP, 4096);
 
         task.abort();
+        cleanup(pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_unconfirmed_registrations_is_bounded_and_preserves_confirmed() {
+        let (pool, schema) = test_pool().await;
+        for _ in 0..=EXPIRED_REGISTRATION_CLEANUP_LIMIT {
+            sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at) VALUES($1,'fcm','token',$2,now()-interval '1 second')")
+                .bind(Uuid::new_v4())
+                .bind(vec![0_u8; 32])
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let confirmed = Uuid::new_v4();
+        sqlx::query("INSERT INTO relay_registrations(id,provider,token,challenge_digest,expires_at,confirmed_at) VALUES($1,'fcm','token',$2,now()-interval '1 second',now())")
+            .bind(confirmed)
+            .bind(vec![0_u8; 32])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = AppState::with_provider(pool.clone(), Arc::new(FakeProvider::default()));
+        assert_eq!(cleanup_expired_registrations(&state).await.unwrap(), 100);
+        assert_eq!(cleanup_expired_registrations(&state).await.unwrap(), 1);
+        let retained: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_registrations WHERE id=$1)")
+                .bind(confirmed)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(retained);
         cleanup(pool, schema).await;
     }
 
@@ -1296,6 +1684,7 @@ mod tests {
         .await;
         assert_eq!(registration3.status(), StatusCode::CREATED);
         let reg3: RegistrationPending = registration3.json().await.unwrap();
+        let challenge3 = fake.challenges.lock().unwrap()[2].2.clone();
 
         // Manually expire the registration in the database
         sqlx::query(
@@ -1311,7 +1700,7 @@ mod tests {
             &client,
             &base,
             &format!("/v1/registrations/{}/confirm", reg3.registration_id),
-            serde_json::json!({"challenge":"f".repeat(64)}),
+            serde_json::json!({"challenge":challenge3}),
         )
         .await;
         assert_eq!(confirm_expired.status(), StatusCode::UNAUTHORIZED);

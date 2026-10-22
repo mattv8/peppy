@@ -9,6 +9,7 @@ import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClient
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.openNativeClient
+import uniffi.peppy_mobile_bindings.NativeEnrollmentIdentity
 import java.io.File
 import java.io.IOException
 import java.security.GeneralSecurityException
@@ -23,6 +24,8 @@ enum class ImportResult {
     UPDATED,
     INVALID_CREDENTIAL,
     SERVER_REJECTED,
+    SETUP_TOKEN_REJECTED,
+    INSTANCE_ALREADY_CLAIMED,
     NOT_A_GATEWAY,
     NETWORK_ERROR,
     /** A different origin/vault/device is already bound to this install's database. */
@@ -55,13 +58,21 @@ data class GatewayStatus(
 
 /** Only produced when the database is open and the shared vault purpose keys are installed. */
 class GatewaySession(val client: NativeClient, val origin: String, val deviceId: String, internal val bearerToken: String)
+/** Credential-only binding used for authenticated reachability checks while vault keys are locked. */
+internal class GatewayReachabilityBinding(
+    val origin: String,
+    val vaultId: String,
+    val deviceId: String,
+    val bearerToken: String,
+    val generation: Long,
+) {
+    override fun toString() = "GatewayReachabilityBinding(redacted)"
+}
 /** Bearer credentials must not gain a generated `toString`, `copy`, or component API. */
 internal class GatewayAccountCredential(val origin: String, val vaultId: String, val deviceId: String, val bearerToken: String) {
     override fun toString() = "GatewayAccountCredential(redacted)"
 }
-
-/** Public sealed-store material exposed only after the vault's shared keys are ready. */
-internal class OwnerPairingLocalMaterial(
+internal class OwnerEnrollmentMaterial(
     val origin: String,
     val vaultId: String,
     val deviceId: String,
@@ -110,7 +121,13 @@ object NativeGateway {
     fun databaseFile(context: Context) = File(context.noBackupFilesDir, DATABASE_NAME)
 
     /** Opens (once) the SQLCipher database. Does not imply the shared vault keys are available. */
-    fun open(context: Context): NativeClient? = synchronized(lock) {
+    fun open(context: Context): NativeClient? {
+        if (!SyncDiagnostics.enabled) return openUnchecked(context)
+        val cold = synchronized(lock) { client == null }
+        return SyncDiagnostics.measureNativeOpen(cold, succeeded = { it != null }) { openUnchecked(context) }
+    }
+
+    private fun openUnchecked(context: Context): NativeClient? = synchronized(lock) {
         client?.let { return it }
         generation++
         val prefs = prefs(context)
@@ -171,6 +188,21 @@ object NativeGateway {
         }
     }
 
+    /**
+     * Returns the active enrolled binding without opening or exposing vault keys. The generation
+     * fences asynchronous probe and worker results from a replaced binding.
+     */
+    internal fun reachabilityBinding(context: Context): GatewayReachabilityBinding? = synchronized(lock) {
+        val prefs = prefs(context)
+        val identity = identity(prefs) ?: return null
+        val token = prefs.getString(P_TOKEN, null)?.let { secretBox.open(P_TOKEN, it) } ?: return null
+        try {
+            GatewayReachabilityBinding(identity.origin, identity.vaultId, identity.deviceId, String(token, Charsets.UTF_8), generation)
+        } finally {
+            token.fill(0)
+        }
+    }
+
     /** Account HTTP may run while keys are locked; it never opens or exports vault key material. */
     internal fun accountCredential(context: Context): GatewayAccountCredential? = synchronized(lock) {
         val prefs = prefs(context); val identity = identity(prefs) ?: return null
@@ -179,20 +211,13 @@ object NativeGateway {
         finally { token.fill(0) }
     }
 
-    /**
-     * The owner-pairing flow needs the exact unlocked local profile, not a fresh server profile.
-     * This deliberately returns no bearer, passphrase, purpose key, or database key.
-     */
-    internal fun ownerPairingLocalMaterial(context: Context): OwnerPairingLocalMaterial? {
-        open(context) ?: return null
-        return synchronized(lock) {
-            if (!sharedKeysReady) return null
-            val prefs = prefs(context)
-            val identity = identity(prefs) ?: return null
-            val profile = openString(prefs, P_PROFILE) ?: return null
-            val header = openString(prefs, P_HEADER) ?: return null
-            OwnerPairingLocalMaterial(identity.origin, identity.vaultId, identity.deviceId, profile, header)
-        }
+    internal fun ownerEnrollmentMaterial(context: Context): OwnerEnrollmentMaterial? = synchronized(lock) {
+        if (!sharedKeysReady) return null
+        val prefs = prefs(context)
+        val identity = identity(prefs) ?: return null
+        val profile = openString(prefs, P_PROFILE) ?: return null
+        val header = openString(prefs, P_HEADER) ?: return null
+        OwnerEnrollmentMaterial(identity.origin, identity.vaultId, identity.deviceId, profile, header)
     }
 
     /**
@@ -230,8 +255,12 @@ object NativeGateway {
             databaseFiles(context).forEach { file -> if (file.exists() && !file.delete()) return false }
             // The active binding and all state that fences its sync history disappear together as
             // far as each durable store permits.  No old credential remains usable by new work.
+            // Capture cleanup under the still-current credential before clearing the enrollment.
+            RelayWakeRuntime.archiveEnrollment(context)
             if (!prefs.edit().clear().commit()) return false
             GatewayStateStore(context).resetForNewEnrollment()
+            ServerReachabilityState.clear()
+            RemoteMessagingService.stop(context)
             true
         } catch (_: IOException) {
             false
@@ -266,6 +295,32 @@ object NativeGateway {
             VaultCheck.Mismatch -> return ImportResult.SERVER_REJECTED
         }
         return persistVerified(context, credential, material, beforeCommit)
+    }
+
+    /** Installs only an identity validated by the opaque Rust enrollment client. */
+    internal fun installEnrollmentIdentity(context: Context, identity: NativeEnrollmentIdentity): ImportResult {
+        val metadata = identity.metadata()
+        val credential = try {
+            DeviceCredential(metadata.origin, metadata.vaultId, metadata.deviceId, identity.credentialForNativeSecureStore())
+        } catch (_: MobileBindingsException) {
+            return ImportResult.SERVER_REJECTED
+        }
+        val installed = persistVerified(context, credential, VaultMaterial(metadata.profileJson, metadata.headerJson))
+        if (installed != ImportResult.IMPORTED && installed != ImportResult.UPDATED) return installed
+        val opened = open(context) ?: return ImportResult.STORAGE_ERROR
+        return try {
+            identity.activateInto(opened)
+            val cache = opened.exportNativeKeyCacheForNativeStorage(
+                org.json.JSONObject(metadata.profileJson).strictUInt("key_epoch")!!.toInt().toUInt(),
+            )
+            try {
+                if (!prefs(context).edit().putString(P_KEY_CACHE, secretBox.seal(P_KEY_CACHE, cache)).commit()) return ImportResult.STORAGE_ERROR
+            } finally { cache.fill(0) }
+            synchronized(lock) { sharedKeysReady = true }
+            installed
+        } catch (_: Exception) {
+            ImportResult.SERVER_REJECTED
+        }
     }
 
     internal sealed interface VaultCheck {
@@ -354,6 +409,7 @@ object NativeGateway {
                 return ImportResult.STORAGE_ERROR
             }
             if (!editor.commit()) return ImportResult.STORAGE_ERROR
+            RelayWakeRuntime.enrollmentChanged(context)
             // A new database always bootstraps from a snapshot before any live replay or effect.
             if (result == ImportResult.IMPORTED) GatewayStateStore(context).startBootstrap()
             result

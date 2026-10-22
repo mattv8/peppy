@@ -3,14 +3,17 @@ package dev.peppy.mobile
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
+import androidx.work.Data
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -34,16 +37,69 @@ object GatewayWork {
 
     private fun constraints() = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
-    /** Unique, network-constrained. APPEND_OR_REPLACE keeps a follow-up when a run is active. */
-    fun enqueue(context: Context) {
+    private const val COALESCE = "peppy-gateway-sync-coalesce"
+    private const val DIRTY = "dirty.v1"
+    private val coalescer = GatewaySyncCoalescer()
+
+    /** Unique, network-constrained work; hints set a durable dirty bit while a pass is running. */
+    fun enqueue(context: Context, diagnosticParent: Long = 0L) {
+        request(context, urgent = false, diagnosticParent = diagnosticParent)
+    }
+
+    /** Wake hints are latency-sensitive, but quota exhaustion must still retain bounded sync work. */
+    fun enqueueUrgent(context: Context) {
+        request(context, urgent = true, diagnosticParent = 0L)
+    }
+
+    private fun request(context: Context, urgent: Boolean, diagnosticParent: Long) {
+        val diagnosticsEnabled = SyncDiagnostics.enabled
+        val enqueuedMs = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
+        val requestTrace = if (diagnosticsEnabled) SyncDiagnostics.currentTraceId() else 0L
+        val appendToActivePass = coalescer.request()
+        if (diagnosticsEnabled) {
+            SyncDiagnostics.record(SyncTraceEvent.GATEWAY_ENQUEUE, SyncTraceField.PARENT_ID to diagnosticParent, SyncTraceField.TRACE_ID to requestTrace, SyncTraceField.ENQUEUED_MS to enqueuedMs, SyncTraceField.SOURCE to if (appendToActivePass) 1 else 0)
+        }
+        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, true).commit()
         WorkManager.getInstance(context).enqueueUniqueWork(
             NAME,
-            ExistingWorkPolicy.APPEND_OR_REPLACE,
-            OneTimeWorkRequestBuilder<GatewaySyncWorker>()
-                .setConstraints(constraints())
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                .build(),
+            if (appendToActivePass) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP,
+            createRequest(urgent, diagnosticParent, enqueuedMs, requestTrace, if (diagnosticsEnabled) SyncDiagnostics.currentSessionToken() else 0L),
         )
+    }
+
+    internal fun createRequest(urgent: Boolean, diagnosticParent: Long = 0L, enqueuedMs: Long = 0L, requestTrace: Long = 0L, session: Long = 0L, apiLevel: Int = Build.VERSION.SDK_INT) =
+        OneTimeWorkRequestBuilder<GatewaySyncWorker>()
+            .setConstraints(constraints())
+            // Pre-S emulates expedited work with a foreground service. This bounded worker
+            // remains ordinary there instead of claiming a foreground notification state.
+            .apply {
+                if (urgent && apiLevel >= Build.VERSION_CODES.S) {
+                    setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                }
+            }
+            .apply {
+                if (SyncDiagnostics.enabled) setInputData(
+                    Data.Builder().putLong(DIAGNOSTIC_PARENT, diagnosticParent).putLong(DIAGNOSTIC_ENQUEUED_MS, enqueuedMs).putLong(DIAGNOSTIC_SESSION, session)
+                        .putLong(DIAGNOSTIC_REQUEST_TRACE, requestTrace).build(),
+                )
+            }
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
+
+    internal const val DIAGNOSTIC_PARENT = "peppy-gateway-diagnostic-parent"
+    internal const val DIAGNOSTIC_ENQUEUED_MS = "peppy-gateway-diagnostic-enqueued-ms"
+    internal const val DIAGNOSTIC_REQUEST_TRACE = "peppy-gateway-diagnostic-request-trace"
+    internal const val DIAGNOSTIC_SESSION = "peppy-gateway-diagnostic-session"
+
+    /** Called only under [GatewaySyncWorker]'s process-wide pass mutex. */
+    internal fun beginPass(context: Context) {
+        coalescer.begin()
+        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, false).commit()
+    }
+
+    /** Preserves the finishing fence so a concurrent wake appends one bounded successor. */
+    internal fun finishPass() {
+        coalescer.finish()
     }
 
     /**
@@ -56,6 +112,29 @@ object GatewayWork {
             ExistingPeriodicWorkPolicy.KEEP,
             PeriodicWorkRequestBuilder<GatewaySyncWorker>(15, TimeUnit.MINUTES).setConstraints(constraints()).build(),
         )
+    }
+}
+
+/** In-process companion to the durable dirty bit; it proves one active pass gets one successor. */
+internal class GatewaySyncCoalescer {
+    private var running = false
+    private var successorQueued = false
+
+    /** True means this request must append exactly one successor to the current unique chain. */
+    @Synchronized fun request(): Boolean {
+        if (!running || successorQueued) return false
+        successorQueued = true
+        return true
+    }
+
+    @Synchronized fun begin() {
+        running = true
+        successorQueued = false
+    }
+
+    /** Keep the finishing fence until the next pass begins, closing WorkManager's success race. */
+    @Synchronized fun finish() {
+        // A request after this point still appends to this pass rather than being swallowed by KEEP.
     }
 }
 
@@ -96,6 +175,9 @@ class GatewaySync(
     /** Contact photo reference registration/reclaim; must precede outbox upload. */
     private val contactPhotos: () -> Boolean = { false },
 ) {
+    private enum class GatewayPhase(val code: Long) {
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19),
+    }
     class PassResult(val more: Boolean, val failure: Exception?)
 
     private var more = false
@@ -105,54 +187,56 @@ class GatewaySync(
     fun run(): PassResult {
         if (state.phase == SyncPhase.RECOVERY_REQUIRED) {
             // Withdraw routes so the desktop stops offering this gateway; nothing else.
-            phase { publish(SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false)); false }
+            phase(GatewayPhase.RECOVERY_WITHDRAW) { publish(SimRoutes.capabilityReport(emptyList(), sendPermissionGranted = false)); false }
             return PassResult(false, failure)
         }
-        phase { publish(capabilities); false }
+        phase(GatewayPhase.CAPABILITIES) { publish(capabilities); false }
         // Probe even when live replay does not need a resync; unknown/failed capability is false.
-        phase { probeSnapshotCapability(); false }
+        phase(GatewayPhase.COMPACTION_CAPABILITY) { probeSnapshotCapability(); false }
         when (state.phase) {
-            SyncPhase.BOOTSTRAP -> phase { bootstrap() }
-            SyncPhase.BOOTSTRAP_DRAINING -> phase { finishBootstrap() }
+            SyncPhase.BOOTSTRAP -> phase(GatewayPhase.BOOTSTRAP) { bootstrap() }
+            SyncPhase.BOOTSTRAP_DRAINING -> phase(GatewayPhase.BOOTSTRAP_DRAIN) { finishBootstrap() }
             SyncPhase.LIVE -> {
                 // Contact repair must not disable legacy SMS/MMS. Receive live commands first:
                 // importing an unread command only through a snapshot would make it historical.
-                phase { drain() }
+                phase(GatewayPhase.DRAIN_BEFORE_RECEIVE) { drain() }
                 val continuingSnapshot = client.snapshotProgress() != null
-                phase { receive() }
+                phase(GatewayPhase.RECEIVE) { receive() }
                 var applyRemaining = true
-                phase { applyRemaining = drain(); applyRemaining }
+                phase(GatewayPhase.DRAIN_AFTER_RECEIVE) { applyRemaining = drain(); applyRemaining }
                 if (!continuingSnapshot && !applyRemaining && client.contactRepairRequired() && client.serverCompactionSupported()) {
-                    phase { repairContactProjection() }
+                    phase(GatewayPhase.CONTACT_REPAIR) { repairContactProjection() }
                 }
-                phase { NotificationMirrorService.reconcile(); false }
+                phase(GatewayPhase.NOTIFICATION_RECONCILE) { NotificationMirrorService.reconcile(); false }
                 // Receive/apply precedes any OS effect and outbound upload. A disconnected listener
                 // or revoked access leaves the durable core effect pending rather than completing it.
-                phase { NotificationMirrorService.runPendingDismissals(); false }
+                phase(GatewayPhase.NOTIFICATION_DISMISSALS) { NotificationMirrorService.runPendingDismissals(); false }
+                // Synthetic records are core-only, so retire them without listener access.
+                phase(GatewayPhase.NOTIFICATION_TEST_DISMISSALS) { NotificationTestCapture.applyDismissals(client); false }
                 // Contacts follow receive/apply (incoming edit requests are journaled first) and
                 // precede media, so newly prepared photos upload in this same pass.
-                if (mayEmit() && !client.contactRepairRequired()) phase { contacts() }
+                if (mayEmit() && !client.contactRepairRequired()) phase(GatewayPhase.CONTACTS) { contacts() }
                 // Media is local encrypted work, but it must finish before its message envelope is
                 // uploaded or a carrier command which references it can be dispatched.
-                if (mayEmit()) phase { transferMedia() }
+                if (mayEmit()) phase(GatewayPhase.MEDIA) { transferMedia() }
                 // Photo references are registered before the core releases those envelopes.
-                if (mayEmit()) phase { contactPhotos() }
+                if (mayEmit()) phase(GatewayPhase.CONTACT_PHOTOS) { contactPhotos() }
             }
             SyncPhase.RECOVERY_REQUIRED -> Unit
         }
-        if (mayEmit()) phase { upload() }
-        if (mayEmit()) phase { dispatch().moreRemaining }
+        if (mayEmit()) phase(GatewayPhase.UPLOAD) { upload() }
+        if (mayEmit()) phase(GatewayPhase.DISPATCH) { dispatch().moreRemaining }
         // Envelopes sealed during the first upload may have produced new photo registrations.
-        if (mayEmit() && state.phase == SyncPhase.LIVE) phase { contactPhotos() }
-        if (mayEmit()) phase { upload() }
+        if (mayEmit() && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
+        if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
         return PassResult(more, failure)
     }
 
     private fun mayEmit() = state.phase == SyncPhase.LIVE && state.outboxRejection == null
 
-    private inline fun phase(block: () -> Boolean) {
+    private fun phase(phase: GatewayPhase, block: () -> Boolean) {
         try {
-            if (block()) more = true
+            if (SyncDiagnostics.measurePhase(phase.code, block)) more = true
         } catch (error: GatewayAuthException) {
             throw error
         } catch (error: Exception) {
@@ -365,7 +449,10 @@ class GatewaySync(
         for (envelope in batch) {
             val response = http.postJson("/v1/events", envelope)
             when {
-                response.ok -> client.ackOutbox(JSONObject(envelope).getString("envelope_id"))
+                response.ok -> {
+                    client.ackOutbox(JSONObject(envelope).getString("envelope_id"))
+                    if (SyncDiagnostics.enabled) SyncDiagnostics.record(SyncTraceEvent.OUTBOX_ACK, SyncTraceField.COUNT to 1)
+                }
                 response.code == 401 -> throw GatewayAuthException()
                 response.code == 409 && response.errorCode == "idempotency_conflict" -> {
                     enterRecovery(RecoveryReason.PRODUCER_CONFLICT)
@@ -425,7 +512,36 @@ class GatewaySync(
 
 class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     /** One-time and periodic passes share the core; never run two passes concurrently. */
-    override suspend fun doWork(): Result = PASS.withLock { withContext(Dispatchers.IO) { pass() } }
+    override suspend fun doWork(): Result = PASS.withLock {
+        withContext(Dispatchers.IO) {
+            if (!SyncDiagnostics.enabled) return@withContext runPass()
+            val metadata = gatewayDiagnosticMetadata()
+            val traceId = SyncDiagnostics.newTraceId()
+            SyncDiagnostics.withTrace(traceId) {
+                SyncDiagnostics.record(SyncTraceEvent.GATEWAY_START, SyncTraceField.PARENT_ID to metadata.parent, SyncTraceField.TRACE_ID to metadata.requestTrace, SyncTraceField.ENQUEUED_MS to (metadata.enqueuedMs ?: 0L), SyncTraceField.ATTEMPT to runAttemptCount.toLong(), *metadata.delayFields())
+                try {
+                    runPass().also { result ->
+                        val outcome = when (result) {
+                            Result.success() -> GATEWAY_OUTCOME_SUCCESS
+                            Result.retry() -> GATEWAY_OUTCOME_RETRY
+                            else -> GATEWAY_OUTCOME_FAILURE
+                        }
+                        SyncDiagnostics.record(SyncTraceEvent.GATEWAY_END, SyncTraceField.SUCCESS to if (outcome == GATEWAY_OUTCOME_SUCCESS) 1 else 0, SyncTraceField.OUTCOME to outcome)
+                    }
+                } catch (error: Throwable) {
+                    SyncDiagnostics.record(SyncTraceEvent.GATEWAY_END, SyncTraceField.SUCCESS to 0, SyncTraceField.OUTCOME to GATEWAY_OUTCOME_THROW)
+                    throw error
+                }
+            }
+        }
+    }
+
+    private fun runPass(): Result {
+        GatewayWork.beginPass(applicationContext)
+        val result = pass()
+        if (result == Result.success()) GatewayWork.finishPass()
+        return result
+    }
 
     private fun pass(): Result {
         val callbacks = SmsCallbackStore(applicationContext)
@@ -437,6 +553,10 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         NativeGateway.open(applicationContext)?.let { SmsCallbackReconciler.replay(it, callbacks) }
         NativeGateway.open(applicationContext)?.let { MmsCallbackReconciler.replay(it, mmsCallbacks) }
         MmsCaptureWork.ensurePeriodic(applicationContext)
+        SmsCaptureWork.ensurePeriodic(applicationContext)
+        if (ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED) {
+            SmsCaptureWork.enqueue(applicationContext)
+        }
         // Not enrolled, database unopenable, or shared vault locked: nothing can be synced yet.
         val session = NativeGateway.session(applicationContext) ?: return Result.success()
         val sendGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.SEND_SMS) ==
@@ -448,9 +568,12 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         val mmsReceiveGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) ==
             PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECEIVE_MMS) ==
             PackageManager.PERMISSION_GRANTED
+        val binding = NativeGateway.reachabilityBinding(applicationContext)
         val sync = GatewaySync(
             client = session.client,
-            http = GatewayHttp(session.origin, session.bearerToken),
+            http = GatewayHttp(session.origin, session.bearerToken) { response ->
+                binding?.let { ServerReachabilityState.recordResponse(it, response) }
+            },
             state = GatewayStateStore(applicationContext),
             deviceId = session.deviceId,
             dispatch = {
@@ -467,14 +590,22 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
                     mms.moreRemaining || sms.moreRemaining,
                 )
             },
-            capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted) { MmsLimits.forSubscription(applicationContext, it) },
+            capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },
             media = {
                 // Media transfer is intentionally separate from SMS/MMS acquisition and text sync.
                 if (hostPolicy.decision(smsAvailable = sendGranted)?.transferMedia == true) {
                     val http = GatewayHttp(session.origin, session.bearerToken)
                     val tracked = ContactPhotoTransfer(session.client, http).trackedUploadIds()
-                    MmsMediaTransfer(session.client, http, applicationContext.noBackupFilesDir) { it in tracked }
-                        .run()
+                    val remoteQuota = MmsRemoteQuota(applicationContext, session.client)
+                    MmsMediaTransfer(
+                        session.client,
+                        http,
+                        applicationContext.noBackupFilesDir,
+                        { it in tracked },
+                        remoteQuota.uploadsAllowed(http),
+                        { remoteQuota.pause() },
+                        { remoteQuota.confirmUploadCapacity() },
+                    ).run()
                         .also { MmsTransferHealth(applicationContext).record(it.failures) }
                 } else {
                     MmsTransferResult(more = false, uploaded = 0, downloaded = 0, failures = emptyList())
@@ -488,6 +619,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         } catch (_: GatewayAuthException) {
             return Result.failure()
         }
+        result.failure?.let { failure -> binding?.let { ServerReachabilityState.recordFailure(it, failure) } }
         return when {
             result.failure != null -> if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
             else -> {
@@ -501,4 +633,31 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         const val MAX_ATTEMPTS = 5
         val PASS = Mutex()
     }
+}
+
+private const val GATEWAY_OUTCOME_SUCCESS = 1L
+private const val GATEWAY_OUTCOME_RETRY = 2L
+private const val GATEWAY_OUTCOME_FAILURE = 3L
+private const val GATEWAY_OUTCOME_THROW = 4L
+
+private data class GatewayWorkerDiagnostic(val parent: Long, val requestTrace: Long, val enqueuedMs: Long?, val unavailable: Boolean) {
+    fun delayFields(): Array<Pair<SyncTraceField, Long>> {
+        val timestamp = enqueuedMs ?: return arrayOf(SyncTraceField.UNAVAILABLE to 1L)
+        val now = SyncDiagnostics.nowMs()
+        return if (unavailable || now < timestamp) arrayOf(SyncTraceField.UNAVAILABLE to 1L)
+        else arrayOf(SyncTraceField.DELAY_MS to (now - timestamp))
+    }
+}
+
+private fun GatewaySyncWorker.gatewayDiagnosticMetadata(): GatewayWorkerDiagnostic {
+    val data = inputData
+    val sessionMatches = data.keyValueMap.containsKey(GatewayWork.DIAGNOSTIC_SESSION) &&
+        data.getLong(GatewayWork.DIAGNOSTIC_SESSION, 0L) == SyncDiagnostics.currentSessionToken()
+    val hasTimestamp = data.keyValueMap.containsKey(GatewayWork.DIAGNOSTIC_ENQUEUED_MS)
+    return GatewayWorkerDiagnostic(
+        parent = if (sessionMatches) data.getLong(GatewayWork.DIAGNOSTIC_PARENT, 0L) else 0L,
+        requestTrace = if (sessionMatches) data.getLong(GatewayWork.DIAGNOSTIC_REQUEST_TRACE, 0L) else 0L,
+        enqueuedMs = if (sessionMatches && hasTimestamp) data.getLong(GatewayWork.DIAGNOSTIC_ENQUEUED_MS, 0L) else null,
+        unavailable = !sessionMatches || !hasTimestamp,
+    )
 }

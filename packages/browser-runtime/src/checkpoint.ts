@@ -48,6 +48,10 @@ interface StoredManifest {
   wrappedCredentials: ArrayBuffer;
 }
 
+interface ValidatedStoredManifest extends StoredManifest {
+  readonly filePaths: ReadonlySet<string>;
+}
+
 const copy = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes);
 const copyBuffer = (bytes: Uint8Array): ArrayBuffer => Uint8Array.from(bytes).buffer;
 
@@ -102,7 +106,7 @@ function validateInput(input: CheckpointInput): void {
   if (!database || isPlainSqlite(database)) throw new CheckpointError("invalid-checkpoint");
 }
 
-function validateStoredManifest(value: unknown): StoredManifest {
+function validateStoredManifest(value: unknown): ValidatedStoredManifest {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new CheckpointError("invalid-checkpoint");
   }
@@ -118,7 +122,13 @@ function validateStoredManifest(value: unknown): StoredManifest {
     paths.add(path);
   }
   if (!paths.has(DATABASE_FILE)) throw new CheckpointError("invalid-checkpoint");
-  return { version: 1, generation: manifest.generation, files: [...manifest.files], wrappedCredentials: manifest.wrappedCredentials.slice(0) };
+  return {
+    version: 1,
+    generation: manifest.generation,
+    files: [...manifest.files],
+    wrappedCredentials: manifest.wrappedCredentials.slice(0),
+    filePaths: paths,
+  };
 }
 
 async function abortAndSettle(transaction: IDBTransaction, completion: Promise<void>): Promise<void> {
@@ -156,8 +166,7 @@ export class IndexedDbCheckpointStore {
           throw new CheckpointError(generation !== expectedGeneration ? "storage-conflict" : "invalid-checkpoint");
         }
         const paths = new Set([...files.map((file) => file.path), ...retainedCipherPaths]);
-        const previousPaths = new Set(previous?.files);
-        if (retainedCipherPaths.some(path => !previousPaths.has(path))) {
+        if (retainedCipherPaths.some(path => !previous?.filePaths.has(path))) {
           throw new CheckpointError("invalid-checkpoint");
         }
         const retainedKeys = await Promise.all(retainedCipherPaths.map(path => request(store.getKey(`file:${path}`))));
@@ -240,7 +249,7 @@ export class IndexedDbCheckpointStore {
       const stored = await request(store.get(MANIFEST_KEY));
       const current = validateStoredManifest(stored);
       if (current.generation !== expectedGeneration) throw new CheckpointError("storage-conflict");
-      if (!current.files.includes(path)) throw new CheckpointError("invalid-checkpoint");
+      if (!current.filePaths.has(path)) throw new CheckpointError("invalid-checkpoint");
       const blob = await request(store.get(`file:${path}`)) as Blob | undefined;
       await completion;
       if (!(blob instanceof Blob)) throw new CheckpointError("invalid-checkpoint");

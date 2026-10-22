@@ -6,6 +6,7 @@ use peppy_domain::{CommandId, DeviceId, EnvelopeId, SourceSequence, VaultId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -54,7 +55,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CompactionReference {
     pub producer_device_id: DeviceId,
     pub producer_sequence: SourceSequence,
@@ -159,15 +160,13 @@ impl Envelope {
                         || (reference.producer_device_id == self.producer_device_id
                             && reference.producer_sequence >= self.producer_sequence)
                 })
-                || compaction
-                    .supersedes
-                    .iter()
-                    .enumerate()
-                    .any(|(index, reference)| {
-                        compaction.supersedes[..index]
-                            .iter()
-                            .any(|prior| prior == reference)
-                    }))
+                || {
+                    let mut references = HashSet::with_capacity(compaction.supersedes.len());
+                    compaction
+                        .supersedes
+                        .iter()
+                        .any(|reference| !references.insert(reference))
+                })
         {
             return Err(EnvelopeError::InvalidCompaction);
         }

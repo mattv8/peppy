@@ -39,6 +39,24 @@ describe("BrowserCore", () => {
     wasm.UTF8ToString = () => JSON.stringify({ok:false,error:{code:"stale-draft",currentRevision:"18446744073709551615"}});
     await expect(core.invoke({command:"save_draft",args:{}})).rejects.toMatchObject({code:"stale-draft",details:{currentRevision:"18446744073709551615"}});
   });
+  it("preserves sanitized draft movement details", async () => {
+    const wasm = moduleWith(() => 100);
+    wasm.UTF8ToString = () => JSON.stringify({ ok: false, error: { code: "draft-moved", conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" } });
+    await expect(new BrowserCore(async () => wasm).invoke({ command: "save_draft", args: {} }))
+      .rejects.toMatchObject({ code: "draft-moved", details: { conversationId: "conversation-2", currentRevision: "2", draftId: "draft-2" } });
+  });
+  it("strips malformed draft details and unknown fields", async () => {
+    const wasm = moduleWith(() => 100);
+    const core = new BrowserCore(async () => wasm);
+    for (const invalidId of ["", "x".repeat(129), "draft\n2"]) {
+      wasm.UTF8ToString = () => JSON.stringify({ ok: false, error: { code: "draft-moved", conversationId: invalidId, currentRevision: "01", draftId: invalidId, secret: "not-exposed" } });
+      await expect(core.invoke({ command: "save_draft", args: {} })).rejects.toMatchObject({ code: "draft-moved", details: undefined });
+    }
+    for (const currentRevision of ["01", "18446744073709551616"]) {
+      wasm.UTF8ToString = () => JSON.stringify({ ok: false, error: { code: "draft-moved", conversationId: "conversation-2", currentRevision, draftId: "draft-2", secret: "not-exposed" } });
+      await expect(core.invoke({ command: "save_draft", args: {} })).rejects.toMatchObject({ code: "draft-moved", details: { conversationId: "conversation-2", draftId: "draft-2" } });
+    }
+  });
   it("keeps well-formed Rust rejections recoverable even when the UI does not recognize their code", async () => {
     const wasm = moduleWith(() => 100);
     wasm.UTF8ToString = () => JSON.stringify({ ok: false, error: { code: "contact-field-read-only" } });

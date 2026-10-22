@@ -1,15 +1,16 @@
-//! Pure hosted enrollment, claimant, and desktop join-request primitives.
+//! Pure hosted provisioning and enrollment primitives.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use peppy_client_core::DeviceId;
+use peppy_crypto::enrollment::derive_admission_keypair;
 use peppy_crypto::{
     KeyProfile, VaultCheckHeader, create_vault_check_header, derive_root_key,
     verify_vault_check_header,
 };
+use peppy_hosted_api::enrollment::ClientKind;
 use peppy_hosted_api::{
     AccountResponse, CompleteProvisioningRequest, CompleteProvisioningResponse, IdentityProvider,
     LoginAttemptRequest, LoginAttemptResponse, ProvisioningGrantResponse, ProvisioningRequest,
-    SessionExchangeRequest, SessionResponse,
+    PushConfig, SessionExchangeRequest, SessionResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,8 +19,13 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod device_credentials;
+pub mod newenrollment;
+
 const MAX_JSON: usize = 16 * 1024;
 const MAX_CHECKPOINT: usize = 64 * 1024;
+const HOSTED_ORIGIN: &str = "https://peppy.pro";
+const HOSTED_WAKE_RELAY_URL: &str = "https://relay.peppy.pro";
 
 #[derive(Debug, thiserror::Error)]
 pub enum HostedClientError {
@@ -27,6 +33,8 @@ pub enum HostedClientError {
     InvalidRequest,
     #[error("invalid profile")]
     InvalidProfile,
+    #[error("verified handoff keys are unavailable")]
+    KeysUnavailable,
     #[error("cryptographic operation failed")]
     Crypto,
 }
@@ -120,6 +128,10 @@ struct Checkpoint {
     header: VaultCheckHeader,
     profile_fingerprint: String,
     grant: Option<String>,
+    client_kind: ClientKind,
+    device_name: String,
+    signing_seed: Vec<u8>,
+    admission_public_key: String,
 }
 
 impl Drop for Checkpoint {
@@ -140,6 +152,10 @@ pub struct HostedProvisioning {
     token: Zeroizing<String>,
     profile: KeyProfile,
     header: VaultCheckHeader,
+    client_kind: ClientKind,
+    device_name: String,
+    signing_seed: Zeroizing<[u8; 32]>,
+    admission_public_key: String,
     grant: Mutex<Option<Zeroizing<String>>>,
 }
 impl fmt::Debug for HostedProvisioning {
@@ -226,15 +242,29 @@ pub fn parse_hosted_account(
 pub fn generate_hosted_passphrase() -> String {
     peppy_crypto::passphrase::generate_passphrase()
 }
+
+/// Returns the fixed hosted wake relay only for the canonical hosted origin.
+pub fn hosted_wake_relay_url(origin: String) -> Option<String> {
+    (origin == HOSTED_ORIGIN).then(|| HOSTED_WAKE_RELAY_URL.into())
+}
+
+/// Parses the versioned hosted push capability response without widening the
+/// canonical wire contract to untrusted provider or environment values.
+pub fn parse_push_config(json: String) -> Result<PushConfig, HostedClientError> {
+    bounded(&json, MAX_JSON)?;
+    let config: PushConfig =
+        serde_json::from_str(&json).map_err(|_| HostedClientError::InvalidRequest)?;
+    if !config.validate() {
+        return invalid();
+    }
+    Ok(config)
+}
 pub fn hosted_passphrase_acceptable(mut passphrase: String) -> bool {
     let acceptable = peppy_crypto::passphrase::passphrase_acceptable(&passphrase);
     passphrase.zeroize();
     acceptable
 }
 
-/// Computes the owner-visible SAS from the claimant's pinned intent facts.
-/// Validates a serialized vault key profile and returns its canonical fingerprint.
-/// Native hosts use this shared primitive when comparing local profile metadata.
 pub fn vault_profile_fingerprint(profile_json: String) -> Result<String, HostedClientError> {
     bounded(&profile_json, MAX_JSON)?;
     let profile: KeyProfile =
@@ -244,42 +274,24 @@ pub fn vault_profile_fingerprint(profile_json: String) -> Result<String, HostedC
         .map_err(|_| HostedClientError::InvalidProfile)
 }
 
-pub fn pairing_intent_sas(
-    intent_token: String,
-    key_digest: String,
-    device_id: String,
-) -> Result<String, HostedClientError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    if intent_token.len() != 43
-        || URL_SAFE_NO_PAD
-            .decode(&intent_token)
-            .ok()
-            .is_none_or(|bytes| bytes.len() != 32)
-        || !hex(&key_digest, 64, None)
-    {
-        return invalid();
-    }
-    let parsed = uuid(&device_id)?;
-    if parsed.to_string() != device_id {
-        return invalid();
-    }
-    Ok(peppy_protocol::pairing_sas(
-        &intent_token,
-        &key_digest,
-        DeviceId(parsed),
-    ))
-}
-
 pub fn prepare(
     origin: impl AsRef<str>,
     account_id: impl AsRef<str>,
     passphrase: impl AsRef<str>,
+    client_kind: ClientKind,
+    device_name: impl AsRef<str>,
 ) -> Result<HostedProvisioning, HostedClientError> {
     let origin = canonical_origin(origin.as_ref())?;
     let account = uuid(account_id.as_ref())?;
     let passphrase = Zeroizing::new(passphrase.as_ref().to_owned());
     if !peppy_crypto::passphrase::passphrase_acceptable(&passphrase) {
+        return invalid();
+    }
+    let device_name = device_name.as_ref().to_owned();
+    if device_name.is_empty()
+        || device_name.len() > 128
+        || device_name.chars().any(char::is_control)
+    {
         return invalid();
     }
     let vault_id = Uuid::new_v4();
@@ -289,9 +301,16 @@ pub fn prepare(
     let root = derive_root_key(&passphrase, &profile).map_err(|_| HostedClientError::Crypto)?;
     let header =
         create_vault_check_header(&root, profile.clone()).map_err(|_| HostedClientError::Crypto)?;
+    let admission_public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        derive_admission_keypair(&root)
+            .map_err(|_| HostedClientError::Crypto)?
+            .public_key(),
+    );
     let mut bytes = [0u8; 48];
+    let mut signing_seed = [0u8; 32];
     libsodium_rs::ensure_init().map_err(|_| HostedClientError::Crypto)?;
     libsodium_rs::random::fill_bytes(&mut bytes);
+    libsodium_rs::random::fill_bytes(&mut signing_seed);
     let token = Zeroizing::new(bytes.iter().map(|x| format!("{x:02x}")).collect());
     bytes.zeroize();
     Ok(HostedProvisioning {
@@ -303,6 +322,10 @@ pub fn prepare(
         token,
         profile,
         header,
+        client_kind,
+        device_name,
+        signing_seed: Zeroizing::new(signing_seed),
+        admission_public_key,
         grant: Mutex::new(None),
     })
 }
@@ -310,7 +333,7 @@ pub fn prepare(
 fn checkpoint(value: &HostedProvisioning) -> Result<Vec<u8>, HostedClientError> {
     let grant = value.grant.lock().map_err(|_| HostedClientError::Crypto)?;
     serde_json::to_vec(&Checkpoint {
-        version: 1,
+        version: 2,
         origin: value.origin.clone(),
         account_id: value.account_id.clone(),
         operation_id: value.operation_id.to_string(),
@@ -324,6 +347,10 @@ fn checkpoint(value: &HostedProvisioning) -> Result<Vec<u8>, HostedClientError> 
             .fingerprint()
             .map_err(|_| HostedClientError::Crypto)?,
         grant: grant.as_ref().map(|x| x.to_string()),
+        client_kind: value.client_kind,
+        device_name: value.device_name.clone(),
+        signing_seed: value.signing_seed.to_vec(),
+        admission_public_key: value.admission_public_key.clone(),
     })
     .map_err(|_| HostedClientError::Crypto)
 }
@@ -340,12 +367,19 @@ pub fn restore(
     let account = uuid(expected_account_id.as_ref())?;
     let mut value: Checkpoint =
         serde_json::from_slice(&checkpoint_bytes).map_err(|_| HostedClientError::InvalidRequest)?;
-    if value.version != 1
+    if value.version != 2
         || value.origin != origin
         || value.account_id != account.to_string()
         || !hex(&value.token, 96, None)
         || value.profile.key_epoch != 1
         || value.profile.vault_id.to_string() != value.vault_id
+        || value.device_name.is_empty()
+        || value.device_name.len() > 128
+        || value.signing_seed.len() != 32
+        || base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&value.admission_public_key)
+            .ok()
+            .is_none_or(|bytes| bytes.len() != 32)
         || value
             .profile
             .fingerprint()
@@ -357,6 +391,11 @@ pub fn restore(
     let operation_id = uuid(&value.operation_id)?;
     let vault_id = uuid(&value.vault_id)?;
     let device_id = uuid(&value.device_id)?;
+    let signing_seed: [u8; 32] = value
+        .signing_seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| HostedClientError::InvalidRequest)?;
     // Validate canonical UUID strings match parsed UUIDs (no nil UUIDs)
     if operation_id.to_string() != value.operation_id
         || vault_id.to_string() != value.vault_id
@@ -384,6 +423,10 @@ pub fn restore(
         token: Zeroizing::new(std::mem::take(&mut value.token)),
         profile: value.profile.clone(),
         header: value.header.clone(),
+        client_kind: value.client_kind,
+        device_name: value.device_name.clone(),
+        signing_seed: Zeroizing::new(signing_seed),
+        admission_public_key: value.admission_public_key.clone(),
         grant: Mutex::new(value.grant.take().map(Zeroizing::new)),
     })
 }
@@ -411,6 +454,12 @@ impl HostedSession {
     }
 }
 impl HostedProvisioning {
+    pub fn profile(&self) -> KeyProfile {
+        self.profile.clone()
+    }
+    pub fn header(&self) -> VaultCheckHeader {
+        self.header.clone()
+    }
     pub fn view(&self) -> HostedProvisioningView {
         HostedProvisioningView {
             origin: self.origin.clone(),
@@ -466,6 +515,10 @@ impl HostedProvisioning {
                 .fingerprint()
                 .map_err(|_| HostedClientError::Crypto)?,
             key_epoch: 1,
+            admission_public_key: self.admission_public_key.clone(),
+            signing_public_key: self.signing_public_key()?,
+            client_kind: self.client_kind,
+            device_name: self.device_name.clone(),
         };
         serde_json::to_string(&request).map_err(|_| HostedClientError::Crypto)
     }
@@ -482,7 +535,16 @@ impl HostedProvisioning {
         {
             return invalid();
         }
-        serde_json::to_string(&serde_json::json!({"version": 1, "origin": self.origin, "vaultId": self.vault_id.to_string(), "deviceId": self.device_id.to_string(), "deviceToken": self.token.to_string()})).map_err(|_| HostedClientError::Crypto)
+        let credential = device_credentials::PortableDeviceCredential::new(
+            self.origin.clone(),
+            self.vault_id.to_string(),
+            self.device_id.to_string(),
+            self.token.to_string(),
+        )
+        .map_err(|_| HostedClientError::InvalidRequest)?;
+        let bytes = device_credentials::serialize_portable_credential(&credential)
+            .map_err(|_| HostedClientError::Crypto)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| HostedClientError::Crypto)
     }
     pub fn passphrase_matches(&self, passphrase: &str) -> Result<bool, HostedClientError> {
         let passphrase = Zeroizing::new(passphrase.to_owned());
@@ -492,21 +554,30 @@ impl HostedProvisioning {
             Err(_) => Ok(false),
         }
     }
+    fn signing_public_key(&self) -> Result<String, HostedClientError> {
+        let key = libsodium_rs::crypto_sign::KeyPair::from_seed(&self.signing_seed[..])
+            .map_err(|_| HostedClientError::Crypto)?;
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.public_key.as_bytes()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
     const PASSPHRASE: &str = "alpha bravo charlie delta echo foxtrot";
     const ORIGIN: &str = "https://peppy.example";
 
     #[test]
     fn provisioning_material_unlocks_serializes_and_restores_without_plaintext() {
         let account = Uuid::new_v4().to_string();
-        let prepared =
-            prepare(ORIGIN, account.clone(), PASSPHRASE).expect("valid local preparation");
+        let prepared = prepare(
+            ORIGIN,
+            account.clone(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
         assert!(prepared.passphrase_matches(PASSPHRASE).unwrap());
         assert!(
             !prepared
@@ -518,6 +589,20 @@ mod tests {
             .accept_grant(serde_json::json!({"grant": grant, "expires_in_seconds": 60}).to_string())
             .unwrap();
         let complete = prepared.complete_request().unwrap();
+        let complete_value: serde_json::Value = serde_json::from_str(&complete).unwrap();
+        assert_eq!(complete_value["client_kind"], "desktop");
+        assert_eq!(complete_value["device_name"], "test device");
+        assert_eq!(
+            complete_value["admission_public_key"]
+                .as_str()
+                .unwrap()
+                .len(),
+            43
+        );
+        assert_eq!(
+            complete_value["signing_public_key"].as_str().unwrap().len(),
+            43
+        );
         assert!(!complete.contains(PASSPHRASE));
         assert!(!complete.contains("pst_"));
         let checkpoint = prepared.checkpoint().unwrap();
@@ -546,6 +631,37 @@ mod tests {
     }
 
     #[test]
+    fn hosted_wake_relay_requires_the_exact_hosted_origin() {
+        assert_eq!(
+            hosted_wake_relay_url("https://peppy.pro".into()),
+            Some("https://relay.peppy.pro".into())
+        );
+        for origin in [
+            "https://peppy.pro/",
+            "https://peppy.pro.evil.example",
+            "https://relay.peppy.pro",
+            "http://peppy.pro",
+        ] {
+            assert_eq!(hosted_wake_relay_url(origin.into()), None, "{origin}");
+        }
+    }
+
+    #[test]
+    fn push_config_fails_closed_on_incompatible_values() {
+        let valid = r#"{"version":1,"available":true,"providers":["fcm","apns"],"apns_environment":"production"}"#;
+        assert!(parse_push_config(valid.into()).is_ok());
+        for invalid in [
+            r#"{"version":2,"available":true,"providers":["fcm"],"apns_environment":null}"#,
+            r#"{"version":1,"available":true,"providers":["apns"],"apns_environment":null}"#,
+            r#"{"version":1,"available":false,"providers":["fcm"],"apns_environment":null}"#,
+            r#"{"version":1,"available":true,"providers":["fcm","fcm"],"apns_environment":null}"#,
+            r#"{"version":1,"available":true,"providers":["webpush"],"apns_environment":null}"#,
+        ] {
+            assert!(parse_push_config(invalid.into()).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     pub fn vault_profile_fingerprint_validates_and_matches_crypto_vector() {
         let profile = KeyProfile {
             crypto_suite: peppy_crypto::CRYPTO_SUITE_1,
@@ -563,24 +679,16 @@ mod tests {
     }
 
     #[test]
-    fn owner_pairing_sas_validates_and_matches_protocol_vector() {
-        let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let digest = "4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0";
-        let device = "00000000-0000-0000-0000-000000000002";
-        assert_eq!(
-            pairing_intent_sas(token.into(), digest.into(), device.into()).unwrap(),
-            peppy_protocol::pairing_sas(token, digest, DeviceId(uuid(device).unwrap()))
-        );
-        assert!(pairing_intent_sas("not-a-token".into(), digest.into(), device.into()).is_err());
-        assert!(pairing_intent_sas(token.into(), "A".repeat(64), device.into()).is_err());
-        assert!(pairing_intent_sas(token.into(), digest.into(), format!("{{{device}}}")).is_err());
-    }
-
-    #[test]
     fn rejects_complete_response_with_wrong_operation_vault_device() {
         let account = Uuid::new_v4().to_string();
-        let prepared =
-            prepare(ORIGIN, account.clone(), PASSPHRASE).expect("valid local preparation");
+        let prepared = prepare(
+            ORIGIN,
+            account.clone(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
         let grant = format!("pgr_{}", "a".repeat(64));
         prepared
             .accept_grant(serde_json::json!({"grant": grant, "expires_in_seconds": 60}).to_string())
@@ -618,8 +726,14 @@ mod tests {
     #[test]
     fn rejects_checkpoint_origin_and_account_mismatch() {
         let account = Uuid::new_v4().to_string();
-        let prepared =
-            prepare(ORIGIN, account.clone(), PASSPHRASE).expect("valid local preparation");
+        let prepared = prepare(
+            ORIGIN,
+            account.clone(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
         let checkpoint = prepared.checkpoint().unwrap();
 
         // Wrong origin
@@ -632,8 +746,14 @@ mod tests {
     #[test]
     fn rejects_noncanonical_device_operation_vault_uuids() {
         let account = Uuid::new_v4().to_string();
-        let prepared =
-            prepare(ORIGIN, account.clone(), PASSPHRASE).expect("valid local preparation");
+        let prepared = prepare(
+            ORIGIN,
+            account.clone(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
         let checkpoint = prepared.checkpoint().unwrap();
 
         let mut value: Checkpoint = serde_json::from_slice(&checkpoint).unwrap();
@@ -662,8 +782,14 @@ mod tests {
     #[test]
     fn rejects_tampered_profile_and_header() {
         let account = Uuid::new_v4().to_string();
-        let prepared =
-            prepare(ORIGIN, account.clone(), PASSPHRASE).expect("valid local preparation");
+        let prepared = prepare(
+            ORIGIN,
+            account.clone(),
+            PASSPHRASE,
+            ClientKind::Desktop,
+            "test device",
+        )
+        .expect("valid local preparation");
         let checkpoint = prepared.checkpoint().unwrap();
 
         let mut value: Checkpoint = serde_json::from_slice(&checkpoint).unwrap();
@@ -686,261 +812,4 @@ mod tests {
             "mismatched header profile should be rejected"
         );
     }
-
-    #[test]
-    fn join_qr_roundtrip_and_validation() {
-        let (_, key) = generate_join_key().unwrap();
-        let qr = JoinRequestQr {
-            https_origin: ORIGIN.into(),
-            join_request_id: Uuid::new_v4(),
-            join_key: URL_SAFE_NO_PAD.encode(key),
-        };
-        let encoded = encode_join_request_qr(&qr);
-        assert_eq!(parse_join_request_qr(&encoded, false).unwrap(), qr);
-        for payload in [
-            encoded.replace(ORIGIN, "http://peppy.example"),
-            encoded.replace(ORIGIN, "https://peppy.example/path"),
-            encoded.replace('}', ",\"extra\":true}"),
-        ] {
-            assert!(parse_join_request_qr(&payload, false).is_err());
-        }
-        for bytes in [[0u8; 31].as_slice(), [0u8; 33].as_slice()] {
-            let invalid = JoinRequestQr {
-                join_key: URL_SAFE_NO_PAD.encode(bytes),
-                ..qr.clone()
-            };
-            assert!(parse_join_request_qr(&encode_join_request_qr(&invalid), false).is_err());
-        }
-    }
-
-    #[test]
-    fn join_seal_open_and_digest_contract() {
-        let (secret, public) = generate_join_key().unwrap();
-        let token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let sealed = seal_intent_token(&public, token).unwrap();
-        assert_eq!(
-            &*open_intent_token(&secret, &public, &sealed).unwrap(),
-            token
-        );
-        let (wrong, wrong_public) = generate_join_key().unwrap();
-        assert!(open_intent_token(&wrong, &wrong_public, &sealed).is_err());
-        let bad = seal_intent_token(&public, "not-43-characters").unwrap();
-        assert!(open_intent_token(&secret, &public, &bad).is_err());
-        assert_eq!(
-            intent_digest_hex("hello"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-    }
 }
-
-pub mod claim {
-    use super::HostedClientError;
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use peppy_client_core::{DeviceId, VaultId};
-    use zeroize::Zeroizing;
-
-    pub fn pairing_proof_bytes(
-        challenge_token: &str,
-        vault_id: &str,
-        device_id: &str,
-        profile_fingerprint: &str,
-        key_epoch: u32,
-        approved_role: &str,
-    ) -> Result<Vec<u8>, HostedClientError> {
-        let challenge: [u8; 32] = URL_SAFE_NO_PAD
-            .decode(challenge_token)
-            .map_err(|_| HostedClientError::InvalidRequest)?
-            .try_into()
-            .map_err(|_| HostedClientError::InvalidRequest)?;
-        let vault_id = VaultId(
-            uuid::Uuid::parse_str(vault_id).map_err(|_| HostedClientError::InvalidRequest)?,
-        );
-        let device_id = DeviceId(
-            uuid::Uuid::parse_str(device_id).map_err(|_| HostedClientError::InvalidRequest)?,
-        );
-        if key_epoch == 0 || profile_fingerprint.len() != 64 || approved_role.is_empty() {
-            return Err(HostedClientError::InvalidRequest);
-        }
-        Ok(peppy_protocol::pairing_proof_message(
-            &challenge,
-            vault_id,
-            device_id,
-            profile_fingerprint,
-            key_epoch,
-            approved_role,
-        ))
-    }
-
-    pub struct EnrollmentKey {
-        seed: Zeroizing<[u8; 32]>,
-    }
-    impl EnrollmentKey {
-        pub fn generate() -> Result<Self, HostedClientError> {
-            libsodium_rs::ensure_init().map_err(|_| HostedClientError::Crypto)?;
-            let mut seed = [0; 32];
-            libsodium_rs::random::fill_bytes(&mut seed);
-            Ok(Self {
-                seed: Zeroizing::new(seed),
-            })
-        }
-        pub fn from_seed(seed: &[u8]) -> Result<Self, HostedClientError> {
-            let seed: [u8; 32] = seed
-                .try_into()
-                .map_err(|_| HostedClientError::InvalidRequest)?;
-            key(&seed)?;
-            Ok(Self {
-                seed: Zeroizing::new(seed),
-            })
-        }
-        pub fn export_seed_for_native_secure_storage(&self) -> Vec<u8> {
-            self.seed.to_vec()
-        }
-        pub fn public_key_base64url(&self) -> Result<String, HostedClientError> {
-            Ok(URL_SAFE_NO_PAD.encode(key(&self.seed[..])?.public_key.as_bytes()))
-        }
-        pub fn sign_pairing_proof(&self, proof: &[u8]) -> Result<String, HostedClientError> {
-            let key = key(&self.seed[..])?;
-            let signature = libsodium_rs::crypto_sign::sign_detached(proof, &key.secret_key)
-                .map_err(|_| HostedClientError::Crypto)?;
-            Ok(URL_SAFE_NO_PAD.encode(signature))
-        }
-        pub fn pairing_sas(
-            &self,
-            intent_token: &str,
-            device_id: &str,
-            server_key_digest: &str,
-        ) -> Result<String, HostedClientError> {
-            if intent_token.is_empty() {
-                return Err(HostedClientError::InvalidRequest);
-            }
-            let device_id = DeviceId(
-                uuid::Uuid::parse_str(device_id).map_err(|_| HostedClientError::InvalidRequest)?,
-            );
-            let key = key(&self.seed[..])?;
-            let digest = peppy_protocol::pairing_key_digest(key.public_key.as_bytes());
-            if digest != server_key_digest {
-                return Err(HostedClientError::InvalidRequest);
-            }
-            Ok(peppy_protocol::pairing_sas(
-                intent_token,
-                &digest,
-                device_id,
-            ))
-        }
-    }
-    fn key(seed: &[u8]) -> Result<libsodium_rs::crypto_sign::KeyPair, HostedClientError> {
-        let seed: [u8; 32] = seed
-            .try_into()
-            .map_err(|_| HostedClientError::InvalidRequest)?;
-        libsodium_rs::ensure_init().map_err(|_| HostedClientError::Crypto)?;
-        libsodium_rs::crypto_sign::KeyPair::from_seed(&seed).map_err(|_| HostedClientError::Crypto)
-    }
-}
-
-pub mod join {
-    use super::HostedClientError;
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use serde::{Deserialize, Serialize};
-    use sha2::{Digest, Sha256};
-    use std::fmt;
-    use url::Url;
-    use uuid::Uuid;
-    use zeroize::Zeroizing;
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    pub struct JoinRequestQr {
-        pub https_origin: String,
-        pub join_request_id: Uuid,
-        pub join_key: String,
-    }
-    pub struct JoinKeySecret(Zeroizing<[u8; 32]>);
-    impl fmt::Debug for JoinKeySecret {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("JoinKeySecret(<redacted>)")
-        }
-    }
-    pub fn encode_join_request_qr(qr: &JoinRequestQr) -> String {
-        serde_json::to_string(qr).expect("JoinRequestQr serializes")
-    }
-    pub fn parse_join_request_qr(
-        payload: &str,
-        allow_loopback_http: bool,
-    ) -> Result<JoinRequestQr, HostedClientError> {
-        let qr: JoinRequestQr =
-            serde_json::from_str(payload).map_err(|_| HostedClientError::InvalidRequest)?;
-        canonical_origin(&qr.https_origin, allow_loopback_http)?;
-        let key = URL_SAFE_NO_PAD
-            .decode(&qr.join_key)
-            .map_err(|_| HostedClientError::InvalidRequest)?;
-        if key.len() != 32 {
-            return Err(HostedClientError::InvalidRequest);
-        }
-        Ok(qr)
-    }
-    pub fn generate_join_key() -> Result<(JoinKeySecret, [u8; 32]), HostedClientError> {
-        libsodium_rs::ensure_init().map_err(|_| HostedClientError::Crypto)?;
-        let key = libsodium_rs::crypto_box::KeyPair::generate();
-        Ok((
-            JoinKeySecret(Zeroizing::new(*key.secret_key.as_bytes())),
-            *key.public_key.as_bytes(),
-        ))
-    }
-    pub fn seal_intent_token(
-        join_key: &[u8; 32],
-        intent_token: &str,
-    ) -> Result<Vec<u8>, HostedClientError> {
-        let public = libsodium_rs::crypto_box::PublicKey::from_bytes(join_key)
-            .map_err(|_| HostedClientError::InvalidRequest)?;
-        libsodium_rs::crypto_box::seal_box(intent_token.as_bytes(), &public)
-            .map_err(|_| HostedClientError::Crypto)
-    }
-    pub fn open_intent_token(
-        secret: &JoinKeySecret,
-        public: &[u8; 32],
-        sealed: &[u8],
-    ) -> Result<Zeroizing<String>, HostedClientError> {
-        let public = libsodium_rs::crypto_box::PublicKey::from_bytes(public)
-            .map_err(|_| HostedClientError::InvalidRequest)?;
-        let private = libsodium_rs::crypto_box::SecretKey::from_bytes(&secret.0[..])
-            .map_err(|_| HostedClientError::Crypto)?;
-        let opened = libsodium_rs::crypto_box::open_sealed_box(sealed, &public, &private)
-            .map_err(|_| HostedClientError::Crypto)?;
-        let opened = String::from_utf8(opened).map_err(|_| HostedClientError::InvalidRequest)?;
-        if opened.len() != 43
-            || URL_SAFE_NO_PAD
-                .decode(&opened)
-                .ok()
-                .is_none_or(|b| b.len() != 32)
-        {
-            return Err(HostedClientError::InvalidRequest);
-        }
-        Ok(Zeroizing::new(opened))
-    }
-    pub fn intent_digest_hex(intent_token: &str) -> String {
-        format!("{:x}", Sha256::digest(intent_token.as_bytes()))
-    }
-    fn canonical_origin(value: &str, allow_loopback_http: bool) -> Result<(), HostedClientError> {
-        let url = Url::parse(value).map_err(|_| HostedClientError::InvalidRequest)?;
-        let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-        if !(url.scheme() == "https" || allow_loopback_http && url.scheme() == "http" && loopback)
-            || url.username() != ""
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.host_str().is_none()
-            || !(url.path().is_empty() || url.path() == "/")
-        {
-            return Err(HostedClientError::InvalidRequest);
-        }
-        let canonical = url.origin().ascii_serialization();
-        if value != canonical && value != format!("{canonical}/") {
-            return Err(HostedClientError::InvalidRequest);
-        }
-        Ok(())
-    }
-}
-pub use join::{
-    JoinKeySecret, JoinRequestQr, encode_join_request_qr, generate_join_key, intent_digest_hex,
-    open_intent_token, parse_join_request_qr, seal_intent_token,
-};

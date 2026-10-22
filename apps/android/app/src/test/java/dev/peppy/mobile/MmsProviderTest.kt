@@ -66,6 +66,25 @@ class MmsProviderTest {
         assertTrue(page.records.single { it.id == 5L }.ready)
     }
 
+    @Test fun preservesOtherwiseCompleteNullDateAndOnlyExpiresPastNotifications() {
+        provider.messages += message(1, 132, dateSeconds = null)
+        provider.messages += message(2, 130, expirySeconds = 1)
+        provider.messages += message(3, 130, expirySeconds = System.currentTimeMillis() / 1_000L + 3_600L)
+        provider.messages += message(4, 130, expirySeconds = Long.MAX_VALUE)
+        provider.messages += message(5, 130, expirySeconds = 0)
+        provider.messages += message(6, 130, expirySeconds = -1)
+        provider.parts[1] = listOf(part(10))
+
+        val nullDate = reader.read(1)!!
+        assertTrue(nullDate.ready)
+        assertNull(nullDate.dateMs)
+        assertEquals("notification_expired", reader.read(2)!!.error)
+        assertEquals("provider_content_pending", reader.read(3)!!.error)
+        assertEquals("provider_content_pending", reader.read(4)!!.error)
+        assertEquals("provider_content_pending", reader.read(5)!!.error)
+        assertEquals("provider_content_pending", reader.read(6)!!.error)
+    }
+
     @Test fun capsRowsWhenProviderIgnoresLimitAndFlagsOversizedFields() {
         repeat(60) { n -> provider.messages += message(n.toLong() + 1, 128) ; provider.parts[n.toLong() + 1] = listOf(part(n.toLong() + 1)) }
         assertEquals(50, reader.page(0, 50).records.size)
@@ -76,6 +95,29 @@ class MmsProviderTest {
         assertEquals("address_overflow", reader.read(2)!!.error)
     }
 
+    @Test fun utf8BoundsRejectMultibyteValuesWhoseUtf16LengthFitsTheLimit() {
+        val subject = "é".repeat(MmsProviderReader.MAX_STRING / 2 + 1)
+        provider.messages += message(1, 128, subject = subject)
+        provider.parts[1] = listOf(part(1))
+
+        assertTrue(subject.length <= MmsProviderReader.MAX_STRING)
+        assertTrue(subject.toByteArray(Charsets.UTF_8).size > MmsProviderReader.MAX_STRING)
+        assertEquals("metadata_overflow", reader.read(1)!!.error)
+    }
+
+    @Test fun utf8BoundsRetainMalformedSurrogateReplacementAtTheBoundary() {
+        val allowed = "\uD800".repeat(MmsProviderReader.MAX_STRING)
+        val oversized = allowed + "\uD800"
+        provider.messages += message(1, 128, subject = allowed)
+        provider.messages += message(2, 128, subject = oversized)
+        provider.parts[1] = listOf(part(1))
+        provider.parts[2] = listOf(part(2))
+
+        assertEquals(MmsProviderReader.MAX_STRING, allowed.toByteArray(Charsets.UTF_8).size)
+        assertNull(reader.read(1)!!.error)
+        assertEquals("metadata_overflow", reader.read(2)!!.error)
+    }
+
     @Test fun decodesKnownCharsetsAndRejectsOversizedInlineText() {
         val utf16 = MmsProviderPart(1, null, "text/plain", null, 1015, "hello", Uri.parse("content://mms/part/1"))
         assertEquals("hello", reader.readPartText(utf16))
@@ -84,10 +126,10 @@ class MmsProviderTest {
         assertThrows(MmsProviderException::class.java) { reader.readPartText(utf16.copy(charset = 9999)) }
     }
 
-    private fun message(id: Long, type: Int, box: Int = 1, sub: Int = 1, subject: String? = null) = Msg(id, type, box, sub, subject)
+    private fun message(id: Long, type: Int, box: Int = 1, sub: Int = 1, subject: String? = null, dateSeconds: Long? = 1, expirySeconds: Long? = null) = Msg(id, type, box, sub, subject, dateSeconds, expirySeconds)
     private fun part(id: Long) = Part(id)
 
-    data class Msg(val id: Long, val type: Int, val box: Int, val sub: Int, val subject: String?)
+    data class Msg(val id: Long, val type: Int, val box: Int, val sub: Int, val subject: String?, val dateSeconds: Long?, val expirySeconds: Long?)
     data class Part(val id: Long)
     class FakeMmsProvider : ContentProvider() {
         val messages = mutableListOf<Msg>(); val parts = mutableMapOf<Long, List<Part>>(); val addresses = mutableMapOf<Long, List<Pair<String, Int>>>()
@@ -101,7 +143,7 @@ class MmsProviderTest {
                     parts[selectionArgs!!.single().toLong()].orEmpty().forEachIndexed { i, p -> c.addRow(arrayOf(p.id, i, "text/plain", null, null, 106, null)) }
                 }
                 else -> MatrixCursor(arrayOf("_id", "thread_id", "sub_id", "msg_box", "date", "tr_id", "sub", "m_type", "exp")).also { c ->
-                    messages.find { it.id == segments.single().toLong() }?.let { m -> c.addRow(arrayOf(m.id, 1, m.sub, m.box, 1, null, m.subject, m.type, null)) }
+                    messages.find { it.id == segments.single().toLong() }?.let { m -> c.addRow(arrayOf(m.id, 1, m.sub, m.box, m.dateSeconds, null, m.subject, m.type, m.expirySeconds)) }
                 }
             }
         }

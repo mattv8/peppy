@@ -2,6 +2,7 @@
 name = "peppy-desktop"
 version = "0.0.0"
 description = "Peppy desktop host"
+license = "Apache-2.0"
 edition = "2021"
 publish = false
 
@@ -12,31 +13,41 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 default = []
 retained-stack-smoke = []
+dev-local-tls = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+rustls-pki-types = { version = "=1.15.1", features = ["std"] }
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2.3.1"
 tauri-plugin-autostart = "2.7.0"
 tauri-plugin-single-instance = "2.5.2"
+tauri-plugin-updater = { version = "=2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["sync", "rt", "time", "fs", "io-util", "macros"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "=1.15.1", features = ["std"] }
 futures-util = "0.3"
 getrandom = "0.3"
 sha2 = "0.10"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream"] }
 base64 = "0.22"
 url = "2"
+semver = "1"
+plist = "1"
+time = { version = "0.3", features = ["formatting"] }
 zeroize = "1"
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 # Maintained OS secure stores: macOS/iOS Keychain (Security.framework), Windows Credential
 # Manager, Linux Secret Service. No secret ever reaches a process argv.
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
@@ -52,6 +63,9 @@ peppy-hosted-api = { path = "../../../crates/hosted-api", version = "0.1.0" }
 cocoa = "0.26"
 objc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # Official Win32 Credential UI bindings; the dialog uses DO_NOT_PERSIST.
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Accessibility"] }
@@ -60,7 +74,19 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dw
 tempfile = "3"
 # Real local server/core loopback test (ignored unless TEST_DATABASE_URL is provided).
 peppy-server = { path = "../../../services/server", version = "0.1.0" }
-sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio-rustls", "migrate", "macros"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-native-roots", "migrate", "macros"] }
 axum = "=0.8.6"
 ed25519-dalek = "=2.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tokio-rustls = "0.26"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+block = "=0.1.6"
+
+[patch.crates-io]
+block = { path = "../../../vendor/block" }
+libsodium-sys-stable = { path = "../../../vendor/libsodium-sys-stable" }
+
+# Argon2id's 256 MiB KDF in libsodium is ~8x slower at -O0.
+[profile.dev.package."*"]
+opt-level = 3

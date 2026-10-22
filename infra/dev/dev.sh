@@ -19,6 +19,21 @@ require_container_tooling() {
   docker compose version >/dev/null 2>&1 || { echo "container development requires docker compose" >&2; exit 1; }
 }
 
+select_source_tree() {
+  if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -n "${PEPPY_SOURCE_TREE+x}" ]]; then
+      echo "PEPPY_SOURCE_TREE requires a registered Git worktree" >&2
+      exit 1
+    fi
+    PEPPY_SOURCE_TREE="$ROOT"
+    export PEPPY_SOURCE_TREE
+    return
+  fi
+  command -v python3 >/dev/null || { echo "development source selection requires python3" >&2; exit 1; }
+  PEPPY_SOURCE_TREE="$(python3 infra/dev/worktree_source.py --root "$ROOT")"
+  export PEPPY_SOURCE_TREE
+}
+
 case "$recipe" in
   dev-setup)
     require_actions_installer
@@ -27,28 +42,7 @@ case "$recipe" in
       exit 1
     fi
     if [[ ! -e .env ]]; then
-      python3 - <<'PY'
-import os
-import secrets
-
-values = {
-    "PEPPY_ENV": "development",
-    "POSTGRES_DB": "peppy",
-    "POSTGRES_USER": "peppy",
-    "POSTGRES_PASSWORD": "synthetic-" + secrets.token_urlsafe(32),
-    "S3_ACCESS_KEY": "synthetic-" + secrets.token_urlsafe(16),
-    "S3_SECRET_KEY": "synthetic-" + secrets.token_urlsafe(32),
-    "S3_BUCKET": "peppy-private",
-    "PEPPY_REPLAY_RETENTION_DAYS": "30",
-    "VAULT_ATTACHMENT_QUOTA_BYTES": "536870912",
-    "PUBLIC_API_URL": "http://127.0.0.1:7000",
-    "PUBLIC_ATTACHMENT_URL": "http://127.0.0.1:7000",
-}
-fd = os.open(".env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w") as output:
-    for key, value in values.items():
-        output.write(f"{key}={value}\n")
-PY
+      python3 infra/dev/dev_port.py write-setup .env
       echo "Created .env with synthetic local credentials (mode 0600)." >&2
     fi
     exec python3 infra/dev/install-actions.py "$@" ;;
@@ -58,10 +52,17 @@ PY
   dev-demo)
     require_container_tooling
     exec python3 infra/dev/demo.py "$@" ;;
-  dev-up|dev-down|dev-build|dev-test)
+  dev-up|dev-build)
+    select_source_tree
     require_container_tooling
     exec just "$recipe" "$@" ;;
-  dev-start|android-build|android-emulator|android-deploy|android-open|android-run|android-smoke|android-sms|desktop-dev|desktop-bundle|desktop-run|desktop-open|ios-run)
+  dev-down|dev-test|ci-test)
+    require_container_tooling
+    exec just "$recipe" "$@" ;;
+  dev-start|android-build|android-run|android-run-fast|desktop-dev|desktop-bundle|desktop-run|ios-run)
+    select_source_tree
+    exec just "$recipe" "$@" ;;
+  android-test|android-emulator|android-forward|android-deploy|android-open|android-smoke|android-sms|desktop-open)
     exec just "$recipe" "$@" ;;
   *)
     echo "unknown development recipe: ${recipe:-<missing>}" >&2

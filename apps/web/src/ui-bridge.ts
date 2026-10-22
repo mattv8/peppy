@@ -12,6 +12,11 @@ export type {
   NotificationPreferences,
   PublicCopy,
   ContactResolutionMap,
+  MediaCursor,
+  MediaMetadataView,
+  MediaPageItem,
+  MediaPage,
+  MediaOpen,
   DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 

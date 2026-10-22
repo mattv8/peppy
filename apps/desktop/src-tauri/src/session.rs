@@ -2,30 +2,29 @@
 //! supervisor. All functions here are synchronous (they call into client-core / the filesystem)
 //! and are invoked from `spawn_blocking`, never directly on an async worker or the UI thread.
 use crate::{
-    credentials::{ensure_database_key, prepare_data_dir, stored_credential, Binding},
+    credentials::{Binding, ensure_database_key, prepare_data_dir, stored_credential},
     dto::{
-        self, AttachmentView, ConversationView, DraftView, GatewayView, Head, Snapshot,
+        self, AttachmentView, ConversationView, DraftView, GatewayView, Head, HistoryPage, Snapshot,
     },
-    error::{core_error, BridgeError, BridgeResult},
+    error::{BridgeError, BridgeResult, core_error},
     media,
     net::Api,
     notifications::NotificationPreferences,
     secure_store::SecretStore,
 };
 use peppy_client_core::{
-    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Message, MessageId,
-    NativeKeyCache, VaultId,
+    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, DraftId,
+    MediaCursor, Message, MessageId, NativeKeyCache, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
     },
 };
 use tokio::sync::Notify;
@@ -33,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
-const MAX_ACTIVE_MESSAGES: usize = 500;
+const INITIAL_HISTORY_MESSAGES: usize = 50;
 const MAX_PREVIEWS_PER_SNAPSHOT: usize = 12;
 const MAX_PREVIEW_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
@@ -44,129 +43,6 @@ pub const GATEWAYS_FILE: &str = "gateways.json";
 pub struct VaultSummary {
     pub epoch: u32,
     pub fingerprint: String,
-}
-
-/// Sanitized pairing state for the webview. Owner credentials and the approval challenge stay
-/// in the native session.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingIntentView {
-    pub https_origin: String,
-    pub intent_token: String,
-    pub expires_in_seconds: i64,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingStatusView {
-    pub claimed: bool,
-    pub approved: bool,
-    pub device_id: Option<String>,
-    pub key_digest: Option<String>,
-    pub sas: Option<String>,
-    pub expires_in_seconds: i64,
-}
-
-#[derive(Deserialize)]
-struct PairingIntentResponse {
-    https_origin: String,
-    intent_token: String,
-    expires_in_seconds: i64,
-}
-
-#[derive(Deserialize)]
-struct PairingStatusResponse {
-    claimed: bool,
-    approved: bool,
-    device_id: Option<String>,
-    key_digest: Option<String>,
-    sas: Option<String>,
-    expires_in_seconds: i64,
-}
-
-#[derive(Deserialize)]
-struct PairingApprovalResponse {}
-
-fn pairing_token(value: &str) -> BridgeResult<()> {
-    (value.len() == 43
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
-    .then_some(())
-    .ok_or_else(|| BridgeError::new("invalid-pairing-intent", "The pairing request is invalid."))
-}
-
-fn pairing_owner_error(error: crate::net::NetError) -> BridgeError {
-    match error {
-        crate::net::NetError::Status {
-            status: 403,
-            code: Some(code),
-        } if code == "owner_required" => BridgeError::new(
-            "pairing-owner-required",
-            "This desktop device is not an owner, so it cannot pair a phone.",
-        ),
-        other => other.into(),
-    }
-}
-
-fn pairing_status_error() -> BridgeError {
-    BridgeError::new(
-        "invalid-pairing-status",
-        "The server returned an invalid pairing verification state.",
-    )
-}
-
-fn valid_pairing_digest(value: &str) -> bool {
-    value.len() == 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
-        })
-}
-
-fn valid_pairing_sas(value: &str) -> bool {
-    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn validated_pairing_status(
-    intent_token: &str,
-    response: PairingStatusResponse,
-) -> BridgeResult<PairingStatusView> {
-    let PairingStatusResponse {
-        claimed,
-        approved,
-        device_id,
-        key_digest,
-        sas,
-        expires_in_seconds,
-    } = response;
-    match (claimed, device_id, key_digest, sas) {
-        (false, None, None, None) => Ok(PairingStatusView {
-            claimed: false,
-            approved: false,
-            device_id: None,
-            key_digest: None,
-            sas: None,
-            expires_in_seconds: expires_in_seconds.max(0),
-        }),
-        (true, Some(device_id), Some(key_digest), Some(server_sas))
-            if valid_pairing_digest(&key_digest) && valid_pairing_sas(&server_sas) =>
-        {
-            let device = DeviceId::from_str(&device_id).map_err(|_| pairing_status_error())?;
-            let expected = peppy_protocol::pairing_sas(intent_token, &key_digest, device);
-            if expected != server_sas {
-                return Err(pairing_status_error());
-            }
-            Ok(PairingStatusView {
-                claimed: true,
-                approved,
-                device_id: Some(device_id),
-                key_digest: Some(key_digest),
-                sas: Some(expected),
-                expires_in_seconds: expires_in_seconds.max(0),
-            })
-        }
-        _ => Err(pairing_status_error()),
-    }
 }
 
 #[derive(Default)]
@@ -181,6 +57,7 @@ pub struct NetStatus {
     pub gateways_known: bool,
     pub vault: Option<VaultSummary>,
     pub device_role: Option<String>,
+    pub revoked_device_ids: HashSet<String>,
 }
 
 /// Local attachment ID -> server object ID, learned when this host uploads or downloads an
@@ -230,6 +107,8 @@ pub struct Session {
     /// Wakes a pending reconnect wait (for example after unlock).
     pub reconnect_wake: Notify,
     pub cancel: CancellationToken,
+    /// Supervisor tasks are retained until an update restart has observed their completion.
+    workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub notifier: Notifier,
     pub mismatch: AtomicBool,
     /// Wakes the live loop to run a requested contact-projection repair snapshot now.
@@ -238,6 +117,11 @@ pub struct Session {
     pub repair_attempted: AtomicBool,
     /// A staged snapshot generation known to be impossible to complete; never resumed.
     pub abandoned_snapshot: Mutex<Option<u64>>,
+}
+
+fn started_sessions() -> &'static Mutex<Vec<Weak<Session>>> {
+    static SESSIONS: OnceLock<Mutex<Vec<Weak<Session>>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 impl Drop for Session {
@@ -291,12 +175,7 @@ pub fn open_session(
         .ok()
         .filter(|b| b.len() <= 256 * 1024)
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .map(|mut gateways: Vec<GatewayView>| {
-            for gateway in &mut gateways {
-                gateway.supports_mms &= gateway.mms_content_version.unwrap_or(0) >= 2;
-            }
-            gateways
-        });
+        .map(sanitize_cached_gateways);
     let status = NetStatus {
         gateways_known: gateways.is_some(),
         gateways: gateways.unwrap_or_default(),
@@ -314,12 +193,25 @@ pub fn open_session(
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
         cancel: CancellationToken::new(),
+        workers: Mutex::new(Vec::new()),
         notifier,
         mismatch: AtomicBool::new(false),
         abandoned_snapshot: Mutex::new(None),
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
     })
+}
+
+fn sanitize_cached_gateways(mut gateways: Vec<GatewayView>) -> Vec<GatewayView> {
+    for gateway in &mut gateways {
+        gateway.supports_mms &= gateway.mms_content_version.unwrap_or(0) >= 2;
+        gateway.availability = peppy_desktop_api::GatewayAvailability::Unknown;
+        gateway.last_seen_age_seconds = None;
+        gateway.presence = None;
+        gateway.wake_route = false;
+        gateway.online = false;
+    }
+    gateways
 }
 
 pub use peppy_desktop_api::compose::DraftInput;
@@ -329,11 +221,56 @@ fn compose_error(error: ComposeError) -> BridgeError {
         ComposeError::Ui { code, message } => BridgeError::new(code, message),
         ComposeError::ReplyBlocked(message) => BridgeError::new("mms-reply-blocked", message),
         ComposeError::Core(error) => core_error(error),
-        ComposeError::AfterRoute { source, current_revision } => core_error(source).with_revision(current_revision),
+        ComposeError::AfterRoute {
+            source,
+            current_revision,
+        } => match source {
+            peppy_client_core::Error::DraftMoved { .. } => core_error(source),
+            source => core_error(source).with_revision(current_revision),
+        },
     }
 }
 
 impl Session {
+    pub(crate) fn register_started(session: &Arc<Self>) {
+        let mut sessions = started_sessions()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        sessions.retain(|session| session.strong_count() != 0);
+        sessions.push(Arc::downgrade(session));
+    }
+
+    pub(crate) fn active_and_retired() -> Vec<Arc<Self>> {
+        let mut sessions = started_sessions()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let active = sessions.iter().filter_map(Weak::upgrade).collect();
+        sessions.retain(|session| session.strong_count() != 0);
+        active
+    }
+    pub(crate) fn track_worker(&self, worker: tokio::task::JoinHandle<()>) {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(worker);
+    }
+
+    pub(crate) fn take_workers(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(
+            &mut *self
+                .workers
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        )
+    }
+
+    pub(crate) fn retain_workers(&self, workers: Vec<tokio::task::JoinHandle<()>>) {
+        self.workers
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .extend(workers);
+    }
+
     pub fn request_work(&self) {
         self.work_wake.notify_one();
     }
@@ -343,88 +280,50 @@ impl Session {
     }
 
     pub fn gateways(&self) -> (Vec<GatewayView>, bool) {
-        let status = self.status.lock().unwrap_or_else(|poison| poison.into_inner());
+        let status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         (status.gateways.clone(), status.gateways_known)
     }
 
-    pub async fn create_pairing_intent(&self) -> BridgeResult<PairingIntentView> {
-        let response: PairingIntentResponse = self
-            .api
-            .post_json(
-                "/v1/pairing/intents",
-                &serde_json::json!({ "https_origin": self.api.origin() }),
-            )
-            .await
-            .map_err(pairing_owner_error)?;
-        pairing_token(&response.intent_token)?;
-        Ok(PairingIntentView {
-            https_origin: response.https_origin,
-            intent_token: response.intent_token,
-            expires_in_seconds: response.expires_in_seconds,
-        })
-    }
-
-    pub async fn pairing_intent_status(
-        &self,
-        intent_token: &str,
-    ) -> BridgeResult<PairingStatusView> {
-        pairing_token(intent_token)?;
-        let response: PairingStatusResponse = self
-            .api
-            .get_json(
-                &format!("/v1/pairing/intents/{intent_token}"),
-                crate::net::MAX_JSON_BYTES,
-            )
-            .await
-            .map_err(pairing_owner_error)?;
-        validated_pairing_status(intent_token, response)
-    }
-
-    pub async fn approve_pairing_intent(
-        &self,
-        intent_token: &str,
-        key_digest: &str,
-    ) -> BridgeResult<()> {
-        pairing_token(intent_token)?;
-        if !valid_pairing_digest(key_digest) {
-            return Err(BridgeError::new(
-                "invalid-pairing-key",
-                "The phone verification key is invalid.",
-            ));
-        }
-        let status = self.pairing_intent_status(intent_token).await?;
-        if !status.claimed || status.approved || status.key_digest.as_deref() != Some(key_digest) {
-            return Err(BridgeError::new(
-                "pairing-claim-changed",
-                "The claimed phone changed or is no longer awaiting approval.",
-            ));
-        }
-        let vault =
-            crate::sync::fetch_vault(&self.api, &self.binding.vault_id, &self.binding.device_id)
-                .await?;
-        let (profile, _) = crate::sync::vault_header(&vault)?;
-        let _: PairingApprovalResponse = self
-            .api
-            .post_json(
-                &format!("/v1/pairing/intents/{intent_token}/approve"),
-                &serde_json::json!({
-                    "key_digest": key_digest,
-                    "profile_fingerprint": vault.profile_fingerprint,
-                    "key_epoch": profile.key_epoch,
-                }),
-            )
-            .await
-            .map_err(pairing_owner_error)?;
-        Ok(())
+    pub fn revoked_devices(&self) -> HashSet<String> {
+        self.status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .revoked_device_ids
+            .clone()
     }
 
     /// CAS draft save. Text, recipients, attachments and route are persisted together.
     pub fn save_draft(&self, input: &DraftInput) -> BridgeResult<DraftView> {
-        compose::save_draft(&self.client, input).map_err(compose_error)
+        let previous = DraftId::from_str(&input.id)
+            .ok()
+            .and_then(|id| self.client.compose_draft(id).ok().flatten());
+        let draft = compose::save_draft(&self.client, input).map_err(compose_error)?;
+        if previous.as_ref().is_none_or(|old| {
+            old.draft_id.to_string() != draft.id
+                || old.conversation_id.to_string() != draft.conversation_id
+        }) {
+            self.notify();
+        }
+        Ok(draft)
+    }
+
+    pub fn discard_draft(
+        &self,
+        input: &peppy_desktop_api::compose::DiscardDraftInput,
+    ) -> BridgeResult<()> {
+        compose::discard_draft(&self.client, input).map_err(compose_error)?;
+        self.notify();
+        Ok(())
     }
 
     /// Queues locally only after shared composition policy accepts the stored draft.
-    pub fn send_draft(&self, input: &DraftInput) -> BridgeResult<peppy_desktop_api::SendResultView> {
+    pub fn send_draft(
+        &self,
+        input: &DraftInput,
+    ) -> BridgeResult<peppy_desktop_api::SendResultView> {
         let (gateways, known) = self.gateways();
         let result = compose::send_draft(&self.client, input, known.then_some(gateways.as_slice()))
             .map_err(compose_error)?;
@@ -434,6 +333,15 @@ impl Session {
 
     pub fn mark_seen(&self, ids: &[String]) -> BridgeResult<()> {
         self.mark_seen_scoped(ids, None)
+    }
+
+    pub fn redirected_conversation(
+        &self,
+        source: ConversationId,
+    ) -> BridgeResult<Option<ConversationId>> {
+        self.client
+            .conversation_redirect(source)
+            .map_err(core_error)
     }
 
     /// Validates a complete batch before applying any read marks. Composer
@@ -594,6 +502,7 @@ impl Session {
         message: &Message,
         budget: &mut usize,
         deferred: &mut bool,
+        eligible: Option<&HashSet<AttachmentId>>,
     ) -> Vec<AttachmentView> {
         let errors = self
             .transfer_errors
@@ -618,38 +527,209 @@ impl Session {
                         preview_url: None,
                         transfer: Some("download"),
                         retryable: None,
+                        media_meta: None,
                     };
                 };
+                let media_metadata = self
+                    .client
+                    .message_attachment_media_metadata(message.payload.record.message_id, id)
+                    .ok()
+                    .flatten();
+                let preview_info = media_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.thumbnail.as_ref())
+                    .unwrap_or(&info);
                 let mut preview = None;
-                if media::is_previewable(&info.media_type) && info.state.is_local() {
+                if media::is_previewable(&preview_info.media_type) && preview_info.state.is_local()
+                {
+                    let preview_id = preview_info.attachment_id;
                     let cached = self
                         .previews
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
-                        .get(&id)
+                        .get(&preview_id)
                         .cloned();
                     preview = match cached {
                         Some(value) => value,
-                        None if *budget > 0 => {
+                        None if eligible.is_none_or(|ids| ids.contains(&preview_id))
+                            && *budget > 0 =>
+                        {
                             *budget -= 1;
                             let value = self
                                 .client
-                                .open_native_plaintext(id)
+                                .open_native_plaintext(preview_id)
                                 .ok()
                                 .and_then(|file| media::read_capped(file.path()))
                                 .and_then(|bytes| media::preview_data_url(&bytes));
-                            self.cache_preview(id, value.clone());
+                            self.cache_preview(preview_id, value.clone());
                             value
                         }
                         None => {
-                            *deferred = true;
+                            if eligible.is_none_or(|ids| ids.contains(&preview_id)) {
+                                *deferred = true;
+                            }
                             None
                         }
                     };
                 }
-                dto::attachment_view(&info, errors.get(&id).cloned(), preview)
+                let mut attachment = dto::attachment_view(&info, errors.get(&id).cloned(), None);
+                if let Some(metadata) = media_metadata {
+                    let mut media_meta = dto::media_metadata_view(metadata);
+                    if let Some(thumbnail) = media_meta.thumbnail.as_mut() {
+                        thumbnail.preview_url = preview;
+                    }
+                    attachment.media_meta = Some(Box::new(media_meta));
+                } else {
+                    attachment.preview_url = preview;
+                }
+                attachment
             })
             .collect()
+    }
+
+    fn message_views(
+        &self,
+        messages: Vec<Message>,
+        budget: &mut usize,
+        deferred: &mut bool,
+        eligible: Option<&HashSet<AttachmentId>>,
+    ) -> Vec<dto::MessageView> {
+        messages
+            .iter()
+            .map(|message| {
+                dto::message_view(
+                    message,
+                    self.attachment_views(message, budget, deferred, eligible),
+                )
+            })
+            .collect()
+    }
+
+    pub fn history_page(
+        &self,
+        conversation_id: &str,
+        before_message_id: &str,
+    ) -> BridgeResult<HistoryPage> {
+        let conversation = ConversationId::from_str(conversation_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+        let anchor = MessageId::from_str(before_message_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The message ID is invalid."))?;
+        let page = self
+            .client
+            .messages_page(conversation, Some(anchor), INITIAL_HISTORY_MESSAGES)
+            .map_err(core_error)?;
+        let (mut budget, mut deferred) = (MAX_PREVIEWS_PER_SNAPSHOT, false);
+        let messages = self.message_views(page.messages, &mut budget, &mut deferred, None);
+        Ok(HistoryPage {
+            conversation_id: conversation.to_string(),
+            messages,
+            has_more: page.has_more,
+        })
+    }
+
+    pub fn media_page(
+        &self,
+        conversation: ConversationId,
+        cursor: Option<&MediaCursor>,
+        limit: usize,
+    ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+        if !(1..=100).contains(&limit) {
+            return Err(BridgeError::new(
+                "invalid-request",
+                "The media page size is invalid.",
+            ));
+        }
+        let page = self
+            .client
+            .media_page(conversation, cursor, limit.min(MAX_PREVIEWS_PER_SNAPSHOT))
+            .map_err(core_error)?;
+        let mut view = peppy_desktop_api::media_page_view(page);
+        let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
+        for item in &mut view.items {
+            let Some(thumbnail) = item
+                .media_meta
+                .as_mut()
+                .and_then(|meta| meta.thumbnail.as_mut())
+            else {
+                continue;
+            };
+            if budget == 0
+                || !media::is_previewable(&thumbnail.media_type)
+                || thumbnail.state != "ready"
+            {
+                continue;
+            }
+            let Ok(id) = AttachmentId::from_str(&thumbnail.id) else {
+                continue;
+            };
+            let cached = self
+                .previews
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .get(&id)
+                .cloned();
+            let preview = match cached {
+                Some(value) => value,
+                None => {
+                    budget -= 1;
+                    let value = self
+                        .client
+                        .open_native_plaintext(id)
+                        .ok()
+                        .and_then(|file| media::read_capped(file.path()))
+                        .and_then(|bytes| media::preview_data_url(&bytes));
+                    self.cache_preview(id, value.clone());
+                    value
+                }
+            };
+            thumbnail.preview_url = preview;
+        }
+        Ok(view)
+    }
+
+    pub fn media_page_around(
+        &self,
+        conversation: ConversationId,
+        attachment: AttachmentId,
+        message: Option<MessageId>,
+        limit: usize,
+    ) -> BridgeResult<peppy_desktop_api::MediaPageAroundView> {
+        if !(1..=100).contains(&limit) {
+            return Err(BridgeError::new(
+                "invalid-request",
+                "The media page size is invalid.",
+            ));
+        }
+        let page = match message {
+            Some(message) => {
+                self.client
+                    .media_page_around_at(conversation, message, attachment, limit)
+            }
+            None => self
+                .client
+                .media_page_around(conversation, attachment, limit),
+        }
+        .map_err(core_error)?;
+        Ok(peppy_desktop_api::media_page_around_view(page))
+    }
+
+    pub fn media_page_newer(
+        &self,
+        conversation: ConversationId,
+        cursor: &MediaCursor,
+        limit: usize,
+    ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+        if !(1..=100).contains(&limit) {
+            return Err(BridgeError::new(
+                "invalid-request",
+                "The media page size is invalid.",
+            ));
+        }
+        let page = self
+            .client
+            .media_page_newer(conversation, cursor, limit)
+            .map_err(core_error)?;
+        Ok(peppy_desktop_api::media_page_view(page))
     }
 
     /// Builds the sanitized UI snapshot from core state. Returns whether previews were deferred
@@ -657,12 +737,17 @@ impl Session {
     pub fn snapshot(
         &self,
         requested: Option<&str>,
+        history_from_message_id: Option<&str>,
         head: Head,
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
     ) -> BridgeResult<(Snapshot, bool)> {
         let conversations = self.client.list_conversations().map_err(core_error)?;
         let drafts = self.client.compose_drafts().map_err(core_error)?;
+        let drafts_by_conversation: HashMap<ConversationId, _> = drafts
+            .iter()
+            .map(|draft| (draft.conversation_id, draft))
+            .collect();
         let known: HashSet<ConversationId> = conversations
             .iter()
             .map(|c| c.conversation_id)
@@ -677,14 +762,19 @@ impl Session {
         let (mut budget, mut deferred) = (MAX_PREVIEWS_PER_SNAPSHOT, false);
         let mut views = Vec::new();
         for conversation in &conversations {
-            let messages = self
+            let latest = self
                 .client
-                .messages(conversation.conversation_id)
+                .latest_message(conversation.conversation_id)
                 .map_err(core_error)?;
-            let last = messages.last();
-            let draft = drafts
-                .iter()
-                .find(|d| d.conversation_id == conversation.conversation_id);
+            let last = latest.as_ref();
+            let draft = drafts_by_conversation
+                .get(&conversation.conversation_id)
+                .copied();
+            let draft_only = draft
+                .map(|draft| self.client.compose_draft_is_new(draft.draft_id))
+                .transpose()
+                .map_err(core_error)?
+                .unwrap_or(false);
             let name = last
                 .map(dto::counterpart)
                 .or_else(|| draft.map(|d| d.recipients.join(", ")))
@@ -699,16 +789,41 @@ impl Session {
                     }
                 })
                 .unwrap_or_default();
-            let message_views = if Some(conversation.conversation_id) == active {
-                let start = messages.len().saturating_sub(MAX_ACTIVE_MESSAGES);
-                messages[start..]
-                    .iter()
-                    .map(|m| {
-                        dto::message_view(m, self.attachment_views(m, &mut budget, &mut deferred))
-                    })
-                    .collect()
+            let (message_views, has_older_messages) = if Some(conversation.conversation_id)
+                == active
+            {
+                let history_from_message_id = (requested.is_some()
+                    && Some(conversation.conversation_id) == active)
+                    .then_some(history_from_message_id)
+                    .flatten();
+                let (messages, has_more) = match history_from_message_id {
+                    Some(anchor) => {
+                        let anchor = MessageId::from_str(anchor).map_err(|_| {
+                            BridgeError::new("invalid-request", "The message ID is invalid.")
+                        })?;
+                        let has_more = !self
+                            .client
+                            .messages_page(conversation.conversation_id, Some(anchor), 1)
+                            .map_err(core_error)?
+                            .messages
+                            .is_empty();
+                        self.client
+                            .messages_since(conversation.conversation_id, anchor)
+                            .map(|messages| (messages, has_more))
+                    }
+                    None => self
+                        .client
+                        .messages_page(conversation.conversation_id, None, INITIAL_HISTORY_MESSAGES)
+                        .map(|page| (page.messages, page.has_more)),
+                }
+                .map_err(core_error)?;
+                let eligible = snapshot_preview_ids(&messages);
+                (
+                    self.message_views(messages, &mut budget, &mut deferred, Some(&eligible)),
+                    Some(has_more),
+                )
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let reply_context = self
                 .client
@@ -720,10 +835,13 @@ impl Session {
                 preview,
                 unread: conversation.unread_count,
                 messages: message_views,
+                has_older_messages,
                 participants: reply_context
                     .as_ref()
                     .map(|context| context.recipients.clone()),
                 reply_blocked_reason: reply_context.and_then(|context| context.blocked_reason),
+                recipientless_draft: false,
+                draft_only,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -746,12 +864,15 @@ impl Session {
                 },
                 unread: 0,
                 messages: Vec::new(),
+                has_older_messages: None,
                 participants: None,
                 reply_blocked_reason: None,
+                recipientless_draft: draft.recipients.is_empty(),
+                draft_only: true,
             });
         }
         let draft = active
-            .and_then(|id| drafts.iter().find(|d| d.conversation_id == id))
+            .and_then(|id| drafts_by_conversation.get(&id).copied())
             .map(dto::draft_view);
         let pending = self
             .client
@@ -860,6 +981,30 @@ impl Session {
         Ok((snapshot, deferred))
     }
 
+    pub fn snapshot_scoped(
+        &self,
+        requested: &str,
+        history_from_message_id: Option<&str>,
+        head: Head,
+        origin: Option<String>,
+        notification_preferences: NotificationPreferences,
+    ) -> BridgeResult<(Snapshot, bool)> {
+        let snapshot = self.snapshot(
+            Some(requested),
+            history_from_message_id,
+            head,
+            origin,
+            notification_preferences,
+        )?;
+        if snapshot.0.active_conversation_id.as_deref() != Some(requested) {
+            return Err(BridgeError::new(
+                "not-found",
+                "The requested stored item was not found.",
+            ));
+        }
+        Ok(snapshot)
+    }
+
     /// Persists the last reported gateway views (non-secret display/routing data, mode 0600).
     pub fn persist_gateways(&self, views: &[GatewayView]) {
         if let Ok(bytes) = serde_json::to_vec(views) {
@@ -877,59 +1022,59 @@ impl Session {
     }
 }
 
+fn snapshot_preview_ids(messages: &[Message]) -> HashSet<AttachmentId> {
+    bounded_preview_ids(
+        messages
+            .iter()
+            .rev()
+            .take(INITIAL_HISTORY_MESSAGES)
+            .flat_map(|message| {
+                message
+                    .payload
+                    .record
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.attachment_id)
+            }),
+    )
+}
+
+fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<AttachmentId> {
+    let mut eligible = HashSet::with_capacity(MAX_PREVIEW_CACHE);
+    for id in ids {
+        eligible.insert(id);
+        if eligible.len() == MAX_PREVIEW_CACHE {
+            break;
+        }
+    }
+    eligible
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{fixture_at, PHRASE};
+    use crate::tests::{PHRASE, fixture_at};
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
-    fn pairing_intent_tokens_are_canonical_base64url() {
-        assert!(pairing_token(&"A".repeat(43)).is_ok());
-        assert!(pairing_token("short").is_err());
-        assert!(pairing_token(&format!("{}+", "A".repeat(42))).is_err());
-    }
-
-    #[test]
-    fn pairing_status_recomputes_the_shared_sas_vector() {
-        let view = validated_pairing_status(
-            "intent-1",
-            PairingStatusResponse {
-                claimed: true,
-                approved: false,
-                device_id: Some("00000000-0000-0000-0000-000000000002".into()),
-                key_digest: Some(
-                    "4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0".into(),
-                ),
-                sas: Some("122032".into()),
-                expires_in_seconds: 300,
-            },
-        )
+    fn cached_gateways_never_restore_live_presence() {
+        let gateway: GatewayView = serde_json::from_value(serde_json::json!({
+            "id": "phone", "name": "Pixel", "simId": "sim", "online": true,
+            "simulated": false, "supportsSms": true, "supportsMms": true,
+            "availability": "offline", "lastSeenAgeSeconds": 12,
+            "presence": { "state": "connected", "last_seen_age_seconds": 12 },
+            "wakeRoute": true
+        }))
         .unwrap();
-        assert_eq!(view.sas.as_deref(), Some("122032"));
+        let cached = sanitize_cached_gateways(vec![gateway]);
         assert_eq!(
-            view.device_id.as_deref(),
-            Some("00000000-0000-0000-0000-000000000002")
+            cached[0].availability,
+            peppy_desktop_api::GatewayAvailability::Unknown
         );
-    }
-
-    #[test]
-    fn pairing_status_rejects_a_server_sas_that_does_not_match() {
-        assert!(validated_pairing_status(
-            "intent-1",
-            PairingStatusResponse {
-                claimed: true,
-                approved: false,
-                device_id: Some("00000000-0000-0000-0000-000000000002".into()),
-                key_digest: Some(
-                    "4bb06f8e4e3a7715d201d573d0aa423762e55dabd61a2c02278fa56cc6d294e0".into()
-                ),
-                sas: Some("000000".into()),
-                expires_in_seconds: 300,
-            },
-        )
-        .is_err());
+        assert_eq!(cached[0].last_seen_age_seconds, None);
+        assert_eq!(cached[0].presence, None);
+        assert!(!cached[0].online);
     }
 
     #[test]
@@ -961,6 +1106,7 @@ mod tests {
             )
             .unwrap();
         let conversation = ConversationId::from_str(&draft.conversation_id).unwrap();
+        count.store(0, Ordering::Relaxed);
         let captured = session
             .client
             .capture_incoming(IncomingSms {
@@ -980,5 +1126,123 @@ mod tests {
 
         session.mark_seen_scoped(&[id], Some(conversation)).unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn snapshots_and_pages_keep_history_continuous_beyond_the_initial_window() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let conversation = session
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "0".into(),
+                provider_message_id: Some("history-0".into()),
+                imported: false,
+            })
+            .unwrap()
+            .conversation_id;
+        for index in 1..52 {
+            session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation),
+                    sender_address: "+15555550100".into(),
+                    body: index.to_string(),
+                    provider_message_id: Some(format!("history-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        let initial = session
+            .snapshot(
+                Some(&conversation.to_string()),
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0;
+        let view = initial
+            .conversations
+            .iter()
+            .find(|view| view.id == conversation.to_string())
+            .unwrap();
+        assert_eq!(view.messages.len(), INITIAL_HISTORY_MESSAGES);
+        assert_eq!(view.has_older_messages, Some(true));
+        let anchor = view.messages[0].id.clone();
+        let page = session
+            .history_page(&conversation.to_string(), &anchor)
+            .unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert!(!page.has_more);
+        let refreshed = session
+            .snapshot(
+                Some(&conversation.to_string()),
+                Some(&anchor),
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap()
+            .0;
+        assert_eq!(refreshed.conversations[0].has_older_messages, Some(true));
+        assert!(
+            session
+                .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
+                .is_err()
+        );
+        let other = session
+            .client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "other".into(),
+                provider_message_id: Some("history-other".into()),
+                imported: false,
+            })
+            .unwrap();
+        let other_id = session.client.messages(other.conversation_id).unwrap()[0]
+            .payload
+            .record
+            .message_id
+            .to_string();
+        assert!(
+            session
+                .history_page(&conversation.to_string(), &other_id)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn snapshot_preview_ids_bound_auto_hydration_to_the_newest_window() {
+        let ids = (0..300)
+            .map(|_| AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap())
+            .collect::<Vec<_>>();
+        let eligible = bounded_preview_ids(ids.iter().copied());
+        assert_eq!(eligible.len(), MAX_PREVIEW_CACHE);
+        assert!(
+            ids[..MAX_PREVIEW_CACHE]
+                .iter()
+                .all(|id| eligible.contains(id))
+        );
+        assert!(
+            ids[MAX_PREVIEW_CACHE..]
+                .iter()
+                .all(|id| !eligible.contains(id))
+        );
     }
 }

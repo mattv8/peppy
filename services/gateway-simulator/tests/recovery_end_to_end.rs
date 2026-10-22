@@ -1,16 +1,15 @@
 //! Encrypted recovery acceptance over isolated PostgreSQL and SeaweedFS Compose fixtures.
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey};
+mod common;
+
+use common::{ADDRESS, NETWORK_TIMEOUT, PHRASE, Paired, VaultFixture, create_vault};
 use peppy_client_core::*;
-use peppy_crypto::{create_vault_check_header, derive_root_key};
 use peppy_gateway_simulator::{drain_media, effects_path, run_one_carrier_effect, upload_pending};
-use peppy_protocol::pairing_proof_message;
 use peppy_server::{
-    api::{create_owner, router},
-    config::S3Config,
-    storage::Storage,
+    ServerBuilder,
+    config::{Config, S3Config},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     fs,
@@ -24,17 +23,16 @@ use tempfile::TempDir;
 use tokio::{net::TcpListener, task::JoinHandle};
 use uuid::Uuid;
 
-const PHRASE: &str = "correct horse battery staple";
-const ADDRESS: &str = "+15555550100";
 const PG_IMAGE: &str =
     "postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f";
-const SEAWEED_IMAGE: &str = "chrislusf/seaweedfs:4.09@sha256:353c69c8ddd7e13c85c1290dca9d1690bf3d066237b7ede7920b8fd2864858e7";
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
+const SEAWEED_IMAGE: &str = "chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d";
+const SEAWEED_ENTRYPOINT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../infra/docker/seaweedfs-entrypoint.sh"
+);
 
 async fn bounded<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
-    tokio::time::timeout(NETWORK_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("phase={phase} status=timeout"))
+    common::network(phase, future).await
 }
 
 fn checked(output: Output, phase: &str) -> Output {
@@ -85,13 +83,17 @@ services:
       retries: 30
   seaweedfs:
     image: {SEAWEED_IMAGE}
+    entrypoint: ["/bin/sh", "/usr/local/bin/peppy-seaweedfs-entrypoint.sh"]
     command: >-
       server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -dir=/data
       -master.port=9333 -master.volumeSizeLimitMB=32 -volume.port=8080 -volume.max=8
-      -filer -filer.port=8888 -ip=seaweedfs
+      -filer -filer.port=8888 -ip=seaweedfs -filer.encryptVolumeData
     configs:
       - source: seaweed-s3-config
         target: /etc/seaweedfs/s3.json
+      - source: seaweed-entrypoint
+        target: /usr/local/bin/peppy-seaweedfs-entrypoint.sh
+        mode: 0555
     volumes:
       - seaweed-volume-data:/data
       - seaweed-filer-data:/root/.seaweedfs
@@ -115,6 +117,8 @@ configs:
   seaweed-s3-config:
     content: |
       {{"identities":[{{"name":"recovery","credentials":[{{"accessKey":"${{S3_ACCESS_KEY}}","secretKey":"${{S3_SECRET_KEY}}"}}],"actions":["Read","Write","List","Tagging","Admin"]}}]}}
+  seaweed-entrypoint:
+    file: {SEAWEED_ENTRYPOINT}
 "#
         );
         fs::write(path.join("docker-compose.yml"), compose).unwrap();
@@ -242,19 +246,6 @@ impl RouterRuntime {
     }
 }
 
-struct VaultFixture {
-    vault: VaultId,
-    profile: KeyProfile,
-    header: VaultCheckHeader,
-    fingerprint: String,
-    owner_token: String,
-}
-
-struct Paired {
-    id: DeviceId,
-    token: String,
-}
-
 fn database_url(fixture: &ComposeFixture) -> String {
     format!(
         "postgres://recovery:recovery_fixture_password@127.0.0.1:{}/recovery",
@@ -280,22 +271,22 @@ fn s3_config(fixture: &ComposeFixture) -> S3Config {
     }
 }
 
-fn configure_router(database_url: &str, s3: &S3Config) {
-    unsafe {
-        std::env::set_var("PEPPY_ENV", "development");
-        std::env::set_var("DATABASE_URL", database_url);
-        std::env::set_var("BIND_ADDR", "127.0.0.1:0");
-        std::env::set_var("S3_INTERNAL_ENDPOINT", s3.endpoint.as_str());
-        std::env::set_var("S3_ACCESS_KEY", &s3.access_key);
-        std::env::set_var("S3_SECRET_KEY", &s3.secret_key);
-        std::env::set_var("S3_BUCKET", &s3.bucket);
-    }
-}
-
 async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime {
     let database_url = database_url(fixture);
     let s3 = s3_config(fixture);
-    configure_router(&database_url, &s3);
+    let config = Config {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        database_url: database_url.clone(),
+        release_identity: "recovery-fixture".into(),
+        s3: Some(s3),
+        public_api_url: None,
+        public_attachment_url: None,
+        vault_attachment_quota_bytes: 512 * 1024 * 1024,
+        trusted_proxy_cidrs: vec![],
+        replay_retention: Duration::from_secs(30 * 86_400),
+        relay_url: None,
+        web_client: None,
+    };
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(NETWORK_TIMEOUT)
@@ -307,13 +298,17 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
             .run(&pool)
             .await
             .unwrap();
-        Storage::new(&s3).ensure_bucket().await.unwrap();
     }
+    let mut server = ServerBuilder::community(config, pool.clone())
+        .build()
+        .await
+        .unwrap();
+    server.start_maintenance().unwrap();
+    let router = server.router();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server_pool = pool.clone();
     let task = tokio::spawn(async move {
-        axum::serve(listener, router(server_pool)).await.unwrap();
+        axum::serve(listener, router).await.unwrap();
     });
     RouterRuntime {
         pool,
@@ -322,83 +317,31 @@ async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime 
     }
 }
 
-async fn create_vault(pool: &PgPool) -> VaultFixture {
-    let vault = VaultId::new();
-    let profile = KeyProfile::new(vault.0, 1).unwrap();
-    let fingerprint = profile.fingerprint().unwrap();
-    let root = derive_root_key(PHRASE, &profile).unwrap();
-    let header = create_vault_check_header(&root, profile.clone()).unwrap();
-    let owner = create_owner(
-        pool,
-        serde_json::to_value(&profile).unwrap(),
-        serde_json::to_vec(&header).unwrap(),
-        fingerprint.clone(),
-        1,
-    )
-    .await
-    .unwrap();
-    VaultFixture {
-        vault,
-        profile,
-        header,
-        fingerprint,
-        owner_token: owner.device_token,
-    }
-}
-
-async fn pair(runtime: &RouterRuntime, vault: &VaultFixture, role: &str, byte: u8) -> Paired {
-    let key = SigningKey::from_bytes(&[byte; 32]);
+async fn enroll_fixture_device(
+    runtime: &RouterRuntime,
+    vault: &VaultFixture,
+    role: &str,
+) -> Paired {
     let id = DeviceId::new();
-    let public =
-        json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-    let http = reqwest::Client::builder()
-        .timeout(NETWORK_TIMEOUT)
-        .build()
+    let token: String = (0..3)
+        .map(|_| Uuid::new_v4().simple().to_string())
+        .collect();
+    sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,'{}'::jsonb,$4,1)")
+        .bind(vault.vault.0)
+        .bind(id.0)
+        .bind(role)
+        .bind(&vault.fingerprint)
+        .execute(&runtime.pool)
+        .await
         .unwrap();
-    let challenge: Value = bounded(
-        "recovery-pair-create",
-        http.post(format!("{}/v1/pairing", runtime.url))
-            .bearer_auth(&vault.owner_token)
-            .json(&json!({"device_id":id.0,"public_key":public,"profile_fingerprint":vault.fingerprint,"key_epoch":1,"requested_role":role}))
-            .send(),
-    )
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    let challenge_bytes: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(challenge["challenge_token"].as_str().unwrap())
-        .unwrap()
-        .try_into()
+    sqlx::query("INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)")
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(vault.vault.0)
+        .bind(id.0)
+        .execute(&runtime.pool)
+        .await
         .unwrap();
-    let proof = pairing_proof_message(
-        &challenge_bytes,
-        vault.vault,
-        id,
-        &vault.fingerprint,
-        1,
-        role,
-    );
-    let response: Value = bounded(
-        "recovery-pair-consume",
-        http.post(format!("{}/v1/pairing/consume", runtime.url))
-            .json(&json!({"challenge_token":challenge["challenge_token"],"device_id":id.0,"public_key":public,"profile_fingerprint":vault.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())}))
-            .send(),
-    )
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    Paired {
-        id,
-        token: response["device_token"].as_str().unwrap().into(),
-    }
+    Paired { id, token }
 }
 
 fn core_client(root: &Path, name: &str, vault: &VaultFixture, device_id: DeviceId) -> Client {
@@ -531,8 +474,8 @@ async fn encrypted_mms_survives_volume_restore_without_historical_carrier_effect
 
     let source_router = start_router(&source, true).await;
     let vault = create_vault(&source_router.pool).await;
-    let desktop_pair = pair(&source_router, &vault, "device", 7).await;
-    let gateway_pair = pair(&source_router, &vault, "gateway", 9).await;
+    let desktop_pair = enroll_fixture_device(&source_router, &vault, "device").await;
+    let gateway_pair = enroll_fixture_device(&source_router, &vault, "gateway").await;
     let desktop = core_client(root.path(), "recovery-desktop", &vault, desktop_pair.id);
     let png = fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media/valid-1x1.png"),

@@ -6,10 +6,21 @@ root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P)
 target=wasm32-unknown-emscripten
 expected_emscripten=6.0.11
 expected_rust=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$root/rust-toolchain.toml")
+persistent_target_cache=${CARGO_TARGET_DIR:-}
 
 fail() {
     printf 'browser-core: %s\n' "$*" >&2
     exit 1
+}
+
+refresh_workspace_inputs() {
+    local directory
+
+    touch -- "$root/Cargo.toml" "$root/Cargo.lock" "$root/rust-toolchain.toml"
+    for directory in "$root/crates" "$root/vendor" "$root/services"; do
+        [[ -d "$directory" ]] || continue
+        find "$directory" -type d \( -name target -o -name .git -o -name cache \) -prune -o -type f -exec touch -- {} +
+    done
 }
 
 [[ $# -eq 1 ]] || fail 'Usage: bash infra/build/build-browser-core.sh <output-directory>'
@@ -35,6 +46,8 @@ RANLIB=$(command -v emranlib)
 export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS
 CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-C link-arg=-sFORCE_FILESYSTEM -C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_ES6=1 -C link-arg=-sEXPORT_NAME=createPeppyCore -C link-arg=-sENVIRONMENT=worker -C link-arg=-sEXIT_RUNTIME=0 -C link-arg=-sINITIAL_MEMORY=536870912 -C link-arg=-sALLOW_MEMORY_GROWTH=1 -C link-arg=-sEXPORTED_RUNTIME_METHODS=FS,UTF8ToString,HEAPU8 -C link-arg=-sEXPORTED_FUNCTIONS=_main,_peppy_browser_alloc,_peppy_browser_dispatch,_peppy_browser_free_request,_peppy_browser_free_response"
 
+# BuildKit's persistent target mount can be newer than source mtimes preserved by COPY.
+[[ -z "$persistent_target_cache" ]] || refresh_workspace_inputs
 cargo build --locked --manifest-path "$root/Cargo.toml" --release \
     --package peppy-browser-bindings --bin peppy-browser-core --target "$target"
 

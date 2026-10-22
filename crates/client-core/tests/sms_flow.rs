@@ -112,12 +112,17 @@ fn desktop_send_reaches_gateway_once_and_encrypted_status_returns() {
         only_message(&gateway, conversation).send_state,
         Some(SendState::Sent)
     );
+    let gateway_status_at_ms = only_message(&gateway, conversation)
+        .status_at_ms
+        .expect("gateway records the time of its latest send status");
+    assert!(gateway_status_at_ms > 0);
 
     // persisted_gateway + submitted + sent statuses.
     assert_eq!(server.upload(&gateway), 3);
     server.sync(&desktop);
     let message = only_message(&desktop, conversation);
     assert_eq!(message.send_state, Some(SendState::Sent));
+    assert_eq!(message.status_at_ms, Some(gateway_status_at_ms));
     assert!(message.seen);
     assert_eq!(desktop.unread_count(conversation).unwrap(), 0);
 

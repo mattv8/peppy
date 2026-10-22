@@ -56,6 +56,11 @@ describe("NotificationsView", () => {
     expect(screen.getByRole("button", { name: "Dismiss up to 100" })).toBeEnabled();
   });
 
+  it("shows an unknown time instead of an elapsed age for a nonpositive post time", () => {
+    render(<NotificationsView {...props([notification("phone-a", "chat", { postedAt: 0 })])} />);
+    expect(screen.getByText("Unknown time")).toBeVisible();
+  });
+
   it("marks rows seen after focus when they were already intersecting", async () => {
     let callback!: IntersectionObserverCallback;
     vi.stubGlobal("IntersectionObserver", class {

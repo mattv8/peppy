@@ -27,6 +27,7 @@ const mockContactBook: ContactBookView = {
     canDelete: true,
     supportsNotes: true,
     supportsPhoto: true,
+    supportsBirthday: true,
   },
   contactCount: 2,
   defaultAccountLabel: "Google",
@@ -74,26 +75,23 @@ describe("ContactsView", () => {
 
   afterEach(cleanup);
 
-  it("allows manual cache repair even when no repair is currently flagged", async () => {
-    vi.mocked(bridge.request_contact_repair).mockResolvedValue({ repairRequired: true });
-    render(<ContactsView sync={{ repairRequired: false }} />);
-    fireEvent.click(await screen.findByLabelText("Repair contact cache"));
-    await waitFor(() => expect(bridge.request_contact_repair).toHaveBeenCalledOnce());
+  it("requests a fresh scan for the selected capable book", async () => {
+    vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+    vi.mocked(bridge.request_contact_sync).mockResolvedValue({ requestId: "scan-1", bookId: "book-pixel8", state: "waiting" });
+    render(<ContactsView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+    await waitFor(() => expect(bridge.request_contact_sync).toHaveBeenCalledWith("book-pixel8"));
+    expect(bridge.request_contact_repair).not.toHaveBeenCalled();
   });
 
-  it("requires confirmation and prevents duplicate requests while forgetting a book", async () => {
-    let finish!: () => void;
-    vi.mocked(bridge.forget_contact_book).mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
-    const { container } = render(<ContactsView />);
-    fireEvent.click(await screen.findByLabelText("Forget Pixel 8"));
-    expect(bridge.forget_contact_book).not.toHaveBeenCalled();
-    fireEvent.keyDown(screen.getByLabelText("Confirm forget Pixel 8"), { key: "Escape" });
-    fireEvent.click(screen.getByLabelText("Forget Pixel 8"));
-    fireEvent.click(screen.getByLabelText("Confirm forget Pixel 8"));
-    expect(bridge.forget_contact_book).toHaveBeenCalledTimes(1);
-    expect(container.querySelector('[data-book-forget="book-pixel8"]')).toBeDisabled();
-    await act(async () => finish());
-    expect(container.querySelector('[data-book-forget="book-pixel8"]')).toBeNull();
+  it("explains why limited and unready books cannot request a scan", async () => {
+    let resolveBooks!: (books: ContactBookView[]) => void;
+    vi.mocked(bridge.list_contact_books).mockImplementation(() => new Promise(resolve => { resolveBooks = resolve; }));
+    render(<ContactsView sync={{ repairRequired: false, readiness: { state: "backfill_pending", contacts_ready: false, server_active: true, backfill_unreadable: 0 } }} />);
+    const syncButton = await screen.findByRole("button", { name: "Sync now" });
+    resolveBooks([{ ...mockContactBook, state: "limited", capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+    expect(await screen.findByText("This phone has limited contact access and cannot complete an authoritative scan.")).toBeInTheDocument();
+    expect(syncButton).toBeDisabled();
   });
 
   it.each([
@@ -103,6 +101,7 @@ describe("ContactsView", () => {
   ])("keeps remaining field identity after removing an earlier row: %s", async (add, remove, list) => {
     const { container } = render(<ContactsView />);
     fireEvent.click(await screen.findByLabelText("New contact"));
+    if (add === "Add address") fireEvent.click(container.querySelector('[data-form-disclosure="addresses"] > summary')!);
     fireEvent.click(screen.getByLabelText(add));
     fireEvent.click(screen.getByLabelText(add));
     const second = container.querySelectorAll(`${list} > li`)[1];
@@ -197,6 +196,59 @@ describe("ContactsView", () => {
   });
 
   describe("creating contacts", () => {
+    it("keeps empty optional contact fields collapsed until their disclosure is opened", async () => {
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByLabelText("New contact"));
+
+      const organization = container.querySelector<HTMLDetailsElement>('[data-form-disclosure="organization"]');
+      expect(organization).not.toHaveAttribute("open");
+
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      expect(organization).toHaveAttribute("open");
+    });
+
+    it("reveals and focuses birthday after the native host rejects it", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockResolvedValue({
+        state: "rejected",
+        reason: "The birthday is invalid.",
+      });
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.click(container.querySelector('[data-form-disclosure="birthday"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Month"), { target: { value: "2" } });
+      fireEvent.click(container.querySelector('[data-form-disclosure="birthday"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      await waitFor(() => {
+        expect(container.querySelector('[data-form-disclosure="birthday"]')).toHaveAttribute("open");
+        expect(document.activeElement).toBe(screen.getByLabelText("Month"));
+      });
+      const givenName = screen.getByLabelText("Given name");
+      givenName.focus();
+      fireEvent.change(givenName, { target: { value: "Avery Lynn" } });
+      expect(document.activeElement).toBe(givenName);
+    });
+
+    it("reveals populated disclosures for a thrown native validation error without stealing focus", async () => {
+      vi.mocked(bridge.submit_contact_edit).mockRejectedValue({ message: "A contact value is too long." });
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Organization"), { target: { value: "Northstar" } });
+      fireEvent.click(container.querySelector('[data-form-disclosure="organization"] > summary')!);
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Avery" } });
+      fireEvent.click(screen.getByText("Save"));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("A contact value is too long.");
+      expect(container.querySelector('[data-form-disclosure="organization"]')).toHaveAttribute("open");
+      expect(document.activeElement).not.toBe(screen.getByLabelText("Organization"));
+    });
+
     it("opens create form on new contact button", async () => {
       render(<ContactsView />);
 
@@ -302,6 +354,16 @@ describe("ContactsView", () => {
       await waitFor(() => {
         expect(screen.getByDisplayValue("Aurora")).toBeDefined();
       });
+    });
+
+    it("opens populated optional fields in the editor", async () => {
+      const { container } = render(<ContactsView />);
+
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Edit contact"));
+
+      expect(container.querySelector('[data-form-disclosure="organization"]')).toHaveAttribute("open");
+      expect(container.querySelector('[data-form-disclosure="title"]')).toHaveAttribute("open");
     });
 
     it("sends update kind with contact id and revision", async () => {
@@ -485,7 +547,7 @@ describe("ContactsView", () => {
     it("displays rejection error from server", async () => {
       vi.mocked(bridge.submit_contact_edit).mockResolvedValue({
         state: "rejected",
-        reason: "Invalid contact data",
+        reason: "A contact value is invalid.",
       });
 
       render(<ContactsView />);
@@ -503,7 +565,7 @@ describe("ContactsView", () => {
       fireEvent.click(screen.getByText("Save"));
 
       await waitFor(() => {
-        expect(screen.getByText(/Invalid contact data/)).toBeInTheDocument();
+        expect(screen.getByText(/A contact value is invalid/)).toBeInTheDocument();
       });
     });
   });
@@ -707,6 +769,35 @@ describe("ContactsView", () => {
   });
 
   describe("live updates, paging and honest status", () => {
+    it("keeps requesting state independent from a concurrent status read", async () => {
+      let resolveRequest!: (status: { requestId: string; bookId: string; state: "waiting" }) => void;
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "old", bookId: "book-pixel8", state: "waiting" });
+      vi.mocked(bridge.request_contact_sync).mockImplementation(() => new Promise(resolve => { resolveRequest = resolve; }));
+      render(<ContactsView />);
+      const button = await screen.findByRole("button", { name: "Sync now" });
+      fireEvent.click(button);
+      expect(screen.getByRole("button", { name: "Requesting…" })).toBeDisabled();
+      resolveRequest({ requestId: "new", bookId: "book-pixel8", state: "waiting" });
+      expect(await screen.findByText("Waiting for the phone to scan contacts.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled();
+    });
+
+    it("does not replace the selected book status with a stale status response", async () => {
+      let resolveFirst!: (status: { requestId: string; bookId: string; state: "waiting" } | null) => void;
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone", capabilities: { ...mockContactBook.capabilities, canSync: true } };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }, secondBook]);
+      vi.mocked(bridge.get_contact_sync_request).mockImplementation(bookId => bookId === "book-pixel8"
+        ? new Promise(resolve => { resolveFirst = resolve; })
+        : Promise.resolve({ requestId: "iphone", bookId, state: "scanning" }));
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
+      expect(await screen.findByText("The phone is scanning contacts.")).toBeInTheDocument();
+      resolveFirst({ requestId: "pixel", bookId: "book-pixel8", state: "waiting" });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.queryByText("Waiting for the phone to scan contacts.")).not.toBeInTheDocument();
+    });
+
     it("refreshes the page on native hints without discarding an open editor", async () => {
       let hint: (() => void) | undefined;
       vi.mocked(bridge.subscribe).mockImplementation(listener => {
@@ -729,6 +820,19 @@ describe("ContactsView", () => {
       expect(screen.getByLabelText("Given name")).toHaveValue("Aurelia");
       expect(screen.getByRole("form")).toHaveAccessibleName("Edit contact");
       expect(await screen.findByRole("button", { name: /Waiting for approval on the phone/ })).toBeInTheDocument();
+    });
+
+    it("refreshes a pending scan status from a native hint", async () => {
+      let hint: (() => void) | undefined;
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "waiting" });
+      render(<ContactsView />);
+      await screen.findByText("Pixel 8");
+      await waitFor(() => expect(screen.getByText("Waiting for the phone to scan contacts.")).toBeInTheDocument());
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "completed" });
+      hint?.();
+      expect(await screen.findByText("Scan completed.")).toBeInTheDocument();
     });
 
     it("pages beyond 200 contacts with bounded Previous/Next requests", async () => {
@@ -773,12 +877,30 @@ describe("ContactsView", () => {
       expect(await screen.findByText("Sent to Pixel 8. Waiting for the phone to apply it.")).toBeInTheDocument();
     });
 
-    it("shows contact projection failures with a repair action", async () => {
-      vi.mocked(bridge.request_contact_repair).mockResolvedValue({ repairRequired: true });
+    it("shows contact projection failures without relabeling repair as sync", async () => {
       render(<ContactsView sync={{ repairRequired: false, projection: { state: "failed", reason: "missing_record" } }} />);
       expect(await screen.findByText(/Contacts may be out of date \(rebuild failed: missing record\)/)).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "Repair contact cache" }));
-      await waitFor(() => expect(bridge.request_contact_repair).toHaveBeenCalled());
+      expect(screen.queryByRole("button", { name: "Repair contact cache" })).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ["stale_epoch", "The phone's contact context changed before the scan. Use Sync now to request a fresh scan."],
+      ["superseded_generation", "A newer contact book version replaced this scan. Use Sync now to request a fresh scan."],
+      ["incomplete_scan", "The phone's scan did not finish. Use Sync now to try again."],
+      ["cancelled", "The phone cancelled this scan. Use Sync now to try again."],
+    ])("explains %s without asking for re-enrollment", async (reason, copy) => {
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "failed", reason });
+      render(<ContactsView />);
+      expect(await screen.findByText(`Scan failed. ${copy}`)).toBeInTheDocument();
+      expect(screen.queryByText(/re-?enroll/i)).not.toBeInTheDocument();
+    });
+
+    it("does not claim completion while the local projection is rebuilding", async () => {
+      vi.mocked(bridge.get_contact_sync_request).mockResolvedValue({ requestId: "scan", bookId: "book-pixel8", state: "completed" });
+      render(<ContactsView sync={{ repairRequired: true, projection: { state: "rebuilding" } }} />);
+      expect(await screen.findByText("The phone finished its scan. Contacts are still being repaired locally.")).toBeInTheDocument();
+      expect(screen.queryByText("Scan completed.")).not.toBeInTheDocument();
     });
   });
 });

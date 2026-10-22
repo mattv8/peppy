@@ -1,0 +1,13 @@
+# This is a maintained lock file for vendored crate upstream audit coverage.
+# It contains a single registry entry for the upstream block package to ensure
+# cargo-audit covers the vendored local path dependency that cargo-deny skips.
+# This is NOT the crate's own lockfile; it is a CI input.
+# See vendor/block/PEPPY.md for audit coverage rationale.
+
+version = 3
+
+[[package]]
+name = "block"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"

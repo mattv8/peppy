@@ -9,22 +9,23 @@ use peppy_client_core::{
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
     self as dto, GatewayView, NotificationPreferences,
-    compose::{self, ComposeError, DraftInput},
+    compose::{self, ComposeError, DiscardDraftInput, DraftInput},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
 use std::{
+    collections::HashMap,
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::{Mutex, OnceLock},
 };
-use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-mod enrollment;
 mod identity_session;
 pub mod local_identity;
+mod newenrollment;
+mod origin;
 
 mod contacts;
 mod context;
@@ -33,6 +34,7 @@ mod notifications;
 mod sync;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const HISTORY_PAGE_SIZE: usize = 50;
 
 #[derive(Deserialize)]
 struct Request<'a> {
@@ -66,6 +68,10 @@ pub(crate) struct Failure {
     message: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     current_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft_id: Option<String>,
 }
 
 impl Failure {
@@ -74,6 +80,8 @@ impl Failure {
             code,
             message,
             current_revision: None,
+            conversation_id: None,
+            draft_id: None,
         }
     }
 }
@@ -114,7 +122,32 @@ pub(crate) fn core(error: CoreError) -> Failure {
             code: "stale-draft",
             message: "The draft changed elsewhere.",
             current_revision: Some(current_revision.to_string()),
+            conversation_id: None,
+            draft_id: None,
         },
+        CoreError::DraftMoved {
+            draft_id,
+            conversation_id,
+            current_revision,
+        } => Failure {
+            code: "draft-moved",
+            message: "The draft moved to another conversation.",
+            current_revision: Some(current_revision.to_string()),
+            conversation_id: Some(conversation_id.to_string()),
+            draft_id: Some(draft_id.to_string()),
+        },
+        CoreError::DraftNotDiscardable => Failure::new(
+            "draft-not-discardable",
+            "Only an empty recipientless draft can be deleted.",
+        ),
+        CoreError::RecipientlessDraftExists => Failure::new(
+            "recipientless-draft-exists",
+            "A recipientless draft already exists.",
+        ),
+        CoreError::DraftMergeOverflow => Failure::new(
+            "draft-merge-overflow",
+            "Combining these drafts would exceed a compose limit.",
+        ),
         CoreError::InvalidMedia => Failure::new(
             "attachment-invalid",
             "The attachment could not be verified.",
@@ -133,7 +166,8 @@ pub struct BrowserCore {
     preferences: NotificationPreferences,
     trusted_origin: Option<String>,
     identity_session: Option<identity_session::IdentitySession>,
-    join: Option<enrollment::JoinSession>,
+    enrollment: Option<peppy_hosted_client::newenrollment::EnrollmentClient>,
+    hosted_provisioning: Option<peppy_hosted_client::HostedProvisioning>,
 }
 
 #[derive(Default, Deserialize)]
@@ -143,6 +177,19 @@ struct HostContext {
     origin: Option<String>,
     device_role: Option<String>,
     gateways: Option<Vec<GatewayView>>,
+    #[serde(skip)]
+    revoked_device_ids: std::collections::HashSet<String>,
+}
+
+fn connection_snapshot(context: &HostContext) -> (&'static str, Option<&'static str>) {
+    match context.connection.as_deref() {
+        Some("connected") => ("connected", None),
+        Some("offline") => ("offline", Some("offline")),
+        Some("revoked") => ("error", Some("revoked")),
+        Some("key-mismatch") => ("error", Some("key-mismatch")),
+        Some("error") => ("error", None),
+        _ => ("offline", Some("connecting")),
+    }
 }
 
 impl BrowserCore {
@@ -156,7 +203,8 @@ impl BrowserCore {
             preferences: NotificationPreferences::default(),
             trusted_origin: None,
             identity_session: None,
-            join: None,
+            enrollment: None,
+            hosted_provisioning: None,
         }
     }
 
@@ -189,19 +237,47 @@ impl BrowserCore {
             | "_worker_rotate_identity" => {
                 self.identity_command(command, raw_args.ok_or_else(invalid)?)
             }
-            "_worker_join_start"
-            | "_worker_join_request"
-            | "_worker_join_open_offer"
-            | "_worker_join_claim"
-            | "_worker_join_challenge"
-            | "_worker_join_confirm"
-            | "_worker_join_cancel" => self.join_command(command, raw_args.ok_or_else(invalid)?),
+            "_worker_enrollment_generate_secret"
+            | "_worker_enrollment_gateway_presence"
+            | "_worker_enrollment_new"
+            | "_worker_enrollment_new_owner_from_identity"
+            | "_worker_enrollment_checkpoint"
+            | "_worker_enrollment_create_owner"
+            | "_worker_enrollment_parse_vault_invite_link"
+            | "_worker_enrollment_begin_vault_request"
+            | "_worker_enrollment_accept_vault_request_created"
+            | "_worker_enrollment_vault_request_header"
+            | "_worker_enrollment_parse_vault_request_status"
+            | "_worker_enrollment_create_vault"
+            | "_worker_enrollment_clear_vault_request"
+            | "_worker_enrollment_pending_vault_request"
+            | "_worker_enrollment_manual_challenge"
+            | "_worker_enrollment_complete_manual_challenge"
+            | "_worker_enrollment_finish_owner"
+            | "_worker_enrollment_finish_manual"
+            | "_worker_enrollment_create_phone_invitation"
+            | "_worker_enrollment_consume_created_phone_invitation"
+            | "_worker_enrollment_get_phone_qr"
+            | "_worker_enrollment_claim_phone_invitation"
+            | "_worker_enrollment_consume_phone_claim"
+            | "_worker_enrollment_phone_status"
+            | "_worker_enrollment_approve_phone_invitation"
+            | "_worker_enrollment_confirm_phone_invitation" => {
+                self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
+            }
+            "_worker_enrollment_prepare_hosted_owner"
+            | "_worker_enrollment_accept_hosted_grant"
+            | "_worker_enrollment_finish_hosted_owner" => {
+                self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
+            }
             #[cfg(test)]
             "open" => self.open(args_value(raw_args)?),
             "close" => {
                 self.client = None;
                 self.device_id = None;
                 self.identity_session = None;
+                self.enrollment = None;
+                self.hosted_provisioning = None;
                 self.context = HostContext::default();
                 self.gateways_known = false;
                 Ok(json!({}))
@@ -211,7 +287,9 @@ impl BrowserCore {
             "_worker_apply_server_context" => self.context_command(command, args_value(raw_args)?),
             "set_host_context" => self.set_host_context(args_value(raw_args)?),
             "snapshot" => self.snapshot(args_value(raw_args)?),
+            "load_history" => self.load_history(args_value(raw_args)?),
             "save_draft" => self.save_draft(args_value(raw_args)?),
+            "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
             _ if media::handles(command) => self.media_command(command, args_value(raw_args)?),
@@ -285,7 +363,10 @@ impl BrowserCore {
     fn set_host_context(&mut self, args: Value) -> Result<Value, Failure> {
         let update: HostContext = serde_json::from_value(args).map_err(|_| invalid())?;
         if let Some(connection) = update.connection {
-            if !matches!(connection.as_str(), "connected" | "offline" | "error") {
+            if !matches!(
+                connection.as_str(),
+                "connected" | "offline" | "revoked" | "key-mismatch" | "error"
+            ) {
                 return Err(invalid());
             }
             self.context.connection = Some(connection);
@@ -328,23 +409,40 @@ impl BrowserCore {
         let client = self.client()?;
         let conversations = client.list_conversations().map_err(core)?;
         let drafts = client.compose_drafts().map_err(core)?;
+        let drafts_by_conversation: HashMap<ConversationId, _> = drafts
+            .iter()
+            .map(|draft| (draft.conversation_id, draft))
+            .collect();
         let requested = requested.filter(|id| {
             conversations.iter().any(|item| item.conversation_id == *id)
                 || drafts.iter().any(|draft| draft.conversation_id == *id)
         });
+        let history_from_message_id = if requested.is_some() {
+            args.get("historyFromMessageId")
+                .and_then(Value::as_str)
+                .map(|id| MessageId::from_str(id).map_err(|_| invalid()))
+                .transpose()?
+        } else {
+            None
+        };
         let active = requested
             .or_else(|| conversations.first().map(|c| c.conversation_id))
             .or_else(|| drafts.first().map(|d| d.conversation_id));
         let mut views = Vec::new();
         for conversation in &conversations {
-            let history = client
-                .messages(conversation.conversation_id)
+            let latest = client
+                .latest_message(conversation.conversation_id)
                 .map_err(core)?;
-            let latest = history.last();
-            let draft = drafts
-                .iter()
-                .find(|draft| draft.conversation_id == conversation.conversation_id);
+            let draft = drafts_by_conversation
+                .get(&conversation.conversation_id)
+                .copied();
+            let draft_only = draft
+                .map(|draft| client.compose_draft_is_new(draft.draft_id))
+                .transpose()
+                .map_err(core)?
+                .unwrap_or(false);
             let name = latest
+                .as_ref()
                 .map(dto::counterpart)
                 .or_else(|| draft.map(|draft| draft.recipients.join(", ")))
                 .filter(|name| !name.is_empty())
@@ -360,10 +458,25 @@ impl BrowserCore {
                     }
                 })
                 .unwrap_or_default();
-            let messages = if Some(conversation.conversation_id) == active {
-                history
+            let (messages, has_older_messages) = if Some(conversation.conversation_id) == active {
+                let (history, has_more) = match history_from_message_id {
+                    Some(anchor) => {
+                        let has_more = !client
+                            .messages_page(conversation.conversation_id, Some(anchor), 1)
+                            .map_err(core)?
+                            .messages
+                            .is_empty();
+                        client
+                            .messages_since(conversation.conversation_id, anchor)
+                            .map(|messages| (messages, has_more))
+                    }
+                    None => client
+                        .messages_page(conversation.conversation_id, None, HISTORY_PAGE_SIZE)
+                        .map(|page| (page.messages, page.has_more)),
+                }
+                .map_err(core)?;
+                let messages = history
                     .iter()
-                    .skip(history.len().saturating_sub(500))
                     .map(|message| {
                         let attachments = message
                             .payload
@@ -371,17 +484,26 @@ impl BrowserCore {
                             .attachments
                             .iter()
                             .filter_map(|id| {
-                                client
-                                    .attachment_info(id.attachment_id)
+                                client.attachment_info(id.attachment_id).ok().map(|info| {
+                                    let mut view = dto::attachment_view(&info, None, None);
+                                    view.media_meta = dto::message_attachment_media_metadata_view(
+                                        client,
+                                        message.payload.record.message_id,
+                                        info.attachment_id,
+                                    )
                                     .ok()
-                                    .map(|info| dto::attachment_view(&info, None, None))
+                                    .flatten()
+                                    .map(Box::new);
+                                    view
+                                })
                             })
                             .collect();
                         dto::message_view(message, attachments)
                     })
-                    .collect()
+                    .collect();
+                (messages, Some(has_more))
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let reply_context = client.mms_reply_context(conversation.conversation_id).ok();
             views.push(dto::ConversationView {
@@ -390,10 +512,13 @@ impl BrowserCore {
                 preview,
                 unread: conversation.unread_count,
                 messages,
+                has_older_messages,
                 participants: reply_context
                     .as_ref()
                     .map(|context| context.recipients.clone()),
                 reply_blocked_reason: reply_context.and_then(|context| context.blocked_reason),
+                recipientless_draft: false,
+                draft_only,
             });
         }
         for draft in drafts.iter().filter(|draft| {
@@ -415,8 +540,13 @@ impl BrowserCore {
                 },
                 unread: 0,
                 messages: Vec::new(),
+                has_older_messages: None,
                 participants: None,
                 reply_blocked_reason: None,
+                // Old recipientless compose rows predate the persisted intent bit. A row that
+                // has no history is still a draft-only row for presentation purposes.
+                recipientless_draft: draft.recipients.is_empty(),
+                draft_only: true,
             });
         }
         let keys = client.key_status().map_err(core)?;
@@ -424,17 +554,14 @@ impl BrowserCore {
             .active_epoch
             .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch));
         let notices = client.notification_snapshot().map_err(core)?;
+        let (connection_state, connection_error_code) = connection_snapshot(&self.context);
         serde_json::to_value(dto::Snapshot {
             version: "1",
             mode: "browser",
             connection: dto::Connection {
-                state: match self.context.connection.as_deref() {
-                    Some("connected") => "connected",
-                    Some("error") => "error",
-                    _ => "offline",
-                },
+                state: connection_state,
                 origin: self.context.origin.clone(),
-                error_code: None,
+                error_code: connection_error_code,
             },
             encryption: dto::Encryption {
                 state: if unlocked { "unlocked" } else { "locked" },
@@ -447,7 +574,7 @@ impl BrowserCore {
             notification_preferences: self.preferences.clone(),
             active_conversation_id: active.map(|id| id.to_string()),
             draft: active
-                .and_then(|id| drafts.iter().find(|d| d.conversation_id == id))
+                .and_then(|id| drafts_by_conversation.get(&id).copied())
                 .map(dto::draft_view),
             head: dto::Head {
                 enabled: false,
@@ -472,6 +599,59 @@ impl BrowserCore {
         })
         .map_err(|_| core(CoreError::Database))
     }
+    fn load_history(&self, args: Value) -> Result<Value, Failure> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct HistoryRequest {
+            conversation_id: String,
+            before_message_id: String,
+        }
+        let request: HistoryRequest = serde_json::from_value(args).map_err(|_| invalid())?;
+        let conversation =
+            ConversationId::from_str(&request.conversation_id).map_err(|_| invalid())?;
+        let before = MessageId::from_str(&request.before_message_id).map_err(|_| invalid())?;
+        let page = self
+            .client()?
+            .messages_page(conversation, Some(before), HISTORY_PAGE_SIZE)
+            .map_err(core)?;
+        let client = self.client()?;
+        let messages = page
+            .messages
+            .iter()
+            .map(|message| {
+                let attachments = message
+                    .payload
+                    .record
+                    .attachments
+                    .iter()
+                    .filter_map(|reference| {
+                        client
+                            .attachment_info(reference.attachment_id)
+                            .ok()
+                            .map(|info| {
+                                let mut view = dto::attachment_view(&info, None, None);
+                                view.media_meta = dto::message_attachment_media_metadata_view(
+                                    client,
+                                    message.payload.record.message_id,
+                                    info.attachment_id,
+                                )
+                                .ok()
+                                .flatten()
+                                .map(Box::new);
+                                view
+                            })
+                    })
+                    .collect();
+                dto::message_view(message, attachments)
+            })
+            .collect();
+        serde_json::to_value(dto::HistoryPage {
+            conversation_id: conversation.to_string(),
+            messages,
+            has_more: page.has_more,
+        })
+        .map_err(|_| core(CoreError::Database))
+    }
     fn save_draft(&self, args: Value) -> Result<Value, Failure> {
         let input: DraftInput = serde_json::from_value(args).map_err(|_| invalid())?;
         parse_revision(&input.expected_revision)?;
@@ -488,6 +668,12 @@ impl BrowserCore {
             compose::send_draft(self.client()?, &input, gateways).map_err(compose_failure)?,
         )
         .map_err(|_| core(CoreError::Database))
+    }
+    fn discard_draft(&self, args: Value) -> Result<Value, Failure> {
+        let input: DiscardDraftInput = serde_json::from_value(args).map_err(|_| invalid())?;
+        parse_revision(&input.expected_revision)?;
+        compose::discard_draft(self.client()?, &input).map_err(compose_failure)?;
+        Ok(json!({}))
     }
     fn mark_seen(&self, args: Value) -> Result<Value, Failure> {
         for id in args
@@ -537,18 +723,7 @@ pub(crate) fn attachment_id(args: &Value) -> Result<AttachmentId, Failure> {
 }
 
 fn canonical_origin(input: &str) -> Result<String, Failure> {
-    let url = Url::parse(input).map_err(|_| invalid())?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return Err(invalid());
-    }
-    Ok(url.origin().ascii_serialization())
+    origin::canonical_origin(input).map_err(|_| invalid())
 }
 
 fn compose_failure(error: ComposeError) -> Failure {
@@ -670,7 +845,7 @@ pub unsafe extern "C" fn peppy_browser_free_response(response: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_client_core::DraftId;
+    use peppy_client_core::{ComposeDraftUpdate, DraftId, IncomingSms};
     use peppy_crypto::{create_vault_check_header, derive_root_key};
 
     fn value(response: &str) -> Value {
@@ -691,6 +866,36 @@ mod tests {
             core.dispatch(r#"{"command":"pairing"}"#)
                 .contains("unknown-command")
         );
+    }
+
+    #[test]
+    fn host_context_accepts_all_scheduler_connection_classifications() {
+        let mut core = BrowserCore::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        for connection in ["connected", "offline", "revoked", "key-mismatch", "error"] {
+            value(&core.dispatch(
+                &json!({"command":"set_host_context","args":{"connection":connection}}).to_string(),
+            ));
+        }
+    }
+
+    #[test]
+    fn generated_enrollment_secret_is_private_and_has_six_words() {
+        let mut core = BrowserCore::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let public: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"enrollment_generate_secret","args":{}}"#),
+        )
+        .unwrap();
+        assert_eq!(public["ok"], false);
+        assert_eq!(public["error"]["code"], "unknown-command");
+
+        let private: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"_worker_enrollment_generate_secret","args":{}}"#),
+        )
+        .unwrap();
+        assert_eq!(private["ok"], true);
+        let passphrase = private["value"]["passphrase"].as_str().unwrap();
+        assert_eq!(passphrase.split_whitespace().count(), 6);
+        assert!(peppy_crypto::passphrase::passphrase_acceptable(passphrase));
     }
 
     #[test]
@@ -748,6 +953,65 @@ mod tests {
         let sent = value(&core.dispatch(&json!({"command":"send_draft","args":{"id":draft["id"],"conversationId":draft["conversationId"],"text":draft["text"],"recipientIds":draft["recipientIds"],"attachmentIds":draft["attachmentIds"],"gatewayId":device,"simId":"sim-1","expectedRevision":draft["revision"]}}).to_string()));
         assert_eq!(sent["status"], "queued-local");
         assert_eq!(core.client().unwrap().pending_outbox().unwrap().len(), 1);
+        let conversation = core
+            .client()
+            .unwrap()
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "0".into(),
+                provider_message_id: Some("history-0".into()),
+                imported: false,
+            })
+            .unwrap()
+            .conversation_id;
+        for index in 1..52 {
+            core.client()
+                .unwrap()
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation),
+                    sender_address: "+15555550101".into(),
+                    body: index.to_string(),
+                    provider_message_id: Some(format!("history-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        let initial = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
+        ));
+        let view = initial["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["id"] == conversation.to_string())
+            .unwrap();
+        assert_eq!(
+            view["messages"].as_array().unwrap().len(),
+            HISTORY_PAGE_SIZE
+        );
+        assert_eq!(view["hasOlderMessages"], true);
+        let anchor = view["messages"][0]["id"].as_str().unwrap();
+        let page = value(&core.dispatch(
+            &json!({"command":"load_history","args":{"conversationId":conversation,"beforeMessageId":anchor}}).to_string(),
+        ));
+        assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(page["hasMore"], false);
+        let refreshed = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":conversation,"historyFromMessageId":anchor}}).to_string(),
+        ));
+        let refreshed_view = refreshed["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["id"] == conversation.to_string())
+            .unwrap();
+        assert_eq!(refreshed_view["hasOlderMessages"], true);
+        let missing: Value = serde_json::from_str(&core.dispatch(
+            &json!({"command":"load_history","args":{"conversationId":conversation,"beforeMessageId":Uuid::new_v4()}}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(missing["ok"], false);
         value(&core.dispatch(r#"{"command":"close"}"#));
         assert!(core.dispatch(&json!({"command":"open","args":{"vaultId":vault,"deviceId":device,"databaseKey":vec![8; 32],"origin":"https://peppy.test/","deviceRole":"device"}}).to_string()).contains("database-key-mismatch"));
     }
@@ -795,5 +1059,118 @@ mod tests {
                 .to_string(),
             saved["revision"].as_str().unwrap()
         );
+    }
+
+    #[test]
+    fn initial_blank_save_reuses_the_recipientless_draft_without_overwriting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        let device = DeviceId::new();
+        open(&mut core, VaultId::new(), device, [7; 32]);
+
+        let initial = value(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ));
+        let saved = value(&core.dispatch(
+            &json!({"command":"save_draft","args":{"id":initial["id"],"conversationId":initial["conversationId"],"text":"keep this","recipientIds":[],"attachmentIds":[],"expectedRevision":initial["revision"]}}).to_string(),
+        ));
+        let reopened = value(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ));
+
+        assert_eq!(reopened["id"], saved["id"]);
+        assert_eq!(reopened["text"], "keep this");
+        let text_reopen: Value = serde_json::from_str(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"new content","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(text_reopen["error"]["code"], "draft-moved");
+        assert_eq!(text_reopen["error"]["draftId"], saved["id"]);
+        assert_eq!(
+            text_reopen["error"]["conversationId"],
+            saved["conversationId"]
+        );
+        let snapshot = value(&core.dispatch(r#"{"command":"snapshot"}"#));
+        assert_eq!(snapshot["conversations"][0]["recipientlessDraft"], true);
+        assert_eq!(snapshot["conversations"][0]["draftOnly"], true);
+    }
+
+    #[test]
+    fn discard_draft_is_dispatched_and_removes_an_empty_recipientless_row() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        open(&mut core, VaultId::new(), DeviceId::new(), [7; 32]);
+        let draft = value(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":[],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ));
+
+        value(&core.dispatch(
+            &json!({"command":"discard_draft","args":{"id":draft["id"],"conversationId":draft["conversationId"],"expectedRevision":draft["revision"]}}).to_string(),
+        ));
+        assert!(
+            value(&core.dispatch(r#"{"command":"snapshot"}"#))["conversations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_new_draft_input_does_not_allocate_a_recipientless_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        open(&mut core, VaultId::new(), DeviceId::new(), [7; 32]);
+
+        let rejected: Value = serde_json::from_str(&core.dispatch(
+            r#"{"command":"save_draft","args":{"id":"new","conversationId":"","text":"","recipientIds":["not a phone"],"attachmentIds":[],"expectedRevision":"0"}}"#,
+        ))
+        .unwrap();
+
+        assert_eq!(rejected["error"]["code"], "invalid-recipient");
+        assert!(
+            value(&core.dispatch(r#"{"command":"snapshot"}"#))["conversations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn history_rows_are_never_recipientless_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+        open(&mut core, VaultId::new(), DeviceId::new(), [7; 32]);
+        let client = core.client().unwrap();
+        let history = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+14155552671".into(),
+                body: "history".into(),
+                provider_message_id: Some("history-row".into()),
+                imported: false,
+            })
+            .unwrap();
+        let source = client.recipientless_compose_draft().unwrap();
+        client
+            .save_compose_draft(
+                source.draft_id,
+                source.revision,
+                ComposeDraftUpdate {
+                    text: "draft".into(),
+                    recipients: vec!["+14155552671".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let snapshot = value(&core.dispatch(r#"{"command":"snapshot"}"#));
+        let row = snapshot["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == history.conversation_id.to_string())
+            .unwrap();
+        assert_eq!(row["recipientlessDraft"], false);
+        assert_eq!(row["draftOnly"], true);
     }
 }

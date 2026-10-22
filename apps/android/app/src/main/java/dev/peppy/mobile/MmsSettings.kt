@@ -32,6 +32,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionState
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillPause
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillStatus
 
 internal data class MmsHealth(
     val pending: Int = 0,
@@ -40,6 +42,8 @@ internal data class MmsHealth(
     val reasons: List<String> = emptyList(),
     val transferReasons: List<String> = emptyList(),
     val databaseUnavailable: Boolean = false,
+    val backfillStatus: String? = null,
+    val quarantinedCount: Long = 0L,
 )
 
 /** Bounded, content-free transfer failures shown only on this phone. */
@@ -83,24 +87,46 @@ private fun loadMmsHealth(context: Context, databaseOpen: Boolean): MmsHealth {
     if (!databaseOpen) return MmsHealth(databaseUnavailable = true, transferReasons = MmsTransferHealth(context).reasons())
     val client = NativeGateway.open(context) ?: return MmsHealth(databaseUnavailable = true, transferReasons = MmsTransferHealth(context).reasons())
     val acquisitions = client.mmsAcquisitions(1000uL)
+    val backfill = client.mmsBackfillStatus(MmsPreferences(context).sourceGeneration, MmsCapture.PROVIDER_SCOPE)
+    return mmsHealthFromNative(acquisitions, backfill, MmsTransferHealth(context).reasons())
+}
+
+internal fun mmsHealthFromNative(
+    acquisitions: List<uniffi.peppy_mobile_bindings.NativeMmsAcquisition>,
+    backfill: NativeMmsBackfillStatus,
+    transferReasons: List<String>,
+): MmsHealth {
     val incomplete = acquisitions.filter { it.state != NativeMmsAcquisitionState.COMPLETE }
+    val status = when (backfill.pause) {
+        NativeMmsBackfillPause.LOCAL_CAPACITY -> "Paused: phone storage capacity"
+        NativeMmsBackfillPause.RECOVERY_CAPACITY -> "Paused: recovery capacity"
+        NativeMmsBackfillPause.REMOTE_STORAGE -> "History paused: vault storage capacity"
+        null -> when {
+            !backfill.baselineInitialized -> "Waiting for the first provider scan"
+            !backfill.historyComplete -> "Scanning MMS history"
+            backfill.pendingCount > 0uL -> "Processing ${backfill.pendingCount} pending MMS"
+            else -> "MMS capture is up to date"
+        }
+    }
     return MmsHealth(
         pending = incomplete.count { it.state == NativeMmsAcquisitionState.PENDING },
         blocked = incomplete.count { it.state == NativeMmsAcquisitionState.BLOCKED },
         unavailable = incomplete.count { it.state == NativeMmsAcquisitionState.UNAVAILABLE },
         reasons = incomplete.mapNotNull { it.reason?.take(120) }.distinct().take(8),
-        transferReasons = MmsTransferHealth(context).reasons(),
+        transferReasons = transferReasons,
+        backfillStatus = status,
+        quarantinedCount = backfill.quarantinedCount.toLong(),
     )
 }
 
 internal fun ownAddressError(error: Throwable?): String = when (error) {
     is MobileBindingsException.InvalidRequest -> "This number could not be saved for the selected SIM."
-    is MobileBindingsException.Closed -> "The encrypted database is unavailable. Import or unlock this gateway first."
+    is MobileBindingsException.Closed -> "The encrypted database is unavailable. Import or unlock this phone first."
     is MobileBindingsException.InvalidDatabaseKey,
     is MobileBindingsException.WrongDatabaseKey,
     is MobileBindingsException.Database,
     is MobileBindingsException.UnsupportedSchema,
-    is MobileBindingsException.Crypto -> "The encrypted database is unavailable. Try again after reopening the gateway."
+    is MobileBindingsException.Crypto -> "The encrypted database is unavailable. Try again after reopening the phone."
     else -> "Could not save the number securely. Try again."
 }
 
@@ -116,7 +142,6 @@ internal fun MmsSettings(
     val preferences = remember { MmsPreferences(context) }
     var enabled by remember(refresh) { mutableStateOf(preferences.enabled) }
     var mediaWifiOnly by remember(refresh) { mutableStateOf(GatewayPolicyHost(context).mediaWifiOnly) }
-    var historyRequested by remember(refresh) { mutableStateOf(preferences.importHistory) }
     var health by remember { mutableStateOf(MmsHealth()) }
     val route = SimRoutes.current().singleOrNull()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -145,7 +170,7 @@ internal fun MmsSettings(
             Switch(enabled, { value ->
                 preferences.enabled = value
                 enabled = preferences.enabled
-                if (enabled) MmsCaptureWork.ensurePeriodic(context)
+                MmsCaptureWork.onPermissionOrForeground(context)
                 onChanged()
             }, modifier = Modifier.testTag("mms-enable-switch"))
         }
@@ -163,17 +188,6 @@ internal fun MmsSettings(
             Switch(mediaWifiOnly, { value -> GatewayPolicyHost(context).mediaWifiOnly = value; mediaWifiOnly = value }, modifier = Modifier.testTag("mms-wifi-only-switch"))
         }
         OutlinedButton(
-            onClick = {
-                preferences.importHistory = true
-                historyRequested = true
-                MmsCaptureWork.enqueue(context)
-                onChanged()
-            },
-            enabled = enabled && receiveGranted && !historyRequested,
-            modifier = Modifier.testTag("mms-import-history"),
-        ) { Text(if (historyRequested) "MMS history import queued" else "Import MMS history") }
-        StatusRow("mms-history-status", "MMS history import", if (historyRequested) "Queued" else "Not requested")
-        OutlinedButton(
             onClick = { MmsCaptureWork.refresh(context); onChanged() },
             enabled = enabled && receiveGranted,
             modifier = Modifier.testTag("mms-refresh-pending"),
@@ -183,6 +197,19 @@ internal fun MmsSettings(
                 health.databaseUnavailable -> Text("Encrypted database unavailable. Acquisition health cannot be read.")
                 health.pending == 0 && health.blocked == 0 && health.unavailable == 0 -> Text("No pending acquisitions.")
                 else -> Text("Phone-only acquisition health: ${health.pending} pending, ${health.blocked} blocked, ${health.unavailable} unavailable.")
+            }
+            health.backfillStatus?.let { Text(it, Modifier.testTag("mms-backfill-status"), style = MaterialTheme.typography.bodySmall) }
+            if (health.quarantinedCount > 0L) {
+                Text(
+                    "Quarantined records: ${health.quarantinedCount}",
+                    Modifier.testTag("mms-quarantine-status"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "These phone records were skipped because they could not be matched safely. Existing messages were kept.",
+                    Modifier.testTag("mms-quarantine-explanation"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
             health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
             health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }

@@ -3,23 +3,23 @@
 //! with bounded, jittered reconnect and cooperative cancellation. Every client-core call runs
 //! in `spawn_blocking`; the Tokio workers never block on SQLCipher, Argon2 or file crypto.
 use crate::{
-    error::{core_error, BridgeError, BridgeResult},
-    gateways::{extract_device_role, gateway_views, CapabilitiesResponse, DevicesResponse},
-    net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES},
+    error::{BridgeError, BridgeResult, core_error},
+    gateways::{CapabilitiesResponse, DevicesResponse, extract_device_role, gateway_views},
+    net::{MAX_JSON_BYTES, MAX_PAGE_BYTES, NetError},
     origin::websocket_url,
     session::{Session, VaultSummary},
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, EnvelopePurpose, KeyProfile, RawSnapshotRecord, SnapshotPurpose,
-    VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
+    Client, Cursor, EnvelopePurpose, KeyProfile, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
+    MAX_SNAPSHOT_PAGE, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::{sync::Arc, time::Duration};
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_tungstenite::tungstenite::{
-    self, client::IntoClientRequest, protocol::WebSocketConfig, Message,
+    self, Message, client::IntoClientRequest, protocol::WebSocketConfig,
 };
 
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -30,6 +30,7 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_PING_AFTER: Duration = Duration::from_secs(45);
 const WS_IDLE_LIMIT: Duration = Duration::from_secs(120);
+const WS_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_REPLAY_PAGES_PER_ROUND: usize = 20;
 const MAX_OUTBOX_BATCHES: usize = 8;
 const OUTBOX_BATCH: usize = 32;
@@ -38,6 +39,19 @@ const MEDIA_PER_ROUND: usize = 4;
 const APPLY_STEPS: usize = 8;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
+
+/// Sync records gateway HTTP outages as reachability failures without changing other API clients.
+fn sync_net_error(error: NetError) -> BridgeError {
+    match error {
+        NetError::Status {
+            status: 502..=504, ..
+        } => BridgeError::new(
+            "server-unavailable",
+            "The configured server is temporarily unavailable.",
+        ),
+        error => error.into(),
+    }
+}
 
 /// Runs client-core work off the async workers.
 pub async fn blocking<T: Send + 'static>(
@@ -67,7 +81,10 @@ pub async fn fetch_vault(
     vault_id: &str,
     device_id: &str,
 ) -> BridgeResult<VaultResponse> {
-    let vault: VaultResponse = api.get_json("/v1/vault", MAX_JSON_BYTES).await?;
+    let vault: VaultResponse = api
+        .get_json("/v1/vault", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let same = |a: &str, b: &str| {
         uuid::Uuid::parse_str(a)
             .ok()
@@ -84,7 +101,7 @@ pub async fn fetch_vault(
 }
 
 pub fn vault_header(vault: &VaultResponse) -> BridgeResult<(KeyProfile, VaultCheckHeader)> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     let invalid = |m: &'static str| BridgeError::new("server-response", m);
     let profile: KeyProfile = serde_json::from_value(vault.public_key_profile.clone())
         .map_err(|_| invalid("The server key profile is invalid."))?;
@@ -114,11 +131,16 @@ async fn refresh_vault(session: &Arc<Session>) -> BridgeResult<()> {
 }
 
 pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
-    let devices: DevicesResponse = session.api.get_json("/v1/devices", MAX_JSON_BYTES).await?;
+    let devices: DevicesResponse = session
+        .api
+        .get_json("/v1/devices", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let capabilities: CapabilitiesResponse = session
         .api
         .get_json("/v1/capabilities", MAX_JSON_BYTES)
-        .await?;
+        .await
+        .map_err(sync_net_error)?;
     let views = gateway_views(&devices, &capabilities);
     let device_role = extract_device_role(&devices, &session.binding.device_id);
     let changed = {
@@ -128,6 +150,12 @@ pub async fn refresh_gateways(session: &Arc<Session>) -> BridgeResult<()> {
         status.gateways = views.clone();
         status.gateways_known = true;
         status.device_role = device_role;
+        status.revoked_device_ids = devices
+            .devices
+            .iter()
+            .filter(|device| device.revoked)
+            .map(|device| device.device_id.clone())
+            .collect();
         changed
     };
     if changed {
@@ -261,7 +289,10 @@ pub(crate) async fn snapshot_resync(session: &Arc<Session>) -> BridgeResult<()> 
             Err(CutError::Other(error)) => return Err(error),
         }
     }
-    Err(BridgeError::new("resync-required", "The server snapshot kept changing; history import will be retried. Live state is unchanged."))
+    Err(BridgeError::new(
+        "resync-required",
+        "The server snapshot kept changing; history import will be retried. Live state is unchanged.",
+    ))
 }
 
 const MAX_SNAPSHOT_ATTEMPTS: usize = 3;
@@ -299,7 +330,11 @@ async fn start_or_resume(
             return Ok(progress);
         }
     }
-    let start: SnapshotStart = session.api.get_json("/v1/snapshot", MAX_JSON_BYTES).await?;
+    let start: SnapshotStart = session
+        .api
+        .get_json("/v1/snapshot", MAX_JSON_BYTES)
+        .await
+        .map_err(sync_net_error)?;
     let invalid = || BridgeError::from(NetError::Invalid);
     let high_water = start
         .high_water_cursor
@@ -397,7 +432,7 @@ async fn import_cut(
             Err(NetError::Status {
                 status: 409 | 400, ..
             }) => return Err(CutError::Impossible),
-            Err(error) => return Err(CutError::Other(error.into())),
+            Err(error) => return Err(CutError::Other(sync_net_error(error))),
         };
         if page.records.is_empty() {
             return Err(CutError::Impossible);
@@ -571,6 +606,9 @@ async fn upload_object(
     object: peppy_client_core::CipherObject,
     reference_tracking: bool,
 ) -> Result<(), Failure> {
+    if session.cancel.is_cancelled() {
+        return Ok(());
+    }
     let id = object.attachment_id;
     let body = serde_json::json!({
         "attachment_id": id.to_string(),
@@ -645,6 +683,9 @@ async fn download_one(
     session: &Arc<Session>,
     object: peppy_client_core::CipherObject,
 ) -> Result<(), Failure> {
+    if session.cancel.is_cancelled() {
+        return Ok(());
+    }
     let remote = object.remote_object_id.clone().ok_or(NetError::Invalid)?;
     let remote = uuid::Uuid::parse_str(&remote)
         .map_err(|_| NetError::Invalid)?
@@ -709,6 +750,9 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         .filter(|o| !failed.contains(&o.attachment_id))
         .take(MEDIA_PER_ROUND)
     {
+        if session.cancel.is_cancelled() {
+            return Ok(());
+        }
         let id = object.attachment_id;
         let reference_tracking = tracked
             .uploads
@@ -723,6 +767,9 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         }
     }
     for _ in 0..MAX_OUTBOX_BATCHES {
+        if session.cancel.is_cancelled() {
+            return Ok(());
+        }
         let c = client(session);
         let sealed = blocking(move || match c.seal_pending_batch(MAX_SEAL_BATCH) {
             Ok(count) => Ok(count),
@@ -737,6 +784,9 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
     // Held contact-photo envelopes become uploadable only after every reference is registered.
     changed |= register_contact_photo_references(session).await?;
     'outbox: for _ in 0..MAX_OUTBOX_BATCHES {
+        if session.cancel.is_cancelled() {
+            return Ok(());
+        }
         let c = client(session);
         let batch =
             blocking(move || c.pending_outbox_batch(OUTBOX_BATCH).map_err(core_error)).await?;
@@ -744,6 +794,9 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
             break;
         }
         for envelope in batch {
+            if session.cancel.is_cancelled() {
+                return Ok(());
+            }
             let path = match envelope.purpose {
                 EnvelopePurpose::Command => "/v1/commands",
                 EnvelopePurpose::Event => "/v1/events",
@@ -774,6 +827,9 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         .filter(|o| !failed.contains(&o.attachment_id))
         .take(MEDIA_PER_ROUND)
     {
+        if session.cancel.is_cancelled() {
+            return Ok(());
+        }
         let id = object.attachment_id;
         match download_one(session, object).await {
             Ok(()) => {
@@ -850,6 +906,9 @@ async fn register_contact_photo_references(session: &Arc<Session>) -> BridgeResu
     let transfers = contact_photo_transfers(session).await?;
     let mut released = false;
     for registration in transfers.registrations {
+        if session.cancel.is_cancelled() {
+            return Ok(released);
+        }
         let Some(remote) = canonical_uuid(&registration.attachment_id) else {
             record_work_error(session, "contact-photo-reference");
             continue;
@@ -935,6 +994,9 @@ async fn reclaim_contact_photos(
         return Ok(());
     };
     for reclaim in reclaims {
+        if session.cancel.is_cancelled() {
+            return Ok(());
+        }
         let Some(after) = reclaim
             .release_after_cursor
             .as_deref()
@@ -1094,6 +1156,14 @@ enum WsEnd {
     Ended { stable: bool, code: &'static str },
 }
 
+const PRESENCE_REFRESH_DELAY: Duration = Duration::from_millis(100);
+
+fn schedule_presence_refresh(due: &mut Option<Instant>, now: Instant) {
+    if due.is_none() {
+        *due = Some(now + PRESENCE_REFRESH_DELAY);
+    }
+}
+
 fn close_code(frame: Option<&tungstenite::protocol::CloseFrame>) -> Option<u16> {
     frame.map(|frame| u16::from(frame.code))
 }
@@ -1131,15 +1201,19 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
     let config = WebSocketConfig::default()
         .max_message_size(Some(WS_MAX_MESSAGE))
         .max_frame_size(Some(WS_MAX_MESSAGE));
+    let connector = match crate::tls::websocket_connector(session.api.origin()) {
+        Ok(connector) => connector,
+        Err(_) => return ended("local-tls-config"),
+    };
     // Plain `ws://` is only produced for validated loopback origins; redirects are never followed.
     let connected = tokio::select! {
         _ = session.cancel.cancelled() => return WsEnd::Cancelled,
-        result = timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async_with_config(request, Some(config), true)) => result,
+        result = timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, connector)) => result,
     };
     let mut socket = match connected {
         Ok(Ok((socket, _))) => socket,
         Ok(Err(tungstenite::Error::Http(response))) if response.status() == 401 => {
-            return WsEnd::Revoked
+            return WsEnd::Revoked;
         }
         _ => return ended("live-unavailable"),
     };
@@ -1156,7 +1230,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
     let deadline = Instant::now() + WS_READY_TIMEOUT;
     loop {
         let next = tokio::select! {
-            _ = session.cancel.cancelled() => { let _ = socket.close(None).await; return WsEnd::Cancelled }
+            _ = session.cancel.cancelled() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Cancelled }
             next = tokio::time::timeout_at(deadline, socket.next()) => next,
         };
         match next {
@@ -1171,7 +1245,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                     Some(WS_CLOSE_REVOKED) => WsEnd::Revoked,
                     Some(WS_CLOSE_RESYNC) => WsEnd::Resync,
                     _ => ended("live-closed"),
-                }
+                };
             }
             Ok(Some(Ok(_))) => continue,
             _ => return ended("live-unavailable"),
@@ -1188,13 +1262,14 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
         code,
     };
     let mut last_frame = Instant::now();
+    let mut presence_refresh_due = None;
     let mut pinged = false;
     let mut liveness = tokio::time::interval(Duration::from_secs(15));
     loop {
         let next = tokio::select! {
-            _ = session.cancel.cancelled() => { let _ = socket.close(None).await; return WsEnd::Cancelled }
+            _ = session.cancel.cancelled() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Cancelled }
             // A manual contact repair runs in the next HTTP round.
-            _ = session.repair_wake.notified() => { let _ = socket.close(None).await; return WsEnd::Resync }
+            _ = session.repair_wake.notified() => { let _ = timeout(WS_CLOSE_TIMEOUT, socket.close(None)).await; return WsEnd::Resync }
             _ = liveness.tick() => {
                 let idle = last_frame.elapsed();
                 if idle > WS_IDLE_LIMIT {
@@ -1208,6 +1283,16 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                 } else if socket.flush().await.is_err() {
                     return ended("live-unavailable");
                 }
+                continue;
+            }
+            _ = async {
+                match presence_refresh_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                presence_refresh_due = None;
+                let _ = refresh_gateways(session).await;
                 continue;
             }
             next = socket.next() => next,
@@ -1235,6 +1320,9 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                         }
                     }
                     "resync_required" => return WsEnd::Resync,
+                    "presence_changed" => {
+                        schedule_presence_refresh(&mut presence_refresh_due, Instant::now())
+                    }
                     _ => {}
                 }
             }
@@ -1243,7 +1331,7 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                     Some(WS_CLOSE_REVOKED) => WsEnd::Revoked,
                     Some(WS_CLOSE_RESYNC) => WsEnd::Resync,
                     _ => ended("live-closed"),
-                }
+                };
             }
             Some(Ok(_)) => {}
             Some(Err(_)) | None => return ended("live-unavailable"),
@@ -1306,6 +1394,40 @@ async fn live(session: Arc<Session>) {
     }
 }
 
+#[cfg(test)]
+mod transport_status_tests {
+    use super::*;
+
+    #[test]
+    fn presence_hints_coalesce_without_dropping_the_first_refresh() {
+        let now = Instant::now();
+        let mut due = None;
+        schedule_presence_refresh(&mut due, now);
+        let first = due.expect("the first presence hint schedules a refresh");
+        schedule_presence_refresh(&mut due, now + Duration::from_millis(10));
+        assert_eq!(due, Some(first));
+        assert_eq!(first.duration_since(now), PRESENCE_REFRESH_DELAY);
+    }
+
+    #[test]
+    fn gateway_statuses_map_to_server_unavailable_only_in_sync() {
+        for status in [502, 503, 504] {
+            assert_eq!(
+                sync_net_error(NetError::Status { status, code: None }).code,
+                "server-unavailable"
+            );
+        }
+        assert_eq!(
+            sync_net_error(NetError::Status {
+                status: 500,
+                code: None,
+            })
+            .code,
+            "server-rejected"
+        );
+    }
+}
+
 /// Starts the worker and live tasks on Tauri's async runtime; both stop when the session's
 /// cancellation token fires (session replaced, origin changed, credential revoked, app exit).
 // Keep photo-transport regressions beside that path; shared MIME helpers follow below.
@@ -1315,7 +1437,7 @@ mod contact_photo_tests {
     use super::*;
     use crate::contacts::tests::mock_server;
     use crate::tests::{fixture_at, open};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reclaims_use_fresh_generation_and_floor_only_once_the_floor_covers_references() {
@@ -1386,6 +1508,101 @@ mod contact_photo_tests {
 }
 
 pub fn start(session: &Arc<Session>) {
-    tauri::async_runtime::spawn(worker(session.clone()));
-    tauri::async_runtime::spawn(live(session.clone()));
+    Session::register_started(session);
+    session.track_worker(tokio::spawn(worker(session.clone())));
+    session.track_worker(tokio::spawn(live(session.clone())));
+}
+
+async fn join_workers(workers: &mut [tokio::task::JoinHandle<()>], duration: Duration) -> bool {
+    timeout(duration, async {
+        for worker in workers {
+            let _ = worker.await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Cancels the session supervisor and waits for all tracked tasks to finish. Timed-out handles
+/// remain retained for a later drain; they are never aborted because their blocking work may
+/// still own durable state.
+pub async fn drain(session: &Arc<Session>, duration: Duration) -> bool {
+    session.cancel.cancel();
+    let mut workers = session.take_workers();
+    let drained = join_workers(&mut workers, duration).await;
+    if !drained {
+        session.retain_workers(
+            workers
+                .into_iter()
+                .filter(|worker| !worker.is_finished())
+                .collect(),
+        );
+    }
+    drained
+}
+
+/// Cancels and drains every started session, including retired sessions retained by their
+/// supervisor tasks. The deadline covers the entire process scope without holding a session lock.
+pub async fn drain_all(duration: Duration) -> bool {
+    let sessions = Session::active_and_retired();
+    for session in &sessions {
+        session.cancel.cancel();
+    }
+    let mut workers = sessions
+        .iter()
+        .map(|session| (session, session.take_workers()))
+        .collect::<Vec<_>>();
+    let drained = timeout(duration, async {
+        for (_, handles) in &mut workers {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }
+    })
+    .await
+    .is_ok();
+    if !drained {
+        for (session, handles) in workers {
+            session.retain_workers(
+                handles
+                    .into_iter()
+                    .filter(|handle| !handle.is_finished())
+                    .collect(),
+            );
+        }
+    }
+    drained
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use crate::tests::{fixture_at, open};
+
+    #[tokio::test]
+    async fn timeout_does_not_abort_a_worker() {
+        let worker = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        });
+        let mut workers = vec![worker];
+        assert!(!join_workers(&mut workers, Duration::from_millis(1)).await);
+        assert!(!workers[0].is_finished());
+        assert!(join_workers(&mut workers, Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn drain_all_retains_timed_out_retired_session_workers() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+        Session::register_started(&session);
+        let worker_session = session.clone();
+        session.track_worker(tokio::spawn(async {
+            let _session = worker_session;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }));
+        drop(session);
+
+        assert!(!drain_all(Duration::from_millis(1)).await);
+        assert!(drain_all(Duration::from_secs(1)).await);
+    }
 }

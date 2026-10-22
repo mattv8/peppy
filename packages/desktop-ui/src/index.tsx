@@ -7,27 +7,31 @@ import {
   ExternalLink,
   GripVertical,
   Loader,
+  LoaderCircle,
   MessageCircle,
   MessageSquarePlus,
+  Minus,
   Paperclip,
+  PanelLeft,
+  Plus,
   SendHorizontal,
   Settings,
+  Smartphone,
+  Square,
+  SquarePen,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
-import {
-  RiAddLine,
-  RiChatNewLine,
-  RiCloseLine,
-  RiLayoutLeftLine,
-  RiSubtractLine,
-} from "@remixicon/react";
 import {
   formatPhoneInput,
   formatPhoneNumber,
   normalizePhoneNumber,
 } from "./phone";
+import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
+import { ContactAvatar } from "./ContactAvatar";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
+export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {
   formatPhoneInput,
@@ -36,13 +40,33 @@ export {
   normalizePhoneNumber,
 } from "./phone";
 import "./styles.css";
+import "./avatar-palette.generated.css";
 export { ContactAvatar } from "./ContactAvatar";
-export { PairPhone, pairingQrPayload, type PairingIntent, type PairingStatus } from "./PairPhone";
+export {
+  AVATAR_PALETTE_SIZE,
+  contactSeed,
+  conversationAvatar,
+  initials,
+  paletteIndex,
+  seedKey,
+  type AvatarIdentity,
+  type AvatarKind,
+} from "./avatar";
+export {
+  formatDateTime,
+  formatElapsedShort,
+  formatRelativeTime,
+  isoDateTime,
+  toDate,
+  type DateTimeFormatOptions,
+  type DateTimeInput,
+} from "./datetime";
 export {
   Bell,
   Check,
   CheckCheck,
   CheckCircle,
+  ChevronDown,
   Clock,
   ExternalLink,
   FileText,
@@ -53,10 +77,17 @@ export {
   LockOpen,
   MessageSquare,
   MessageSquarePlus,
+  Minus,
+  Plus,
   Radio,
   ShieldAlert,
+  Smartphone,
   SquarePen,
+  Trash2,
   TriangleAlert,
+  User,
+  UserPlus,
+  Users,
   X,
 } from "lucide-react";
 
@@ -75,11 +106,13 @@ export const themeTokens = {
 export type Conversation = {
   id: string;
   name: string;
-  /** Display-only contact photo (data URL); initials are shown otherwise. */
-  avatarUrl?: string;
+  /** Display-only identity, seeded from raw addresses. */
+  avatar?: AvatarIdentity;
   preview: string;
   unread: number;
   status?: string;
+  recipientlessDraft?: boolean;
+  draftOnly?: boolean;
 };
 export type Attachment = {
   id: string;
@@ -91,6 +124,12 @@ export type Attachment = {
 
 export type StatusTone = "neutral" | "ok" | "warning" | "error";
 export type PanelStatus = { tone: StatusTone; summary: string; details: ReactNode };
+export type NavigationView = "conversations" | "notifications" | "settings" | "contacts";
+export type NavigationPosition = "side-rail" | "title-bar";
+
+export function isNavigationPosition(value: unknown): value is NavigationPosition {
+  return value === "side-rail" || value === "title-bar";
+}
 
 export function StatusPopover({ tone, summary, children }: { tone: StatusTone; summary: string; children?: ReactNode }): ReactElement {
   const panelId = `status-panel-${useId()}`;
@@ -181,26 +220,29 @@ export function StatusPopover({ tone, summary, children }: { tone: StatusTone; s
   </div>;
 }
 
-export function ConnectionDot({ state, label }: { state: string; label: string }): ReactElement {
-  return <span role="status" aria-label={label} title={label} data-connection-state={state}>
+export function ConnectionDot({ state, label, serverUnreachable = false }: { state: string; label: string; serverUnreachable?: boolean }): ReactElement {
+  return <span role="status" aria-label={label} title={label} data-connection-state={state} data-server-unreachable={serverUnreachable || undefined}>
     <span className="connection-dot" aria-hidden />
   </span>;
 }
 
-export type RecipientChip = { id: string; label: string; avatarUrl?: string };
+/** Visible pending status: the label is the live-region text; the spinner is decorative. */
+export function BusyIndicator({ id, label }: { id: string; label: string }): ReactElement {
+  return <span id={id} className="busy-indicator" role="status" aria-live="polite" aria-atomic="true">
+    <LoaderCircle className="busy-indicator-icon" size={14} strokeWidth={1.75} aria-hidden />
+    <span className="busy-indicator-label">{label}</span>
+  </span>;
+}
+
+export type RecipientChip = { id: string; label: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
 /** A contact phone offered while typing; `id` is the phone address that becomes the recipient. */
-export type RecipientSuggestion = { id: string; label: string; detail?: string; avatarUrl?: string };
+export type RecipientSuggestion = { id: string; label: string; detail?: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string };
 export type RecipientPosition = { x: number; y: number };
 
 export function isRecipientPosition(value: unknown): value is RecipientPosition {
   return typeof value === "object" && value !== null
     && Number.isFinite((value as RecipientPosition).x) && (value as RecipientPosition).x >= 0
     && Number.isFinite((value as RecipientPosition).y) && (value as RecipientPosition).y >= 0;
-}
-
-function recipientAvatarLetter(label: string): string {
-  if (/^[+\d]/.test(label.trim())) return "#";
-  return label.match(/[a-z0-9]/i)?.[0]?.toUpperCase() ?? "#";
 }
 
 function recipientLabel(label: string): string {
@@ -244,7 +286,6 @@ export function RecipientPanel({
   const boundaryRef = useRef<HTMLElement>(null);
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [failedAvatars, setFailedAvatars] = useState<Set<string>>(() => new Set());
   const [dimensions, setDimensions] = useState({ boundaryWidth: 0, boundaryHeight: 0, panelWidth: 0, panelHeight: 0 });
   const [livePosition, setLivePosition] = useState<RecipientPosition | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -265,6 +306,7 @@ export function RecipientPanel({
   const searchSeqRef = useRef(0);
   const suggestionListId = useId();
   const recipientIds = recipients.map((recipient) => recipient.id).join("\n");
+  const chosenRecipientIds = new Set(recipients.map((recipient) => recipient.id));
   // Latest callback without re-running the search on every parent render.
   const searchRef = useRef(searchContacts);
   searchRef.current = searchContacts;
@@ -295,7 +337,7 @@ export function RecipientPanel({
     searchSeqRef.current += 1;
     setSuggestions([]);
     onSuggestionChosen?.(suggestion);
-    if (!recipients.some((recipient) => recipient.id === suggestion.id)) {
+    if (!chosenRecipientIds.has(suggestion.id)) {
       onCommit([...recipients.map((recipient) => recipient.id), suggestion.id]);
     }
     setError(null);
@@ -487,11 +529,8 @@ export function RecipientPanel({
       <span className="recipient-label" aria-hidden>To</span>
       <ul id="recipient-chips" aria-label="Recipient list">
         {recipients.map((recipient) => {
-          const showImage = recipient.avatarUrl && !failedAvatars.has(recipient.id);
           return <li key={recipient.id} data-recipient-id={recipient.id} className="recipient-chip">
-            <span className="recipient-avatar" aria-hidden>
-              {showImage ? <img src={recipient.avatarUrl} alt="" onError={() => setFailedAvatars((current) => new Set(current).add(recipient.id))} /> : recipientAvatarLetter(recipient.label)}
-            </span>
+            <ContactAvatar seed={recipient.avatarSeed ?? seedKey(recipient.id)} photoDataUrl={recipient.avatarUrl} name={recipient.avatarName} size={18} className="recipient-avatar" />
             <span className="recipient-chip-label">{recipientLabel(recipient.label)}</span>
             <button
               type="button"
@@ -588,9 +627,7 @@ export function RecipientPanel({
                 chooseSuggestion(suggestion);
               }}
             >
-              <span className="recipient-avatar" aria-hidden>
-                {suggestion.avatarUrl ? <img src={suggestion.avatarUrl} alt="" /> : recipientAvatarLetter(suggestion.label)}
-              </span>
+              <ContactAvatar seed={suggestion.avatarSeed ?? seedKey(suggestion.id)} photoDataUrl={suggestion.avatarUrl} name={suggestion.avatarName} size={18} className="recipient-avatar" />
               <span className="recipient-suggestion-copy">
                 <b>{suggestion.label}</b>
                 {suggestion.detail && <small>{suggestion.detail}</small>}
@@ -652,6 +689,7 @@ export function AppTitlebar({
   sidebarExpanded,
   sidebarControls,
   onNewMessage,
+  navigation,
 }: {
   onMinimize?(): void;
   onMaximize?(): void;
@@ -665,8 +703,10 @@ export function AppTitlebar({
   sidebarExpanded?: boolean;
   sidebarControls?: string;
   onNewMessage?(): void;
+  navigation?: ReactNode;
 }) {
   const macos = (platform ?? detectPlatform()) === "macos";
+  const renderedNavigation = !isComposer && navigation;
   return (
     <header
       id="desktop-titlebar"
@@ -675,7 +715,9 @@ export function AppTitlebar({
       role="banner"
       aria-label="Peppy title bar"
       data-composer={isComposer || undefined}
+      data-navigation-placement={renderedNavigation ? (macos ? "trailing" : "leading") : undefined}
     >
+      {!macos && renderedNavigation}
       {macos && (onClose || onMinimize || onMaximize) && <div
         id="window-controls"
         className="window-controls window-controls-macos"
@@ -687,7 +729,9 @@ export function AppTitlebar({
           aria-label={isComposer ? "Close composer" : "Close window"}
           title={isComposer ? "Close composer" : "Close window"}
           onClick={onClose}
-        ><RiCloseLine size={10} aria-hidden /></button>}
+        >
+          <X size={10} strokeWidth={1.75} aria-hidden />
+        </button>}
         {onMinimize && <button
           className="traffic-light traffic-light-minimize"
           aria-label="Minimize window"
@@ -696,7 +740,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><RiSubtractLine size={10} aria-hidden /></button>}
+        ><Minus size={10} strokeWidth={1.75} aria-hidden /></button>}
         {onMaximize && <button
           className="traffic-light traffic-light-maximize"
           aria-label="Maximize window"
@@ -705,7 +749,7 @@ export function AppTitlebar({
           disabled={isComposer}
           aria-hidden={isComposer || undefined}
           tabIndex={isComposer ? -1 : undefined}
-        ><RiAddLine size={10} aria-hidden /></button>}
+        ><Plus size={10} strokeWidth={1.75} aria-hidden /></button>}
       </div>}
       {!isComposer && (onToggleSidebar || onNewMessage) && <div id="titlebar-actions" role="toolbar" aria-label="Conversation controls">
         {onToggleSidebar && <button
@@ -716,14 +760,14 @@ export function AppTitlebar({
           aria-expanded={sidebarExpanded}
           aria-controls={sidebarControls}
           onClick={onToggleSidebar}
-        ><RiLayoutLeftLine size={16} aria-hidden /></button>}
+        ><PanelLeft size={16} strokeWidth={1.75} aria-hidden /></button>}
         {onNewMessage && <button
           type="button"
           data-action="new-message"
           aria-label="New conversation"
           title="New conversation"
           onClick={onNewMessage}
-        ><RiChatNewLine size={16} aria-hidden /></button>}
+        ><MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden /></button>}
       </div>}
       <span className="titlebar-product" aria-hidden>
         <img src={logoUrl} alt="" draggable={false} />
@@ -750,14 +794,14 @@ export function AppTitlebar({
               title="Minimize window"
               onClick={onMinimize}
             >
-              <RiSubtractLine size={10} aria-hidden />
+              <Minus size={10} strokeWidth={1.75} aria-hidden />
             </button>}
             {onMaximize && <button
               aria-label="Maximize window"
               title="Maximize window"
               onClick={onMaximize}
             >
-              <RiAddLine size={10} aria-hidden />
+              <Square size={10} strokeWidth={1.75} aria-hidden />
             </button>}
           </>
         )}
@@ -767,9 +811,10 @@ export function AppTitlebar({
           onClick={onClose}
           className="close-button"
         >
-          <RiCloseLine size={10} aria-hidden />
+          <X size={10} strokeWidth={1.75} aria-hidden />
         </button>}
       </div>}
+      {macos && renderedNavigation}
     </header>
   );
 }
@@ -779,12 +824,20 @@ export function ConversationList({
   selectedId,
   onSelect,
   onPopout,
+  onDelete,
+  onCancelDelete,
+  deleteConfirmationId,
+  deletingId,
   loading = false,
 }: {
   conversations: Conversation[];
   selectedId: string;
   onSelect(id: string): void;
   onPopout?(id: string): void;
+  onDelete?(id: string): void;
+  onCancelDelete?(): void;
+  deleteConfirmationId?: string;
+  deletingId?: string;
   loading?: boolean;
 }) {
   return (
@@ -793,30 +846,47 @@ export function ConversationList({
         {loading ? (
           <li className="sidebar-empty">Loading conversations…</li>
         ) : conversations.length ? (
-          conversations.map((c) => (
-            <li key={c.id}>
+          conversations.map((c) => {
+            const isDeleteConfirmation = deleteConfirmationId === c.id;
+            return <li key={c.id}>
               <div className={`conversation-row ${selectedId === c.id ? "selected" : ""}`} data-conversation-row={c.id}>
-              <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
-                <span className="avatar" aria-hidden>
-                  {c.avatarUrl ? <img src={c.avatarUrl} alt="" /> : c.name.slice(0, 1).toUpperCase()}
-                </span>
-                <span className="conversation-copy">
-                  <b>{c.name}</b>
-                  <small>{c.preview}</small>
-                </span>
-                {c.unread > 0 && (
-                  <span
-                    aria-label={`${c.unread} unread messages`}
-                    className="unread"
-                  >
-                    <span aria-hidden>{c.unread}</span>
+                <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
+                  <ContactAvatar {...(c.avatar ?? conversationAvatar({ id: c.id, name: c.name }))} size={36} className="avatar" />
+                  <span className="conversation-copy">
+                    <b>{c.name}</b>
+                    <small>{c.preview}</small>
                   </span>
-                )}
-              </button>
-              {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
+                  {c.unread > 0 && (
+                    <span aria-label={`${c.unread} unread messages`} className="unread">
+                      <span aria-hidden>{c.unread}</span>
+                    </span>
+                  )}
+                </button>
+                {c.recipientlessDraft && c.draftOnly && onDelete && <button
+                  type="button"
+                  className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}
+                  data-delete-conversation-id={c.id}
+                  aria-label={`${isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"} for ${c.name}`}
+                  title={isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"}
+                  disabled={deletingId === c.id}
+                  onBlur={() => isDeleteConfirmation && onCancelDelete?.()}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape" || !isDeleteConfirmation) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onCancelDelete?.();
+                  }}
+                  onClick={(event) => {
+                    event.currentTarget.focus();
+                    onDelete(c.id);
+                  }}
+                >
+                  {deletingId === c.id ? <Loader size={15} aria-hidden /> : <Trash2 size={16} aria-hidden />}
+                </button>}
+                {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
               </div>
-            </li>
-          ))
+            </li>;
+          })
         ) : (
           <li className="sidebar-empty">No conversations yet</li>
         )}
@@ -827,7 +897,7 @@ export function ConversationList({
 
 type PickerOption =
   | { kind: "existing"; id: string; name: string }
-  | { kind: "contact"; id: string; name: string; detail?: string; avatarUrl?: string; value: string }
+  | { kind: "contact"; id: string; name: string; detail?: string; avatarUrl?: string; avatarSeed?: string; avatarName?: string; value: string }
   | { kind: "new"; id: string; name: string; value: string };
 const NEW_OPTION_ID = "new-recipient";
 export function RecipientPicker({
@@ -889,6 +959,8 @@ export function RecipientPicker({
       name: match.label,
       detail: match.detail,
       avatarUrl: match.avatarUrl,
+      avatarSeed: match.avatarSeed,
+      avatarName: match.avatarName,
       value: match.id,
     })),
     ...(onNewRecipient && normalizedQuery && !contactMatches.some((match) => match.id === normalizedQuery)
@@ -1005,9 +1077,7 @@ export function RecipientPicker({
             >
               {option.kind === "contact" ? (
                 <>
-                  <span className="recipient-avatar" aria-hidden>
-                    {option.avatarUrl ? <img src={option.avatarUrl} alt="" /> : recipientAvatarLetter(option.name)}
-                  </span>
+                  <ContactAvatar seed={option.avatarSeed ?? seedKey(option.value)} photoDataUrl={option.avatarUrl} name={option.avatarName ?? option.name} size={18} className="recipient-avatar" />
                   <span className="recipient-suggestion-copy">
                     <b>{option.name}</b>
                     {option.detail && <small>{option.detail}</small>}
@@ -1165,7 +1235,7 @@ export function Composer({
               {status}
             </p>
           )}
-          {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "gateway is offline"}</span>}
+           {fallbackShown && <span id="unavailable-hint">Sending unavailable: {unavailableReason ?? "phone is offline"}</span>}
         </div>
         <div id="composer-toolbar">
         <button
@@ -1203,6 +1273,64 @@ export function Composer({
   );
 }
 
+export function NavButtons({
+  orientation,
+  activeView,
+  onView,
+  onToggleList,
+  listCollapsed,
+  threadListId,
+  notificationUnread = 0,
+  contactsPending = 0,
+}: {
+  orientation: "rail" | "titlebar";
+  activeView: NavigationView;
+  onView(view: NavigationView): void;
+  onToggleList?(): void;
+  listCollapsed?: boolean;
+  threadListId?: string;
+  notificationUnread?: number;
+  contactsPending?: number;
+}): ReactElement {
+  const iconSize = orientation === "rail" ? 20 : 16;
+  return <nav id={orientation === "titlebar" ? "titlebar-navigation" : undefined} aria-label="Main navigation" data-orientation={orientation}>
+    <button
+      data-rail-item="conversations"
+      aria-label="Conversations"
+      title="Conversations"
+      aria-current={activeView === "conversations" ? "page" : undefined}
+      aria-expanded={activeView === "conversations" ? !listCollapsed : undefined}
+      aria-controls={activeView === "conversations" ? threadListId : undefined}
+      onClick={() => activeView === "conversations" ? onToggleList?.() : onView("conversations")}
+    >
+      <MessageCircle size={iconSize} strokeWidth={1.75} aria-hidden />
+    </button>
+    <button data-rail-item="contacts" aria-label={contactsPending ? `Contacts, ${contactsPending} pending` : "Contacts"} title="Contacts" aria-current={activeView === "contacts" ? "page" : undefined} onClick={() => onView("contacts")}>
+      <Users size={iconSize} strokeWidth={1.75} aria-hidden />
+      {contactsPending > 0 && <span className="rail-notif-badge" aria-hidden>{contactsPending > 99 ? "99+" : contactsPending}</span>}
+    </button>
+    <button
+      data-rail-item="notifications"
+      aria-label={notificationUnread ? `Notifications, ${notificationUnread} unread` : "Notifications"}
+      title="Notifications"
+      aria-current={activeView === "notifications" ? "page" : undefined}
+      onClick={() => onView("notifications")}
+    >
+      <Bell size={iconSize} strokeWidth={1.75} aria-hidden />
+      {notificationUnread > 0 && <span className="rail-notif-badge" aria-hidden>{notificationUnread > 99 ? "99+" : notificationUnread}</span>}
+    </button>
+    <button
+      data-rail-item="settings"
+      aria-label="Settings"
+      title="Settings"
+      aria-current={activeView === "settings" ? "page" : undefined}
+      onClick={() => onView("settings")}
+    >
+      <Settings size={iconSize} strokeWidth={1.75} aria-hidden />
+    </button>
+  </nav>;
+}
+
 export function Panel({
   children,
   activeView,
@@ -1215,8 +1343,8 @@ export function Panel({
   contactsPending = 0,
 }: {
   children?: ReactNode;
-  activeView: "conversations" | "notifications" | "settings" | "contacts";
-  onView(view: "conversations" | "notifications" | "settings" | "contacts"): void;
+  activeView: NavigationView;
+  onView(view: NavigationView): void;
   status?: PanelStatus;
   onToggleList?(): void;
   listCollapsed?: boolean;
@@ -1226,42 +1354,16 @@ export function Panel({
 }) {
   return (
     <aside id="desktop-rail" aria-label="Navigation rail">
-      <nav aria-label="Main navigation">
-        <button
-          data-rail-item="conversations"
-          aria-label="Conversations"
-          title="Conversations"
-          aria-current={activeView === "conversations" ? "page" : undefined}
-          aria-expanded={activeView === "conversations" ? !listCollapsed : undefined}
-          aria-controls={activeView === "conversations" ? threadListId : undefined}
-          onClick={() => activeView === "conversations" ? onToggleList?.() : onView("conversations")}
-        >
-          <MessageCircle size={20} aria-hidden />
-        </button>
-        <button data-rail-item="contacts" aria-label={contactsPending ? `Contacts, ${contactsPending} pending` : "Contacts"} title="Contacts" aria-current={activeView === "contacts" ? "page" : undefined} onClick={() => onView("contacts")}>
-          <Users size={20} aria-hidden />
-          {contactsPending > 0 && <span className="rail-notif-badge" aria-hidden>{contactsPending > 99 ? "99+" : contactsPending}</span>}
-        </button>
-        <button
-          data-rail-item="notifications"
-          aria-label={notificationUnread ? `Notifications, ${notificationUnread} unread` : "Notifications"}
-          title="Notifications"
-          aria-current={activeView === "notifications" ? "page" : undefined}
-          onClick={() => onView("notifications")}
-        >
-          <Bell size={20} aria-hidden />
-          {notificationUnread > 0 && <span className="rail-notif-badge" aria-hidden>{notificationUnread > 99 ? "99+" : notificationUnread}</span>}
-        </button>
-        <button
-          data-rail-item="settings"
-          aria-label="Settings"
-          title="Settings"
-          aria-current={activeView === "settings" ? "page" : undefined}
-          onClick={() => onView("settings")}
-        >
-          <Settings size={20} aria-hidden />
-        </button>
-      </nav>
+      <NavButtons
+        orientation="rail"
+        activeView={activeView}
+        onView={onView}
+        onToggleList={onToggleList}
+        listCollapsed={listCollapsed}
+        threadListId={threadListId}
+        notificationUnread={notificationUnread}
+        contactsPending={contactsPending}
+      />
       <div className="rail-spacer" />
       {status && <StatusPopover tone={status.tone} summary={status.summary}>{status.details}</StatusPopover>}
       {children}

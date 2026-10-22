@@ -14,7 +14,6 @@ use peppy_crypto::{
 use serde::{Deserialize, Serialize, de};
 use serde_json::Value;
 use std::collections::HashSet;
-use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -190,7 +189,7 @@ fn validate_wrapped(wrapped: &WrappedIdentity) -> Result<(), IdentityError> {
     Ok(())
 }
 
-fn validate_metadata(metadata: &IdentityMetadata) -> Result<(), IdentityError> {
+pub(crate) fn validate_metadata(metadata: &IdentityMetadata) -> Result<(), IdentityError> {
     if metadata.version != VERSION
         || canonical_origin(&metadata.origin)? != metadata.origin
         || metadata.profile.vault_id != metadata.vault_id
@@ -205,18 +204,7 @@ fn validate_metadata(metadata: &IdentityMetadata) -> Result<(), IdentityError> {
 }
 
 fn canonical_origin(input: &str) -> Result<String, IdentityError> {
-    let url = Url::parse(input).map_err(|_| IdentityError::Invalid)?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return Err(IdentityError::Invalid);
-    }
-    Ok(url.origin().ascii_serialization())
+    crate::origin::canonical_origin(input).map_err(|_| IdentityError::Invalid)
 }
 
 fn metadata_aad(metadata: &IdentityMetadata) -> Result<Vec<u8>, IdentityError> {
@@ -254,14 +242,15 @@ fn map_crypto_error(error: CryptoError) -> IdentityError {
         CryptoError::SurroundingWhitespace => IdentityError::InvalidPassphrase,
         CryptoError::UnsupportedSuite
         | CryptoError::InvalidProfile
-        | CryptoError::InvalidCiphertext => IdentityError::Invalid,
+        | CryptoError::InvalidCiphertext
+        | CryptoError::InvalidEnrollment => IdentityError::Invalid,
         CryptoError::OperationFailed | CryptoError::InvalidStream | CryptoError::Io => {
             IdentityError::Unavailable
         }
     }
 }
 
-fn validate_token(token: &str) -> Result<(), IdentityError> {
+pub(crate) fn validate_token(token: &str) -> Result<(), IdentityError> {
     if token.len() != DEVICE_TOKEN_HEX || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(IdentityError::Invalid);
     }
@@ -431,10 +420,14 @@ mod tests {
     }
 
     fn metadata() -> IdentityMetadata {
+        metadata_for_origin("https://peppy.test")
+    }
+
+    fn metadata_for_origin(origin: &str) -> IdentityMetadata {
         let (profile, header) = fixture();
         IdentityMetadata {
             version: VERSION,
-            origin: "https://peppy.test".into(),
+            origin: origin.into(),
             vault_id: profile.vault_id,
             device_id: Uuid::new_v4(),
             role: DeviceRole::Device,
@@ -479,6 +472,41 @@ mod tests {
     }
 
     #[test]
+    fn seals_and_opens_loopback_http_identities_only() {
+        for origin in [
+            "http://localhost:7100",
+            "http://127.0.0.1:7100",
+            "http://[::1]:7100",
+        ] {
+            let metadata = metadata_for_origin(origin);
+            let wrapped = seal_identity(metadata.clone(), &secrets(), PHRASE).unwrap();
+            let serialized = serde_json::to_vec(&wrapped).unwrap();
+            assert_eq!(
+                open_identity(&serialized, origin, PHRASE)
+                    .unwrap()
+                    .metadata(),
+                &metadata
+            );
+        }
+
+        for origin in [
+            "http://192.168.1.1",
+            "http://example.test",
+            "http://localhost.evil.test",
+            "http://127.0.0.1.evil.test",
+            "http://user:secret@localhost",
+            "http://localhost/path",
+            "http://localhost?query=value",
+            "http://localhost#fragment",
+        ] {
+            assert!(matches!(
+                seal_identity(metadata_for_origin(origin), &secrets(), PHRASE),
+                Err(IdentityError::Invalid)
+            ));
+        }
+    }
+
+    #[test]
     fn metadata_aad_is_pinned_to_the_v1_golden_bytes() {
         let vault_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let profile = KeyProfile {
@@ -520,6 +548,10 @@ mod tests {
         );
         assert_eq!(
             map_crypto_error(CryptoError::InvalidProfile),
+            IdentityError::Invalid
+        );
+        assert_eq!(
+            map_crypto_error(CryptoError::InvalidEnrollment),
             IdentityError::Invalid
         );
         assert_eq!(

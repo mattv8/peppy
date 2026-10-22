@@ -60,6 +60,15 @@ public actor HostedAccountClient {
         return try await account(using: stored, expectedGeneration: generation)
     }
 
+    /// Native-only enrollment authorization. It is deliberately available only
+    /// for the pinned hosted origin and never crosses a UI boundary.
+    func enrollmentSessionBearer() throws -> String {
+        guard origin.serialized == "https://peppy.pro" else { throw HostedAccountClientError.unavailable }
+        let session = try loadSession()
+        guard session.expiresAt > Date() else { throw HostedAccountClientError.sessionExpired }
+        return session.bearer
+    }
+
     public func signOut() async throws {
         generation &+= 1
         // Capture the session before this actor yields for best-effort revocation.
@@ -91,7 +100,13 @@ public actor HostedAccountClient {
         guard account.access == "read_write" else { throw HostedAccountClientError.entitlementRequired }
         guard expected == generation else { throw CancellationError() }
         guard account.vaultId == nil else { throw HostedAccountClientError.provisioningInProgress }
-        let item = try prepareHostedProvisioning(origin: origin.serialized, accountId: account.accountId, passphrase: passphrase)
+        let item = try prepareHostedProvisioning(
+            origin: origin.serialized,
+            accountId: account.accountId,
+            passphrase: passphrase,
+            clientKind: .ios,
+            deviceName: "Peppy iOS"
+        )
         try Task.checkCancellation()
         try secureStore.upsert(checkpointKey, try item.checkpoint())
         return item.view()

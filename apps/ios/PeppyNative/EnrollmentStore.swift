@@ -12,7 +12,8 @@ struct EnrollmentRecord: Codable, Equatable, Sendable {
 
 /// Keychain layout. Every item is bound to origin, vault and device in its account name:
 /// `device-token|…`, `database-key|…`, `database-created|…`, `enrollment|…`, `key-cache-<epoch>|…`;
-/// plus one `active-enrollment` pointer. Passphrases are never stored.
+/// plus one `active-enrollment` pointer. Vault shared secrets may be stored only in
+/// the per-identity `vault-secret-v2` secure-store account.
 ///
 /// Disconnecting removes only the pointer. Per-identity items (and the encrypted database they open)
 /// stay as an archive, so re-importing that identity reopens its unsent local work.

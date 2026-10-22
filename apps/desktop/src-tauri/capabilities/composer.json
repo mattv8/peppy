@@ -10,15 +10,24 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "allow-load-state",
+    "allow-load-history",
     "allow-save-draft",
     "allow-send-draft",
     "allow-mark-seen",
     "allow-pick-attachments",
     "allow-retry-attachment",
     "allow-save-attachment",
+    "allow-request-attachment-download",
+    "allow-media-page",
+    "allow-media-page-around",
+    "allow-media-page-newer",
+    "allow-open-media",
+    "allow-load-media",
+    "allow-close-media",
     "allow-close-composer",
     "allow-close-head-panel",
     "allow-search-contact-recipients",
-    "allow-acknowledge-lifecycle"
+    "allow-acknowledge-lifecycle",
+    "allow-report-update-activity"
   ]
 }

@@ -9,7 +9,10 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -20,6 +23,7 @@ use super::{
 };
 
 const MAX_CHECK_HEADER_BYTES: usize = 1_048_576;
+const ADMISSION_PUBLIC_KEY_BYTES: usize = 32;
 
 /// `GET /v1/vault/key-profiles` — every registered epoch, oldest first.
 pub(super) async fn list(State(s): State<ApiState>, h: HeaderMap) -> ApiResult<Json<Value>> {
@@ -55,6 +59,8 @@ pub(super) struct RegisterProfile {
     /// Standard base64 of the encrypted vault check header for this epoch.
     encrypted_vault_check_header: String,
     profile_fingerprint: String,
+    /// Base64url-no-padding Ed25519 verifier derived by the client for this epoch.
+    admission_public_key: String,
 }
 
 /// `POST /v1/vault/key-profiles` (owner) — registers a future epoch without activating it.
@@ -72,9 +78,13 @@ pub(super) async fn register(
     let header = STANDARD
         .decode(&x.encrypted_vault_check_header)
         .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_key_profile"))?;
+    let admission_public_key = URL_SAFE_NO_PAD
+        .decode(&x.admission_public_key)
+        .map_err(|_| ApiError(StatusCode::UNPROCESSABLE_ENTITY, "invalid_key_profile"))?;
     if vault != p.vault
         || header.is_empty()
         || header.len() > MAX_CHECK_HEADER_BYTES
+        || admission_public_key.len() != ADMISSION_PUBLIC_KEY_BYTES
         || i32::try_from(x.key_epoch).is_err()
     {
         return Err(invalid);
@@ -89,7 +99,7 @@ pub(super) async fn register(
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| database_unavailable(&error, "key_profile_lock"))?;
-    if let Some(existing) = sqlx::query("SELECT public_key_profile,encrypted_vault_check_header,profile_fingerprint,activated_at IS NOT NULL AS activated FROM vault_key_profiles WHERE vault_id=$1 AND key_epoch=$2")
+    if let Some(existing) = sqlx::query("SELECT p.public_key_profile,p.encrypted_vault_check_header,p.profile_fingerprint,p.activated_at IS NOT NULL AS activated,a.profile_fingerprint AS admission_profile_fingerprint,a.admission_public_key FROM vault_key_profiles p LEFT JOIN vault_admission_keys a ON a.vault_id=p.vault_id AND a.key_epoch=p.key_epoch WHERE p.vault_id=$1 AND p.key_epoch=$2")
         .bind(p.vault)
         .bind(epoch)
         .fetch_optional(&mut *tx)
@@ -98,7 +108,13 @@ pub(super) async fn register(
     {
         let same = existing.get::<Value, _>("public_key_profile") == x.public_key_profile
             && existing.get::<Vec<u8>, _>("encrypted_vault_check_header") == header
-            && existing.get::<String, _>("profile_fingerprint") == x.profile_fingerprint;
+            && existing.get::<String, _>("profile_fingerprint") == x.profile_fingerprint
+            && existing
+                .try_get::<String, _>("admission_profile_fingerprint")
+                .is_ok_and(|fingerprint| fingerprint == x.profile_fingerprint)
+            && existing
+                .try_get::<Vec<u8>, _>("admission_public_key")
+                .is_ok_and(|key| key == admission_public_key);
         if !same {
             return Err(ApiError(StatusCode::CONFLICT, "key_profile_conflict"));
         }
@@ -124,6 +140,20 @@ pub(super) async fn register(
                 ApiError(StatusCode::CONFLICT, "key_profile_conflict")
             } else {
                 database_unavailable(&error, "key_profile_insert")
+            }
+        })?;
+    sqlx::query("INSERT INTO vault_admission_keys(vault_id,key_epoch,profile_fingerprint,admission_public_key) VALUES($1,$2,$3,$4)")
+        .bind(p.vault)
+        .bind(epoch)
+        .bind(&x.profile_fingerprint)
+        .bind(&admission_public_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            if error.as_database_error().and_then(|e| e.code()).is_some_and(|code| code == "23505") {
+                ApiError(StatusCode::CONFLICT, "key_profile_conflict")
+            } else {
+                database_unavailable(&error, "key_profile_admission_key_insert")
             }
         })?;
     tx.commit()
@@ -159,7 +189,7 @@ pub(super) async fn activate(
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| database_unavailable(&error, "key_activate_lock"))?;
-    let profile = sqlx::query("SELECT public_key_profile,encrypted_vault_check_header,profile_fingerprint FROM vault_key_profiles WHERE vault_id=$1 AND key_epoch=$2")
+    let profile = sqlx::query("SELECT p.public_key_profile,p.encrypted_vault_check_header,p.profile_fingerprint,a.admission_public_key FROM vault_key_profiles p LEFT JOIN vault_admission_keys a ON a.vault_id=p.vault_id AND a.key_epoch=p.key_epoch AND a.profile_fingerprint=p.profile_fingerprint WHERE p.vault_id=$1 AND p.key_epoch=$2")
         .bind(p.vault)
         .bind(key_epoch)
         .fetch_optional(&mut *tx)
@@ -167,6 +197,15 @@ pub(super) async fn activate(
         .map_err(|error| database_unavailable(&error, "key_activate_lookup"))?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "key_profile_not_found"))?;
     let fingerprint: String = profile.get("profile_fingerprint");
+    if !profile
+        .try_get::<Vec<u8>, _>("admission_public_key")
+        .is_ok_and(|key| key.len() == ADMISSION_PUBLIC_KEY_BYTES)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "key_profile_admission_key_missing",
+        ));
+    }
     if key_epoch == current {
         return Ok(Json(
             json!({"key_epoch": key_epoch, "profile_fingerprint": fingerprint, "duplicate": true}),

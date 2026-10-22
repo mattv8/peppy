@@ -2,12 +2,13 @@
 # Build and run the debug iOS application on one compatible simulator.
 set -euo pipefail
 
-ROOT="${PEPPY_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-cd "$ROOT"
-ARTIFACTS="${PEPPY_IOS_ARTIFACTS:-$ROOT/.opencode/dev/artifacts/ios}"
-SCRATCH="${PEPPY_IOS_SCRATCH:-$ROOT/.opencode/sessions/ios-simulator-actions}"
-RUST_ARTIFACTS="${CARGO_TARGET_DIR:-$ROOT/target}"
-[[ "$RUST_ARTIFACTS" == /* ]] || RUST_ARTIFACTS="$ROOT/$RUST_ARTIFACTS"
+CALLER_ROOT="${PEPPY_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SOURCE_ROOT=$(cd "${PEPPY_SOURCE_TREE:-$CALLER_ROOT}" && pwd -L)
+cd "$SOURCE_ROOT"
+ARTIFACTS="${PEPPY_IOS_ARTIFACTS:-$CALLER_ROOT/.opencode/dev/artifacts/ios}"
+SCRATCH="${PEPPY_IOS_SCRATCH:-$CALLER_ROOT/.opencode/sessions/ios-simulator-actions}"
+RUST_ARTIFACTS="${CARGO_TARGET_DIR:-$CALLER_ROOT/target}"
+[[ "$RUST_ARTIFACTS" == /* ]] || RUST_ARTIFACTS="$CALLER_ROOT/$RUST_ARTIFACTS"
 APP_BUNDLE_ID=dev.peppy.mobile
 BUILD_SCRATCH=
 SIMULATOR_FRONTEND=
@@ -154,7 +155,7 @@ build() {
   mkdir -p "$generated"
   cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen --target-dir "$RUST_ARTIFACTS" -- generate \
     --library "$RUST_ARTIFACTS/debug/libpeppy_mobile_bindings.dylib" --language swift --out-dir "$generated"
-  if ! diff -ru --exclude=module.modulemap "$ROOT/apps/ios/Generated" "$generated"; then
+  if ! diff -ru --exclude=module.modulemap "$SOURCE_ROOT/apps/ios/Generated" "$generated"; then
     fail "Generated iOS bindings drift from Rust source; regenerate Swift bindings using the command in CONTRIBUTING.md > iOS Simulator workflow before building."
   fi
   cat > "$compiler_wrapper" <<'EOF'
@@ -169,7 +170,7 @@ EOF
     CFLAGS="-target $APPLE_TARGET -isysroot $SDKROOT -mios-simulator-version-min=26.0" \
     "CC_$target_env=$compiler_wrapper" "AR_$target_env=$AR" "RANLIB_$target_env=$RANLIB" \
     "CARGO_TARGET_${target_upper}_LINKER=$compiler_wrapper" cargo build -p peppy-mobile-bindings --locked --target "$RUST_TARGET" --target-dir "$RUST_ARTIFACTS"
-  xcodebuild -project "$ROOT/apps/ios/PeppyMobile.xcodeproj" -scheme PeppyMobile -configuration Debug -sdk iphonesimulator \
+  xcodebuild -project "$SOURCE_ROOT/apps/ios/PeppyMobile.xcodeproj" -scheme PeppyMobile -configuration Debug -sdk iphonesimulator \
     -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -derivedDataPath "$ARTIFACTS" \
     "LIBRARY_SEARCH_PATHS=\"$RUST_ARTIFACTS/$RUST_TARGET/debug\"" "ARCHS=$ARCH" ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=YES build
   APP_PATH="$ARTIFACTS/Build/Products/Debug-iphonesimulator/PeppyMobile.app"
@@ -179,7 +180,7 @@ EOF
 run() {
   check
   # The existing dev-up action owns backend setup; invoke it only after preflight.
-  bash "$ROOT/infra/dev/dev.sh" dev-up
+  bash "$CALLER_ROOT/infra/dev/dev.sh" dev-up
   xcrun simctl bootstatus "$SIMULATOR_UDID" -b || fail "simulator boot failed; check its runtime in Xcode Settings > Components"
   # Open the detected frontend: Simulator.app (Xcode 26) or DeviceHub.app (Xcode 27+)
   if [[ "$SIMULATOR_FRONTEND" == *"Simulator.app" ]]; then
@@ -190,6 +191,9 @@ run() {
     open "$SIMULATOR_FRONTEND"
   fi
   build
+  # After a potentially long build, revalidate the selected device is still booted before install.
+  # DeviceHub may have quit during the build, shutting down the simulator.
+  xcrun simctl bootstatus "$SIMULATOR_UDID" -b || fail "simulator became unavailable during build; do not retry without verifying device state"
   xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
   xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" "$APP_BUNDLE_ID"
 }

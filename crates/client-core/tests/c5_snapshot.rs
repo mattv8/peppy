@@ -348,6 +348,54 @@ fn snapshot_commands_are_historical_and_restore_guard_blocks_new_permits() {
 }
 
 #[test]
+fn snapshot_replay_preserves_the_original_gateway_status_time() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, "desktop", &vault);
+    let gateway_cfg = config(&dir, "gateway", &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let fresh = unlocked(&config(&dir, "fresh", &vault), &vault);
+    let mut server = Server::default();
+    let conversation = ConversationId::new();
+    let queued = desktop
+        .queue_send(sms(conversation, "status timestamp"), route(&gateway_cfg))
+        .unwrap();
+
+    server.upload(&desktop);
+    server.sync(&gateway);
+    assert!(matches!(
+        gateway.begin_send_attempt(queued.command_id).unwrap(),
+        PermitDecision::Permit(_)
+    ));
+    gateway
+        .record_send_result(queued.command_id, SendResult::Sent)
+        .unwrap();
+    server.upload(&gateway);
+    server.sync(&desktop);
+    let original_status_at_ms = only_message(&gateway, conversation)
+        .status_at_ms
+        .expect("gateway records the status time before snapshot replay");
+    assert_eq!(
+        only_message(&desktop, conversation).status_at_ms,
+        Some(original_status_at_ms)
+    );
+
+    let records = snapshot(&server);
+    import(
+        &fresh,
+        &records,
+        records.len() as u64,
+        SnapshotPurpose::Resync,
+    );
+    fresh.apply_pending(100).unwrap();
+    assert_eq!(
+        only_message(&fresh, conversation).status_at_ms,
+        Some(original_status_at_ms)
+    );
+}
+
+#[test]
 fn inconsistent_snapshots_fail_closed_and_missing_keys_wait() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

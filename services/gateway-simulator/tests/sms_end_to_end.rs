@@ -1,19 +1,23 @@
 //! SIMULATED acceptance tests: real PostgreSQL, TCP HTTP/WS, SQLCipher clients and crypto.
+mod common;
+
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use ed25519_dalek::{Signer, SigningKey};
+use common::{ADDRESS, NETWORK_TIMEOUT, PHRASE, Paired, create_vault};
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::*;
-use peppy_crypto::{create_vault_check_header, derive_root_key};
+use peppy_crypto::{
+    create_vault_check_header, derive_root_key, enrollment::derive_admission_keypair,
+};
 use peppy_gateway_simulator::{
     drain_media, effects_path, publish_capabilities, run_one_carrier_effect,
     run_one_carrier_effect_for_route, sync_http, upload_pending,
 };
-use peppy_protocol::pairing_proof_message;
-use peppy_server::api::{create_owner, router};
+use peppy_server::{ServerBuilder, config::Config};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{fs, future::Future, path::PathBuf, time::Duration};
 use tempfile::TempDir;
@@ -25,16 +29,20 @@ use tokio_tungstenite::{
 use url::Url;
 use uuid::Uuid;
 
-const PHRASE: &str = "correct horse battery staple";
 const ROTATED_PHRASE: &str = "different manual rotation phrase";
-const ADDRESS: &str = "+15555550100";
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+enum ServerFrame {
+    Json(Value),
+    Ping(Vec<u8>),
+    Ignore,
+}
 
 async fn network<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
-    tokio::time::timeout(NETWORK_TIMEOUT, future)
-        .await
-        .unwrap_or_else(|_| panic!("phase={phase} status=timeout"))
+    common::network(phase, future).await
 }
 
 struct Server {
@@ -50,11 +58,6 @@ struct Server {
     header: VaultCheckHeader,
     fingerprint: String,
 }
-struct Paired {
-    id: DeviceId,
-    token: String,
-}
-
 impl Server {
     async fn start() -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL").expect(
@@ -83,25 +86,19 @@ impl Server {
             .run(&pool)
             .await
             .unwrap();
-        let vault = VaultId::new();
-        let profile = KeyProfile::new(vault.0, 1).unwrap();
-        let fingerprint = profile.fingerprint().unwrap();
-        let root = derive_root_key(PHRASE, &profile).unwrap();
-        let header = create_vault_check_header(&root, profile.clone()).unwrap();
-        let owner = create_owner(
-            &pool,
-            serde_json::to_value(&profile).unwrap(),
-            serde_json::to_vec(&header).unwrap(),
-            fingerprint.clone(),
-            1,
-        )
-        .await
-        .unwrap();
+        let mut config = Config::from_env().expect("complete S3 test configuration is required");
+        config.database_url = isolated.to_string();
+        let mut server = ServerBuilder::community(config, pool.clone())
+            .build()
+            .await
+            .unwrap();
+        server.start_maintenance().unwrap();
+        let router = server.router();
+        let fixture = create_vault(&pool).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server_pool = pool.clone();
         let task = tokio::spawn(async move {
-            axum::serve(listener, router(server_pool)).await.unwrap();
+            axum::serve(listener, router).await.unwrap();
         });
         Self {
             pool,
@@ -110,35 +107,36 @@ impl Server {
             url: format!("http://{addr}"),
             ws: format!("ws://{addr}/v1/ws"),
             task,
-            owner: owner.device_token,
-            vault,
-            profile,
-            header,
-            fingerprint,
+            owner: fixture.owner_token,
+            vault: fixture.vault,
+            profile: fixture.profile,
+            header: fixture.header,
+            fingerprint: fixture.fingerprint,
         }
     }
-    async fn pair(&self, role: &str) -> Paired {
-        let key = SigningKey::from_bytes(&[9; 32]);
+    async fn enroll_fixture_device(&self, role: &str) -> Paired {
         let id = DeviceId::new();
-        let public =
-            json!({"ed25519_public_key": URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes())});
-        let http = reqwest::Client::builder()
-            .timeout(NETWORK_TIMEOUT)
-            .build()
+        let token: String = (0..3)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect();
+        sqlx::query("INSERT INTO devices(vault_id,device_id,role,public_key,profile_fingerprint,key_epoch) VALUES($1,$2,$3,'{}'::jsonb,$4,1)")
+            .bind(self.vault.0)
+            .bind(id.0)
+            .bind(role)
+            .bind(&self.fingerprint)
+            .execute(&self.pool)
+            .await
             .unwrap();
-        let challenge: Value = network("E01-pair-create", http.post(format!("{}/v1/pairing", self.url)).bearer_auth(&self.owner).json(&json!({"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"requested_role":role})).send()).await.unwrap().error_for_status().unwrap().json().await.unwrap();
-        let challenge_bytes: [u8; 32] = URL_SAFE_NO_PAD
-            .decode(challenge["challenge_token"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let proof =
-            pairing_proof_message(&challenge_bytes, self.vault, id, &self.fingerprint, 1, role);
-        let body: Value = network("E01-pair-consume", http.post(format!("{}/v1/pairing/consume", self.url)).json(&json!({"challenge_token":challenge["challenge_token"],"device_id":id.0,"public_key":public,"profile_fingerprint":self.fingerprint,"key_epoch":1,"signature":URL_SAFE_NO_PAD.encode(key.sign(&proof).to_bytes())})).send()).await.unwrap().error_for_status().unwrap().json().await.unwrap();
-        Paired {
-            id,
-            token: body["device_token"].as_str().unwrap().into(),
-        }
+        sqlx::query(
+            "INSERT INTO device_credentials(token_digest,vault_id,device_id) VALUES($1,$2,$3)",
+        )
+        .bind(Sha256::digest(token.as_bytes()).as_slice())
+        .bind(self.vault.0)
+        .bind(id.0)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        Paired { id, token }
     }
     async fn shutdown(self) {
         self.task.abort();
@@ -169,6 +167,51 @@ fn route(id: DeviceId) -> GatewayRoute {
     GatewayRoute {
         gateway_device_id: id,
         subscription_id: "sim-1".into(),
+    }
+}
+
+fn classify_server_frame(frame: tungstenite::Message) -> ServerFrame {
+    match frame {
+        tungstenite::Message::Text(text) => ServerFrame::Json(serde_json::from_str(&text).unwrap()),
+        tungstenite::Message::Ping(payload) => ServerFrame::Ping(payload.to_vec()),
+        tungstenite::Message::Pong(_) => ServerFrame::Ignore,
+        other => panic!("expected a text or control frame, got {other:?}"),
+    }
+}
+
+async fn next_json_frame(socket: &mut Socket) -> Value {
+    loop {
+        let frame = socket.next().await.unwrap().unwrap();
+        match classify_server_frame(frame) {
+            ServerFrame::Json(value) => return value,
+            ServerFrame::Ping(payload) => socket
+                .send(tungstenite::Message::Pong(payload.into()))
+                .await
+                .unwrap(),
+            ServerFrame::Ignore => {}
+        }
+    }
+}
+
+async fn next_event_frame(socket: &mut Socket) -> Value {
+    loop {
+        let frame = next_json_frame(socket).await;
+        match frame["type"].as_str() {
+            Some("event") => return frame,
+            Some("presence_changed") => {}
+            other => panic!("expected an event or presence hint, got {other:?}: {frame}"),
+        }
+    }
+}
+
+#[test]
+fn websocket_control_frame_payload_is_not_decoded_as_json() {
+    let payload = vec![0, 0, 159];
+    let frame = tungstenite::Message::Ping(payload.clone().into());
+
+    match classify_server_frame(frame) {
+        ServerFrame::Ping(received) => assert_eq!(received, payload),
+        _ => panic!("non-UTF8 ping was not classified as a control frame"),
     }
 }
 
@@ -211,9 +254,9 @@ async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
     eprintln!("phase=E01 status=start");
     let server = Server::start().await;
     eprintln!("phase=E01 status=server_ready");
-    let desktop_p = server.pair("device").await;
-    eprintln!("phase=E01 status=desktop_paired");
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    eprintln!("phase=E01 status=desktop_enrolled");
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     eprintln!("phase=E01 status=ok");
 
@@ -284,25 +327,9 @@ async fn simulated_sms_checkpoint_over_real_postgres_http_and_ws() {
         .unwrap(),
         1
     );
-    let ready: Value = serde_json::from_str(
-        &network("E03-ws-ready", socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .into_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let ready = network("E03-ws-ready", next_json_frame(&mut socket)).await;
     assert_eq!(ready["type"], "ready");
-    let frame: Value = serde_json::from_str(
-        &network("E03-ws-event", socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .into_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let frame = network("E03-ws-event", next_event_frame(&mut socket)).await;
     assert_eq!(frame["type"], "event");
     assert_eq!(frame["cursor"], "1");
     assert_eq!(
@@ -461,8 +488,8 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
     let _guard = LOCK.lock().await;
     eprintln!("phase=EM01 status=start");
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-media", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-media", &server, gateway_p.id);
@@ -576,7 +603,7 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
         .prepare_attachment(&outbound_source, "image/png", "share.png")
         .unwrap();
     let draft = desktop.create_compose_draft(None).unwrap();
-    desktop
+    let draft = desktop
         .save_compose_draft(
             draft.draft_id,
             0,
@@ -631,10 +658,14 @@ async fn simulated_mms_storage_and_public_copy_over_real_postgres_and_seaweed() 
     )
     .await
     .unwrap();
-    assert_eq!(
-        desktop.messages(draft.conversation_id).unwrap()[0].send_state,
-        Some(SendState::Sent)
-    );
+    // The draft joined the conversation that already holds the incoming MMS, so select by id.
+    let sent = desktop
+        .messages(draft.conversation_id)
+        .unwrap()
+        .into_iter()
+        .find(|message| message.payload.record.message_id == queued.message_id)
+        .unwrap();
+    assert_eq!(sent.send_state, Some(SendState::Sent));
 
     // Public sharing is a distinct explicit plaintext derivative. The original endpoint still
     // rejects unauthenticated reads; the token works once and revocation removes only the copy.
@@ -735,8 +766,8 @@ async fn simulator_resyncs_pruned_replay_without_executing_snapshot_commands() {
     let _guard = LOCK.lock().await;
     eprintln!("phase=ES01 status=start");
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-snapshot", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-snapshot", &server, gateway_p.id);
@@ -911,8 +942,8 @@ async fn simulator_resyncs_pruned_replay_without_executing_snapshot_commands() {
 async fn advertised_sim_route_is_discoverable_and_foreign_route_never_effects() {
     let _guard = LOCK.lock().await;
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-route", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-route", &server, gateway_p.id);
@@ -989,8 +1020,8 @@ async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
     let _guard = LOCK.lock().await;
     eprintln!("phase=EROT01 status=start");
     let server = Server::start().await;
-    let desktop_p = server.pair("device").await;
-    let gateway_p = server.pair("gateway").await;
+    let desktop_p = server.enroll_fixture_device("device").await;
+    let gateway_p = server.enroll_fixture_device("gateway").await;
     let temp = TempDir::new().unwrap();
     let desktop = client(&temp, "desktop-rotation", &server, desktop_p.id);
     let gateway = client(&temp, "gateway-rotation", &server, gateway_p.id);
@@ -1040,11 +1071,14 @@ async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
     let fingerprint_two = profile_two.fingerprint().unwrap();
     let root_two = derive_root_key(ROTATED_PHRASE, &profile_two).unwrap();
     let header_two = create_vault_check_header(&root_two, profile_two.clone()).unwrap();
+    let admission_public_key =
+        URL_SAFE_NO_PAD.encode(derive_admission_keypair(&root_two).unwrap().public_key());
     let register = json!({
         "key_epoch": 2,
         "public_key_profile": profile_two,
         "encrypted_vault_check_header": STANDARD.encode(serde_json::to_vec(&header_two).unwrap()),
         "profile_fingerprint": fingerprint_two,
+        "admission_public_key": admission_public_key,
     });
     let http = reqwest::Client::builder()
         .timeout(NETWORK_TIMEOUT)
@@ -1225,15 +1259,7 @@ async fn manual_passphrase_rotation_retires_old_commands_and_revokes_gateway() {
     )
     .await
     .unwrap();
-    let ready: Value = serde_json::from_str(
-        network("EROT04-ws-ready", socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .to_text()
-            .unwrap(),
-    )
-    .unwrap();
+    let ready = network("EROT04-ws-ready", next_json_frame(&mut socket)).await;
     assert_eq!(ready["type"], "ready");
 
     let revoked = network(

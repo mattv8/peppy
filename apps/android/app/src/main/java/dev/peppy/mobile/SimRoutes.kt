@@ -42,6 +42,7 @@ object SimRoutes {
         sendPermissionGranted: Boolean,
         mmsEnabled: Boolean = false,
         mmsReceivePermissionGranted: Boolean = false,
+        mmsContentVersion: UInt? = null,
         limits: (Int) -> MmsLimits = { MmsLimits(MmsLimits.FALLBACK_PDU_BYTES, 20, true, MmsLimits.Source.FALLBACK) },
     ): JSONObject {
         val sims = JSONArray()
@@ -59,7 +60,7 @@ object SimRoutes {
                     .put("mms_max_attachments", 10)
                     .put("mms_carrier_verified", false)
             }
-            if (mmsEnabled) report.put("mms_content_version", 2)
+            if (mmsEnabled && mmsContentVersion != null) report.put("mms_content_version", mmsContentVersion.toLong())
             sims.put(report)
         }
         return JSONObject().put("simulator", false).put("capabilities", JSONObject().put("sims", sims))

@@ -65,17 +65,34 @@ the trusted proxy in the network/firewall configuration. For the planned
 Docker2 staging deployment that interface is `10.10.0.101`; the public origin
 still uses HTTPS through Proxy, not the internal HTTP port.
 
-## Browser messaging hostname
+## Browser messaging at the public root
 
-The public server image includes the browser client at
-`/usr/share/peppy/web`. To expose it, set `WEB_CLIENT_HOST` to its HTTPS
-hostname and start the Caddy overlay with the root file first:
+The public server image includes the browser client at `/usr/share/peppy/web`.
+Community Compose enables it at `https://PUBLIC_HOST/` by default; its API shares
+that origin. Start the Caddy overlay with the root file first:
 
 ```sh
 docker compose -f docker-compose.yml -f infra/compose/compose.caddy.yml up -d
 ```
 
-`WEB_CLIENT_HOST` is passed to the server as `PEPPY_WEB_CLIENT_HOST`. Set it to
-the same value as `PUBLIC_HOST` for a single-host installation; Caddy emits one
-site block in that case. Leave it empty to keep browser hosting disabled. DNS
-and TLS configuration remain operator-managed prerequisites.
+Set `WEB_UI_ENABLED=false` to disable the browser UI while retaining the API.
+When using a reverse proxy, set `TRUSTED_PROXY_CIDRS` to only its direct peer IPs
+or narrow CIDRs and keep the value aligned with the proxy topology. An empty
+value safely ignores forwarded addresses, but all clients behind that proxy then
+share its rate-limit bucket. The supplied Caddy configuration keeps Caddy's
+default sanitization of inbound `X-Forwarded-For`; do not add broad proxy trust.
+
+### Server-sent events through a reverse proxy
+
+The administrator's live family-vault request view uses server-sent events (SSE)
+at `/v1/instance/events`. Configure every reverse proxy on that path to forward
+responses without buffering. Buffering delays approval requests and status
+changes until the buffer flushes, so the view is no longer live. Preserve the
+long-lived streaming response rather than applying a normal buffered API-response
+policy. The server sends `X-Accel-Buffering: no` and `Cache-Control: no-store`;
+the proxy configuration must still honor the unbuffered behavior.
+
+`WEB_CLIENT_HOST` is retired: it is no longer passed to the server and Caddy
+serves `PUBLIC_HOST` only. If upgrading from a separate app hostname, direct
+users to `https://PUBLIC_HOST/`, then remove `WEB_CLIENT_HOST` and that hostname's
+DNS record. DNS and TLS configuration remain operator-managed prerequisites.

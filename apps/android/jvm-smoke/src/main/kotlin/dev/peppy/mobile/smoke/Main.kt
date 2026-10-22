@@ -4,6 +4,8 @@ import java.io.File
 import java.util.UUID
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
+import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionInput
+import uniffi.peppy_mobile_bindings.NativeMmsSource
 import uniffi.peppy_mobile_bindings.NativeOpenConfig
 import uniffi.peppy_mobile_bindings.createVaultMaterial
 import uniffi.peppy_mobile_bindings.openNativeClient
@@ -34,6 +36,20 @@ fun main() {
     )
     check(!captured.duplicate)
     check(client.pendingOutboxJson().size == 1)
+    check(client.requestMmsRecheck("generation", "android-mms-provider", 32uL) == 0uL)
+    try {
+        client.requestMmsRecheck("generation", "android-mms-provider", 50uL)
+        error("MMS recheck accepted a request above the core bound")
+    } catch (_: MobileBindingsException.InvalidRequest) {
+        // The Android caller must remain at or below the real core-owned bound.
+    }
+    println("Kotlin MMS recheck bounds passed (32 accepted, 50 rejected)")
+
+    client.planMmsBackfillScans("jni-generation", "sim-1", "42")
+    client.beginMmsAcquisitionOutcome(mmsInput("first-pdu"))
+    client.beginMmsAcquisitionOutcome(mmsInput("second-pdu"))
+    check(client.mmsBackfillStatus("jni-generation", "sim-1").quarantinedCount == 1uL)
+    println("Kotlin MMS quarantine status passed (count 1)")
     client.dispose()
 
     val reopened = openNativeClient(config)
@@ -50,3 +66,16 @@ fun main() {
         println("Kotlin SQLCipher UniFFI smoke passed")
     }
 }
+
+
+private fun mmsInput(transactionId: String) = NativeMmsAcquisitionInput(
+    source = NativeMmsSource("jni-generation", "sim-1", "42", "7"),
+    incoming = true,
+    senderAddress = "+15551234567",
+    recipients = listOf("+15557654321"),
+    subject = "JNI MMS boundary",
+    body = "message body",
+    imported = false,
+    observedAtMs = 1L,
+    transactionId = transactionId,
+)

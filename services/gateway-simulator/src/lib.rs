@@ -4,7 +4,6 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use futures_util::StreamExt;
@@ -14,6 +13,9 @@ use peppy_client_core::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod transport;
+pub use transport::http_client;
+
 #[derive(Debug, Error)]
 pub enum SimulatorError {
     #[error("SIMULATED gateway HTTP request failed")]
@@ -22,6 +24,8 @@ pub enum SimulatorError {
     Response,
     #[error("SIMULATED gateway file operation failed")]
     Io,
+    #[error("SIMULATED development TLS certificate is unreadable or invalid")]
+    DevelopmentCertificate,
     #[error("client-core operation failed")]
     Core,
     #[error("SIMULATED identity has prior producer history; fresh pairing required")]
@@ -137,15 +141,6 @@ pub fn write_state(path: &Path, state: &SimulatorState) -> Result<(), SimulatorE
     Ok(())
 }
 
-fn http_client() -> Result<reqwest::Client, SimulatorError> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| SimulatorError::Http)
-}
-
 fn decode_bounded_json(bytes: &[u8]) -> Result<serde_json::Value, SimulatorError> {
     if bytes.len() > MAX_JSON_RESPONSE_BYTES {
         return Err(SimulatorError::Response);
@@ -216,7 +211,7 @@ pub async fn sync_http(
     token: &str,
 ) -> Result<usize, SimulatorError> {
     let api_origin = canonical_origin(api_origin)?;
-    let http = http_client()?;
+    let http = http_client(&api_origin)?;
     let after = client.receive_cursor().map_err(|_| SimulatorError::Core)?.0;
     let response = http
         .get(format!("{api_origin}/v1/events?after={after}&limit=100"))
@@ -250,7 +245,7 @@ pub async fn declare_compaction_capability(
     token: &str,
 ) -> Result<bool, SimulatorError> {
     let api_origin = canonical_origin(api_origin)?;
-    let response = match http_client()?
+    let response = match http_client(&api_origin)?
         .post(format!("{api_origin}/v1/compaction/capability"))
         .bearer_auth(token)
         .send()
@@ -274,7 +269,7 @@ pub async fn publish_capabilities(
     subscription_id: &str,
 ) -> Result<(), SimulatorError> {
     let api_origin = canonical_origin(api_origin)?;
-    http_client()?.post(format!("{api_origin}/v1/capabilities")).bearer_auth(token)
+    http_client(&api_origin)?.post(format!("{api_origin}/v1/capabilities")).bearer_auth(token)
         .json(&serde_json::json!({"simulator":true,"capabilities":{"sims":[{"subscription_id":subscription_id,"label":"Simulated SIM","sms":"available","mms":"available","mms_content_version":peppy_client_core::MMS_CONTENT_VERSION}]}}))
         .send().await.map_err(|_| SimulatorError::Http)?.error_for_status().map_err(|_| SimulatorError::Http)?;
     Ok(())
@@ -310,7 +305,7 @@ async fn import_snapshot(
     reject_producer: Option<DeviceId>,
 ) -> Result<usize, SimulatorError> {
     let api_origin = canonical_origin(api_origin)?;
-    let http = http_client()?;
+    let http = http_client(&api_origin)?;
     let snapshot = read_bounded_json(
         http.get(format!("{api_origin}/v1/snapshot"))
             .bearer_auth(token)
@@ -428,7 +423,7 @@ pub async fn upload_pending(
     token: &str,
 ) -> Result<usize, SimulatorError> {
     let api_origin = canonical_origin(api_origin)?;
-    let http = http_client()?;
+    let http = http_client(&api_origin)?;
     let mut uploaded = 0_usize;
     loop {
         client
@@ -475,7 +470,7 @@ pub async fn drain_media(
     state_dir: &Path,
 ) -> Result<(), SimulatorError> {
     let api_origin = canonical_origin(api_origin)?;
-    let http = http_client()?;
+    let http = http_client(&api_origin)?;
     for item in client.pending_uploads().map_err(|_| SimulatorError::Core)? {
         let reservation = read_bounded_json(http.post(format!("{api_origin}/v1/attachments/reserve"))
             .bearer_auth(token).json(&serde_json::json!({"attachment_id":item.attachment_id.0,"declared_ciphertext_bytes":item.ciphertext_bytes,"declared_ciphertext_sha256":item.ciphertext_sha256}))

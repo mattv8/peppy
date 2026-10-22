@@ -42,6 +42,7 @@ jobs:
         shell: bash
         env:
           FILTER_FORCE_FULL: ${{ github.event_name != 'pull_request' }}
+          PRODUCTION_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/production' }}
           FILTER_RUST: ${{ steps.filter.outputs.rust }}
           FILTER_DESKTOP: ${{ steps.filter.outputs.desktop }}
           FILTER_WEB: ${{ steps.filter.outputs.web }}
@@ -83,17 +84,43 @@ jobs:
 
   release-tooling:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - run: npm install --global corepack@0.36.0
+      - run: corepack enable && pnpm install --frozen-lockfile --filter @peppy/desktop --ignore-scripts
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
       - run: shellcheck infra/release/*.sh
       - run: infra/release/install-git-cliff.sh "$RUNNER_TEMP/bin"
       - run: echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install Android signing test SDK tools
+        run: |
+          set +e
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdkmanager_status"
       - run: infra/release/test-compute-version.sh
       - run: infra/release/test-release-scripts.sh
+      - run: infra/release/test-android-signing.sh
+      - run: infra/release/test-desktop-bundles.sh
+      - name: Test real Linux package normalization
+        run: |
+          sudo apt-get update && sudo apt-get install --yes rpm gnupg cpio file
+          infra/release/test-linux-package-metadata.sh
 
   source-audit:
     timeout-minutes: 10
@@ -120,9 +147,17 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt, clippy
       - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ubuntu-24.04
+          # Cache policy for every Rust job: only production pushes save, so the
+          # quota holds caches that every PR and later run can restore, and a
+          # failure in a later step still saves the compiled dependencies.
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --lib --exclude peppy-push-relay --locked
+      # The integration job runs all workspace tests, including library tests.
       - run: cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check licenses bans sources
@@ -134,19 +169,27 @@ jobs:
     needs: changes
     if: needs.changes.outputs.integration == 'true'
     runs-on: ubuntu-24.04
-    # Uncached workspace and desktop integration builds now exceed 30 minutes.
-    timeout-minutes: 45
+    # Leave cold-cache headroom: workspace tests alone can take over 40 minutes.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.98.1
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          node-version-file: .node-version
-      - run: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @peppy/desktop build
-      - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libpq-dev libsqlite3-dev libssl-dev libsodium-dev libsecret-1-dev libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
-      - run: |
+          key: ubuntu-24.04
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
+      - name: Install cargo-nextest
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          bash infra/ci/install-cargo-nextest.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Run workspace integration tests
+        run: |
+          bash infra/docker/test-seaweedfs-entrypoint.sh
           source infra/compose/test-env.sh
           cleanup() {
             status=$?
@@ -156,8 +199,8 @@ jobs:
           }
           trap cleanup EXIT
           peppy_test_infra_up
-          cargo test --workspace --locked
-          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --ignored
+          cargo nextest run --workspace --locked --profile ci
+          cargo test --workspace --locked --doc
 
   desktop:
     needs: changes
@@ -167,15 +210,24 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    # Uncached Windows Tauri check + test builds take ~30 minutes on hosted runners.
-    timeout-minutes: ${{ matrix.os == 'windows-2025' && 60 || 30 }}
+    # Linux also runs ignored integration tests using the desktop build below.
+    # Windows needs cold-cache headroom for its native Tauri dependencies.
+    timeout-minutes: ${{ matrix.os == 'macos-15' && 30 || 60 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
+      - name: Remove preinstalled package-manager shims
+        if: runner.os == 'Windows'
+        run: npm uninstall --global yarn pnpm
+      - run: npm install --global corepack@0.36.0
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - run: node --test apps/desktop/scripts/generate-tray-icons.test.mjs
+      - name: Verify committed tray icons
+        if: runner.os == 'macOS'
+        run: pnpm --filter @peppy/desktop icons:tray:check
       - run: pnpm --filter @peppy/browser-runtime typecheck
       - run: pnpm --filter @peppy/browser-runtime test
       - run: pnpm --filter @peppy/desktop-ui test
@@ -184,6 +236,13 @@ jobs:
       - run: pnpm --filter @peppy/web typecheck
       - run: pnpm --filter @peppy/web test
       - run: pnpm --filter @peppy/web build
+      - name: Verify native installer artwork
+        if: runner.os == 'macOS'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/installer-tests"
+          "$RUNNER_TEMP/installer-tests/bin/python" -m pip install --require-hashes --only-binary=:all: -r packaging/macos/dmg/requirements.txt
+          PYTHONPATH=packaging/macos/dmg "$RUNNER_TEMP/installer-tests/bin/python" -m unittest discover -s packaging/macos/dmg/tests
+          python3 packaging/windows/installer/tests/test_installer_assets.py
       - if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -File tests/dev/windows-desktop.Tests.ps1
@@ -209,8 +268,29 @@ jobs:
             throw "Native Perl at $perl cannot load IPC::Cmd"
           }
           "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.os }}
+          workspaces: apps/desktop/src-tauri -> target
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
       - run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - name: Run desktop integration tests with the existing build
+        if: runner.os == 'Linux' && needs.changes.outputs.integration == 'true'
+        shell: bash
+        run: |
+          bash infra/docker/test-seaweedfs-entrypoint.sh
+          source infra/compose/test-env.sh
+          cleanup() {
+            status=$?
+            peppy_test_compose logs --no-color || true
+            peppy_test_infra_down || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          peppy_test_infra_up
+          cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -- --ignored
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check licenses bans sources advisories
 
@@ -225,10 +305,26 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      # Like the Rust caches, only production saves Gradle's cache (see the
+      # save step at the end of this job).
+      - name: Restore Gradle cache
+        id: gradle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle.kts', 'apps/android/gradle.properties', 'apps/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.98.1
       - run: rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ubuntu-24.04-android-ndk-27.2.12479018
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
       - run: sudo apt-get update && sudo apt-get install --yes build-essential pkg-config libssl-dev libsodium-dev
       - run: |
           set +e
@@ -237,10 +333,51 @@ jobs:
           sdkmanager_status=${PIPESTATUS[1]}
           set -e
           exit "$sdkmanager_status"
-      - run: |
+      - name: Verify and build Android native libraries
+        run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           infra/compose/verify-android-native.sh
-          cd apps/android && ./gradlew :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Run JVM binding smoke test
+        working-directory: apps/android
+        run: ./gradlew --console=plain :jvm-smoke:run
+      - name: Compile Android unit tests and prepare Robolectric runtimes
+        working-directory: apps/android
+        run: ./gradlew --console=plain :app:compileDebugUnitTestKotlin :app:prepareRobolectricDependencies
+      # Compiled unit tests normally run in about two minutes. A stall fails the
+      # step with JVM thread dumps instead of silently consuming the job budget.
+      - name: Run Android debug unit tests
+        working-directory: apps/android
+        run: |
+          dump_threads() {
+            sleep 420
+            echo "::error::Android unit tests exceeded 7 minutes; dumping JVM threads"
+            jcmd -l || true
+            jcmd -l | awk '$2 !~ /JCmd/ { print $1 }' | while read -r pid; do
+              jcmd "$pid" Thread.print || true
+            done
+          }
+          dump_threads &
+          watchdog_pid=$!
+          trap 'pkill -P "$watchdog_pid" 2>/dev/null || true; kill "$watchdog_pid" 2>/dev/null || true' EXIT
+          timeout --signal=TERM --kill-after=30s 8m ./gradlew --console=plain :app:testDebugUnitTest
+      - name: Lint and assemble Android artifacts
+        working-directory: apps/android
+        run: ./gradlew --console=plain :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Verify release SMS diagnostics policy
+        working-directory: apps/android
+        run: ./gradlew --console=plain :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest -PpeppySmsDiagnostics=true
+      - name: Stop Gradle before caching
+        if: ${{ success() && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        working-directory: apps/android
+        run: ./gradlew --stop
+      - name: Save Gradle cache
+        if: ${{ success() && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
 
   development-tools:
     timeout-minutes: 10
@@ -255,9 +392,10 @@ jobs:
         with:
           just-version: '1.58.0'
       - run: node packages/mobile-design/scripts/generate.mjs --check
+      - run: node packages/desktop-ui/scripts/avatar-palette.mjs --check
       - run: node --test packages/mobile-design/test/*.test.mjs
       - run: python3 -m unittest discover -s tests/dev -p 'test_*.py'
-      - run: bash -n infra/dev/dev.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh && shellcheck infra/dev/dev.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
+      - run: bash -n infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh && shellcheck infra/dev/dev.sh infra/dev/dev-smoke.sh infra/dev/copy-web-assets.sh infra/dev/container-run.sh infra/dev/android.sh infra/dev/android-container-run.sh infra/dev/desktop.sh infra/compose/verify-android-native.sh
       - run: shellcheck .github/scripts/*.sh
       - run: bash .github/scripts/test-ci-scripts.sh
       - run: just --list
@@ -273,6 +411,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: macos-15-swift-bindings
+          save-if: ${{ github.ref == 'refs/heads/production' }}
+          cache-on-failure: true
       - run: |
           cargo build -p peppy-mobile-bindings --locked
           cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir apps/ios/Generated
@@ -286,9 +429,29 @@ jobs:
     needs: [changes, version]
     if: needs.changes.outputs.development_artifacts == 'true'
     with:
+      ref: ${{ github.sha }}
       version: ${{ needs.version.outputs.version }}
       android_version_code: ${{ needs.version.outputs.android_version_code }}
       wix_version: ${{ needs.version.outputs.wix_version }}
+      trusted_update_build: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' }}
+      update_channel: ${{ github.event_name == 'push' && github.ref == 'refs/heads/staging' && 'staging' || '' }}
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_RPM_GPG_KEY: ${{ secrets.PEPPY_RELEASE_RPM_GPG_KEY }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET }}
+      PEPPY_ANDROID_KEYSTORE_BASE64: ${{ secrets.PEPPY_ANDROID_KEYSTORE_BASE64 }}
+      PEPPY_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEYSTORE_PASSWORD }}
+      PEPPY_ANDROID_KEY_ALIAS: ${{ secrets.PEPPY_ANDROID_KEY_ALIAS }}
+      PEPPY_ANDROID_KEY_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEY_PASSWORD }}
 
   container-image:
     uses: ./.github/workflows/build-container.yml
@@ -335,17 +498,23 @@ jobs:
         run: bash .github/scripts/ci-gate.sh
 
   publish-prerelease:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success'"
     needs: [version, gate]
     permissions:
       contents: write
     uses: ./.github/workflows/publish-release.yml
     with:
       version: ${{ needs.version.outputs.version }}
-      channel: prerelease
+      channel: staging
       sha: ${{ github.sha }}
+      trusted_update_build: true
+    secrets:
+      PEPPY_UPDATER_PRIVATE_KEY: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY }}
+      PEPPY_UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.PEPPY_UPDATER_PRIVATE_KEY_PASSWORD }}
+      PEPPY_RELEASE_GPG_KEY: ${{ secrets.PEPPY_RELEASE_GPG_KEY }}
+      PEPPY_RELEASE_GPG_PASSPHRASE: ${{ secrets.PEPPY_RELEASE_GPG_PASSPHRASE }}
   publish-staging-server:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -357,7 +526,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   publish-staging-relay:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/staging' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -369,7 +538,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   publish-production-server:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -381,7 +550,7 @@ jobs:
       sha: ${{ github.sha }}
     secrets: inherit
   publish-production-relay:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success'"
     needs: gate
     uses: ./.github/workflows/publish-community-image.yml
     with:
@@ -391,4 +560,19 @@ jobs:
       tag: edge
       environment: production
       sha: ${{ github.sha }}
+    secrets: inherit
+  stable-release:
+    if: "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/production' && needs.gate.result == 'success' && needs.version.outputs.head_released != 'true' && needs.version.result == 'success' && needs.publish-production-server.result == 'success' && needs.publish-production-relay.result == 'success'"
+    needs: [gate, version, publish-production-server, publish-production-relay]
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: stable-release
+      cancel-in-progress: false
+    uses: ./.github/workflows/release.yml
+    with:
+      bump: auto
+      version: ''
+      dry_run: false
     secrets: inherit

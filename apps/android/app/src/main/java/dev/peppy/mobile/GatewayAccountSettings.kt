@@ -1,6 +1,12 @@
 package dev.peppy.mobile
 
 import android.content.Intent
+import android.content.Context
+import android.content.ContextWrapper
+import android.Manifest
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,6 +18,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,32 +30,62 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.peppy_mobile_bindings.hostedWakeRelayUrl
 
 /** Drop-in Account destination; parent calls GatewayAccountSettings(onChanged). */
 @Composable
 internal fun GatewayAccountSettings(onChanged: () -> Unit) {
     val context = LocalContext.current
     var state by remember { mutableStateOf<GatewayAccountState?>(null) }
+    var gatewayStatus by remember { mutableStateOf<GatewayStatus?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var deleteOpen by remember { mutableStateOf(false) }
     var erase by remember { mutableStateOf("") }
     var revokeTarget by remember { mutableStateOf<GatewayAccountDevice?>(null) }
-    var ownerPairingOpen by remember { mutableStateOf(false) }
     val relayPrefs = remember { context.getSharedPreferences("peppy-relay", 0) }
     var relayEnabled by remember { mutableStateOf(relayPrefs.getBoolean("relay-enabled.v1", false)) }
     var relayOrigin by remember { mutableStateOf(relayPrefs.getString("relay-origin.v1", "") ?: "") }
+    var remoteMessagingEnabled by remember { mutableStateOf(RemoteMessagingPreferences.enabled(context)) }
+    var wakePreference by remember { mutableStateOf(RelayWakeRuntime.preference(context)) }
+    var wakeStatus by remember { mutableStateOf(RelayWakeRuntime.status(context)) }
     val scope = rememberCoroutineScope()
-    suspend fun refresh() { state = withContext(Dispatchers.IO) { GatewayAccountHost.load(context) }; if (state == null) failure = "Could not load devices. Unlock or check the server connection." }
+    DisposableEffect(relayPrefs, context) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            when (key) {
+                "hosted-relay-preference.v1" -> wakePreference = RelayWakeRuntime.preference(context)
+                "hosted-relay-status.v1" -> wakeStatus = RelayWakeRuntime.status(context)
+                "relay-enabled.v1" -> relayEnabled = relayPrefs.getBoolean("relay-enabled.v1", false)
+                "relay-origin.v1" -> relayOrigin = relayPrefs.getString("relay-origin.v1", "") ?: ""
+            }
+        }
+        relayPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { relayPrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    suspend fun refresh() {
+        val loaded = withContext(Dispatchers.IO) { GatewayAccountHost.load(context) }
+        gatewayStatus = withContext(Dispatchers.IO) { NativeGateway.status(context) }
+        state = loaded
+        if (state == null) failure = "Could not load devices. Unlock or check the server connection."
+    }
     LaunchedEffect(Unit) { refresh() }
+    // Lock and recovery may change while this screen remains open. This is local state only; the
+    // explicit Refresh button remains the only roster/server request.
+    LaunchedEffect(Unit) {
+        while (true) {
+            gatewayStatus = withContext(Dispatchers.IO) { NativeGateway.status(context) }
+            delay(1_000)
+        }
+    }
     Column(Modifier.fillMaxWidth().testTag("account-tab-screen")) {
         val account = state
         if (account == null) Text(failure ?: "Loading account…", Modifier.testTag("devices-loading")) else {
-            Section("identity-section", stringResource(R.string.peppy_account)) {
+            Section("identity-section", stringResource(R.string.peppy_account), showDivider = false) {
                 StatusRow("identity-role", "Role", account.self.role)
                 StatusRow("identity-device-id", "This device", account.self.id)
-                if (NativeGateway.status(context).origin == "https://peppy.pro") {
+                if (gatewayStatus?.origin == "https://peppy.pro") {
                     OutlinedButton(onClick = {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account")))
                     }, modifier = Modifier.testTag("hosted-manage-account-button")) {
@@ -67,9 +104,39 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                         ) { Text(if (device.id == account.self.id) "Disconnect" else "Remove") }
                     }
                 }
-                if (account.self.role == "owner" && NativeGateway.status(context).sharedKeysReady) {
-                    OutlinedButton(onClick = { ownerPairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("add-device-button")) {
-                        Text(stringResource(R.string.peppy_production_add_device))
+            }
+            if (account.self.role == "owner" || account.self.role == "gateway") {
+                Section("remote-messaging-section", "Remote messaging") {
+                    Row(Modifier.fillMaxWidth().testTag("remote-messaging-toggle-row")) {
+                        Column(Modifier.weight(1f)) {
+                            Text(stringResource(R.string.peppy_remote_messaging_label))
+                            Text(stringResource(R.string.peppy_remote_messaging_hint))
+                        }
+                        Switch(
+                            checked = remoteMessagingEnabled,
+                            enabled = gatewayStatus?.sharedKeysReady == true && gatewayStatus?.syncPhase != SyncPhase.RECOVERY_REQUIRED,
+                            onCheckedChange = { enabled ->
+                                remoteMessagingEnabled = enabled
+                                RemoteMessagingPreferences.setEnabled(context, enabled)
+                                if (enabled) RemoteMessagingService.resumeOrEnqueue(context) else RemoteMessagingService.stop(context)
+                            },
+                            modifier = Modifier.testTag("remote-messaging-toggle"),
+                        )
+                    }
+                    val statusRes = when (RemoteMessagingRuntime.status()) {
+                        RemoteMessagingStatus.CONNECTED -> R.string.peppy_remote_messaging_status_connected
+                        RemoteMessagingStatus.RECONNECTING -> R.string.peppy_remote_messaging_status_reconnecting
+                        RemoteMessagingStatus.LOCKED -> R.string.peppy_remote_messaging_status_locked
+                    }
+                    if (remoteMessagingEnabled) StatusRow("remote-messaging-status", stringResource(R.string.peppy_remote_messaging_status_label), stringResource(statusRes))
+                    if (gatewayStatus?.syncPhase == SyncPhase.RECOVERY_REQUIRED) Text(stringResource(R.string.peppy_remote_messaging_recovery_required))
+                    else if (gatewayStatus?.sharedKeysReady != true) Text(stringResource(R.string.peppy_remote_messaging_status_locked))
+                    if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                        Text(stringResource(R.string.peppy_remote_messaging_notifications_disabled))
+                        OutlinedButton(
+                            onClick = { context.findActivity()?.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0) },
+                            modifier = Modifier.testTag("remote-messaging-notification-permission"),
+                        ) { Text(stringResource(R.string.peppy_remote_messaging_allow_notifications)) }
                     }
                 }
             }
@@ -77,25 +144,53 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                 Button(onClick = { deleteOpen = true }, modifier = Modifier.testTag("vault-delete-button")) { Text("Delete vault") }
             }
         }
-        Section("relay-health-section", "Wake relay") {
-            OutlinedTextField(relayOrigin, { relayOrigin = it }, label = { Text("Relay HTTPS origin") }, modifier = Modifier.testTag("relay-origin-field"))
-            Row(Modifier.fillMaxWidth()) {
-                Text("Enable wake relay", Modifier.weight(1f))
-                Switch(relayEnabled, { enabled ->
-                    relayEnabled = enabled
-                    if (enabled) {
-                        val origin = CredentialParser.canonicalOrigin(relayOrigin, false)
-                        if (origin == null) { relayEnabled = false; failure = "Enter a canonical HTTPS relay origin." } else {
-                            RelayWakeRuntime.setEnabled(context, origin, true)
-                            if (context.resources.getIdentifier("google_app_id", "string", context.packageName) != 0) {
-                                com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                                    .addOnSuccessListener { RelayWakeRuntime.client?.register(it) }
+        Section("relay-health-section", stringResource(R.string.peppy_wake_section_title), showDivider = account != null) {
+            val hostedRelay = NativeGateway.accountCredential(context)?.let { hostedWakeRelayUrl(it.origin) }
+            if (hostedRelay != null) {
+                val statusText = when (wakeStatus) {
+                    RelayWakeStatus.REGISTERED -> stringResource(R.string.peppy_wake_status_registered)
+                    RelayWakeStatus.RETRYING -> stringResource(R.string.peppy_wake_status_retrying)
+                    RelayWakeStatus.PAUSED -> stringResource(R.string.peppy_wake_status_paused)
+                    RelayWakeStatus.UNAVAILABLE -> stringResource(R.string.peppy_wake_status_unavailable)
+                    RelayWakeStatus.PENDING -> stringResource(R.string.peppy_wake_status_pending)
+                    RelayWakeStatus.MISSING_APP_SUPPORT -> stringResource(R.string.peppy_wake_status_unavailable)
+                    RelayWakeStatus.CLEANUP_PENDING -> stringResource(R.string.peppy_wake_status_paused)
+                }
+                val footer = when (wakeStatus) {
+                    RelayWakeStatus.REGISTERED -> R.string.peppy_wake_footer_registered
+                    RelayWakeStatus.RETRYING -> R.string.peppy_wake_footer_retrying
+                    RelayWakeStatus.PAUSED -> R.string.peppy_wake_footer_paused
+                    RelayWakeStatus.UNAVAILABLE -> R.string.peppy_wake_footer_unavailable_server
+                    RelayWakeStatus.PENDING -> R.string.peppy_wake_footer_pending
+                    RelayWakeStatus.MISSING_APP_SUPPORT -> R.string.peppy_wake_footer_missing_app_support
+                    RelayWakeStatus.CLEANUP_PENDING -> R.string.peppy_wake_cleanup_pending
+                }
+                StatusRow("relay-wake-status", stringResource(R.string.peppy_wake_status_label), statusText)
+                Row(Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.peppy_wake_updates_toggle_label), Modifier.weight(1f).testTag("relay-wake-toggle-label"))
+                    Switch(wakePreference != RelayWakePreference.PAUSED, { enabled ->
+                        wakePreference = if (enabled) RelayWakePreference.AUTOMATIC else RelayWakePreference.PAUSED
+                        RelayWakeRuntime.setPreference(context, wakePreference)
+                    }, modifier = Modifier.testTag("relay-wake-toggle"))
+                }
+                Text(stringResource(footer), Modifier.testTag("relay-wake-footer"))
+            } else {
+                OutlinedTextField(relayOrigin, { relayOrigin = it }, label = { Text("Relay HTTPS origin") }, modifier = Modifier.testTag("relay-origin-field"))
+                Row(Modifier.fillMaxWidth()) {
+                    Text("Enable wake relay", Modifier.weight(1f))
+                    Switch(relayEnabled, { enabled ->
+                        relayEnabled = enabled
+                        if (enabled) {
+                            val origin = CredentialParser.canonicalOrigin(relayOrigin, false)
+                            if (origin == null) { relayEnabled = false; failure = "Enter a canonical HTTPS relay origin." } else {
+                                RelayWakeRuntime.setEnabled(context, origin, true)
                             }
-                        }
-                    } else { RelayWakeRuntime.setEnabled(context, null, false) }
-                }, modifier = Modifier.testTag("relay-enable-toggle"))
+                        } else { RelayWakeRuntime.setEnabled(context, null, false) }
+                    }, modifier = Modifier.testTag("relay-enable-toggle"))
+                }
+                val communityFooter = if (relayEnabled) R.string.peppy_wake_community_relay_enabled else R.string.peppy_wake_community_relay_disabled
+                Text(stringResource(communityFooter), Modifier.testTag("relay-not-configured"))
             }
-            Text(if (relayEnabled) "Relay registration waits for Firebase configuration." else "No relay configured. Sync runs while the app is open.", Modifier.testTag("relay-not-configured"))
         }
         failure?.let { Text(it, Modifier.testTag("account-error")) }
     }
@@ -121,10 +216,10 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
             dismissButton = { OutlinedButton(onClick = { revokeTarget = null }) { Text("Cancel") } },
         )
     }
-    if (ownerPairingOpen) AlertDialog(
-        onDismissRequest = { ownerPairingOpen = false },
-        title = { Text(stringResource(R.string.peppy_production_add_device)) },
-        text = { OwnerPairingSheet(onDismiss = { ownerPairingOpen = false }) },
-        confirmButton = {},
-    )
+}
+
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

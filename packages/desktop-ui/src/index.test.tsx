@@ -7,13 +7,14 @@ import {
   Composer,
   installOverlayScrollbars,
   isRecipientPosition,
+  NavButtons,
+  Panel,
   RecipientPanel,
   RecipientPicker,
   ResizeHandle,
   StatusPopover,
   ConnectionDot,
-  PairPhone,
-  pairingQrPayload,
+  ConversationList,
 } from "./index";
 
 const people = [{ id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 }];
@@ -135,6 +136,11 @@ describe("ConnectionDot", () => {
     expect(dot).toHaveAttribute("title", "Connection: Native host unavailable");
     expect(dot).toHaveAttribute("data-connection-state", "missing-native-host");
   });
+
+  it("marks confirmed server outages for the amber presentation", () => {
+    render(<ConnectionDot state="offline" label="Connection: Offline" serverUnreachable />);
+    expect(screen.getByRole("status")).toHaveAttribute("data-server-unreachable");
+  });
 });
 
 function renderRecipientPanel(props: Partial<ComponentProps<typeof RecipientPanel>> = {}, withLayer = false) {
@@ -169,39 +175,35 @@ function firePointer(target: Element, type: string, pointerId: number, clientX: 
 }
 
 describe("desktop UI controls", () => {
-  it("emits the exact cross-surface JSON QR payload", () => {
-    expect(pairingQrPayload({ httpsOrigin: "https://vault.example", intentToken: "A".repeat(43), expiresInSeconds: 300 }))
-      .toBe(`{"https_origin":"https://vault.example","intent_token":"${"A".repeat(43)}"}`);
+  it("uses a deterministic fallback avatar for conversations without an identity", () => {
+    render(<ConversationList conversations={people} selectedId="conv-a" onSelect={() => {}} />);
+    const avatar = screen.getByRole("button", { name: /Aurora/ }).querySelector(".contact-avatar");
+    expect(avatar).toHaveAttribute("data-avatar-kind", "person");
+    expect(avatar).toHaveAttribute("data-avatar-color");
   });
 
-  it("requires SAS confirmation before approving a claimed phone", async () => {
-    const approve = vi.fn().mockResolvedValue(undefined);
-    render(<PairPhone
-      createIntent={async () => ({ httpsOrigin: "https://example.test", intentToken: "A".repeat(43), expiresInSeconds: 300 })}
-      getStatus={async () => ({ claimed: true, approved: false, keyDigest: "b".repeat(64), sas: "123456", expiresInSeconds: 300 })}
-      approveIntent={approve}
-    />);
-    fireEvent.click(screen.getByTestId("pairing-new-qr-button"));
-    expect(await screen.findByTestId("pairing-qr-image")).toHaveAttribute("src", expect.stringMatching(/^data:image\//));
-    const approval = await screen.findByTestId("pairing-approve-prompt");
-    expect(within(approval).getByTestId("pairing-sas-code")).toHaveTextContent("123456");
-    const button = within(approval).getByRole("button", { name: "Approve pairing" });
-    expect(button).toBeDisabled();
-    fireEvent.click(within(approval).getByRole("checkbox"));
-    fireEvent.click(button);
-    await vi.waitFor(() => expect(approve).toHaveBeenCalledWith("A".repeat(43), "b".repeat(64)));
-  });
+  it("offers a cancellable inline delete confirmation only for blank draft rows", () => {
+    const onDelete = vi.fn();
+    const onCancelDelete = vi.fn();
+    const draft = { id: "draft", name: "New message", preview: "Draft", unread: 0, recipientlessDraft: true, draftOnly: true };
+    const { rerender } = render(<ConversationList conversations={[draft, people[0]]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} />);
 
-  it("never enables approval for a malformed claimed SAS", async () => {
-    render(<PairPhone
-      createIntent={async () => ({ httpsOrigin: "https://example.test", intentToken: "A".repeat(43), expiresInSeconds: 300 })}
-      getStatus={async () => ({ claimed: true, approved: false, keyDigest: "b".repeat(64), sas: "invalid", expiresInSeconds: 300 })}
-      approveIntent={async () => undefined}
-    />);
-    fireEvent.click(screen.getByTestId("pairing-new-qr-button"));
-    const approval = await screen.findByTestId("pairing-approve-prompt");
-    fireEvent.click(within(approval).getByRole("checkbox"));
-    expect(within(approval).getByRole("button", { name: "Approve pairing" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete draft for New message" })).toHaveAttribute("data-delete-conversation-id", "draft");
+    expect(screen.queryByRole("button", { name: /Delete draft for Aurora/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft for New message" }));
+    expect(onDelete).toHaveBeenCalledWith("draft");
+    expect(screen.getByRole("button", { name: "Delete draft for New message" })).toHaveFocus();
+
+    rerender(<ConversationList conversations={[draft]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} deleteConfirmationId="draft" />);
+    const confirmation = screen.getByRole("button", { name: "Confirm delete draft for New message" });
+    fireEvent.keyDown(confirmation, { key: "Escape" });
+    expect(onCancelDelete).toHaveBeenCalledOnce();
+    fireEvent.blur(confirmation);
+    expect(onCancelDelete).toHaveBeenCalledTimes(2);
+
+    rerender(<ConversationList conversations={[draft]} selectedId="draft" onSelect={() => {}} onDelete={onDelete} onCancelDelete={onCancelDelete} />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Delete draft for New message" }), { key: "Escape" });
+    expect(onCancelDelete).toHaveBeenCalledTimes(2);
   });
 
   it("selects recipients with an ARIA combobox keyboard flow", () => {
@@ -414,6 +416,7 @@ describe("desktop UI controls", () => {
     expect(toggle).toHaveAttribute("aria-controls", "thread-list");
     fireEvent.click(toggle);
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(screen.getByRole("button", { name: "New conversation" }).querySelector("svg")).toHaveClass("lucide-message-square-plus");
     expect(toggleSidebar).toHaveBeenCalledOnce();
     expect(newMessage).toHaveBeenCalledOnce();
   });
@@ -421,6 +424,68 @@ describe("desktop UI controls", () => {
   it("does not render main-window conversation controls in the composer", () => {
     render(<AppTitlebar isComposer onMinimize={() => {}} onMaximize={() => {}} onClose={() => {}} onToggleSidebar={() => {}} onNewMessage={() => {}} />);
     expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
+  });
+
+  it.each(["rail", "titlebar"] as const)("renders %s navigation buttons with badges and view behavior", (orientation) => {
+    const onView = vi.fn();
+    const onToggleList = vi.fn();
+    render(<NavButtons
+      orientation={orientation}
+      activeView="conversations"
+      onView={onView}
+      onToggleList={onToggleList}
+      listCollapsed={false}
+      threadListId="thread-list"
+      notificationUnread={100}
+      contactsPending={100}
+    />);
+    const navigation = screen.getByRole("navigation", { name: "Main navigation" });
+    const conversations = screen.getByRole("button", { name: "Conversations" });
+    expect(navigation).toHaveAttribute("data-orientation", orientation);
+    expect(conversations).toHaveAttribute("aria-current", "page");
+    expect(conversations).toHaveAttribute("aria-expanded", "true");
+    expect(conversations).toHaveAttribute("aria-controls", "thread-list");
+    expect(screen.getByRole("button", { name: "Contacts, 100 pending" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Notifications, 100 unread" })).toBeInTheDocument();
+    expect(screen.getAllByText("99+")).toHaveLength(2);
+    fireEvent.click(conversations);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(onToggleList).toHaveBeenCalledOnce();
+    expect(onView).toHaveBeenCalledWith("settings");
+    if (orientation === "titlebar") expect(navigation).toHaveAttribute("id", "titlebar-navigation");
+    else expect(navigation).not.toHaveAttribute("id");
+  });
+
+  it("places titlebar navigation after status on macOS and first on Windows and Linux", () => {
+    const navigation = <NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />;
+    const { rerender } = render(<AppTitlebar platform="macos" status={<span>Status node</span>} navigation={navigation} />);
+    const titlebar = document.getElementById("desktop-titlebar")!;
+    const titlebarNavigation = document.getElementById("titlebar-navigation")!;
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "trailing");
+    expect(titlebar.lastElementChild).toBe(titlebarNavigation);
+    expect(titlebarNavigation.previousElementSibling).toHaveAttribute("id", "titlebar-status");
+    expect(titlebarNavigation).not.toHaveAttribute("data-tauri-drag-region");
+
+    rerender(<AppTitlebar platform="windows" navigation={navigation} />);
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "leading");
+    expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
+
+    rerender(<AppTitlebar platform="linux" navigation={navigation} />);
+    expect(titlebar).toHaveAttribute("data-navigation-placement", "leading");
+    expect(titlebar.firstElementChild).toBe(document.getElementById("titlebar-navigation"));
+  });
+
+  it("ignores titlebar navigation in the composer", () => {
+    render(<AppTitlebar isComposer platform="macos" navigation={<NavButtons orientation="titlebar" activeView="conversations" onView={() => {}} />} />);
+    expect(document.getElementById("titlebar-navigation")).not.toBeInTheDocument();
+    expect(document.getElementById("desktop-titlebar")).not.toHaveAttribute("data-navigation-placement");
+  });
+
+  it("keeps the desktop rail navigation when Panel uses shared nav buttons", () => {
+    render(<Panel activeView="conversations" onView={() => {}} threadListId="thread-list" />);
+    const rail = document.getElementById("desktop-rail");
+    expect(rail).toBeInTheDocument();
+    expect(within(rail!).getByRole("navigation", { name: "Main navigation" })).toHaveAttribute("data-orientation", "rail");
   });
 
   it("does not end a drag when its parent rerenders", () => {

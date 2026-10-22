@@ -1,8 +1,106 @@
+import java.io.ByteArrayInputStream
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
+import java.util.Base64
+import javax.xml.parsers.DocumentBuilderFactory
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+fun debugEnabled(): Boolean {
+    val value = System.getenv("DEBUG") ?: ""
+    return when (value) {
+        "" -> false
+        "true", "1" -> true
+        "false", "0" -> false
+        else -> throw GradleException("DEBUG must be true, false, 1, or 0; got '$value'")
+    }
+}
+
+val selectedAndroidAbi = providers.gradleProperty("peppyAndroidAbi").orNull?.let { value ->
+    value.takeIf { it in setOf("arm64-v8a", "x86_64") }
+        ?: throw GradleException("peppyAndroidAbi must be arm64-v8a or x86_64; got '$value'")
+}
+
+fun strictDebugBoolean(name: String): Boolean = providers.gradleProperty(name).orNull?.let { value ->
+    when (value) {
+        "true" -> true
+        "false" -> false
+        else -> throw GradleException("$name must be true or false; got '$value'")
+    }
+} ?: false
+
+val peppySmsDiagnostics = strictDebugBoolean("peppySmsDiagnostics")
+
+// Robolectric's own runtime download has no network timeout and can hang the test worker, so
+// Gradle stages the framework jars and tests run Robolectric offline. These must match the SDKs
+// in the tests' @Config annotations (30, 31, 34, 35) for this Robolectric version; a missing jar
+// fails the test immediately. Each needs its own configuration, or Gradle keeps only the newest.
+val robolectricDependencyDirectory = layout.buildDirectory.dir("robolectric-dependencies")
+val robolectricDependencies = listOf(
+    "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
+    "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
+    "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",
+    "org.robolectric:android-all-instrumented:15-robolectric-12650502-i7",
+).mapIndexed { index, coordinate ->
+    configurations.create("robolectricDependency$index").also { configuration ->
+        dependencies.add(configuration.name, coordinate)
+    }
+}
+val prepareRobolectricDependencies = tasks.register<Sync>("prepareRobolectricDependencies") {
+    from(robolectricDependencies)
+    into(robolectricDependencyDirectory)
+}
+
+private val certificatePemPattern = Regex(
+    """\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----\s*\z""",
+)
+
+fun validatedDevelopmentTlsCertificate(certificatePem: String): X509Certificate {
+    val encodedCertificate = certificatePemPattern.matchEntire(certificatePem)?.groupValues?.get(1)
+        ?: throw GradleException("Development TLS certificate must contain exactly one CERTIFICATE PEM block")
+    val certificateBytes = runCatching { Base64.getMimeDecoder().decode(encodedCertificate) }.getOrElse { error ->
+        throw GradleException("Development TLS certificate is malformed", error)
+    }
+    val certificates = runCatching {
+        CertificateFactory.getInstance("X.509").generateCertificates(ByteArrayInputStream(certificateBytes))
+    }.getOrElse { error ->
+        throw GradleException("Development TLS certificate is malformed", error)
+    }
+    if (certificates.size != 1) {
+        throw GradleException("Development TLS certificate must contain exactly one certificate")
+    }
+    val certificate = certificates.single() as? X509Certificate
+        ?: throw GradleException("Development TLS certificate is not an X.509 certificate")
+    if (!certificate.encoded.contentEquals(certificateBytes)) {
+        throw GradleException("Development TLS certificate contains unexpected data")
+    }
+    if (certificate.basicConstraints < 0) {
+        throw GradleException("Development TLS certificate must be a CA certificate")
+    }
+    runCatching(certificate::checkValidity).getOrElse { error ->
+        throw GradleException("Development TLS certificate is expired or not yet valid", error)
+    }
+    return certificate
+}
+
+fun developmentTlsPem(certificate: X509Certificate): String {
+    val encodedCertificate = Base64.getMimeEncoder(64, byteArrayOf('\n'.code.toByte())).encodeToString(certificate.encoded)
+    return "-----BEGIN CERTIFICATE-----\n$encodedCertificate\n-----END CERTIFICATE-----\n"
+}
+
+val developmentTlsEnabled = debugEnabled()
+val developmentTlsCertificate = System.getenv("PEPPY_DEV_TLS_CERT")?.takeUnless(String::isBlank)?.let { configuredPath ->
+    File(configuredPath).also { certificate ->
+        if (!certificate.isAbsolute) {
+            throw GradleException("PEPPY_DEV_TLS_CERT must be an absolute path")
+        }
+    }
+}
+val developmentTlsResources = layout.buildDirectory.dir("generated/res/devTls/debug")
 
 // Operator configuration is deliberately local. Builds without google-services.json keep FCM
 // optional and must not require or commit provider credentials.
@@ -29,14 +127,27 @@ android {
             providers.environmentVariable("PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID"),
         ).orNull.orEmpty()
         buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
+        buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
-        ndk { abiFilters += setOf("arm64-v8a", "x86_64") }
+        ndk {
+            abiFilters.clear()
+            abiFilters.addAll(selectedAndroidAbi?.let(::setOf) ?: setOf("arm64-v8a", "x86_64"))
+        }
     }
 
     buildFeatures {
         compose = true
         // BuildConfig.DEBUG gates the loopback-only cleartext development origin.
         buildConfig = true
+    }
+
+    buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", peppySmsDiagnostics.toString())
+        }
+        getByName("release") {
+            buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
+        }
     }
 
     compileOptions {
@@ -47,6 +158,7 @@ android {
 
     sourceSets {
         getByName("main").jniLibs.srcDir("src/main/jniLibs")
+        getByName("debug").res.srcDir(developmentTlsResources)
     }
 
     testOptions {
@@ -55,12 +167,22 @@ android {
             all { test ->
                 // Robolectric tests exercise the real generated bindings against the host build of
                 // the same Rust crate (SQLCipher + libsodium); there is no mock message store.
-                test.systemProperty(
-                    "uniffi.component.peppy_mobile_bindings.libraryOverride",
-                    rootProject.projectDir.resolve(
-                        "../../target/debug/" + System.mapLibraryName("peppy_mobile_bindings")
-                    ).canonicalPath,
-                )
+                test.dependsOn(prepareRobolectricDependencies)
+                test.systemProperty("robolectric.offline", "true")
+                test.systemProperty("robolectric.dependency.dir", robolectricDependencyDirectory.get().asFile.canonicalPath)
+                val nativeLibrary = rootProject.projectDir.resolve(
+                    "../../target/debug/" + System.mapLibraryName("peppy_mobile_bindings")
+                ).canonicalFile
+                test.systemProperty("uniffi.component.peppy_mobile_bindings.libraryOverride", nativeLibrary.path)
+                // Track the library's contents so a native-only change can never reuse a cached test result.
+                test.inputs.file(nativeLibrary)
+                    .withPropertyName("peppyBindingsLibrary")
+                    .withPathSensitivity(PathSensitivity.NONE)
+                if (System.getenv("CI") == "true") {
+                    test.testLogging {
+                        events("started", "passed", "skipped", "failed")
+                    }
+                }
             }
         }
     }
@@ -70,6 +192,7 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2025.10.01"))
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.credentials:credentials:1.5.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
@@ -105,4 +228,130 @@ dependencies {
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.10.01"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+val generateDebugNetworkSecurityConfig = tasks.register("generateDebugNetworkSecurityConfig") {
+    inputs.property("developmentTlsEnabled", developmentTlsEnabled)
+    if (developmentTlsEnabled && developmentTlsCertificate != null) {
+        inputs.file(developmentTlsCertificate).optional()
+    }
+    outputs.dir(developmentTlsResources)
+
+    doLast {
+        val resourcesDirectory = developmentTlsResources.get().asFile
+        val rawDirectory = resourcesDirectory.resolve("raw")
+        val xmlDirectory = resourcesDirectory.resolve("xml")
+        resourcesDirectory.deleteRecursively()
+        xmlDirectory.mkdirs()
+
+        val tlsTrustAnchors = if (developmentTlsEnabled) {
+            val certificateFile = developmentTlsCertificate
+                ?: throw GradleException("DEBUG=true requires PEPPY_DEV_TLS_CERT")
+            if (!certificateFile.isFile) {
+                throw GradleException("DEBUG=true requires CA certificate at ${certificateFile.path}")
+            }
+            val certificate = validatedDevelopmentTlsCertificate(certificateFile.readText())
+            rawDirectory.mkdirs()
+            rawDirectory.resolve("peppy_dev_tls_ca.pem").writeText(developmentTlsPem(certificate))
+            """
+                <trust-anchors>
+                    <certificates src="system" />
+                    <certificates src="@raw/peppy_dev_tls_ca" />
+                </trust-anchors>
+            """.trimIndent()
+        } else {
+            ""
+        }
+
+        xmlDirectory.resolve("network_security_config.xml").writeText(
+            """
+                <?xml version="1.0" encoding="utf-8"?>
+                <network-security-config>
+                    <base-config cleartextTrafficPermitted="false" />
+                    <domain-config cleartextTrafficPermitted="true">
+                        <domain includeSubdomains="false">127.0.0.1</domain>
+                        <domain includeSubdomains="false">localhost</domain>
+                        <domain includeSubdomains="false">::1</domain>
+                        <domain includeSubdomains="false">10.0.2.2</domain>
+                        $tlsTrustAnchors
+                    </domain-config>
+                </network-security-config>
+            """.trimIndent().trimStart() + "\n",
+        )
+    }
+}
+
+val debugResourceConsumerTasks = setOf(
+    "preDebugBuild",
+    "mapDebugSourceSetPaths",
+    "generateDebugResources",
+    "packageDebugResources",
+    "extractDeepLinksDebug",
+    "parseDebugLocalResources",
+    "mergeDebugResources",
+    "processDebugResources",
+    "preDebugAndroidTestBuild",
+    "mapDebugAndroidTestSourceSetPaths",
+    "generateDebugAndroidTestResources",
+    "mergeDebugAndroidTestResources",
+    "processDebugAndroidTestResources",
+)
+
+tasks.matching { it.name in debugResourceConsumerTasks }.configureEach {
+    dependsOn(generateDebugNetworkSecurityConfig)
+}
+
+tasks.register("verifyDevTlsNetworkSecurityConfig") {
+    dependsOn(generateDebugNetworkSecurityConfig)
+
+    doLast {
+        val generatedResources = layout.buildDirectory.dir("generated/res/devTls/debug").get().asFile
+        val config = generatedResources.resolve("xml/network_security_config.xml")
+        check(config.isFile) { "Debug builds must generate a network security configuration" }
+        DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(config)
+        val configText = config.readText()
+        val localDomains = listOf("127.0.0.1", "localhost", "::1", "10.0.2.2")
+        check(localDomains.all { domain -> configText.contains(">$domain</domain>") }) {
+            "Debug configuration must include every local development host"
+        }
+        val certificate = generatedResources.resolve("raw/peppy_dev_tls_ca.pem")
+        if (developmentTlsEnabled) {
+            check(certificate.isFile) { "Enabled development TLS must generate a debug-only CA resource" }
+            check(configText.contains("<certificates src=\"system\" />")) {
+                "Development TLS must retain system trust anchors"
+            }
+            check(configText.contains("<certificates src=\"@raw/peppy_dev_tls_ca\" />")) {
+                "Development TLS must trust its debug-only CA resource"
+            }
+        } else {
+            check(!certificate.exists()) { "Disabled development TLS must not generate a CA resource" }
+        }
+    }
+}
+
+tasks.register("verifyDevTlsCertificateValidation") {
+    onlyIf { developmentTlsEnabled && developmentTlsCertificate?.isFile == true }
+
+    doLast {
+        val certificatePem = developmentTlsCertificate!!.readText()
+        check(runCatching {
+            validatedDevelopmentTlsCertificate(
+                certificatePem + "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n",
+            )
+        }.isFailure) { "Certificate and private-key PEM input must be rejected" }
+        check(runCatching {
+            validatedDevelopmentTlsCertificate(certificatePem.trimEnd() + "\n" + certificatePem)
+        }.isFailure) { "Multiple certificate PEM blocks must be rejected" }
+    }
+}
+
+tasks.register("verifyReleaseDevTlsResources") {
+    dependsOn("processReleaseResources")
+
+    doLast {
+        val releaseResources = layout.buildDirectory.dir("intermediates/packaged_res/release/packageReleaseResources").get().asFile
+        check(!releaseResources.resolve("raw/peppy_dev_tls_ca.pem").exists()) {
+            "Release resources must not contain the development TLS CA"
+        }
+    }
 }

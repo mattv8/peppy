@@ -1,0 +1,13 @@
+# This is a maintained lock file for vendored crate upstream audit coverage.
+# It contains a single registry entry for the upstream libsodium-sys-stable
+# package to ensure cargo-audit covers the vendored local path dependency that
+# cargo-deny skips. This is NOT the crate's own lockfile; it is a CI input.
+# See vendor/libsodium-sys-stable/PEPPY.md for audit coverage rationale.
+
+version = 3
+
+[[package]]
+name = "libsodium-sys-stable"
+version = "1.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b04bf6da2c98b727af37ab62cb505f4d751b975b034a9b9ad491d333b0564e"

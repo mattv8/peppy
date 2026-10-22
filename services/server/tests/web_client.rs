@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode, header},
-    routing::get,
+    routing::{get, post},
 };
 use http_body_util::BodyExt;
 use peppy_server::web_client::{WebClientConfig, wrap};
@@ -20,11 +20,10 @@ fn app_for_host(host: &str) -> (TempDir, Router) {
     app_for_host_and_account_url(host, None)
 }
 
-fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempDir, Router) {
+fn assets() -> TempDir {
     let assets = TempDir::new().unwrap();
     fs::write(assets.path().join("index.html"), "<main>Peppy</main>").unwrap();
     fs::create_dir(assets.path().join("assets")).unwrap();
-    fs::create_dir(assets.path().join("core")).unwrap();
     fs::write(
         assets.path().join("assets/app-1234abcd.js"),
         "console.log(1)",
@@ -35,6 +34,7 @@ fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempD
         "self.onconnect = () => {};",
     )
     .unwrap();
+    fs::create_dir(assets.path().join("core")).unwrap();
     fs::write(
         assets.path().join("core/peppy_browser_core.wasm"),
         [0, 97, 115, 109],
@@ -46,6 +46,53 @@ fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempD
     )
     .unwrap();
     fs::write(assets.path().join("assets/peppy.ttf"), []).unwrap();
+    assets
+}
+
+fn app_for_config(config: WebClientConfig) -> Router {
+    let inner = Router::new()
+        .route("/v1/ping", get(|| async { "api" }))
+        .route("/healthz", get(|| async { "healthy" }))
+        .route("/readyz", get(|| async { "ready" }))
+        .route("/__release", get(|| async { "release" }))
+        .route("/file/x", get(|| async { "file" }))
+        .route("/hosted/v1/enrollment/config", get(|| async { "config" }))
+        .route(
+            "/hosted/v1/web/app-session",
+            post(|| async { StatusCode::CREATED }).delete(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/hosted/v1/web/app-account",
+            get(|| async { StatusCode::UNAUTHORIZED }),
+        )
+        .route(
+            "/hosted/v1/web/provisioning",
+            post(|| async { "provisioning" }),
+        )
+        .route(
+            "/hosted/v1/web/provisioning/complete",
+            post(|| async { "complete" }),
+        )
+        .route(
+            "/hosted/v1/web/app-authorize",
+            get(|| async { "authorize" }),
+        )
+        .fallback(|| async { StatusCode::IM_A_TEAPOT });
+    wrap(inner, config)
+}
+
+fn root_app() -> (TempDir, Router) {
+    let assets = assets();
+    let config = WebClientConfig::for_all_hosts(
+        assets.path().into(),
+        Url::parse("http://localhost:7000/v1").unwrap(),
+    )
+    .unwrap();
+    (assets, app_for_config(config))
+}
+
+fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempDir, Router) {
+    let assets = assets();
     let config = WebClientConfig::new(
         host.into(),
         assets.path().into(),
@@ -58,11 +105,7 @@ fn app_for_host_and_account_url(host: &str, account_url: Option<&str>) -> (TempD
             .unwrap(),
         None => config,
     };
-    let inner = Router::new()
-        .route("/v1/ping", get(|| async { "api" }))
-        .route("/healthz", get(|| async { "healthy" }))
-        .fallback(|| async { StatusCode::IM_A_TEAPOT });
-    (assets, wrap(inner, config))
+    (assets, app_for_config(config))
 }
 
 #[tokio::test]
@@ -193,6 +236,259 @@ async fn serves_app_assets_config_and_api_only_on_the_configured_host() {
         .await
         .unwrap();
     assert_eq!(other_host.status(), StatusCode::IM_A_TEAPOT);
+}
+
+#[tokio::test]
+async fn app_host_forwards_only_exact_enrollment_paths_with_method_unchanged() {
+    let (_assets, app) = app();
+    for (path, method, status) in [
+        ("/hosted/v1/enrollment/config", "GET", StatusCode::OK),
+        (
+            "/hosted/v1/enrollment/config?probe=1",
+            "GET",
+            StatusCode::OK,
+        ),
+        ("/hosted/v1/web/app-session", "POST", StatusCode::CREATED),
+        (
+            "/hosted/v1/web/app-session",
+            "DELETE",
+            StatusCode::NO_CONTENT,
+        ),
+        (
+            "/hosted/v1/web/app-account",
+            "GET",
+            StatusCode::UNAUTHORIZED,
+        ),
+        ("/hosted/v1/web/provisioning", "POST", StatusCode::OK),
+        (
+            "/hosted/v1/web/provisioning/complete",
+            "POST",
+            StatusCode::OK,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(path, Some("app.example.test"), method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
+
+    // Methods the backend does not route stay the backend's decision (405), not the SPA's.
+    let wrong_method = app
+        .clone()
+        .oneshot(request(
+            "/hosted/v1/enrollment/config",
+            Some("app.example.test"),
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let no_spa_on_post = app
+        .clone()
+        .oneshot(request(
+            "/hosted/v1/web/app-session",
+            Some("app.example.test"),
+            "PUT",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(no_spa_on_post.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    for path in [
+        "/hosted",
+        "/hosted/",
+        "/hosted/v1",
+        "/hosted/v1/enrollment",
+        "/hosted/v1/enrollment/config/",
+        "/hosted/v1/enrollment/config/x",
+        "/hosted/v1/web/app-session/",
+        "/hosted/v1/web/app-session/x",
+        "/hosted/v1/web/app-account/",
+        "/hosted/v1/web/provisioning/complete/x",
+        "/hosted/v1/web/app-authorize",
+        "/hosted/v1/web/account",
+        "/hosted/v1/account/billing",
+        "/hosted/v1/web/app-session%2F",
+    ] {
+        for method in ["GET", "POST", "DELETE"] {
+            let response = app
+                .clone()
+                .oneshot(request(path, Some("app.example.test"), method))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn account_host_and_root_mode_do_not_forward_app_enrollment_paths() {
+    let (_assets, app) = app();
+    let account = app
+        .clone()
+        .oneshot(request(
+            "/hosted/v1/web/app-authorize",
+            Some("api.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(account.status(), StatusCode::OK);
+
+    let (_assets, root) = root_app();
+    let response = root
+        .oneshot(request("/hosted/v1/web/app-session", None, "POST"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn app_host_shell_sends_no_referrer_while_assets_keep_same_origin() {
+    let (_assets, app) = app();
+    let shell = app
+        .clone()
+        .oneshot(request(
+            "/?enrollment_code=abc&state=def",
+            Some("app.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(shell.headers()[header::REFERRER_POLICY], "no-referrer");
+
+    let asset = app
+        .oneshot(request(
+            "/assets/app-1234abcd.js",
+            Some("app.example.test"),
+            "GET",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(asset.headers()[header::REFERRER_POLICY], "same-origin");
+
+    let (_assets, root) = root_app();
+    let root_shell = root.oneshot(request("/", None, "GET")).await.unwrap();
+    assert_eq!(root_shell.headers()[header::REFERRER_POLICY], "same-origin");
+}
+
+#[tokio::test]
+async fn root_mode_serves_all_hosts_without_parsing_host_and_keeps_api_errors() {
+    let (_assets, app) = root_app();
+    for host in [
+        None,
+        Some("community.example.test"),
+        Some("bad host"),
+        Some("app.example.test:99999"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("/", host, "GET"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{host:?}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            response
+                .headers()
+                .contains_key(header::CONTENT_SECURITY_POLICY)
+        );
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+    }
+
+    let config = app
+        .clone()
+        .oneshot(request("/web/config.json", None, "GET"))
+        .await
+        .unwrap();
+    assert_eq!(config.status(), StatusCode::OK);
+    assert_eq!(
+        config
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        br#"{"apiOrigin":"http://localhost:7000/","version":1}"#,
+    );
+
+    let api_error = app
+        .clone()
+        .oneshot(request("/v1/missing", None, "GET"))
+        .await
+        .unwrap();
+    assert_eq!(api_error.status(), StatusCode::IM_A_TEAPOT);
+    assert_ne!(
+        api_error.headers().get(header::CONTENT_TYPE),
+        Some(&axum::http::HeaderValue::from_static(
+            "text/html; charset=utf-8"
+        ))
+    );
+
+    for (path, method, status) in [
+        ("/v1/x", "POST", StatusCode::IM_A_TEAPOT),
+        ("/healthz", "GET", StatusCode::OK),
+        ("/readyz", "GET", StatusCode::OK),
+        ("/__release", "GET", StatusCode::OK),
+        ("/file/x", "GET", StatusCode::OK),
+        ("/account", "GET", StatusCode::NOT_FOUND),
+        ("/hosted", "GET", StatusCode::NOT_FOUND),
+        ("/signin", "GET", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(path, None, method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
+
+    let head = app
+        .clone()
+        .oneshot(request("/assets/app-1234abcd.js", None, "HEAD"))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(
+        head.headers()[header::CONTENT_TYPE],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(
+        head.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    assert!(head.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+
+    for (path, method, status) in [
+        (
+            "/assets/app-1234abcd.js",
+            "POST",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("/%2e%2e/secret", "GET", StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(path, None, method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
 }
 
 #[tokio::test]

@@ -1,30 +1,118 @@
 //! Regression tests for the DU security review (reports/DU-security-review.md).
 use crate::{
-    credentials::{parse_credential, tests::credential_json, tests::TOKEN},
+    AppState, PreparedPublicCopy,
+    credentials::{parse_credential, tests::TOKEN, tests::credential_json},
     secure_store::{MemoryStore, SecretStore},
     session::Session,
-    sync::{self, classify, next_backoff, Failure, MediaOutcome, STABLE_CONNECTION},
-    tests::{fixture_at, gateway, input, noop, open, routed, PHRASE},
-    AppState, PreparedPublicCopy,
+    sync::{self, Failure, MediaOutcome, STABLE_CONNECTION, classify, next_backoff},
+    tests::{PHRASE, fixture_at, gateway, input, noop, open, routed},
 };
 use axum::{
+    Json, Router,
     extract::{Path as AxumPath, Query},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
-    Json, Router,
 };
 use peppy_client_core::{Cursor, RawSnapshotRecord, SnapshotPurpose};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicU16, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicU16, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 const TOKEN2: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+struct CountingStore {
+    inner: MemoryStore,
+    gets: AtomicUsize,
+}
+
+impl SecretStore for CountingStore {
+    fn get(
+        &self,
+        account: &str,
+    ) -> crate::error::BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &[u8]) -> crate::error::BridgeResult<()> {
+        self.inner.set(account, secret)
+    }
+}
+
+struct FailingStore;
+
+impl SecretStore for FailingStore {
+    fn get(
+        &self,
+        _account: &str,
+    ) -> crate::error::BridgeResult<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        Err(crate::error::BridgeError::new(
+            "secure-store-unavailable",
+            "unavailable",
+        ))
+    }
+
+    fn set(&self, _account: &str, _secret: &[u8]) -> crate::error::BridgeResult<()> {
+        Err(crate::error::BridgeError::new(
+            "secure-store-unavailable",
+            "unavailable",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn cached_native_session_does_not_reread_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(CountingStore {
+        inner: MemoryStore::default(),
+        gets: AtomicUsize::new(0),
+    });
+    let vault = uuid::Uuid::new_v4().to_string();
+    let device = uuid::Uuid::new_v4().to_string();
+    let state = AppState::new(root.path().to_path_buf(), store.clone(), noop());
+    crate::activate_import(
+        &state,
+        credential("http://127.0.0.1:9", &vault, &device, TOKEN),
+    )
+    .await
+    .unwrap();
+    let before = store.gets.load(Ordering::SeqCst);
+    assert!(state.session().await.unwrap().is_some());
+    assert_eq!(store.gets.load(Ordering::SeqCst), before);
+}
+
+#[tokio::test]
+async fn snapshot_loading_propagates_secure_store_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let binding = crate::credentials::Binding {
+        origin: "https://example.test".into(),
+        vault_id: uuid::Uuid::new_v4().to_string(),
+        device_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let state = AppState::new(root.path().to_path_buf(), Arc::new(FailingStore), noop());
+    state
+        .update_config(|config| {
+            config.select_origin(&binding.origin);
+            config.remember(&binding);
+            config.active = Some(binding);
+        })
+        .unwrap();
+
+    assert_eq!(
+        crate::snapshot_session(&state)
+            .await
+            .err()
+            .expect("expected store error")
+            .code,
+        "secure-store-unavailable"
+    );
+}
 
 async fn serve(router: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -66,33 +154,76 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let commands = declared_commands();
     let registered = include_str!("lib.rs");
     let hosted = include_str!("hosted/mod.rs");
-    let join = include_str!("join.rs");
+    let enrollment = include_str!("enrollment.rs");
     for command in &commands {
         assert!(
+            registered.contains(&format!("enrollment::{command},"))
+                || !command.starts_with("enrollment_"),
+            "{command} is declared but not registered in generate_handler"
+        );
+        assert!(
             registered.contains(&format!("fn {command}("))
-                || [hosted, join].iter().any(|source| {
+                || [hosted, enrollment].iter().any(|source| {
                     source.contains(&format!("pub async fn {command}("))
                         || source.contains(&format!("pub fn {command}("))
                 }),
             "{command} declared in the app manifest but not defined"
         );
     }
+
     let composer = permissions(include_str!("../capabilities/composer.json"));
     let main = permissions(include_str!("../capabilities/default.json"));
+    assert!(commands.contains(&"load_history".to_owned()));
+    assert!(registered.contains("fn load_history("));
+    let handler = &registered[registered.find("tauri::generate_handler![").unwrap()..];
+    assert!(handler.contains("\n        load_history,"));
+    assert!(crate::COMPOSER_COMMANDS.contains(&"load_history"));
+    assert!(main.contains("allow-load-history"));
+    assert!(composer.contains("allow-load-history"));
+    for command in [
+        "request_attachment_download",
+        "media_page",
+        "open_media",
+        "load_media",
+        "close_media",
+    ] {
+        assert!(commands.contains(&command.to_owned()));
+        assert!(handler.contains(&format!("\n        {command},")));
+        assert!(crate::COMPOSER_COMMANDS.contains(&command));
+        assert!(main.contains(&allow(command)));
+        assert!(composer.contains(&allow(command)));
+    }
+    for command in [
+        "enrollment_begin_vault_request",
+        "enrollment_vault_request_status",
+        "enrollment_create_vault",
+        "enrollment_rotate_phone",
+        "enrollment_cancel_phone",
+        "reveal_vault_secret",
+        "enrollment_start_over",
+    ] {
+        assert!(registered.contains(&format!("enrollment::{command},")));
+        assert!(commands.contains(&command.to_owned()));
+        assert!(main.contains(&allow(command)));
+    }
     let app_permissions = |set: &HashSet<String>| {
         set.iter()
             .filter(|p| !p.contains(':'))
             .cloned()
             .collect::<HashSet<_>>()
     };
-    let expected: HashSet<String> = crate::COMPOSER_COMMANDS.iter().map(|c| allow(c)).collect();
+    let expected: HashSet<String> = crate::COMPOSER_COMMANDS
+        .iter()
+        .map(|command| allow(command))
+        .chain(std::iter::once("allow-report-update-activity".into()))
+        .collect();
     assert!(expected.contains("allow-close-head-panel"));
     assert_eq!(app_permissions(&composer), expected);
     for main_only in [
         "configure_server",
-        "import_credentials",
         "unlock_sync",
         "publish_attachment",
+        "discard_draft",
         "open_composer",
         "set_start_at_login",
         "popout_conversation",
@@ -102,10 +233,10 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "hosted_sign_out",
         "hosted_open_billing",
         "hosted_provision",
-        "join_start",
-        "join_status",
-        "join_cancel",
-        "join_confirm",
+        "check_for_updates",
+        "restart_for_update",
+        "set_automatic_updates",
+        "defer_update",
     ] {
         assert!(
             !composer.contains(&allow(main_only)),
@@ -128,20 +259,40 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
 }
 
 #[test]
+fn device_management_commands_are_registered_for_the_main_window_only() {
+    let commands = declared_commands();
+    let registered = include_str!("lib.rs");
+    let main = permissions(include_str!("../capabilities/default.json"));
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    for command in [
+        "list_devices",
+        "revoke_device",
+        "request_contact_sync",
+        "get_contact_sync_request",
+    ] {
+        assert!(
+            commands.contains(&command.to_owned()),
+            "{command} is not declared"
+        );
+        assert!(
+            registered.contains(&format!("\n        {command},")),
+            "{command} is not registered"
+        );
+        assert!(main.contains(&allow(command)), "main lacks {command}");
+        assert!(
+            !composer.contains(&allow(command)),
+            "composer can call {command}"
+        );
+    }
+}
+
+#[test]
 fn runtime_window_checks_back_the_acl() {
-    let conversation = peppy_client_core::ConversationId::new().to_string();
-    let label = format!("composer-{conversation}");
     assert!(crate::require_main("main").is_ok());
     assert_eq!(
-        crate::require_main(&label).unwrap_err().code,
+        crate::require_main("composer-any").unwrap_err().code,
         "window-context"
     );
-    assert!(crate::check_conversation_scope("main", None).is_ok());
-    assert!(crate::check_conversation_scope(&label, Some(&conversation)).is_ok());
-    let other = peppy_client_core::ConversationId::new().to_string();
-    assert!(crate::check_conversation_scope(&label, Some(&other)).is_err());
-    assert!(crate::check_conversation_scope(&label, None).is_err());
-    assert!(crate::check_conversation_scope("head-x", Some(&conversation)).is_err());
 }
 
 // ---- 2. Serialized import, token rotation and session cancellation -----------------------
@@ -246,7 +397,7 @@ async fn token_rotation_replaces_and_cancels_the_session_and_keeps_the_key() {
     .await;
     assert_eq!(foreign.unwrap_err().code, "origin-binding");
     // The full import path refuses before any network request (otherwise this would be `offline`).
-    let network_path = crate::import_credential(
+    let network_path = crate::verify_and_activate_test_credential(
         &state,
         credential(
             "https://elsewhere.invalid",
@@ -526,12 +677,14 @@ async fn reserve_conflict_recovers_only_from_authenticated_duplicate_finalize_pr
 
     assert_eq!(finalized.load(Ordering::SeqCst), 1);
     assert!(session.client.pending_uploads().unwrap().is_empty());
-    assert!(session
-        .client
-        .attachment_info(attachment.id.parse().unwrap())
-        .unwrap()
-        .state
-        .is_local());
+    assert!(
+        session
+            .client
+            .attachment_info(attachment.id.parse().unwrap())
+            .unwrap()
+            .state
+            .is_local()
+    );
     session.cancel.cancel();
 }
 
@@ -603,29 +756,35 @@ async fn work_requests_wake_only_the_worker() {
         );
     tokio::time::sleep(Duration::from_millis(100)).await;
     session.request_work();
-    assert!(tokio::time::timeout(Duration::from_secs(2), worker)
-        .await
-        .expect("worker woke")
-        .unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("worker woke")
+            .unwrap()
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !live.is_finished(),
         "a reconnect wait must not consume the worker's wake-up"
     );
     session.reconnect_wake.notify_one();
-    assert!(tokio::time::timeout(Duration::from_secs(2), live)
-        .await
-        .unwrap()
-        .unwrap());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), live)
+            .await
+            .unwrap()
+            .unwrap()
+    );
     // Cancellation ends both waits with `false`.
     let waiter = session.clone();
     let cancelled =
         tokio::spawn(async move { sync::pause_worker(&waiter, Duration::from_secs(30)).await });
     session.cancel.cancel();
-    assert!(!tokio::time::timeout(Duration::from_secs(2), cancelled)
-        .await
-        .unwrap()
-        .unwrap());
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(2), cancelled)
+            .await
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[test]
@@ -712,7 +871,7 @@ fn refused_sends_keep_the_revision_and_results_report_it() {
     // A stale send reports the current revision so the UI can continue.
     let stale = session
         .send_draft(&routed(
-            input(&draft.id, "", "", &[], "0"),
+            input(&draft.id, "", "", &[], "1"),
             &gateway_id,
             "sim-1",
         ))
@@ -721,9 +880,11 @@ fn refused_sends_keep_the_revision_and_results_report_it() {
         (stale.code, stale.current_revision.as_deref()),
         ("stale-draft", Some(draft.revision.as_str()))
     );
-    assert!(serde_json::to_string(&stale)
-        .unwrap()
-        .contains("\"currentRevision\""));
+    assert!(
+        serde_json::to_string(&stale)
+            .unwrap()
+            .contains("\"currentRevision\"")
+    );
     // A successful send (route persisted + atomic send) reports the stored revision.
     let fixed = session
         .save_draft(&input(
@@ -777,10 +938,7 @@ fn send_rejects_a_draft_from_another_conversation_without_mutation() {
         .save_draft(&input("draft-new", "", "mine", &["+15555550101"], "0"))
         .unwrap();
     assert_ne!(victim.conversation_id, own.conversation_id);
-    // A composer scoped to `own` passes the window scope check with its own conversation ID
-    // but names the other conversation's draft (whose stored route differs, forcing a save).
-    let label = format!("composer-{}", own.conversation_id);
-    assert!(crate::check_conversation_scope(&label, Some(&own.conversation_id)).is_ok());
+    // A request that names `own` but carries the other draft must not mutate it.
     let forged = routed(
         input(&victim.id, &own.conversation_id, "", &[], &victim.revision),
         &gateway_id,

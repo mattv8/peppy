@@ -1,7 +1,10 @@
 //! Tray/background behavior and the single conversation-composer window factory.
+use std::sync::{Mutex, OnceLock};
+
 use crate::{
     error::{BridgeError, BridgeResult},
     heads::PanelLayout,
+    updates::types::{UpdatePhase, UpdateStatus},
 };
 use peppy_client_core::ConversationId;
 use tauri::{
@@ -16,47 +19,52 @@ pub const COMPOSER_PREFIX: &str = "composer-";
 const TRAY_ID: &str = "peppy";
 const HEAD_OPEN_PREFIX: &str = "head-open:";
 const HEAD_DISMISS_PREFIX: &str = "head-dismiss:";
+const UPDATE_ID: &str = "update";
 const PANEL_WIDTH: f64 = 340.0;
 const PANEL_HEIGHT: f64 = 440.0;
 const PANEL_GAP: f64 = 8.0;
 
-#[cfg(any(target_os = "macos", test))]
-fn template_icon_rgba(size: u32) -> Vec<u8> {
-    let mut rgba = vec![0; (size * size * 4) as usize];
-    let center = (size as i32 - 1) / 2;
-    let radius = (size as i32 / 2).saturating_sub(2);
-    for y in 0..size as i32 {
-        for x in 0..size as i32 {
-            let alpha = if (x - center).abs() + (y - center).abs() <= radius {
-                255
-            } else {
-                0
-            };
-            let offset = ((y as u32 * size + x as u32) * 4) as usize;
-            rgba[offset..offset + 4].copy_from_slice(&[0, 0, 0, alpha]);
-        }
-    }
-    rgba
+#[derive(Clone)]
+struct UpdateItem {
+    label: String,
 }
+
+#[derive(Default)]
+struct MenuState {
+    heads: Vec<(String, String)>,
+    update: Option<UpdateItem>,
+}
+
+fn menu_state() -> &'static Mutex<MenuState> {
+    static STATE: OnceLock<Mutex<MenuState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(MenuState::default()))
+}
+
+#[cfg(any(target_os = "macos", test))]
+const MACOS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/macos-template.png");
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/windows-color.png");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const DEFAULT_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
 
 fn tray_icon() -> tauri::Result<Image<'static>> {
     #[cfg(target_os = "macos")]
-    {
-        const SIZE: u32 = 18;
-        Ok(Image::new_owned(template_icon_rgba(SIZE), SIZE, SIZE))
-    }
-    #[cfg(not(target_os = "macos"))]
-    Image::from_bytes(include_bytes!("../icons/icon.png"))
+    return Image::from_bytes(MACOS_TRAY_ICON);
+    #[cfg(target_os = "windows")]
+    return Image::from_bytes(WINDOWS_TRAY_ICON);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Image::from_bytes(DEFAULT_TRAY_ICON)
 }
 
 /// Builds the tray; returns false when the platform/session offers no tray.
 pub fn install(
     app: &AppHandle,
     on_compose: impl Fn(&AppHandle) + Send + Sync + 'static,
+    on_update: impl Fn(&AppHandle) + Send + Sync + 'static,
     on_quit: impl Fn(&AppHandle) + Send + Sync + 'static,
 ) -> bool {
     let build = || -> tauri::Result<()> {
-        let menu = build_menu(app, &[])?;
+        let menu = build_menu(app)?;
         TrayIconBuilder::with_id(TRAY_ID)
             .icon(tray_icon()?)
             .icon_as_template(cfg!(target_os = "macos"))
@@ -69,6 +77,8 @@ pub fn install(
                     show_main(app);
                 } else if id == "compose" {
                     on_compose(app);
+                } else if id == UPDATE_ID {
+                    on_update(app);
                 } else if id == "quit" {
                     on_quit(app);
                 } else if let Some(conversation_id) = id.strip_prefix(HEAD_OPEN_PREFIX) {
@@ -83,8 +93,20 @@ pub fn install(
     build().is_ok()
 }
 
-fn build_menu(app: &AppHandle, heads: &[(String, String)]) -> tauri::Result<Menu<tauri::Wry>> {
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let state = menu_state().lock().expect("tray menu state poisoned");
+    build_menu_with(app, &state.heads, state.update.as_ref())
+}
+
+fn build_menu_with(
+    app: &AppHandle,
+    heads: &[(String, String)],
+    update: Option<&UpdateItem>,
+) -> tauri::Result<Menu<tauri::Wry>> {
     let open = MenuItem::with_id(app, "open", "Open Peppy", true, None::<&str>)?;
+    let update = update
+        .map(|item| MenuItem::with_id(app, UPDATE_ID, &item.label, true, None::<&str>))
+        .transpose()?;
     let compose = MenuItem::with_id(app, "compose", "New message", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Peppy", true, None::<&str>)?;
@@ -118,7 +140,14 @@ fn build_menu(app: &AppHandle, heads: &[(String, String)]) -> tauri::Result<Menu
         !heads.is_empty(),
         &head_refs,
     )?;
-    Menu::with_items(app, &[&open, &compose, &floating, &separator, &quit])
+    if let Some(update) = update.as_ref() {
+        Menu::with_items(
+            app,
+            &[&open, update, &compose, &floating, &separator, &quit],
+        )
+    } else {
+        Menu::with_items(app, &[&open, &compose, &floating, &separator, &quit])
+    }
 }
 
 fn menu_name(name: &str) -> String {
@@ -143,11 +172,43 @@ fn menu_name(name: &str) -> String {
 /// Rebuilds only the tray menu. Names are resolved from the current local
 /// session and are never persisted in the pin file.
 pub fn set_floating_conversations(app: &AppHandle, heads: &[(String, String)]) -> bool {
-    let Ok(menu) = build_menu(app, heads) else {
+    if let Ok(mut state) = menu_state().lock() {
+        state.heads = heads.to_vec();
+    }
+    let Ok(menu) = build_menu(app) else {
         return false;
     };
     app.tray_by_id(TRAY_ID)
         .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok())
+}
+
+pub fn set_update_status(app: &AppHandle, status: &UpdateStatus) -> bool {
+    if let Ok(mut state) = menu_state().lock() {
+        state.update = update_item(status);
+    }
+    let Ok(menu) = build_menu(app) else {
+        return false;
+    };
+    app.tray_by_id(TRAY_ID)
+        .is_some_and(|tray| tray.set_menu(Some(menu)).is_ok())
+}
+
+fn update_item(status: &UpdateStatus) -> Option<UpdateItem> {
+    match status.phase {
+        UpdatePhase::Ready if status.can_restart => Some(UpdateItem {
+            label: "Update ready — Restart Peppy".into(),
+        }),
+        UpdatePhase::Deferred if status.can_restart => Some(UpdateItem {
+            label: "Update ready — Restart Peppy".into(),
+        }),
+        UpdatePhase::Installed if status.can_restart => Some(UpdateItem {
+            label: "Update installed — Restart Peppy".into(),
+        }),
+        UpdatePhase::AuthorizationRequired => Some(UpdateItem {
+            label: "Update requires authorization".into(),
+        }),
+        _ => None,
+    }
 }
 
 /// User-initiated only (tray/dock).
@@ -157,9 +218,8 @@ pub fn show_main(app: &AppHandle) {
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     }
     if let Some(window) = app.get_webview_window(MAIN) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        crate::window_chrome::prepare_material(&window, false);
+        let _ = crate::window_chrome::show_when_ready(&window);
     }
 }
 
@@ -186,12 +246,8 @@ pub fn open_composer_mode(
     let label = format!("{COMPOSER_PREFIX}{conversation}");
     if let Some(window) = app.get_webview_window(&label) {
         configure_composer(&window, effective_panel);
-        window
-            .show()
+        crate::window_chrome::show_when_ready(&window)
             .map_err(|_| BridgeError::new("window", "Could not show the composer window."))?;
-        window
-            .set_focus()
-            .map_err(|_| BridgeError::new("window", "Could not focus the composer window."))?;
         return Ok(());
     }
     let url = composer_url(conversation, effective_panel);
@@ -202,7 +258,10 @@ pub fn open_composer_mode(
         .min_inner_size(320.0, 360.0)
         .decorations(false)
         .resizable(true)
+        .visible(false)
         .focused(true);
+    #[cfg(target_os = "macos")]
+    let builder = builder.transparent(true);
     let builder = if effective_panel {
         builder.always_on_top(true)
     } else {
@@ -211,7 +270,9 @@ pub fn open_composer_mode(
     let window = builder
         .build()
         .map_err(|_| BridgeError::new("window", "Could not open the composer window."))?;
-    crate::window_chrome::sync_webview_window(&window, effective_panel);
+    crate::window_chrome::prepare_material(&window, effective_panel);
+    crate::window_chrome::show_when_ready(&window)
+        .map_err(|_| BridgeError::new("window", "Could not show the composer window."))?;
     Ok(())
 }
 
@@ -258,6 +319,7 @@ fn configure_composer(window: &tauri::WebviewWindow, head_panel: bool) {
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
     }
     let _ = window.set_always_on_top(head_panel);
+    crate::window_chrome::prepare_material(window, head_panel);
     crate::window_chrome::sync_webview_window(window, head_panel);
 }
 
@@ -482,6 +544,35 @@ pub fn place_head_panel(app: &AppHandle, conversation_id: &str, frame: &crate::w
 mod tests {
     use super::*;
     use crate::windows::HeadFrame;
+    use image::{Rgba, RgbaImage};
+
+    fn decoded_icon(bytes: &[u8]) -> RgbaImage {
+        image::load_from_memory(bytes).unwrap().into_rgba8()
+    }
+
+    fn assert_transparent_outer_edges(icon: &RgbaImage) {
+        let width = icon.width();
+        let height = icon.height();
+        for x in 0..width {
+            assert_eq!(icon.get_pixel(x, 0)[3], 0);
+            assert_eq!(icon.get_pixel(x, height - 1)[3], 0);
+        }
+        for y in 0..height {
+            assert_eq!(icon.get_pixel(0, y)[3], 0);
+            assert_eq!(icon.get_pixel(width - 1, y)[3], 0);
+        }
+    }
+
+    fn assert_antialiased_visible_pixels(icon: &RgbaImage) {
+        assert!(icon.pixels().any(|pixel| pixel[3] == 255));
+        assert!(icon.pixels().any(|pixel| (1..255).contains(&pixel[3])));
+    }
+
+    fn assert_images_match(image: &Image<'_>, expected: &RgbaImage) {
+        assert_eq!(image.width(), expected.width());
+        assert_eq!(image.height(), expected.height());
+        assert_eq!(image.rgba(), expected.as_raw());
+    }
 
     fn frame(x: f64, y: f64, work_width: f64, work_height: f64, scale: f64) -> HeadFrame {
         HeadFrame {
@@ -612,13 +703,47 @@ mod tests {
     }
 
     #[test]
-    fn template_icon_has_transparent_corners_and_visible_diamond() {
-        let size = 18;
-        let rgba = template_icon_rgba(size);
-        assert_eq!(rgba[3], 0);
-        assert_eq!(rgba[(((size / 2) * size + size / 2) * 4 + 3) as usize], 255);
-        assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 0));
-        assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 255));
+    fn macos_template_asset_is_a_padded_black_antialiased_icon() {
+        let icon = decoded_icon(MACOS_TRAY_ICON);
+        assert_eq!(icon.dimensions(), (36, 36));
+        assert_transparent_outer_edges(&icon);
+        assert_antialiased_visible_pixels(&icon);
+        assert!(icon
+            .pixels()
+            .filter(|pixel| pixel[3] != 0)
+            .all(|pixel| { pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 }));
+    }
+
+    #[test]
+    fn windows_color_asset_is_a_padded_coral_antialiased_icon() {
+        let icon = decoded_icon(WINDOWS_TRAY_ICON);
+        assert_eq!(icon.dimensions(), (32, 32));
+        assert_transparent_outer_edges(&icon);
+        assert_antialiased_visible_pixels(&icon);
+        assert!(icon
+            .pixels()
+            .filter(|pixel| pixel[3] == 255)
+            .all(|pixel| color_is_close_to_coral(*pixel)));
+    }
+
+    fn color_is_close_to_coral(pixel: Rgba<u8>) -> bool {
+        const CORAL: [u8; 3] = [229, 83, 61];
+        const TOLERANCE: u8 = 2;
+        pixel.0[..3]
+            .iter()
+            .zip(CORAL)
+            .all(|(channel, expected)| channel.abs_diff(expected) <= TOLERANCE)
+    }
+
+    #[test]
+    fn tray_icon_uses_the_current_platform_asset() {
+        let icon = tray_icon().unwrap();
+        #[cfg(target_os = "macos")]
+        assert_images_match(&icon, &decoded_icon(MACOS_TRAY_ICON));
+        #[cfg(target_os = "windows")]
+        assert_images_match(&icon, &decoded_icon(WINDOWS_TRAY_ICON));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_images_match(&icon, &decoded_icon(DEFAULT_TRAY_ICON));
     }
 
     #[test]
@@ -626,5 +751,28 @@ mod tests {
         assert_eq!(menu_name(" Alice\n  Example "), "Alice Example");
         assert_eq!(menu_name("\n\t"), "conversation");
         assert_eq!(menu_name(&"x".repeat(80)).chars().count(), 60);
+    }
+
+    #[test]
+    fn update_menu_surfaces_only_actionable_restart_or_authorization() {
+        let mut status =
+            UpdateStatus::idle("1.0.0".into(), crate::updates::types::UpdateChannel::Stable);
+        assert!(update_item(&status).is_none());
+        status.phase = UpdatePhase::Ready;
+        status.can_restart = true;
+        assert_eq!(
+            update_item(&status).unwrap().label,
+            "Update ready — Restart Peppy"
+        );
+        status.phase = UpdatePhase::AuthorizationRequired;
+        assert_eq!(
+            update_item(&status).unwrap().label,
+            "Update requires authorization"
+        );
+        status.phase = UpdatePhase::Installed;
+        assert_eq!(
+            update_item(&status).unwrap().label,
+            "Update installed — Restart Peppy"
+        );
     }
 }

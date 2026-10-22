@@ -1,11 +1,20 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use peppy_server::{ServerBuilder, config::Config, web_client::WebClientConfig};
+use peppy_hosted_api::{ApnsEnvironment, PushConfigAdvertisement, PushProvider};
+use peppy_server::{
+    ServerBuilder,
+    api::{
+        EnrollmentAuthContext, EnrollmentAuthorization, EnrollmentAuthorizationFuture,
+        EnrollmentAuthorizationRequest,
+    },
+    config::Config,
+    web_client::WebClientConfig,
+};
 use sqlx::postgres::PgPoolOptions;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -33,9 +42,33 @@ fn pool() -> sqlx::PgPool {
         .unwrap()
 }
 
+struct HostedEnrollmentAuthorization;
+
+impl EnrollmentAuthorization for HostedEnrollmentAuthorization {
+    fn authorize_enrollment(
+        &self,
+        _request: EnrollmentAuthorizationRequest,
+    ) -> EnrollmentAuthorizationFuture<'_, Result<EnrollmentAuthContext, StatusCode>> {
+        Box::pin(async { Err(StatusCode::UNAUTHORIZED) })
+    }
+}
+
+#[tokio::test]
+async fn builder_rejects_a_short_operator_setup_token() {
+    let error = ServerBuilder::new(config("short-setup-token"), pool())
+        .setup_token("a".repeat(31))
+        .build()
+        .await
+        .err()
+        .expect("short operator setup tokens must fail server assembly");
+
+    assert!(error.to_string().contains("setup token"));
+}
+
 #[tokio::test]
 async fn builder_uses_the_supplied_config_without_environment_configuration() {
     let server = ServerBuilder::new(config("builder-test"), pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
         .build()
         .await
         .unwrap();
@@ -61,6 +94,7 @@ async fn builder_uses_the_supplied_config_without_environment_configuration() {
 #[tokio::test]
 async fn builder_assembles_routes_without_starting_maintenance() {
     let server = ServerBuilder::new(config("routes-only"), pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
         .build()
         .await
         .unwrap();
@@ -87,6 +121,7 @@ async fn builder_leaves_web_client_wrapping_to_the_entrypoint() {
         .unwrap(),
     );
     let server = ServerBuilder::new(server_config, pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
         .build()
         .await
         .unwrap();
@@ -107,6 +142,7 @@ async fn builder_leaves_web_client_wrapping_to_the_entrypoint() {
 #[tokio::test]
 async fn maintenance_can_only_be_started_once() {
     let mut server = ServerBuilder::new(config("maintenance"), pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
         .build()
         .await
         .unwrap();
@@ -125,4 +161,31 @@ async fn row_security_requires_an_explicit_maintenance_database() {
         .expect("hosted RLS must not silently run maintenance on the runtime pool");
 
     assert!(error.to_string().contains("maintenance database"));
+}
+
+#[tokio::test]
+async fn builder_accepts_a_private_enrollment_authorization_adapter() {
+    let server = ServerBuilder::new(config("hosted-enrollment"), pool())
+        .setup_token("builder-test-token-at-least-32-bytes")
+        .enrollment_authorization(Arc::new(HostedEnrollmentAuthorization))
+        .build()
+        .await;
+
+    assert!(server.is_ok());
+}
+
+#[tokio::test]
+async fn builder_rejects_inconsistent_push_configuration() {
+    let error = ServerBuilder::new(config("invalid-push-config"), pool())
+        .push_config(PushConfigAdvertisement {
+            available: true,
+            providers: vec![PushProvider::Fcm],
+            apns_environment: Some(ApnsEnvironment::Production),
+        })
+        .build()
+        .await
+        .err()
+        .expect("an APNs environment without APNs must fail closed");
+
+    assert!(error.to_string().contains("push configuration"));
 }

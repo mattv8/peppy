@@ -1,5 +1,6 @@
 use peppy_push_relay::{
-    AppState, app, deliver_one, providers::ConfiguredProvider, trusted_proxy_cidrs,
+    AppState, app, cleanup_expired_registrations, deliver_one, providers::ConfiguredProvider,
+    trusted_proxy_cidrs, wake_admission_limit,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -18,6 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .map_err(std::io::Error::other)?;
     let release_identity = std::env::var("PEPPY_RELEASE_ID").unwrap_or_else(|_| "unknown".into());
+    let wake_admission_limit = wake_admission_limit(
+        std::env::var("PEPPY_RELAY_WAKE_ADMISSION_LIMIT")
+            .ok()
+            .as_deref(),
+    )
+    .map_err(std::io::Error::other)?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .connect(&database_url)
@@ -32,11 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         Arc::new(ConfiguredProvider::from_environment(&selection).map_err(std::io::Error::other)?)
     };
-    let state = AppState::with_provider_and_proxy_cidrs(
+    let state = AppState::with_provider_proxy_cidrs_and_wake_limit(
         pool,
         provider,
         trusted_proxy_cidrs,
         release_identity,
+        wake_admission_limit,
     );
     if !state.provider_configured() {
         tracing::warn!(%bind_addr, "push relay has no provider adapter configured and cannot deliver push");
@@ -44,7 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let worker_state = state.clone();
     tokio::spawn(async move {
         loop {
-            while deliver_one(&worker_state).await.unwrap_or(false) {}
+            for _ in 0..peppy_push_relay::WAKE_DELIVERY_BATCH_LIMIT {
+                if !deliver_one(&worker_state).await.unwrap_or(false) {
+                    break;
+                }
+            }
+            if let Err(error) = cleanup_expired_registrations(&worker_state).await {
+                tracing::warn!(%error, "expired relay registration cleanup failed");
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });

@@ -11,6 +11,166 @@
         }
       }
     },
+    "peppy.server_offline_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server offline"
+          }
+        }
+      }
+    },
+    "peppy.server_offline_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy will reconnect automatically."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live sync"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keeps this phone connected for faster message delivery. Uses a small amount of battery."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_connected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_status_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Locked — unlock to sync"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote messaging active"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconnecting…"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to continue syncing"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_channel_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote messaging"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notif_channel_desc": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows while Peppy is keeping your phone connected for faster syncing."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_notifications_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off. Live sync can still reconnect; allow notifications to show its ongoing status."
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_allow_notifications": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow notifications"
+          }
+        }
+      }
+    },
+    "peppy.remote_messaging_recovery_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Re-pair this phone to enable remote messaging."
+          }
+        }
+      }
+    },
     "peppy.sms": {
       "localizations": {
         "en": {
@@ -51,6 +211,196 @@
         }
       }
     },
+    "peppy.sms_history_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone message sync"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatically adds sent and received SMS, including existing phone history, to your Peppy vault. Works with messages available in Android's SMS storage."
+          }
+        }
+      }
+    },
+    "peppy.sms_history_permission_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read phone messages"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History status"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not allowed"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_allow_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow phone message access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_open_settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open phone message settings"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting_permission": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for phone message access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_sync_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SMS sync is off"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for vault access"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting to read phone history"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_reading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reading phone history…"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused — vault recovery capacity reached"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_captured": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone history captured"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone messages unavailable — will retry"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some messages need reconciliation"
+          }
+        }
+      }
+    },
+    "peppy.sms_history_captured_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captured messages sync when your vault connection is available."
+          }
+        }
+      }
+    },
+    "peppy.sms_history_capacity_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History import is paused to keep vault recovery available. Existing messages remain on your phone."
+          }
+        }
+      }
+    },
     "peppy.wifi_only": {
       "localizations": {
         "en": {
@@ -67,6 +417,126 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skip silent notifications"
+          }
+        }
+      }
+    },
+    "peppy.app_filters": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App filters"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading app filters…"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_all_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All apps allowed"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_muted_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 app muted"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_muted_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d apps muted"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_search": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search apps"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh app list"
+          }
+        }
+      }
+    },
+    "peppy.app_filters_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock sync to view or change per-app filters."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No app notifications received yet. Filters appear after the first notification."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_no_match": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching apps."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_save_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not save the app filter. Unlock sync and try again."
+          }
+        }
+      }
+    },
+    "peppy.app_filters_load_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load app filters. Try again."
           }
         }
       }
@@ -127,16 +597,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Scan pairing QR code"
-          }
-        }
-      }
-    },
-    "peppy.use_credential_file": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Use credential file"
           }
         }
       }
@@ -227,6 +687,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "Connect your devices and choose what to sync."
+          }
+        }
+      }
+    },
+    "peppy.onboarding_mode_selector": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server"
+          }
+        }
+      }
+    },
+    "peppy.onboarding_mode_hosted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy Hosted"
+          }
+        }
+      }
+    },
+    "peppy.onboarding_mode_self_hosted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Self-hosted"
           }
         }
       }
@@ -466,7 +956,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Gateway device"
+            "value": "Phone"
           }
         }
       }
@@ -571,12 +1061,122 @@
         }
       }
     },
-    "peppy.production_pairing_verify": {
+    "peppy.production_pairing_connecting": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "I checked that the verification codes match"
+            "value": "Connecting…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_generating": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generating connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_qr_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not generate the connection code. Try again."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking connection status…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_preparing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing a connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_refreshing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refreshing connection code…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_approving": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving phone…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_cancelling": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelling connection…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_revealing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opening the shared-secret prompt…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_finishing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finishing connection setup…"
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_idle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No connection code is active."
+          }
+        }
+      }
+    },
+    "peppy.production_pairing_sas_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verification code"
           }
         }
       }
@@ -617,6 +1217,336 @@
           "stringUnit": {
             "state": "translated",
             "value": "Could not reach Peppy. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_add_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_waiting_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect your phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_waiting_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Peppy on your phone and scan this code."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_waiting_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code connects your phone to this server. It does not grant any permissions by itself."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_qr_accessibility": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone connection QR code"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_shared_secret_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter shared secret on phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_verify_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verify the code"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_verify_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compare this code with the code shown in Peppy on the phone you are adding. Approve only if they match."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_codes_match": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The codes match on both devices."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_approve_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm and approve"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_countdown_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code expires in"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_approved_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approved. Waiting for the phone to finish connecting…"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_connected_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Phone connected"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_connected_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setup on the phone."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_done_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_expired_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code expired"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_expired_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code expired. Start again to get a new one."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_restart_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start again"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_prompt_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve phone"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_prompt_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the vault shared secret you saved when this vault was created. This is not your admin password."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_secret_reveal_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show shared secret"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_secret_hide_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide shared secret"
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_secret_saved_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy keeps your vault shared secret in this phone's secure storage. Show it when you add another device."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_wrong_passphrase": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That shared secret does not match this vault."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_secret_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The vault shared secret saved on this phone no longer matches this vault."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_secret_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The vault shared secret is not saved on this phone."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_lock_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set a screen lock on this phone to show the shared secret."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_account_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to your Peppy account to add a phone."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone was not approved. Start again to create a new code."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_state": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The phone pairing state changed unexpectedly. Start again."
+          }
+        }
+      }
+    },
+    "peppy.owner_phone_error_server_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server rejected this request. Start again."
           }
         }
       }
@@ -1006,7 +1936,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Add this phone"
+            "value": "Connect this phone"
           }
         }
       }
@@ -1016,7 +1946,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Compare this code on your other device before approving this phone."
+            "value": "Compare the verification code with the web or desktop app before approving the connection."
           }
         }
       }
@@ -1031,22 +1961,12 @@
         }
       }
     },
-    "peppy.hosted_join_fallback": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Use my encryption passphrase instead"
-          }
-        }
-      }
-    },
     "peppy.hosted_join_denied": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This request was declined or expired. Try again or use your encryption passphrase."
+            "value": "This connection was not approved. Ask the owner to create a new Connect your phone code, or use your shared secret."
           }
         }
       }
@@ -1251,6 +2171,206 @@
         }
       }
     },
+    "peppy.wake_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background updates"
+          }
+        }
+      }
+    },
+    "peppy.wake_updates_toggle_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow background updates"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wake registration"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_registered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registered"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        }
+      }
+    },
+    "peppy.wake_status_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unavailable"
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_registered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registered for background updates. Delivery may be delayed by your phone."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up background updates automatically."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background updates will retry when a connection is available."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is paused. Other permitted sync may still run."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_unavailable_server": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is unavailable on this server."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_missing_app_support": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app build does not support background push."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_os_restricted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your phone is limiting background activity."
+          }
+        }
+      }
+    },
+    "peppy.wake_footer_keys_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Peppy to process pending updates."
+          }
+        }
+      }
+    },
+    "peppy.wake_cleanup_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background wake is paused. Server cleanup will retry when connected."
+          }
+        }
+      }
+    },
+    "peppy.wake_os_settings_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        }
+      }
+    },
+    "peppy.wake_community_relay_enabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay enabled. Background delivery may be delayed."
+          }
+        }
+      }
+    },
+    "peppy.wake_community_relay_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom relay is off."
+          }
+        }
+      }
+    },
     "peppy.self_hosted_headline": {
       "localizations": {
         "en": {
@@ -1266,7 +2386,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scan a pairing QR code from an enrolled owner device, or import a credential file."
+            "value": "Enter your server address and shared secret, or scan a Connect your phone code."
           }
         }
       }
@@ -1511,72 +2631,662 @@
         }
       }
     },
-    "peppy.production_add_computer": {
+    "peppy.production_pairing_invalid_qr": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Add a computer"
+            "value": "This is not a phone pairing code. Scan a code from an enrolled owner device."
           }
         }
       }
     },
-    "peppy.production_add_computer_scan_body": {
+    "peppy.production_pairing_scan_owner_hint": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scan the QR code shown on the computer."
+            "value": "Scan a code from an enrolled owner device."
           }
         }
       }
     },
-    "peppy.production_pairing_role_computer": {
+    "peppy.production_pairing_camera_owner_hint": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Computer"
+            "value": "Point your camera at a code from an enrolled owner device."
           }
         }
       }
     },
-    "peppy.production_add_computer_origin_mismatch": {
+    "peppy.enrollment_setup_code": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This QR code is for a different Peppy server."
+            "value": "Setup code"
           }
         }
       }
     },
-    "peppy.production_add_computer_already_linked": {
+    "peppy.enrollment_admin_password": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This pairing code has already been used. Start pairing again on your computer."
+            "value": "Admin password"
           }
         }
       }
     },
-    "peppy.production_add_computer_allow_hint": {
+    "peppy.enrollment_admin_password_confirm": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Connects the computer to your vault."
+            "value": "Confirm admin password"
           }
         }
       }
     },
-    "peppy.production_add_computer_deny_hint": {
+    "peppy.admin_password_mismatch": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Rejects this computer."
+            "value": "The passwords do not match."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_allow_camera": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow camera access"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_setup_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No setup code is required."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_setup_protected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server's operator requires a setup code configured with PEPPY_SETUP_TOKEN."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invalid_setup_token": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_already_claimed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server has already been set up. Connect with your admin password or vault shared secret instead."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_username_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Username"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_setup_username_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This will be your username for this server. Pre-set to admin."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_username_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave empty if you set up this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_vault_username_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a username for your new vault on this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose how to connect to this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_password_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_password_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with your username and password."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_connect_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect this device"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_connect_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect with your vault shared secret."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_invite_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Have an invite link?"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_invite_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use an invite link to request a new vault on this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_signin_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_request_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request a vault"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_request_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste the invite link you received, then enter a display name so the admin can identify your request."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_link_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Invite link"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_link_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://…"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_link_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste the full link from the admin."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_display_name_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your name"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_display_name_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "How you appear to the admin while approving. Not your username."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_request_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send request"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_cancel_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for approval"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request has been sent. The admin will review it shortly."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can leave and return — your request is saved."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_poll_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking approval status…"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_waiting_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the admin to approve your request."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request approved"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a username for your vault. Your password and vault secret will be requested securely."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_secure_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A secure prompt will ask for your password and vault shared secret. Peppy never sees them in this window."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_create_vault_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create vault"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_approved_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request was approved."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_denied_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request denied"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_denied_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The admin denied this request. Ask them for a new invite link to try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_expired_headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request expired"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_expired_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request expired before the admin could approve it. Ask them for a new invite link."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_restart_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start over"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_denied_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request was denied."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_invite_expired_live_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your request expired."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_vault_owner_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vault owner username"
+          }
+        }
+      }
+    },
+    "peppy.enrollment_vault_owner_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server has multiple vaults. Enter the username of the vault you want to connect to."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_admin_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admin access is required for this action."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_foreign_vault": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request refers to a different vault. Check the server address and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_vault_owner_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the username for the vault you want to connect to."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_request_not_approved": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request has not been approved yet, or the approval window expired."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_username_taken": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This username is already taken. Choose a different one."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_operation_conflict": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A conflicting operation is already in progress. Try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invite_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This invite link is not valid, or it has already been used."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_request_not_found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This vault request could not be found. It may have expired."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_vault_not_found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The requested vault could not be found on this server."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invalid_username": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usernames must start with a letter or digit, use only a–z, 0–9, dash, dot, or underscore, and be 1–32 characters."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_invalid_display_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your display name must be between 1 and 64 characters."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_vault_request_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many requests from this device. Wait a moment and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_create_vault_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many vault creation attempts. Wait a moment and try again."
+          }
+        }
+      }
+    },
+    "peppy.enrollment_error_manual_owner_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many connection attempts. Wait a moment and try again."
           }
         }
       }
