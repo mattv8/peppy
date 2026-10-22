@@ -17,6 +17,7 @@ version *args:
 release-test:
     infra/release/test-compute-version.sh
     infra/release/test-release-scripts.sh
+    infra/release/test-android-signing.sh
 
 doctor:
     @command -v cargo >/dev/null || { echo "cargo is required; install the pinned Rust toolchain" >&2; exit 1; }

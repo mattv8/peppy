@@ -181,6 +181,11 @@ jobs:
           PEPPY_RELEASE_GPG_KEY_ID: ${{ vars.PEPPY_RELEASE_GPG_KEY_ID }}
           PEPPY_MACOS_SIGNING_MODE: ${{ vars.PEPPY_MACOS_SIGNING_MODE || 'developer-id' }}
           PEPPY_WINDOWS_SIGNING_MODE: ${{ vars.PEPPY_WINDOWS_SIGNING_MODE || 'authenticode' }}
+          PEPPY_ANDROID_KEYSTORE_BASE64: ${{ secrets.PEPPY_ANDROID_KEYSTORE_BASE64 }}
+          PEPPY_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEYSTORE_PASSWORD }}
+          PEPPY_ANDROID_KEY_ALIAS: ${{ secrets.PEPPY_ANDROID_KEY_ALIAS }}
+          PEPPY_ANDROID_KEY_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEY_PASSWORD }}
+          PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 }}
         run: bash .github/scripts/release-signing-readiness.sh
   artifacts:
     needs: [prepare, signing]
@@ -206,6 +211,10 @@ jobs:
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET: ${{ secrets.PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET }}
+      PEPPY_ANDROID_KEYSTORE_BASE64: ${{ secrets.PEPPY_ANDROID_KEYSTORE_BASE64 }}
+      PEPPY_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEYSTORE_PASSWORD }}
+      PEPPY_ANDROID_KEY_ALIAS: ${{ secrets.PEPPY_ANDROID_KEY_ALIAS }}
+      PEPPY_ANDROID_KEY_PASSWORD: ${{ secrets.PEPPY_ANDROID_KEY_PASSWORD }}
   publish:
     if: ${{ !cancelled() && !inputs.dry_run && needs.prepare.outputs.skip != 'true' && needs.signing.outputs.ready == 'true' && needs.artifacts.result == 'success' && needs.publish-server-image.result == 'success' && needs.publish-relay-image.result == 'success' }}
     needs: [prepare, signing, artifacts, publish-server-image, publish-relay-image]

@@ -62,6 +62,14 @@ on:
         required: false
       PEPPY_DESKTOP_GOOGLE_CLIENT_SECRET:
         required: false
+      PEPPY_ANDROID_KEYSTORE_BASE64:
+        required: false
+      PEPPY_ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      PEPPY_ANDROID_KEY_ALIAS:
+        required: false
+      PEPPY_ANDROID_KEY_PASSWORD:
+        required: false
   workflow_dispatch:
     inputs:
       ref:
@@ -95,12 +103,45 @@ permissions:
 
 jobs:
   android-development-artifacts:
+    environment: "${{ inputs.trusted_update_build && format('updates-{0}', inputs.update_channel) || 'development-artifacts' }}"
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
+      - name: Reject untrusted Android build context
+        if: inputs.trusted_update_build
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.update_channel }}
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          [ "$REQUESTED_REF" = "$GITHUB_SHA" ] || { echo 'trusted Android build ref must equal the triggering SHA' >&2; exit 1; }
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF:$CHANNEL" in
+            workflow_dispatch:refs/heads/production:stable|push:refs/heads/production:stable|push:refs/heads/staging:staging) ;;
+            *) echo 'trusted Android builds require a production stable dispatch/push or staging push' >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.ref || github.sha }}
+      - name: Verify checked-out trusted Android context
+        if: inputs.trusted_update_build
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.update_channel }}
+          REQUESTED_SHA: ${{ inputs.ref }}
+        run: bash .github/scripts/release-context-guard.sh
+      - name: Validate protected Android signing inputs
+        if: inputs.trusted_update_build
+        shell: bash
+        env:
+          PEPPY_ANDROID_KEYSTORE_BASE64: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEYSTORE_BASE64 || '' }}
+          PEPPY_ANDROID_KEYSTORE_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEYSTORE_PASSWORD || '' }}
+          PEPPY_ANDROID_KEY_ALIAS: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEY_ALIAS || '' }}
+          PEPPY_ANDROID_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEY_PASSWORD || '' }}
+          PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}
+        run: |
+          for input in PEPPY_ANDROID_KEYSTORE_BASE64 PEPPY_ANDROID_KEYSTORE_PASSWORD PEPPY_ANDROID_KEY_ALIAS PEPPY_ANDROID_KEY_PASSWORD PEPPY_ANDROID_SIGNING_CERT_SHA256; do
+            [ -n "${!input}" ] || { echo "missing protected Android signing input: $input" >&2; exit 1; }
+          done
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
@@ -127,7 +168,8 @@ jobs:
         env:
           PEPPY_ANDROID_FIREBASE_APP_CONFIG: ${{ inputs.android_firebase_app_config || vars.PEPPY_ANDROID_FIREBASE_APP_CONFIG }}
         run: node infra/build/validate-firebase-app-config.mjs
-      - name: Build APK and unsigned release bundles
+      - name: Build trusted Android release artifacts
+        if: inputs.trusted_update_build
         env:
           VERSION: ${{ inputs.version }}
           ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
@@ -150,12 +192,56 @@ jobs:
           mkdir -p ../../dist/android-release
           install -m 0644 app/build/outputs/apk/release/app-release-unsigned.apk ../../dist/android-release/peppy-android-unsigned.apk
           install -m 0644 app/build/outputs/bundle/release/app-release.aab ../../dist/android-release/peppy-android-unsigned.aab
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Stop Android Gradle daemon before signing
+        if: inputs.trusted_update_build
+        working-directory: apps/android
+        run: ./gradlew --stop
+      - name: Sign trusted Android release artifacts
+        if: inputs.trusted_update_build
+        env:
+          PEPPY_ANDROID_KEYSTORE_BASE64: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEYSTORE_BASE64 || '' }}
+          PEPPY_ANDROID_KEYSTORE_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEYSTORE_PASSWORD || '' }}
+          PEPPY_ANDROID_KEY_ALIAS: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEY_ALIAS || '' }}
+          PEPPY_ANDROID_KEY_PASSWORD: ${{ inputs.trusted_update_build && secrets.PEPPY_ANDROID_KEY_PASSWORD || '' }}
+          PEPPY_ANDROID_SIGNING_CERT_SHA256: ${{ inputs.trusted_update_build && vars.PEPPY_ANDROID_SIGNING_CERT_SHA256 || '' }}
+        run: bash infra/release/sign-android-artifacts.sh dist/android-release/peppy-android-unsigned.apk dist/android-release/peppy-android-unsigned.aab dist/android-release
+      - name: Build development Android debug APK
+        if: ${{ !inputs.trusted_update_build }}
+        env:
+          VERSION: ${{ inputs.version }}
+          ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
+          PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID: ${{ vars.PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID }}
+          PEPPY_ANDROID_NATIVE_PROFILE: release
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          infra/compose/verify-android-native.sh
+          cd apps/android
+          if [[ -n "$VERSION" || -n "$ANDROID_VERSION_CODE" ]]; then
+            if [[ -z "$VERSION" || -z "$ANDROID_VERSION_CODE" ]]; then
+              echo "version and android_version_code must both be set" >&2
+              exit 1
+            fi
+            ./gradlew :app:assembleDebug :app:assembleRelease :app:bundleRelease "-PpeppyVersionName=$VERSION" "-PpeppyVersionCode=$ANDROID_VERSION_CODE"
+          else
+            ./gradlew :app:assembleDebug :app:assembleRelease :app:bundleRelease
+          fi
+          mkdir -p ../../dist/android-release
+          install -m 0644 app/build/outputs/apk/debug/app-debug.apk ../../dist/android-release/peppy-android-debug.apk
+      - if: inputs.trusted_update_build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-${{ inputs.trusted_update_build && 'release' || 'development' }}-artifacts
+          name: android-release-artifacts
           path: |
-            dist/android-release/peppy-android-unsigned.apk
-            dist/android-release/peppy-android-unsigned.aab
+            dist/android-release/peppy-android.apk
+            dist/android-release/peppy-android.aab
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - if: ${{ !inputs.trusted_update_build }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-development-artifacts
+          path: dist/android-release/peppy-android-debug.apk
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

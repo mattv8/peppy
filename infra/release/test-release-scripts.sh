@@ -11,8 +11,8 @@ if release_linux_package_version 0.2.0-dev.1 >/dev/null 2>&1; then printf 'expec
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 fixture="$root/download"
 mkdir -p "$fixture/android-release-artifacts" "$fixture/desktop-linux-release-artifacts" "$fixture/desktop-macos-release-artifacts/apps/desktop/src-tauri/target/release/bundle/dmg" "$fixture/desktop-windows-release-artifacts/nsis" "$fixture/desktop-windows-release-artifacts/msi"
-printf release > "$fixture/android-release-artifacts/peppy-android-unsigned.apk"
-printf bundle > "$fixture/android-release-artifacts/peppy-android-unsigned.aab"
+printf release > "$fixture/android-release-artifacts/peppy-android.apk"
+printf bundle > "$fixture/android-release-artifacts/peppy-android.aab"
 mkdir -p "$root/linux/appimage" "$root/linux/deb" "$root/linux/rpm"
 printf appimage > "$root/linux/appimage/Peppy.AppImage"; printf deb > "$root/linux/deb/peppy.deb"; printf rpm > "$root/linux/rpm/peppy.rpm"
 tar -C "$root/linux" -czf "$fixture/desktop-linux-release-artifacts/desktop-linux-bundles.tar.gz" appimage deb rpm
@@ -21,10 +21,10 @@ printf archive > "$fixture/desktop-macos-release-artifacts/Peppy.app.tar.gz"
 printf exe > "$fixture/desktop-windows-release-artifacts/nsis/Peppy_X_x64-setup.exe"; printf msi > "$fixture/desktop-windows-release-artifacts/msi/Peppy_X_x64_en-US.msi"
 "$script_dir/stage-assets.sh" 0.2.0-staging.5 staging "$fixture" "$root/prerelease"
 test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.deb"; test -f "$root/prerelease/peppy-0.2.0-staging.5-linux-x86_64.rpm"; test -s "$root/prerelease/SHA256SUMS"
-test -f "$root/prerelease/peppy-0.2.0-staging.5-android-unsigned.apk"; test -f "$root/prerelease/peppy-0.2.0-staging.5-android-unsigned.aab"
+test -f "$root/prerelease/peppy-0.2.0-staging.5-android.apk"; test -f "$root/prerelease/peppy-0.2.0-staging.5-android.aab"
 test ! -e "$root/prerelease/peppy-0.2.0-staging.5-android-debug.apk"
 test "$(find "$root/prerelease" -type f | wc -l | tr -d ' ')" = 10; test "$(grep -c . "$root/prerelease/SHA256SUMS")" = 9
-grep -Fq 'peppy-0.2.0-staging.5-android-unsigned.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-staging.5-android-unsigned.aab' "$root/prerelease/SHA256SUMS"
+grep -Fq 'peppy-0.2.0-staging.5-android.apk' "$root/prerelease/SHA256SUMS"; grep -Fq 'peppy-0.2.0-staging.5-android.aab' "$root/prerelease/SHA256SUMS"
 "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/stable"; test -f "$root/stable/peppy-0.2.0-linux-x86_64.rpm"
 if "$script_dir/sign-update-assets.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected unsigned signing failure\n' >&2; exit 1; fi
 key="$root/test-updater.key"; alternate_key="$root/alternate-updater.key"
@@ -92,9 +92,9 @@ git -C "$floor_repo" tag v0.3.0-staging.2
 if (cd "$floor_repo" && VERSION=0.2.0 bash "$script_dir/check-stable-prerelease-floor.sh") >/dev/null 2>&1; then printf 'expected reachable prerelease floor failure\n' >&2; exit 1; fi
 rm "$root/stable/peppy-0.2.0-linux-x86_64.rpm.sig"
 if "$script_dir/generate-update-manifest.sh" 0.2.0 stable "$root/stable" >/dev/null 2>&1; then printf 'expected missing signature failure\n' >&2; exit 1; fi
-rm "$fixture/android-release-artifacts/peppy-android-unsigned.apk"
+rm "$fixture/android-release-artifacts/peppy-android.apk"
 if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/missing" >/dev/null 2>&1; then printf 'expected missing asset failure\n' >&2; exit 1; fi
-printf release > "$fixture/android-release-artifacts/peppy-android-unsigned.apk"; mkdir "$fixture/android-release-artifacts/duplicate"; cp "$fixture/android-release-artifacts/peppy-android-unsigned.apk" "$fixture/android-release-artifacts/duplicate/peppy-android-unsigned.apk"
+printf release > "$fixture/android-release-artifacts/peppy-android.apk"; mkdir "$fixture/android-release-artifacts/duplicate"; cp "$fixture/android-release-artifacts/peppy-android.apk" "$fixture/android-release-artifacts/duplicate/peppy-android.apk"
 if "$script_dir/stage-assets.sh" 0.2.0 stable "$fixture" "$root/duplicate" >/dev/null 2>&1; then printf 'expected duplicate asset failure\n' >&2; exit 1; fi
 rm -rf "$fixture/android-release-artifacts/duplicate"
 grep -Fq 'shell: bash' "$script_dir/../../.github/workflows/build-artifacts.yml"

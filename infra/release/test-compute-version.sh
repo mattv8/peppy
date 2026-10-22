@@ -123,7 +123,7 @@ printf '%s\n' "$notes" | grep -F 'GPG-signed SHA256SUMS' >/dev/null
 printf '%s\n' "$notes" | grep -F 'GPG-signed RPM packages' >/dev/null
 printf '%s\n' "$notes" | grep -F 'macOS is ad-hoc signed and not notarized' >/dev/null
 printf '%s\n' "$notes" | grep -F 'Windows installers are not Authenticode publisher-signed' >/dev/null
-printf '%s\n' "$notes" | grep -F 'Android artifacts remain unsigned' >/dev/null
+printf '%s\n' "$notes" | grep -F 'Android APK and AAB artifacts are signed with the protected release certificate' >/dev/null
 printf '%s\n' "$notes" | grep -F 'iOS archive remains unsigned' >/dev/null
 printf '%s\n' "$notes" | grep -F '### macOS first launch' >/dev/null
 printf '%s\n' "$notes" | grep -Fx '```sh' >/dev/null
