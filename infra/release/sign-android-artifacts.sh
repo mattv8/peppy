@@ -30,10 +30,12 @@ temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/peppy-android-signing.XXXXXX")
 trap 'rm -rf "$temporary_dir"' EXIT
 keystore="$temporary_dir/release.keystore"
 encoded_keystore=$(printf '%s' "$PEPPY_ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]')
-[[ "$encoded_keystore" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] && [ $(( ${#encoded_keystore} % 4 )) -eq 0 ] && [ -n "$encoded_keystore" ] || {
+if [ -z "$encoded_keystore" ] ||
+  [[ ! "$encoded_keystore" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] ||
+  [ $(( ${#encoded_keystore} % 4 )) -ne 0 ]; then
   echo 'PEPPY_ANDROID_KEYSTORE_BASE64 is not valid base64' >&2
   exit 1
-}
+fi
 
 if base64 --decode > "$keystore" 2>/dev/null <<<"$encoded_keystore"; then
   :
