@@ -193,6 +193,8 @@ fn encode_session(account_id: &str, bearer: &str, expires_at: u64) -> Vec<u8> {
 struct ControlledStore {
     values: Mutex<HashMap<String, Vec<u8>>>,
     fail_get: Mutex<bool>,
+    fail_nonempty_write: Mutex<bool>,
+    fail_binding_write: Mutex<bool>,
     fail_empty_write: Mutex<bool>,
 }
 
@@ -214,6 +216,18 @@ impl crate::secure_store::SecretStore for ControlledStore {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> BridgeResult<()> {
+        if key.starts_with("vault-secret:") && *self.fail_binding_write.lock().unwrap() {
+            return Err(BridgeError::new(
+                "secure-store-unavailable",
+                "test binding write failure",
+            ));
+        }
+        if !value.is_empty() && *self.fail_nonempty_write.lock().unwrap() {
+            return Err(BridgeError::new(
+                "secure-store-unavailable",
+                "test write failure",
+            ));
+        }
         if value.is_empty() && *self.fail_empty_write.lock().unwrap() {
             return Err(BridgeError::new(
                 "secure-store-unavailable",
@@ -917,6 +931,494 @@ async fn account_resumable_when_checkpoint_exists() {
 // ============================================================================
 
 #[tokio::test]
+async fn fresh_provision_generates_a_vault_secret_without_prompting() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server_state = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, _handle) = start_fake_server(server_state).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let origin = HTTPS_ORIGIN;
+    let prompts = Arc::new(Mutex::new(0));
+    let prompt_count = prompts.clone();
+    store
+        .set(
+            &super::session_key(&origin),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+
+    let result = super::provision_core(
+        &store,
+        &hosted,
+        &origin,
+        move |_| {
+            let prompt_count = prompt_count.clone();
+            async move {
+                *prompt_count.lock().unwrap() += 1;
+                Ok(Some(Zeroizing::new("twelve-chars".into())))
+            }
+        },
+        |_, passphrase| async move {
+            assert!(peppy_crypto::passphrase::passphrase_acceptable(&passphrase));
+            Ok(())
+        },
+    )
+    .await;
+    result.unwrap();
+    assert_eq!(*prompts.lock().unwrap(), 0);
+    assert!(store
+        .get(&super::checkpoint_key(&origin, ACCOUNT))
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+}
+
+#[tokio::test]
+async fn pending_secret_write_failure_prevents_checkpoint_and_posts() {
+    let store = ControlledStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let origin = HTTPS_ORIGIN;
+    store
+        .set(
+            &super::session_key(&origin),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+    *store.fail_nonempty_write.lock().unwrap() = true;
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        &origin,
+        |_| async { panic!("fresh Hosted provisioning must not prompt") },
+        |_, _| async { panic!("activation must not run") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "secure-store-unavailable");
+    assert!(store
+        .value(&super::checkpoint_key(&origin, ACCOUNT))
+        .is_none());
+    assert!(server.lock().unwrap().grant_bodies.is_empty());
+    assert_eq!(server.lock().unwrap().complete_calls, 0);
+}
+
+#[tokio::test]
+async fn concurrent_provision_calls_share_one_operation_and_secret() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState {
+        complete_fails: true,
+        ..FakeServerState::default()
+    }));
+    let (base, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+
+    let first = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        |_| async { panic!("fresh Hosted provisioning must not prompt") },
+        |_, _| async { panic!("completion failure must not activate") },
+    );
+    let second = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        |_| async { panic!("serialized resume must use the saved secret") },
+        |_, _| async { panic!("completion failure must not activate") },
+    );
+    let (first, second) = tokio::join!(first, second);
+    assert!(first.is_err() && second.is_err());
+    let server = server.lock().unwrap();
+    assert_eq!(
+        server.grant_bodies.len(),
+        1,
+        "the second call reuses the saved grant"
+    );
+    assert_eq!(server.complete_calls, 2);
+}
+
+#[tokio::test]
+async fn failed_postactivation_binding_handoff_is_repaired_by_verified_discovery() {
+    let store = ControlledStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+    *store.fail_binding_write.lock().unwrap() = true;
+
+    super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        |_| async { panic!("fresh Hosted provisioning must not prompt") },
+        |_, _| async { Ok(()) },
+    )
+    .await
+    .unwrap();
+
+    assert!(store
+        .value(&super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT))
+        .is_some_and(|value| !value.is_empty()));
+    assert!(store
+        .value(&super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT))
+        .is_some_and(|value| !value.is_empty()));
+
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let provisioning =
+        peppy_hosted_client::restore(store.value(&checkpoint).unwrap(), HTTPS_ORIGIN, ACCOUNT)
+            .unwrap();
+    let binding = super::binding_for(&provisioning);
+    *store.fail_binding_write.lock().unwrap() = false;
+    super::sweep_verified_pending_secret(&store, &binding, |secret| {
+        provisioning.passphrase_matches(secret).unwrap()
+    })
+    .unwrap();
+
+    for key in [
+        checkpoint,
+        super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT),
+        super::recovery_index_key(&binding),
+    ] {
+        assert!(store.value(&key).is_some_and(|value| value.is_empty()));
+    }
+}
+
+#[tokio::test]
+async fn invalid_checkpoint_is_preserved_and_never_replaced() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    let checkpoint = super::checkpoint_key(&origin, ACCOUNT);
+    store.set(&checkpoint, b"invalid checkpoint").unwrap();
+    store
+        .set(
+            &super::session_key(&origin),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        &origin,
+        |_| async { panic!("invalid checkpoint must not prompt") },
+        |_, _| async { panic!("invalid checkpoint must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "vault-secret-unavailable");
+    assert_eq!(
+        store.get(&checkpoint).unwrap().unwrap().as_slice(),
+        b"invalid checkpoint"
+    );
+    assert!(server.lock().unwrap().grant_bodies.is_empty());
+}
+
+#[tokio::test]
+async fn secure_store_read_failure_preserves_checkpoint() {
+    let store = ControlledStore::default();
+    let hosted = HostedState::default();
+    let origin = HTTPS_ORIGIN;
+    let checkpoint = super::checkpoint_key(origin, ACCOUNT);
+    store.set(&checkpoint, b"preserve this checkpoint").unwrap();
+    store
+        .set(
+            &super::session_key(origin),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+    *store.fail_get.lock().unwrap() = true;
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        origin,
+        |_| async { panic!("read failure must not prompt") },
+        |_, _| async { panic!("read failure must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "secure-store-unavailable");
+    *store.fail_get.lock().unwrap() = false;
+    assert_eq!(
+        store.value(&checkpoint).unwrap(),
+        b"preserve this checkpoint"
+    );
+}
+
+#[test]
+fn pending_secret_keys_are_account_isolated() {
+    let first = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let second = super::pending_secret_key(HTTPS_ORIGIN, "660e8400-e29b-41d4-a716-446655440000");
+    assert_ne!(first, second);
+    assert!(!first.contains(ACCOUNT));
+}
+
+#[test]
+fn verified_sweep_moves_only_a_matching_recovery_tuple() {
+    let store = MemoryStore::default();
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&binding);
+    store
+        .set(&checkpoint, &provisioning.checkpoint().unwrap())
+        .unwrap();
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+
+    super::sweep_verified_pending_secret(&store, &binding, |secret| secret == RESUME_PHRASE)
+        .unwrap();
+
+    assert_eq!(
+        super::read_text_secret(&store, &binding.vault_secret_account())
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        RESUME_PHRASE
+    );
+    for key in [&checkpoint, &pending, &index] {
+        assert!(store
+            .get(key)
+            .unwrap()
+            .is_some_and(|value| value.is_empty()));
+    }
+}
+
+#[test]
+fn verified_sweep_repairs_pending_secret_after_checkpoint_cleanup() {
+    let store = MemoryStore::default();
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&binding);
+    store.set(&checkpoint, b"").unwrap();
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+
+    super::sweep_verified_pending_secret(&store, &binding, |secret| secret == RESUME_PHRASE)
+        .unwrap();
+
+    assert!(store
+        .get(&binding.vault_secret_account())
+        .unwrap()
+        .is_some_and(|value| value.as_slice() == RESUME_PHRASE.as_bytes()));
+    assert!(store
+        .get(&pending)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+    assert!(store
+        .get(&index)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+}
+
+#[test]
+fn verified_sweep_preserves_conflicting_binding_and_recovery_data() {
+    let store = MemoryStore::default();
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&binding);
+    store
+        .set(&checkpoint, &provisioning.checkpoint().unwrap())
+        .unwrap();
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+    store
+        .set(
+            &binding.vault_secret_account(),
+            b"different verified secret",
+        )
+        .unwrap();
+
+    super::sweep_verified_pending_secret(&store, &binding, |secret| secret == RESUME_PHRASE)
+        .unwrap();
+
+    for key in [&checkpoint, &pending, &index] {
+        assert!(store
+            .get(key)
+            .unwrap()
+            .is_some_and(|value| !value.is_empty()));
+    }
+}
+
+#[test]
+fn postactivation_handoff_never_overwrites_a_conflicting_binding() {
+    let store = MemoryStore::default();
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&binding);
+    store
+        .set(&checkpoint, &provisioning.checkpoint().unwrap())
+        .unwrap();
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+    store
+        .set(
+            &binding.vault_secret_account(),
+            b"different verified secret",
+        )
+        .unwrap();
+
+    super::hand_off_and_cleanup(
+        &store,
+        &checkpoint,
+        &pending,
+        &provisioning,
+        &Zeroizing::new(RESUME_PHRASE.into()),
+    );
+
+    assert_eq!(
+        store
+            .get(&binding.vault_secret_account())
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"different verified secret"
+    );
+    for key in [&checkpoint, &pending, &index] {
+        assert!(store
+            .get(key)
+            .unwrap()
+            .is_some_and(|value| !value.is_empty()));
+    }
+}
+
+#[test]
+fn verified_sweep_binding_write_failure_keeps_recovery_data() {
+    let store = ControlledStore::default();
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&binding);
+    store
+        .set(&checkpoint, &provisioning.checkpoint().unwrap())
+        .unwrap();
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+    *store.fail_nonempty_write.lock().unwrap() = true;
+
+    assert!(
+        super::sweep_verified_pending_secret(&store, &binding, |secret| secret == RESUME_PHRASE)
+            .is_err()
+    );
+    for key in [&checkpoint, &pending, &index] {
+        assert!(store.value(key).is_some_and(|value| !value.is_empty()));
+    }
+}
+
+#[tokio::test]
 async fn provision_has_vault_returns_error() {
     let store = MemoryStore::default();
     let hosted = HostedState::default();
@@ -1011,50 +1513,6 @@ async fn provision_read_only_returns_entitlement_error() {
 }
 
 #[tokio::test]
-async fn provision_passphrase_none_returns_ok_no_checkpoint() {
-    let store = MemoryStore::default();
-    let hosted = HostedState::default();
-
-    let server_state = Arc::new(Mutex::new(FakeServerState {
-        account_revoked: false,
-        has_vault: false,
-        access: "read_write".into(),
-        grant_expired: false,
-        grant_call_count: 0,
-        ..FakeServerState::default()
-    }));
-    let (uri, _handle) = start_fake_server(server_state).await;
-
-    let account_id = "550e8400-e29b-41d4-a716-446655440000";
-    let session_key = super::session_key(&uri);
-    store
-        .set(
-            &session_key,
-            &encode_session(
-                account_id,
-                "pst_validtoken123456789012345678901234567",
-                super::now_unix() + 3600,
-            ),
-        )
-        .unwrap();
-
-    let passphrase_fn = |_need: super::PassphraseNeed| async { Ok(None) };
-    let activate_fn = |_cred: Zeroizing<Vec<u8>>, _pass: Zeroizing<String>| async { Ok(()) };
-
-    let result = super::provision_core(&store, &hosted, &uri, passphrase_fn, activate_fn).await;
-
-    assert!(
-        result.is_ok(),
-        "Provision should succeed when passphrase is None"
-    );
-    let checkpoint_key = super::checkpoint_key(&uri, account_id);
-    assert!(
-        store.get(&checkpoint_key).unwrap().is_none(),
-        "No checkpoint should be created"
-    );
-}
-
-#[tokio::test]
 async fn provision_wrong_resume_passphrase_returns_error() {
     let store = MemoryStore::default();
     let hosted = HostedState::default();
@@ -1107,6 +1565,143 @@ async fn provision_wrong_resume_passphrase_returns_error() {
         server_state.lock().unwrap().grant_bodies.is_empty(),
         "A wrong passphrase must not reach the provisioning grant"
     );
+}
+
+#[tokio::test]
+async fn generated_checkpoint_without_secret_fails_without_prompt_or_regeneration() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(base);
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    store
+        .set(&checkpoint, &provisioning.checkpoint().unwrap())
+        .unwrap();
+    store
+        .set(
+            &super::recovery_index_key(&binding),
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        |_| async { panic!("generated secret loss must not prompt") },
+        |_, _| async { panic!("generated secret loss must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "vault-secret-unavailable");
+    assert!(store
+        .get(&checkpoint)
+        .unwrap()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(server.lock().unwrap().grant_bodies.is_empty());
+}
+
+#[tokio::test]
+async fn malformed_generated_pending_secret_fails_without_prompt_or_regeneration() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let provisioning = peppy_hosted_client::prepare(
+        HTTPS_ORIGIN,
+        ACCOUNT,
+        RESUME_PHRASE,
+        CLIENT_KIND,
+        DEVICE_NAME,
+    )
+    .unwrap();
+    let binding = super::binding_for(&provisioning);
+    store
+        .set(
+            &super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT),
+            &provisioning.checkpoint().unwrap(),
+        )
+        .unwrap();
+    store
+        .set(&super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT), &[0xff])
+        .unwrap();
+    store
+        .set(
+            &super::recovery_index_key(&binding),
+            &serde_json::to_vec(&super::recovery_index(&provisioning, true)).unwrap(),
+        )
+        .unwrap();
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (base, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(base);
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        |_| async { panic!("malformed generated material must not prompt") },
+        |_, _| async { panic!("malformed generated material must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "vault-secret-unavailable");
+    assert!(server.lock().unwrap().grant_bodies.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_checkpoint_cancel_keeps_its_identity_for_later_recovery() {
+    let (store, hosted, server, _vault, _account) =
+        resumable_fixture(FakeServerState::default(), false).await;
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+
+    super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        |need| async move {
+            assert!(matches!(need, super::PassphraseNeed::Resume));
+            Ok(None)
+        },
+        |_, _| async { panic!("cancelled recovery must not activate") },
+    )
+    .await
+    .unwrap();
+
+    assert!(store
+        .get(&checkpoint)
+        .unwrap()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(server.lock().unwrap().grant_bodies.is_empty());
 }
 
 #[tokio::test]
@@ -1202,15 +1797,11 @@ async fn failed_completion_keeps_checkpoint_and_resume_reuses_operation() {
             ),
         )
         .unwrap();
-    let phrase = "alpha bravo charlie delta echo foxtrot";
     let first = super::provision_core(
         &store,
         &hosted,
         &uri,
-        |need| async move {
-            assert!(matches!(need, super::PassphraseNeed::Create));
-            Ok(Some(Zeroizing::new(phrase.into())))
-        },
+        |_| async move { panic!("fresh Hosted provisioning must not prompt") },
         |_, _| async { panic!("activation must not run after a failed completion") },
     )
     .await;
@@ -1223,6 +1814,10 @@ async fn failed_completion_keeps_checkpoint_and_resume_reuses_operation() {
             .is_some_and(|value| !value.is_empty()),
         "the checkpoint survives a failed completion"
     );
+    let pending_key = super::pending_secret_key(&uri, account_id);
+    assert!(store.get(&pending_key).unwrap().is_some_and(|value| {
+        peppy_crypto::passphrase::passphrase_acceptable(std::str::from_utf8(&value).unwrap())
+    }));
     assert!(
         super::account_view(&store, &hosted, &uri, Some("desktop-client-id"))
             .await
@@ -1237,10 +1832,7 @@ async fn failed_completion_keeps_checkpoint_and_resume_reuses_operation() {
         &store,
         &hosted,
         &uri,
-        |need| async move {
-            assert!(matches!(need, super::PassphraseNeed::Resume));
-            Ok(Some(Zeroizing::new(phrase.into())))
-        },
+        |_| async move { panic!("stored generated secret must resume without prompting") },
         move |_, _| async move {
             *sink.lock().unwrap() += 1;
             Ok(())
@@ -1249,6 +1841,10 @@ async fn failed_completion_keeps_checkpoint_and_resume_reuses_operation() {
     .await
     .unwrap();
     assert_eq!(*activated.lock().unwrap(), 1);
+    assert!(store
+        .get(&pending_key)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
     let server = server_state.lock().unwrap();
     let operations: Vec<_> = server
         .grant_bodies

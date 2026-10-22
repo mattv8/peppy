@@ -156,8 +156,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const [sharedSecretError, setSharedSecretError] = useState<string | null>(null);
   const [startOverConfirming, setStartOverConfirming] = useState(false);
   const [startOverAttempted, setStartOverAttempted] = useState(false);
-  const [acknowledged, setAcknowledged] = useState(false);
-  const [provisionError, setProvisionError] = useState(false);
+  const [provisionError, setProvisionError] = useState<string | null>(null);
   const [hostedOperation, setHostedOperation] = useState<PeppyCopyKey | null>(null);
   const [ownerStatusChecking, setOwnerStatusChecking] = useState(false);
   const [selfHostedUrl, setSelfHostedUrl] = useState(fixedOrigin ?? "");
@@ -793,10 +792,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     provision();
   };
   const provision = () => {
-    setProvisionError(false);
-    setHostedOperation("production_pairing_preparing");
+    setProvisionError(null);
+    setHostedOperation("hosted_create_vault_progress");
     setBusy(true);
-    void bridge.hosted_provision().catch(() => setProvisionError(true)).finally(() => {
+    void bridge.hosted_provision().catch(error => setProvisionError(thrownErrorCode(error))).finally(() => {
       setBusy(false);
       setHostedOperation(null);
       void refreshAccount();
@@ -1046,8 +1045,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       {route === "enrollment" && <div id="enrollment-panel">{renderEnrollment()}</div>}
       {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>}
       {route === "billing" && <section id="hosted-billing-card"><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>}
-      {route === "provisioning" && <section id="hosted-provisioning-card"><h2 tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>}
-      {route === "passphrase" && <section id="hosted-passphrase-card"><h2 tabIndex={-1}>{copy("passphrase_create_headline")}</h2><p>{copy("passphrase_create_body")}</p><p className="setup-hint">{copy("passphrase_irrecoverable_warn")}</p><p className="setup-hint">{copy("passphrase_native_note")}</p><label className="settings-check"><input id="passphrase-ack" type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /> {copy("passphrase_ack_label")}</label><button id="passphrase-native-cta-button" className="primary-button" disabled={!acknowledged || busy} onClick={startProvisioning}>{copy("passphrase_native_cta")}</button>{provisionError && <p id="hosted-passphrase-error" role="alert">{copy("production_provision_retry")}</p>}</section>}
+      {route === "provisioning" && <section id="hosted-provisioning-card"><h2 tabIndex={-1}>{copy("provisioning_headline")}</h2><div role="progressbar" aria-label={copy("provisioning_headline")} /><p>{copy("setup_provisioning_body")}</p>{provisionError !== null && <p id="hosted-provision-error" role="alert">{copy("production_provision_retry")}</p>}{provisionError !== null && <p id="hosted-provision-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}{provisionError !== null && <button id="hosted-provision-retry-button" className="secondary-button" disabled={busy} onClick={startProvisioning}>{copy("production_provision_resume")}</button>}</section>}
+      {route === "passphrase" && <section id="hosted-passphrase-card"><h2 tabIndex={-1}>{copy("hosted_create_vault_headline")}</h2><p>{copy("hosted_create_vault_body")}</p><button id="passphrase-native-cta-button" className="primary-button" disabled={busy} onClick={startProvisioning}>{copy(provisionError === null ? "production_create_vault" : "try_again")}</button>{provisionError !== null && <p id="hosted-passphrase-error" role="alert">{copy("hosted_create_vault_error")}</p>}{provisionError !== null && <p id="hosted-passphrase-error-code" className="setup-hint" data-error-code={provisionError}>Error code: {provisionError}</p>}</section>}
     </>
   );
 
