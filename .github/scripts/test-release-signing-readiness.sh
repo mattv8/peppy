@@ -14,6 +14,11 @@ required_env=(
   PEPPY_RELEASE_RPM_GPG_KEY_ID=rpm-gpg-key-id
   PEPPY_RELEASE_GPG_KEY=release-gpg-key
   PEPPY_RELEASE_GPG_KEY_ID=release-gpg-key-id
+  PEPPY_ANDROID_KEYSTORE_BASE64=android-keystore
+  PEPPY_ANDROID_KEYSTORE_PASSWORD=android-keystore-password
+  PEPPY_ANDROID_KEY_ALIAS=android-key-alias
+  PEPPY_ANDROID_KEY_PASSWORD=android-key-password
+  PEPPY_ANDROID_SIGNING_CERT_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 )
 
 strict_macos_env=(
@@ -66,6 +71,11 @@ if run_readiness partial-dispatch GITHUB_EVENT_NAME=workflow_dispatch "${require
   echo 'partial manual signing configuration must fail' >&2
   exit 1
 fi
+if run_readiness android-partial GITHUB_EVENT_NAME=push "${required_env[@]:0:6}" "${required_env[@]:7}" "${strict_macos_env[@]}" "${strict_windows_env[@]}"; then
+  echo 'partial Android signing configuration must fail' >&2
+  exit 1
+fi
+grep -Fq 'PEPPY_ANDROID_KEYSTORE_BASE64' "$temp_dir/android-partial.stdout" || { echo 'partial Android configuration must list missing names' >&2; exit 1; }
 
 run_readiness free-modes GITHUB_EVENT_NAME=push "${required_env[@]}" PEPPY_MACOS_SIGNING_MODE=adhoc PEPPY_WINDOWS_SIGNING_MODE=none
 expect_output "$temp_dir/free-modes.output" 'ready=true'

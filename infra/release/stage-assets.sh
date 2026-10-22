@@ -17,8 +17,8 @@ find_exact() {
 copy_asset() { cp "$1" "$out_dir/$2"; }
 mkdir -p "$out_dir"; rm -f "$out_dir"/*
 android="$download_dir/android-release-artifacts"; linux="$download_dir/desktop-linux-release-artifacts"; macos="$download_dir/desktop-macos-release-artifacts"; windows="$download_dir/desktop-windows-release-artifacts"
-copy_asset "$(find_exact "$android" 'peppy-android-unsigned.apk')" "peppy-$version-android-unsigned.apk"
-copy_asset "$(find_exact "$android" 'peppy-android-unsigned.aab')" "peppy-$version-android-unsigned.aab"
+copy_asset "$(find_exact "$android" 'peppy-android.apk')" "peppy-$version-android.apk"
+copy_asset "$(find_exact "$android" 'peppy-android.aab')" "peppy-$version-android.aab"
 work_dir=$(mktemp -d); trap 'rm -rf "$work_dir"' EXIT
 tar -xzf "$(find_exact "$linux" 'desktop-linux-bundles.tar.gz')" -C "$work_dir"
 copy_asset "$(find_exact "$work_dir" '*.AppImage')" "peppy-$version-linux-x86_64.AppImage"

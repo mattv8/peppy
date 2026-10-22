@@ -1,9 +1,9 @@
 # Desktop update release provisioning
 
 Only protected `updates-stable` and `updates-staging` environments may provide
-desktop update credentials. Direct `build-artifacts.yml` dispatches and pull
-requests never enable the trusted updater build input and therefore produce no
-update artifacts or signatures.
+release credentials. Direct `build-artifacts.yml` dispatches and pull requests
+never enable the trusted updater build input and therefore produce no update
+artifacts or release signatures.
 
 Configure the following protected inputs before enabling an update release:
 
@@ -32,6 +32,14 @@ Configure the following protected inputs before enabling an update release:
   this RPM keyring separately from the checksum-signing key. This must be an
   unprotected, isolated CI RPM signing key: `rpmsign` has no safe passphrase
   input, so passphrase-protected RPM keys are rejected.
+- `PEPPY_ANDROID_KEYSTORE_BASE64`, `PEPPY_ANDROID_KEYSTORE_PASSWORD`,
+  `PEPPY_ANDROID_KEY_ALIAS`, and `PEPPY_ANDROID_KEY_PASSWORD` protected
+  environment secrets: the persistent Android release keystore and its access
+  inputs.
+- `PEPPY_ANDROID_SIGNING_CERT_SHA256` protected environment variable: the
+  64-hex-digit SHA-256 fingerprint of the Android release certificate. The
+  publisher independently verifies final staged APK and AAB assets against it
+  before checksums or GitHub Release creation.
 
 The trusted build fails closed when its channel, updater key, required selected
 platform credentials, or explicit mode value is invalid. It never downgrades a
@@ -68,6 +76,29 @@ account or store enrollment. The Linux repository lane consumes the exact
 `dist/release` directory after `sign-update-assets.sh` and
 `generate-update-manifest.sh`; it must publish those immutable final assets and
 their signatures without renaming them.
+
+## Android signing
+
+Trusted Android builds require all five Android inputs. They fail closed when
+any is absent, malformed, or does not match the final signer; they never
+substitute debug signing or publish unsigned Android release assets. Keep the
+keystore outside this repository, provision it only as protected-environment
+secrets, and retain encrypted, access-controlled backups outside CI. The same
+key must sign every version and every stable/staging channel sharing the Android
+application ID, or installed clients cannot upgrade across releases.
+
+Provision all five Android inputs in both `updates-stable` and `updates-staging`
+before merging or enabling this workflow. An otherwise configured protected
+release environment that lacks any Android input intentionally fails closed;
+only a wholly unconfigured stable automatic release retains the documented
+skip behavior.
+
+Register the corresponding certificate with Google OAuth where that Android
+identity is required. GitHub Release assets are named
+`peppy-<version>-android.apk` and `peppy-<version>-android.aab`. The APK is the
+signed direct-sideload artifact; the AAB is an upload input for store tooling,
+not directly installable. Google Play enrollment is not required to sideload the
+APK.
 
 Protected environments must permit deployment only from `production` for
 `updates-stable` and from `staging` for `updates-staging`. The only trusted
