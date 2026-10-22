@@ -13,6 +13,11 @@ if [ "${TRUSTED_UPDATE_BUILD:-false}" = true ]; then
   if [ "$macos_mode" = adhoc ]; then printf 'macOS is ad-hoc signed and not notarized; it is not a Developer ID or Gatekeeper-approved build and may require the System Settings bypass.\n'; fi
   if [ "$windows_mode" = none ]; then printf 'Windows installers are not Authenticode publisher-signed and can show SmartScreen or UAC warnings on installation and updates.\n'; fi
   printf 'Android artifacts remain unsigned, and the iOS archive remains unsigned and is not an installable IPA.\n\n'
+  if [ "$macos_mode" = adhoc ]; then
+    printf '### macOS first launch\n\n'
+    printf 'Copy Peppy.app from the downloaded DMG to /Applications first, and use only a trusted official release after verifying its download checksum. This command removes the macOS quarantine flag from Peppy.app only; it does not sign or notarize the app and does not disable Gatekeeper globally.\n\n'
+    printf '```sh\nxattr -dr com.apple.quarantine "/Applications/Peppy.app" && open "/Applications/Peppy.app"\n```\n\n'
+  fi
 else
   printf 'This is an unsigned development-grade %s. It is not notarized, signed, or store-distributed.\n\n' "$kind"
 fi
