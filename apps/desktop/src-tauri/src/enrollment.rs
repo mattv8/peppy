@@ -1162,7 +1162,12 @@ pub async fn enrollment_discover(
                     &*state.store,
                     &selected,
                     &session.binding.vault_secret_account(),
-                    verify,
+                    &verify,
+                );
+                let _ = crate::hosted::sweep_verified_pending_secret(
+                    &*state.store,
+                    &session.binding,
+                    &verify,
                 );
             }
         }

@@ -352,11 +352,87 @@ describe("SetupLanding", () => {
     expect(bridge.enrollment_cancel).toHaveBeenCalled();
   });
 
-  it("keeps native passphrase entry and hosted provisioning routing", async () => {
+  it("creates a fresh hosted vault without a passphrase acknowledgement or secret field", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     renderLanding();
-    expect(await screen.findByRole("button", { name: /enter passphrase securely/i })).toBeDisabled();
+    const create = await screen.findByRole("button", { name: "Create my vault" });
+    expect(create).toBeEnabled();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
+    fireEvent.click(create);
+    await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledOnce());
+  });
+
+  it("disables fresh vault creation while provisioning is in flight", async () => {
+    const provision = deferred<void>();
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
+    vi.spyOn(bridge, "hosted_provision").mockReturnValue(provision.promise);
+    renderLanding();
+    const create = await screen.findByRole("button", { name: "Create my vault" });
+    fireEvent.click(create);
+    await waitFor(() => expect(create).toBeDisabled());
+    expect(screen.getByText(peppyCopy.hosted_create_vault_progress)).toBeInTheDocument();
+    fireEvent.click(create);
+    expect(bridge.hosted_provision).toHaveBeenCalledOnce();
+    await act(async () => provision.resolve());
+    await waitFor(() => expect(create).toBeEnabled());
+  });
+
+  it("shows a sanitized diagnostic code on fresh and resumable provisioning failures", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
+    vi.spyOn(bridge, "hosted_provision").mockRejectedValueOnce({ code: "secure-store-unavailable" });
+    renderLanding();
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
+    expect(await screen.findByRole("alert")).not.toHaveTextContent("secure-store-unavailable");
+    expect(document.getElementById("hosted-passphrase-error-code")).toHaveAttribute("data-error-code", "secure-store-unavailable");
+    expect(document.getElementById("hosted-passphrase-error-code")).toHaveTextContent("Error code: secure-store-unavailable");
+    cleanup();
+
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write", resumable: true }));
+    vi.spyOn(bridge, "hosted_provision").mockRejectedValueOnce({ code: "network" });
+    renderLanding();
+    expect(await screen.findByRole("alert")).not.toHaveTextContent("network");
+    expect(document.getElementById("hosted-provision-error-code")).toHaveAttribute("data-error-code", "network");
+    expect(document.getElementById("hosted-provision-error-code")).toHaveTextContent("Error code: network");
+  });
+
+  it("never renders raw messages, payloads, or unknown codes from a failed provision", async () => {
+    const leaked = {
+      code: "PASSPHRASE-LEAK-CODE",
+      message: "correct horse battery staple passphrase-leak",
+      body: "{\"vault_secret\":\"body-leak\"}",
+      details: "details-leak",
+    };
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
+    vi.spyOn(bridge, "hosted_provision").mockRejectedValueOnce(leaked);
+    renderLanding();
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(document.getElementById("hosted-passphrase-error-code")).toHaveAttribute("data-error-code", "unavailable");
+    expect(document.body).not.toHaveTextContent("PASSPHRASE-LEAK-CODE");
+    expect(document.body).not.toHaveTextContent("correct horse");
+    expect(document.body).not.toHaveTextContent("body-leak");
+    expect(document.body).not.toHaveTextContent("details-leak");
+    cleanup();
+
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write", resumable: true }));
+    vi.spyOn(bridge, "hosted_provision").mockRejectedValueOnce(new Error("correct horse battery staple passphrase-leak"));
+    renderLanding();
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(document.getElementById("hosted-provision-error-code")).toHaveAttribute("data-error-code", "unavailable");
+    expect(document.body).not.toHaveTextContent("correct horse");
+  });
+
+  it("shows the creation error on the fresh card and retries provisioning", async () => {
+    vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
+    vi.spyOn(bridge, "hosted_provision").mockRejectedValueOnce({ code: "network" }).mockResolvedValueOnce();
+    renderLanding();
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(peppyCopy.hosted_create_vault_error);
+    expect(document.getElementById("hosted-passphrase-error")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
   });
 
   it("automatically creates a transfer invitation for an enrolled owner without a phone", async () => {
@@ -834,8 +910,7 @@ describe("SetupLanding", () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     vi.spyOn(bridge, "hosted_provision").mockRejectedValue({ code: "network" });
     renderLanding();
-    fireEvent.click(await screen.findByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: /enter passphrase securely/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 
@@ -856,32 +931,29 @@ describe("SetupLanding", () => {
     expect(bridge.enrollment_discover).not.toHaveBeenCalled();
   });
 
-  it("provisions a resumable account and an acknowledged passphrase setup", async () => {
+  it("provisions a resumable account and a fresh hosted vault", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write", resumable: true }));
     renderLanding();
     await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledOnce());
     cleanup();
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     renderLanding();
-    fireEvent.click(await screen.findByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: /enter passphrase securely/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
     await waitFor(() => expect(bridge.hosted_provision).toHaveBeenCalledTimes(2));
   });
 
   it("records Hosted when an explicit passphrase provision begins", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     renderLanding();
-    fireEvent.click(await screen.findByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: /enter passphrase securely/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
     expect(window.localStorage.getItem("peppy.setup.mode")).toBe("hosted");
   });
 
-  it("refreshes the account after a failed passphrase provision", async () => {
+  it("refreshes the account after a failed fresh vault creation", async () => {
     vi.spyOn(bridge, "hosted_account").mockResolvedValue(account({ signedIn: true, access: "read_write" }));
     vi.spyOn(bridge, "hosted_provision").mockRejectedValue({ code: "network" });
     renderLanding();
-    fireEvent.click(await screen.findByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: /enter passphrase securely/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create my vault" }));
     await screen.findByRole("alert");
     await waitFor(() => expect(bridge.hosted_account).toHaveBeenCalledTimes(2));
   });

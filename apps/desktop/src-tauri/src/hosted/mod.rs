@@ -4,6 +4,7 @@
 //! webview receives only `HostedAccountView`.
 
 use crate::{
+    credentials::Binding,
     error::{BridgeError, BridgeResult},
     net::{read_bounded, NetError},
     secure_store::SecretStore,
@@ -36,11 +37,15 @@ const PRODUCTION_ORIGIN: &str = "https://peppy.pro";
 const MAX_BODY: usize = 64 * 1024;
 const SESSION_PREFIX: &str = "hosted-session:";
 const CHECKPOINT_PREFIX: &str = "hosted-provisioning:";
+const PENDING_SECRET_PREFIX: &str = "hosted-pending-secret:v1:";
+const RECOVERY_INDEX_PREFIX: &str = "hosted-provisioning-index:v1:";
+const MAX_PENDING_SECRET_BYTES: usize = 16 * 1024;
 
 /// Managed by L8 with `app.manage(HostedState::default())`.
 #[derive(Default)]
 pub struct HostedState {
     session: Mutex<Option<HostedSessionRecord>>,
+    provisioning: Mutex<()>,
     sign_in_generation: AtomicU64,
     /// Tests send requests to a local fake server while keeping an HTTPS credential origin.
     #[cfg(test)]
@@ -85,12 +90,9 @@ pub(crate) async fn provision_enrollment(
         &*state.store,
         hosted,
         &origin,
-        |need| async move {
-            let purpose = match need {
-                PassphraseNeed::Create => crate::dialogs::PassphrasePurpose::Create,
-                PassphraseNeed::Resume => crate::dialogs::PassphrasePurpose::Unlock,
-            };
-            crate::dialogs::passphrase(app, purpose).await
+        |_| async move {
+            crate::dialogs::passphrase(app, crate::dialogs::PassphrasePurpose::RecoverVaultSecret)
+                .await
         },
         |credential, passphrase| activate_and_unlock(app, state, credential, passphrase),
     )
@@ -223,6 +225,112 @@ fn session_key(origin: &str) -> String {
 }
 fn checkpoint_key(origin: &str, account_id: &str) -> String {
     format!("{CHECKPOINT_PREFIX}{origin}:{account_id}")
+}
+fn scoped_key(prefix: &str, parts: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update(part.as_bytes());
+        digest.update([0]);
+    }
+    format!("{prefix}{:x}", digest.finalize())
+}
+fn pending_secret_key(origin: &str, account_id: &str) -> String {
+    scoped_key(PENDING_SECRET_PREFIX, &[origin, account_id])
+}
+fn recovery_index_key(binding: &Binding) -> String {
+    scoped_key(
+        RECOVERY_INDEX_PREFIX,
+        &[&binding.origin, &binding.vault_id, &binding.device_id],
+    )
+}
+fn read_text_secret(store: &dyn SecretStore, key: &str) -> BridgeResult<Option<Zeroizing<String>>> {
+    let Some(value) = store.get(key)?.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_PENDING_SECRET_BYTES {
+        return Err(BridgeError::new(
+            "vault-secret-unavailable",
+            "The stored vault shared secret is invalid.",
+        ));
+    }
+    match String::from_utf8(value.to_vec()) {
+        Ok(value) => Ok(Some(Zeroizing::new(value))),
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            bytes.zeroize();
+            Err(BridgeError::new(
+                "vault-secret-unavailable",
+                "The stored vault shared secret is invalid.",
+            ))
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryIndex {
+    version: u8,
+    origin: String,
+    account_id: String,
+    operation_id: String,
+    vault_id: String,
+    device_id: String,
+    generated: bool,
+}
+
+fn binding_for(provisioning: &HostedProvisioning) -> Binding {
+    let view = provisioning.view();
+    Binding {
+        origin: view.origin,
+        vault_id: view.vault_id,
+        device_id: view.device_id,
+    }
+}
+
+fn recovery_index(provisioning: &HostedProvisioning, generated: bool) -> RecoveryIndex {
+    let view = provisioning.view();
+    RecoveryIndex {
+        version: 1,
+        origin: view.origin,
+        account_id: view.account_id,
+        operation_id: view.operation_id,
+        vault_id: view.vault_id,
+        device_id: view.device_id,
+        generated,
+    }
+}
+
+fn matching_index(index: &RecoveryIndex, provisioning: &HostedProvisioning) -> bool {
+    let view = provisioning.view();
+    index.version == 1
+        && index.origin == view.origin
+        && index.account_id == view.account_id
+        && index.operation_id == view.operation_id
+        && index.vault_id == view.vault_id
+        && index.device_id == view.device_id
+}
+
+fn read_recovery_index(
+    store: &dyn SecretStore,
+    provisioning: &HostedProvisioning,
+) -> BridgeResult<Option<RecoveryIndex>> {
+    let key = recovery_index_key(&binding_for(provisioning));
+    let Some(value) = store.get(&key)?.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let index: RecoveryIndex = serde_json::from_slice(&value).map_err(|_| {
+        BridgeError::new(
+            "vault-secret-unavailable",
+            "The stored provisioning recovery record is invalid.",
+        )
+    })?;
+    if !matching_index(&index, provisioning) {
+        return Err(BridgeError::new(
+            "vault-secret-unavailable",
+            "The stored provisioning recovery record does not match the pending vault.",
+        ));
+    }
+    Ok(Some(index))
 }
 fn hosted_error() -> BridgeError {
     BridgeError::new(
@@ -517,12 +625,9 @@ pub async fn hosted_provision(
         &*state.store,
         &hosted,
         &hosted_origin()?,
-        |need| async move {
-            let purpose = match need {
-                PassphraseNeed::Create => crate::dialogs::PassphrasePurpose::Create,
-                PassphraseNeed::Resume => crate::dialogs::PassphrasePurpose::Unlock,
-            };
-            crate::dialogs::passphrase(app, purpose).await
+        |_| async move {
+            crate::dialogs::passphrase(app, crate::dialogs::PassphrasePurpose::RecoverVaultSecret)
+                .await
         },
         |credential, passphrase| activate_and_unlock(app, state, credential, passphrase),
     )
@@ -551,10 +656,11 @@ async fn activate_and_unlock(
         &native,
         profile,
         header,
-        passphrase,
+        passphrase.clone(),
         vault.profile_fingerprint,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 fn persist_checkpoint(
@@ -656,6 +762,7 @@ where
     A: FnOnce(Zeroizing<Vec<u8>>, Zeroizing<String>) -> AF,
     AF: std::future::Future<Output = BridgeResult<()>>,
 {
+    let _provisioning = hosted.provisioning.lock().await;
     let Some(session) = load_session_from_store(store, hosted, origin).await? else {
         return Err(BridgeError::new(
             "credentials-required",
@@ -680,14 +787,19 @@ where
     .map_err(client_error)?;
 
     let key = checkpoint_key(origin, &session.account_id);
+    let pending_key = pending_secret_key(origin, &session.account_id);
     let stored = store.get(&key)?.filter(|value| !value.is_empty());
-    let restored = stored
-        .as_ref()
-        .and_then(|value| restore(value.to_vec(), origin, &session.account_id).ok());
-    if stored.is_some() && restored.is_none() {
-        // An unreadable or foreign checkpoint is discarded; a fresh operation starts instead.
-        tombstone(store, &key)?;
-    }
+    let restored = match stored.as_ref() {
+        Some(value) => Some(
+            restore(value.to_vec(), origin, &session.account_id).map_err(|_| {
+                BridgeError::new(
+                    "vault-secret-unavailable",
+                    "The pending Hosted provisioning record is invalid.",
+                )
+            })?,
+        ),
+        None => None,
+    };
     // A vault owned by this account is only recoverable here when it is the one this desktop
     // was creating: the server replays a consumed operation for the same grant and payload.
     let replaying = match (&account.vault_id, &restored) {
@@ -707,36 +819,83 @@ where
         ));
     }
 
-    let need = if restored.is_some() {
-        PassphraseNeed::Resume
-    } else {
-        PassphraseNeed::Create
-    };
-    let Some(passphrase) = passphrase(need).await? else {
-        return Ok(());
-    };
-    let provisioning = match restored {
+    let mut recovered_legacy_secret = false;
+    let mut has_recovery_index = false;
+    let mut generated_marker = false;
+    let (provisioning, passphrase, generated) = match restored {
         Some(value) => {
-            if !value
-                .passphrase_matches(&passphrase)
-                .map_err(client_error)?
-            {
+            let binding = binding_for(&value);
+            let index = read_recovery_index(store, &value)?;
+            has_recovery_index = index.is_some();
+            generated_marker = index.as_ref().is_some_and(|index| index.generated);
+            let stored_secret = read_text_secret(store, &pending_key)?
+                .or(read_text_secret(store, &binding.vault_secret_account())?);
+            let secret = match stored_secret {
+                Some(secret) => secret,
+                None if index.is_some_and(|index| index.generated) => {
+                    return Err(BridgeError::new(
+                        "vault-secret-unavailable",
+                        "The generated vault shared secret is unavailable on this device.",
+                    ));
+                }
+                None => {
+                    recovered_legacy_secret = true;
+                    let Some(secret) = passphrase(PassphraseNeed::Resume).await? else {
+                        return Ok(());
+                    };
+                    secret
+                }
+            };
+            if !value.passphrase_matches(&secret).map_err(client_error)? {
                 return Err(BridgeError::new(
                     "wrong-passphrase",
                     "That passphrase does not match the pending vault.",
                 ));
             }
-            value
+            (value, secret, false)
         }
-        None => prepare(
-            origin,
-            &session.account_id,
-            &passphrase,
-            peppy_hosted_api::enrollment::ClientKind::Desktop,
-            "Peppy Desktop",
-        )
-        .map_err(client_error)?,
+        None => {
+            let secret = match read_text_secret(store, &pending_key)? {
+                Some(secret) => secret,
+                None => Zeroizing::new(peppy_crypto::passphrase::generate_passphrase()),
+            };
+            if !peppy_crypto::passphrase::passphrase_acceptable(&secret) {
+                return Err(BridgeError::new(
+                    "vault-secret-unavailable",
+                    "The stored vault shared secret is invalid.",
+                ));
+            }
+            let provisioning = prepare(
+                origin,
+                &session.account_id,
+                &secret,
+                peppy_hosted_api::enrollment::ClientKind::Desktop,
+                "Peppy Desktop",
+            )
+            .map_err(client_error)?;
+            (provisioning, secret, true)
+        }
     };
+    if generated || recovered_legacy_secret {
+        // This must happen before either the checkpoint or any replayable request.
+        store.set(&pending_key, passphrase.as_bytes())?;
+    }
+    if generated || !has_recovery_index {
+        let binding = binding_for(&provisioning);
+        let index = Zeroizing::new(
+            serde_json::to_vec(&recovery_index(
+                &provisioning,
+                generated || generated_marker,
+            ))
+            .map_err(|_| {
+                BridgeError::new(
+                    "vault-secret-unavailable",
+                    "Could not save provisioning recovery data.",
+                )
+            })?,
+        );
+        store.set(&recovery_index_key(&binding), &index)?;
+    }
     persist_checkpoint(store, &key, &provisioning)?;
 
     let complete = |provisioning: &HostedProvisioning| {
@@ -784,8 +943,136 @@ where
     let credential = provisioning
         .credential_json(String::from_utf8(done).map_err(|_| invalid_response())?)
         .map_err(client_error)?;
+    let cleanup_secret = passphrase.clone();
     activate_and_unlock(Zeroizing::new(credential.into_bytes()), passphrase).await?;
-    tombstone(store, &key)
+    hand_off_and_cleanup(store, &key, &pending_key, &provisioning, &cleanup_secret);
+    Ok(())
+}
+
+/// A completed activation is never turned into a retry error by secure-store trouble. Cleanup is
+/// permitted only after the verified binding contains exactly the secret used for activation.
+fn hand_off_and_cleanup(
+    store: &dyn SecretStore,
+    checkpoint_key: &str,
+    pending_key: &str,
+    provisioning: &HostedProvisioning,
+    secret: &Zeroizing<String>,
+) {
+    let binding_account = binding_for(provisioning).vault_secret_account();
+    let handoff_complete =
+        crate::enrollment::save_verified_vault_secret_if_empty(store, &binding_account, secret)
+            .is_ok()
+            && read_text_secret(store, &binding_account)
+                .ok()
+                .flatten()
+                .is_some_and(|stored| stored.as_str() == secret.as_str());
+    if !handoff_complete || tombstone(store, checkpoint_key).is_err() {
+        return;
+    }
+
+    let pending = match read_text_secret(store, pending_key) {
+        Ok(pending) => pending,
+        Err(_) => return,
+    };
+    if pending.is_some_and(|pending| pending.as_str() == secret.as_str())
+        && tombstone(store, pending_key).is_err()
+    {
+        return;
+    }
+
+    let index_key = recovery_index_key(&binding_for(provisioning));
+    if read_recovery_index(store, provisioning)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        let _ = tombstone(store, &index_key);
+    }
+}
+
+/// Repairs only the recovery record bound to an already unlocked owner identity. This does not
+/// consult an OAuth account session: the owner header verifier is the authority for the move.
+pub(crate) fn sweep_verified_pending_secret(
+    store: &dyn SecretStore,
+    binding: &Binding,
+    verify: impl Fn(&str) -> bool,
+) -> BridgeResult<()> {
+    let index_key = recovery_index_key(binding);
+    let Some(bytes) = store.get(&index_key)?.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let index: RecoveryIndex = serde_json::from_slice(&bytes).map_err(|_| {
+        BridgeError::new(
+            "vault-secret-unavailable",
+            "The stored provisioning recovery record is invalid.",
+        )
+    })?;
+    if index.version != 1
+        || index.origin != binding.origin
+        || index.vault_id != binding.vault_id
+        || index.device_id != binding.device_id
+    {
+        return Ok(());
+    }
+    let checkpoint_key = checkpoint_key(&index.origin, &index.account_id);
+    if let Some(checkpoint) = store
+        .get(&checkpoint_key)?
+        .filter(|value| !value.is_empty())
+    {
+        let provisioning =
+            restore(checkpoint.to_vec(), &index.origin, &index.account_id).map_err(|_| {
+                BridgeError::new(
+                    "vault-secret-unavailable",
+                    "The pending Hosted provisioning record is invalid.",
+                )
+            })?;
+        if !matching_index(&index, &provisioning) || binding_for(&provisioning) != *binding {
+            return Ok(());
+        }
+    }
+    let pending_key = pending_secret_key(&index.origin, &index.account_id);
+    let Some(secret) = read_text_secret(store, &pending_key)? else {
+        return Ok(());
+    };
+    if !verify(&secret) {
+        return Ok(());
+    }
+    let binding_account = binding.vault_secret_account();
+    crate::enrollment::save_verified_vault_secret_if_empty(store, &binding_account, &secret)?;
+    if !read_text_secret(store, &binding_account)?
+        .is_some_and(|stored| stored.as_str() == secret.as_str())
+    {
+        return Ok(());
+    }
+    // Durable confirmation exists; cleanup only this exact recovery tuple.
+    tombstone_if_matching_checkpoint(store, &checkpoint_key, &index)?;
+    if read_text_secret(store, &pending_key)?
+        .is_some_and(|stored| stored.as_str() == secret.as_str())
+    {
+        tombstone(store, &pending_key)?;
+    }
+    tombstone(store, &index_key)
+}
+
+fn tombstone_if_matching_checkpoint(
+    store: &dyn SecretStore,
+    key: &str,
+    index: &RecoveryIndex,
+) -> BridgeResult<()> {
+    let Some(checkpoint) = store.get(key)?.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let provisioning =
+        restore(checkpoint.to_vec(), &index.origin, &index.account_id).map_err(|_| {
+            BridgeError::new(
+                "vault-secret-unavailable",
+                "The pending Hosted provisioning record is invalid.",
+            )
+        })?;
+    if matching_index(index, &provisioning) {
+        tombstone(store, key)?;
+    }
+    Ok(())
 }
 
 /// Requests a grant when the operation has none and records it in the durable checkpoint. A
