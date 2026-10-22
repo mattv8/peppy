@@ -46,7 +46,7 @@ const diagnosticErrorCodes = new Set<string>([
   "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
   "host-config", "server-response", "revoked", "wrong-passphrase", "vault-secret-mismatch", "credential-changed", "enrollment-state", "database-key-conflict",
   "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
-  "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable",
+  "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable", "hosted-checkpoint-invalid",
   "vault_not_found", "request_not_found", "request_not_approved", "operation_conflict", "admin-password-length",
   "owner-status-pending",
 ]);

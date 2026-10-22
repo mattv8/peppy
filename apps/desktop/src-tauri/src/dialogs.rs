@@ -18,7 +18,7 @@ pub enum PassphrasePurpose {
     Unlock,
     ResumeOwnerSecret,
     RecoverVaultSecret,
-    Create,
+    ResumeHostedPassphrase,
     SetupToken,
     AdminPassword,
     AdminPasswordCreate,
@@ -411,21 +411,21 @@ fn trim_helper_terminator(value: &mut Vec<u8>) {
 #[cfg(target_os = "windows")]
 mod windows_dialog {
     use super::{
-        BridgeError, BridgeResult, MAX_PASSPHRASE_BYTES, PassphrasePurpose, Zeroizing,
-        passphrase_from_utf8,
+        passphrase_from_utf8, BridgeError, BridgeResult, PassphrasePurpose, Zeroizing,
+        MAX_PASSPHRASE_BYTES,
     };
     use windows::{
+        core::w,
         Win32::{
             Foundation::{ERROR_CANCELLED, HWND, WIN32_ERROR},
             Graphics::Gdi::HBITMAP,
             Security::Credentials::{
-                CRED_MAX_CREDENTIAL_BLOB_SIZE, CREDUI_FLAGS_ALWAYS_SHOW_UI,
+                CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI,
                 CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
                 CREDUI_FLAGS_PASSWORD_ONLY_OK, CREDUI_INFOW, CREDUI_MAX_USERNAME_LENGTH,
-                CredUIPromptForCredentialsW,
+                CRED_MAX_CREDENTIAL_BLOB_SIZE,
             },
         },
-        core::w,
     };
     use zeroize::Zeroize;
 
@@ -462,11 +462,11 @@ mod windows_dialog {
                 ),
                 w!("Complete vault setup"),
             ),
-            PassphrasePurpose::Create => (
+            PassphrasePurpose::ResumeHostedPassphrase => (
                 w!(
-                    "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered."
+                    "Enter the encryption passphrase you chose when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy."
                 ),
-                w!("Create encryption passphrase"),
+                w!("Resume Peppy Hosted setup"),
             ),
             PassphrasePurpose::AppLockCreate => (
                 w!("Choose a password required when Peppy opens on this computer."),
@@ -526,8 +526,8 @@ mod windows_dialog {
                 match purpose {
                     PassphrasePurpose::Unlock
                     | PassphrasePurpose::ResumeOwnerSecret
-                    | PassphrasePurpose::RecoverVaultSecret => w!("Peppy sync vault"),
-                    PassphrasePurpose::Create => w!("Peppy encryption passphrase"),
+                    | PassphrasePurpose::RecoverVaultSecret
+                    | PassphrasePurpose::ResumeHostedPassphrase => w!("Peppy sync vault"),
                     PassphrasePurpose::AppLockCreate
                     | PassphrasePurpose::AppLockConfirm
                     | PassphrasePurpose::AppLockUnlock
@@ -585,8 +585,8 @@ mod windows_dialog {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        BridgeError, BridgeResult, MAX_PASSPHRASE_BYTES, PassphrasePurpose, Zeroizing,
-        passphrase_from_utf8, trim_helper_terminator,
+        passphrase_from_utf8, trim_helper_terminator, BridgeError, BridgeResult, PassphrasePurpose,
+        Zeroizing, MAX_PASSPHRASE_BYTES,
     };
     use std::{
         io::{Read, Result as IoResult},
@@ -599,8 +599,8 @@ mod linux {
     const RESUME_OWNER_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.";
     const RECOVER_VAULT_SECRET_TITLE: &str = "Complete vault setup";
     const RECOVER_VAULT_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.";
-    const CREATE_TITLE: &str = "Create encryption passphrase";
-    const CREATE_MESSAGE: &str = "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.";
+    const RESUME_HOSTED_PASSPHRASE_TITLE: &str = "Resume Peppy Hosted setup";
+    const RESUME_HOSTED_PASSPHRASE_MESSAGE: &str = "Enter the encryption passphrase you chose when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy.";
     const APP_LOCK_MESSAGE: &str = "Enter the password required to open Peppy on this computer.";
 
     pub fn secure_passphrase(
@@ -614,7 +614,10 @@ mod linux {
             PassphrasePurpose::RecoverVaultSecret => {
                 (RECOVER_VAULT_SECRET_TITLE, RECOVER_VAULT_SECRET_MESSAGE)
             }
-            PassphrasePurpose::Create => (CREATE_TITLE, CREATE_MESSAGE),
+            PassphrasePurpose::ResumeHostedPassphrase => (
+                RESUME_HOSTED_PASSPHRASE_TITLE,
+                RESUME_HOSTED_PASSPHRASE_MESSAGE,
+            ),
             PassphrasePurpose::AppLockCreate => (
                 "Require a password to open Peppy",
                 "Choose a password required when Peppy opens on this computer.",
@@ -718,10 +721,10 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::{
-        COPY_FAILED, COPY_SUCCEEDED, SecretClipboard, SecretDialogAction, SecretDialogStep,
-        VAULT_SECRET_CLOSE, VAULT_SECRET_COPY, VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
         handle_secret_dialog_action, passphrase_from_utf8, secret_message, trim_helper_terminator,
-        vault_secret_action, vault_secret_buttons,
+        vault_secret_action, vault_secret_buttons, SecretClipboard, SecretDialogAction,
+        SecretDialogStep, COPY_FAILED, COPY_SUCCEEDED, VAULT_SECRET_CLOSE, VAULT_SECRET_COPY,
+        VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
     };
     use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
 
@@ -834,7 +837,7 @@ mod tests {
     #[test]
     fn passphrase_purpose_preserves_unlock_copy() {
         let unlock = super::macos::copy(super::PassphrasePurpose::Unlock);
-        let create = super::macos::copy(super::PassphrasePurpose::Create);
+        let hosted = super::macos::copy(super::PassphrasePurpose::ResumeHostedPassphrase);
         let admin_password = super::macos::copy(super::PassphrasePurpose::AdminPassword);
         let admin_password_create =
             super::macos::copy(super::PassphrasePurpose::AdminPasswordCreate);
@@ -850,8 +853,10 @@ mod tests {
             "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
         );
         assert_eq!(unlock.2, "Unlock");
-        assert_ne!(unlock, create);
-        assert_eq!(create.2, "Create");
+        assert_ne!(unlock, hosted);
+        assert_eq!(hosted.0, "Resume Peppy Hosted setup");
+        assert!(hosted.1.contains("started setting up Peppy Hosted"));
+        assert_eq!(hosted.2, "Continue");
         assert!(admin_password.1.contains("12–1024 UTF-8 bytes"));
         assert!(admin_password_create.1.contains("12–1024 UTF-8 bytes"));
         assert_ne!(admin_password_create, admin_password_confirm);
@@ -890,7 +895,7 @@ mod tests {
 #[allow(unexpected_cfgs, deprecated)]
 mod macos {
     use cocoa::{
-        base::{YES, id, nil},
+        base::{id, nil, YES},
         foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString},
     };
     use objc::{class, msg_send, sel, sel_impl};
@@ -924,10 +929,10 @@ mod macos {
                 "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.",
                 "Continue",
             ),
-            super::PassphrasePurpose::Create => (
-                "Create encryption passphrase",
-                "Choose the encryption passphrase for your Peppy server. Enter the same passphrase on every device. It stays on this device, is never sent to Peppy, and cannot be recovered.",
-                "Create",
+            super::PassphrasePurpose::ResumeHostedPassphrase => (
+                "Resume Peppy Hosted setup",
+                "Enter the encryption passphrase you chose when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy.",
+                "Continue",
             ),
             super::PassphrasePurpose::SetupToken => (
                 "Claim Peppy server",
