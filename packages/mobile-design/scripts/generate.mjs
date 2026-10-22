@@ -277,7 +277,7 @@ async function generateWindowsIcon() {
 async function generateIcons() {
   await withIconOutput(async output => {
     tauriIcon(paths.appIcon, output);
-    await Promise.all(["128x128.png", "128x128@2x.png", "icon.png"].map(file => cp(resolve(output, file), resolve(iconDir, file))));
+    await Promise.all(["128x128.png", "128x128@2x.png", "icon.png", "icon.icns"].map(file => cp(resolve(output, file), resolve(iconDir, file))));
     await Promise.all(iosDefaultIcons.map(file => cp(resolve(output, "ios", file), resolve(iosIconDir, file))));
     for (const file of iosDefaultIcons) {
       const [width, height] = pngSize(resolve(iosIconDir, file));
