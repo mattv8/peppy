@@ -90,9 +90,12 @@ pub(crate) async fn provision_enrollment(
         &*state.store,
         hosted,
         &origin,
-        |_| async move {
-            crate::dialogs::passphrase(app, crate::dialogs::PassphrasePurpose::RecoverVaultSecret)
-                .await
+        || async move {
+            crate::dialogs::passphrase(
+                app,
+                crate::dialogs::PassphrasePurpose::ResumeHostedPassphrase,
+            )
+            .await
         },
         |credential, passphrase| activate_and_unlock(app, state, credential, passphrase),
     )
@@ -618,20 +621,8 @@ pub async fn hosted_provision(
     state: tauri::State<'_, AppState>,
     hosted: tauri::State<'_, HostedState>,
 ) -> BridgeResult<()> {
-    let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
-    let (app, state) = (&app, &*state);
-    provision_core(
-        &*state.store,
-        &hosted,
-        &hosted_origin()?,
-        |_| async move {
-            crate::dialogs::passphrase(app, crate::dialogs::PassphrasePurpose::RecoverVaultSecret)
-                .await
-        },
-        |credential, passphrase| activate_and_unlock(app, state, credential, passphrase),
-    )
-    .await
+    provision_enrollment(&app, &state, &hosted).await
 }
 
 /// Activates the provisioned credential through the shared import path, then unlocks with the
@@ -656,11 +647,10 @@ async fn activate_and_unlock(
         &native,
         profile,
         header,
-        passphrase.clone(),
+        passphrase,
         vault.profile_fingerprint,
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 fn persist_checkpoint(
@@ -757,7 +747,7 @@ pub(crate) async fn provision_core<P, PF, A, AF>(
     activate_and_unlock: A,
 ) -> BridgeResult<()>
 where
-    P: FnOnce(PassphraseNeed) -> PF,
+    P: FnOnce() -> PF,
     PF: std::future::Future<Output = BridgeResult<Option<Zeroizing<String>>>>,
     A: FnOnce(Zeroizing<Vec<u8>>, Zeroizing<String>) -> AF,
     AF: std::future::Future<Output = BridgeResult<()>>,
@@ -793,7 +783,7 @@ where
         Some(value) => Some(
             restore(value.to_vec(), origin, &session.account_id).map_err(|_| {
                 BridgeError::new(
-                    "vault-secret-unavailable",
+                    "hosted-checkpoint-invalid",
                     "The pending Hosted provisioning record is invalid.",
                 )
             })?,
@@ -821,15 +811,15 @@ where
 
     let mut recovered_legacy_secret = false;
     let mut has_recovery_index = false;
-    let mut generated_marker = false;
     let (provisioning, passphrase, generated) = match restored {
         Some(value) => {
             let binding = binding_for(&value);
             let index = read_recovery_index(store, &value)?;
             has_recovery_index = index.is_some();
-            generated_marker = index.as_ref().is_some_and(|index| index.generated);
-            let stored_secret = read_text_secret(store, &pending_key)?
-                .or(read_text_secret(store, &binding.vault_secret_account())?);
+            let stored_secret = match read_text_secret(store, &pending_key)? {
+                Some(secret) => Some(secret),
+                None => read_text_secret(store, &binding.vault_secret_account())?,
+            };
             let secret = match stored_secret {
                 Some(secret) => secret,
                 None if index.is_some_and(|index| index.generated) => {
@@ -840,7 +830,7 @@ where
                 }
                 None => {
                     recovered_legacy_secret = true;
-                    let Some(secret) = passphrase(PassphraseNeed::Resume).await? else {
+                    let Some(secret) = passphrase().await? else {
                         return Ok(());
                     };
                     secret
@@ -880,14 +870,10 @@ where
         // This must happen before either the checkpoint or any replayable request.
         store.set(&pending_key, passphrase.as_bytes())?;
     }
-    if generated || !has_recovery_index {
+    if !has_recovery_index {
         let binding = binding_for(&provisioning);
         let index = Zeroizing::new(
-            serde_json::to_vec(&recovery_index(
-                &provisioning,
-                generated || generated_marker,
-            ))
-            .map_err(|_| {
+            serde_json::to_vec(&recovery_index(&provisioning, generated)).map_err(|_| {
                 BridgeError::new(
                     "vault-secret-unavailable",
                     "Could not save provisioning recovery data.",
@@ -1034,14 +1020,19 @@ pub(crate) fn sweep_verified_pending_secret(
     let Some(secret) = read_text_secret(store, &pending_key)? else {
         return Ok(());
     };
-    if !verify(&secret) {
-        return Ok(());
-    }
     let binding_account = binding.vault_secret_account();
-    crate::enrollment::save_verified_vault_secret_if_empty(store, &binding_account, &secret)?;
-    if !read_text_secret(store, &binding_account)?
-        .is_some_and(|stored| stored.as_str() == secret.as_str())
-    {
+    if let Some(stored) = read_text_secret(store, &binding_account)? {
+        if stored.as_str() != secret.as_str() {
+            return Ok(());
+        }
+    } else if verify(&secret) {
+        crate::enrollment::save_verified_vault_secret_if_empty(store, &binding_account, &secret)?;
+        if !read_text_secret(store, &binding_account)?
+            .is_some_and(|stored| stored.as_str() == secret.as_str())
+        {
+            return Ok(());
+        }
+    } else {
         return Ok(());
     }
     // Durable confirmation exists; cleanup only this exact recovery tuple.
@@ -1065,7 +1056,7 @@ fn tombstone_if_matching_checkpoint(
     let provisioning =
         restore(checkpoint.to_vec(), &index.origin, &index.account_id).map_err(|_| {
             BridgeError::new(
-                "vault-secret-unavailable",
+                "hosted-checkpoint-invalid",
                 "The pending Hosted provisioning record is invalid.",
             )
         })?;
@@ -1118,12 +1109,6 @@ async fn session_expired(
         "credentials-required",
         "Your Peppy Hosted sign-in expired. Sign in again to continue.",
     )
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum PassphraseNeed {
-    Create,
-    Resume,
 }
 
 async fn load_session_from_store(
