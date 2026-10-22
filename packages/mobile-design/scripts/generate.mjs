@@ -1,17 +1,20 @@
 #!/usr/bin/env node
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { catalog, nativeCatalog, desktopCatalog } from "../src/catalog.mjs";
 import { kotlinNames, semanticTokens, swiftNames } from "../src/tokens.mjs";
+import { verifyIcoTransparency } from "./icon-alpha.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const paths = {
   css: resolve(root, "packages/desktop-ui/src/peppy-tokens.css"),
   mark: resolve(root, "apps/desktop/public/peppy-logo.svg"),
   appIcon: resolve(root, "packages/mobile-design/assets/peppy-app-icon.svg"),
+  windowsAppIcon: resolve(root, "packages/mobile-design/assets/peppy-windows-app-icon.svg"),
   darkAppIcon: resolve(root, "packages/mobile-design/assets/peppy-app-icon-dark.svg"),
   tintedAppIcon: resolve(root, "packages/mobile-design/assets/peppy-app-icon-tinted.svg"),
   androidTokens: resolve(root, "apps/android/app/src/main/java/dev/peppy/mobile/ui/theme/PeppyTokens.kt"),
@@ -201,6 +204,16 @@ function squareIcon(mark, background, foreground) {
 </svg>
 `;
 }
+function transparentIcon(mark) {
+  const x = round((iconCanvas - mark.width * iconMarkScale) / 2);
+  const y = round((iconCanvas - mark.height * iconMarkScale) / 2);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${iconCanvas}" height="${iconCanvas}" viewBox="0 0 ${iconCanvas} ${iconCanvas}">
+  <g transform="translate(${x} ${y}) scale(${iconMarkScale})">
+    <path fill="${mark.fill}" d="${mark.pathData}"/>
+  </g>
+</svg>
+`;
+}
 function iosLogoContents() { return `{
   "images" : [ { "filename" : "peppy-logo.svg", "idiom" : "universal", "scale" : "1x" } ],
   "info" : { "author" : "xcode", "version" : 1 }
@@ -227,7 +240,7 @@ async function outputs() {
   const theme = { dark: selected(extractTheme(css, ":root,")), light: selected(extractTheme(css, ".theme-light {")) };
   const icon = squareIcon(mark, "#FFFFFF", mark.fill);
   return new Map([
-    [paths.appIcon, icon], [paths.darkAppIcon, squareIcon(mark, "#1A1A1A", theme.dark.brand.replace("FF", "#"))], [paths.tintedAppIcon, squareIcon(mark, "#FFFFFF", "#000000")],
+    [paths.appIcon, icon], [paths.windowsAppIcon, transparentIcon(mark)], [paths.darkAppIcon, squareIcon(mark, "#1A1A1A", theme.dark.brand.replace("FF", "#"))], [paths.tintedAppIcon, squareIcon(mark, "#FFFFFF", "#000000")],
     [paths.androidTokens, kotlin(theme)], [paths.androidStrings, androidCopy()], [paths.androidLogo, androidVector(mark)],
     [paths.androidForeground, launcherForeground(mark)], [paths.androidBackground, `<?xml version="1.0" encoding="utf-8"?>\n<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#FFFFFFFF"/></shape>\n`],
     [paths.androidMonochrome, launcherForeground(mark, "#FF000000")], [paths.androidIcon, adaptive()], [paths.androidRoundIcon, adaptive()],
@@ -242,26 +255,45 @@ function verifyIcons() {
   const iosIcons = iosDefaultIcons.flatMap(file => [file, variantName(file, "dark"), variantName(file, "tinted")]);
   for (const file of [...defaultIconFiles.map(file => resolve(iconDir, file)), ...iosIcons.map(file => resolve(iosIconDir, file)), resolve(root, "apps/desktop/public/favicon-32.png")]) if (!existsSync(file)) throw new Error(`Missing generated icon: ${file}`);
   for (const file of [resolve(iconDir, "icon.png"), resolve(iosIconDir, "AppIcon-512@2x.png"), resolve(iosIconDir, variantName("AppIcon-512@2x.png", "dark")), resolve(iosIconDir, variantName("AppIcon-512@2x.png", "tinted"))]) if (pngSize(file)?.join("x") !== (file.includes("icon.png") ? "512x512" : "1024x1024")) throw new Error(`Unexpected icon dimensions: ${file}`);
+  verifyIcoTransparency(resolve(iconDir, "icon.ico"));
+}
+async function withIconOutput(action) {
+  const output = await mkdtemp(join(tmpdir(), "peppy-icons-"));
+  try {
+    await action(output);
+  } finally {
+    await rm(output, { recursive: true, force: true });
+  }
+}
+function tauriIcon(source, output) {
+  execFileSync("pnpm", ["--dir", "apps/desktop", "exec", "tauri", "icon", source, "--output", output, "--fit", "contain", "--ios-color", "#FFFFFF"], { cwd: root, stdio: "inherit" });
+}
+async function generateWindowsIcon() {
+  await withIconOutput(async output => {
+    tauriIcon(paths.windowsAppIcon, output);
+    await cp(resolve(output, "icon.ico"), resolve(iconDir, "icon.ico"));
+  });
 }
 async function generateIcons() {
-  execFileSync("pnpm", ["--dir", "apps/desktop", "exec", "tauri", "icon", "../../packages/mobile-design/assets/peppy-app-icon.svg", "--output", "src-tauri/icons", "--fit", "contain", "--ios-color", "#FFFFFF"], { cwd: root, stdio: "inherit" });
-  await Promise.all(iosDefaultIcons.map(file => cp(resolve(iconDir, "ios", file), resolve(iosIconDir, file))));
-  for (const file of iosDefaultIcons) {
-    const [width, height] = pngSize(resolve(iosIconDir, file));
-    for (const [appearance, source] of [["dark", paths.darkAppIcon], ["tinted", paths.tintedAppIcon]]) {
-      execFileSync("sips", ["-z", String(height), String(width), "-s", "format", "png", source, "--out", resolve(iosIconDir, variantName(file, appearance))], { stdio: "inherit" });
+  await withIconOutput(async output => {
+    tauriIcon(paths.appIcon, output);
+    await Promise.all(["128x128.png", "128x128@2x.png", "icon.png"].map(file => cp(resolve(output, file), resolve(iconDir, file))));
+    await Promise.all(iosDefaultIcons.map(file => cp(resolve(output, "ios", file), resolve(iosIconDir, file))));
+    for (const file of iosDefaultIcons) {
+      const [width, height] = pngSize(resolve(iosIconDir, file));
+      for (const [appearance, source] of [["dark", paths.darkAppIcon], ["tinted", paths.tintedAppIcon]]) {
+        execFileSync("sips", ["-z", String(height), String(width), "-s", "format", "png", source, "--out", resolve(iosIconDir, variantName(file, appearance))], { stdio: "inherit" });
+      }
     }
-  }
-  const current = new Set(iosDefaultIcons.flatMap(file => [file, variantName(file, "dark"), variantName(file, "tinted")]));
-  for (const file of await readdir(iosIconDir)) {
-    if (file.startsWith("AppIcon-") && file.endsWith(".png") && !current.has(file)) {
-      await rm(resolve(iosIconDir, file));
+    const current = new Set(iosDefaultIcons.flatMap(file => [file, variantName(file, "dark"), variantName(file, "tinted")]));
+    for (const file of await readdir(iosIconDir)) {
+      if (file.startsWith("AppIcon-") && file.endsWith(".png") && !current.has(file)) {
+        await rm(resolve(iosIconDir, file));
+      }
     }
-  }
-  await cp(resolve(iconDir, "32x32.png"), resolve(root, "apps/desktop/public/favicon-32.png"));
-  await rm(resolve(iconDir, "android"), { recursive: true, force: true });
-  await rm(resolve(iconDir, "ios"), { recursive: true, force: true });
-  for (const file of ["32x32.png", "64x64.png", "StoreLogo.png", ...[30,44,71,89,107,142,150,284,310].map(size => `Square${size}x${size}Logo.png`)]) await rm(resolve(iconDir, file), { force: true });
+    await cp(resolve(output, "32x32.png"), resolve(root, "apps/desktop/public/favicon-32.png"));
+  });
+  await generateWindowsIcon();
 }
 async function main() {
   const output = await outputs();
@@ -273,5 +305,6 @@ async function main() {
   }
   await writeOutputs(output);
   if (process.argv.includes("--icons")) await generateIcons();
+  else if (process.argv.includes("--windows-icon")) await generateWindowsIcon();
 }
 await main();

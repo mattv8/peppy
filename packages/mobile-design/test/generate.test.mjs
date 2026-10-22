@@ -4,6 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { catalog, nativeCatalog, desktopCatalog, desktopOnlyKeys } from "../src/catalog.mjs";
+import { icoFrameAlphas } from "../scripts/icon-alpha.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
 const run = (...args) => execFileSync("node", ["packages/mobile-design/scripts/generate.mjs", ...args], { cwd: root, encoding: "utf8" });
@@ -302,6 +303,16 @@ test("generated icons include default, dark, and tinted variants", () => {
   assert.ok(contents.images.every(image => image.idiom === "universal" && image.platform === "ios" && image.size === "1024x1024"));
   assert.equal(variants.length, 2, "dark and tinted appearances must be registered");
   assert.deepEqual([...new Set(variants.map(image => image.appearances[0].value))].sort(), ["dark", "tinted"]);
+});
+
+test("Windows application icon frames preserve transparent antialiased edges", () => {
+  const frames = icoFrameAlphas(path("apps/desktop/src-tauri/icons/icon.ico"));
+  assert.equal(frames.length, 6);
+  for (const alphas of frames) {
+    assert.ok(alphas.includes(0), "transparent canvas edge");
+    assert.ok(alphas.includes(255), "opaque coral mark");
+    assert.ok(alphas.some(alpha => alpha > 0 && alpha < 255), "antialiased mark edge");
+  }
 });
 
 test("favicon, iOS logo, and coral logo are generated from the canonical mark", () => {
