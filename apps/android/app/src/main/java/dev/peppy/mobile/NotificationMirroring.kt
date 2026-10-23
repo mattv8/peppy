@@ -227,12 +227,15 @@ class NotificationMirrorService : NotificationListenerService() {
     internal fun applyDismissals(): Int {
         if (!NotificationMirrorAccess.granted(this)) return 0
         val session = NativeGateway.session(applicationContext) ?: return 0
+        if (!dismissalPermitted()) return 0
         var completed = 0
         val active = try { activeNotifications ?: return 0 } catch (_: SecurityException) { return 0 }
         for (dismissal in try { session.client.pendingNotificationDismissals(50uL) } catch (_: MobileBindingsException) { return 0 }) {
             val current = active.firstOrNull { it.key == dismissal.target.notificationKey }
             if (current == null || "${current.key}:${current.postTime}" != dismissal.instance) continue
             if (!current.isClearable) continue
+            // Fresh policy per effect: a switch-off mid-batch stops further OS effects and acks.
+            if (!dismissalPermitted()) return completed
             try {
                 cancelNotification(current.key)
                 session.client.completeNotificationDismissal(dismissal.id)
@@ -241,6 +244,10 @@ class NotificationMirrorService : NotificationListenerService() {
         }
         return completed
     }
+
+    /** Rust-owned master, Wi-Fi, and access policy; fails closed when the decision is unavailable. */
+    private fun dismissalPermitted(): Boolean =
+        GatewayPolicyHost(this).decision(notificationIsSilent = false)?.captureNotification == true
 
     private fun clearPending() { pending.clear(); callbacks.values.forEach(handler::removeCallbacks); callbacks.clear() }
     override fun onDestroy() { if (connected === this) connected = null; clearPending(); worker.quitSafely(); super.onDestroy() }

@@ -25,7 +25,7 @@ val selectedAndroidAbi = providers.gradleProperty("peppyAndroidAbi").orNull?.let
         ?: throw GradleException("peppyAndroidAbi must be arm64-v8a or x86_64; got '$value'")
 }
 
-fun strictDebugBoolean(name: String): Boolean = providers.gradleProperty(name).orNull?.let { value ->
+fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name).orNull?.let { value ->
     when (value) {
         "true" -> true
         "false" -> false
@@ -33,7 +33,8 @@ fun strictDebugBoolean(name: String): Boolean = providers.gradleProperty(name).o
     }
 } ?: false
 
-val peppySmsDiagnostics = strictDebugBoolean("peppySmsDiagnostics")
+val peppySmsDiagnostics = strictBooleanProperty("peppySmsDiagnostics")
+val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
 
 // Robolectric's own runtime download has no network timeout and can hang the test worker, so
 // Gradle stages the framework jars and tests run Robolectric offline. These must match the SDKs
@@ -129,6 +130,7 @@ android {
         ).orNull.orEmpty()
         buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
         buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
+        buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", "false")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
         ndk {
             abiFilters.clear()
@@ -145,9 +147,11 @@ android {
     buildTypes {
         getByName("debug") {
             buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", peppySmsDiagnostics.toString())
+            buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
         getByName("release") {
             buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
+            buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
     }
 

@@ -86,6 +86,14 @@
     "allow-restart-for-update",
     "allow-defer-update",
     "allow-set-automatic-updates",
-    "allow-report-update-activity"
+    "allow-report-update-activity",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://peppy.pro/privacy"
+        }
+      ]
+    }
   ]
 }

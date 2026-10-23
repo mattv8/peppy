@@ -21,9 +21,10 @@
     <string name="peppy_sms">SMS</string>
     <string name="peppy_cancel">Cancel</string>
     <string name="peppy_mirroring">Mirroring</string>
+    <string name="peppy_notification_mirroring_disclosure">Notification access lets Peppy read the content Android makes available, which may include verification codes or bank alerts. Mirroring is off by default. When you enable it, Peppy encrypts copies for your vault and stores them on your configured server for your authorized vault devices. Dismissing a mirrored notification on another device may also clear it on this phone while mirroring is permitted. Turning mirroring off stops new captures and remote phone clearing. Already-synced history stays in your vault.</string>
     <string name="peppy_sms_sync">SMS synchronization</string>
     <string name="peppy_sms_history_title">Phone message sync</string>
-    <string name="peppy_sms_history_description">Automatically adds sent and received SMS, including existing phone history, to your Peppy vault. Works with messages available in Android\'s SMS storage.</string>
+    <string name="peppy_sms_history_description">With SMS sync enabled, Peppy imports existing and new sent and received messages available in Android\'s SMS storage. They may include verification codes or bank alerts. Peppy encrypts copies for your vault and stores them on your configured server for access by your authorized vault devices. SMS access may also let Peppy read your SIM phone number and sync an encrypted copy for group MMS recipient matching, even if MMS capture is off. Carrier SMS itself is not end-to-end encrypted.</string>
     <string name="peppy_sms_history_permission_label">Read phone messages</string>
     <string name="peppy_sms_history_status_label">History status</string>
     <string name="peppy_sms_history_allowed">Allowed</string>
@@ -41,6 +42,9 @@
     <string name="peppy_sms_history_pending">Some messages need reconciliation</string>
     <string name="peppy_sms_history_captured_footer">Captured messages sync when your vault connection is available.</string>
     <string name="peppy_sms_history_capacity_footer">History import is paused to keep vault recovery available. Existing messages remain on your phone.</string>
+    <string name="peppy_sms_capture_enabled_label">Enable SMS sync</string>
+    <string name="peppy_sms_capture_disabled_hint">Turning this off pauses new SMS capture and new sends. It does not cancel messages already handed to Android or discard pending requests and uncertain outcomes.</string>
+    <string name="peppy_mms_capture_disclosure">Peppy encrypts downloaded MMS, including existing history, for sync through your configured server to your authorized vault devices. This includes message content, media and group-recipient data. Using permissions already granted, Peppy may read your SIM phone number even if MMS capture is off. Peppy syncs an encrypted copy for group-recipient matching. You can enter the number manually if unavailable. Carrier MMS itself is not end-to-end encrypted.</string>
     <string name="peppy_wifi_only">Wi-Fi only</string>
     <string name="peppy_skip_silent">Skip silent notifications</string>
     <string name="peppy_app_filters">App filters</string>
@@ -169,6 +173,8 @@
     <string name="peppy_hosted_subscribe_cta">Subscribe</string>
     <string name="peppy_hosted_subscribe_terms">Terms</string>
     <string name="peppy_hosted_subscribe_privacy">Privacy</string>
+    <string name="peppy_privacy_policy">Privacy Policy</string>
+    <string name="peppy_privacy_policy_scope">Peppy apps and hosted service. Self-hosted server operators set their own privacy practices.</string>
     <string name="peppy_hosted_subscribe_store_unavailable">Pricing is unavailable. Try again later.</string>
     <string name="peppy_hosted_purchase_pending">Waiting for purchase approval</string>
     <string name="peppy_hosted_purchase_verifying">Verifying subscription…</string>
@@ -212,6 +218,7 @@
     <string name="peppy_permissions_body">You can change these choices later in Settings.</string>
     <string name="peppy_permissions_contacts">Contacts</string>
     <string name="peppy_permissions_sms">SMS</string>
+    <string name="peppy_permissions_sms_disclosure">With SMS sync enabled, Peppy imports existing and new sent and received messages available in Android\'s SMS storage. They may include verification codes or bank alerts. Peppy encrypts copies for your vault, stores them on your configured server and shares them with your authorized vault devices. SMS access may also let Peppy read your SIM phone number and sync an encrypted copy for group MMS recipient matching, even if MMS capture is off. Send SMS lets this phone send texts queued by those devices. Contact sync is a separate opt-in feature; Peppy does not read call logs or replace your default SMS app. Carrier SMS itself is not end-to-end encrypted.</string>
     <string name="peppy_permissions_notifications">Notifications</string>
     <string name="peppy_permissions_battery">Background activity</string>
     <string name="peppy_permissions_ios_note">This iPhone supports contact sync. Carrier messaging and notification mirroring are unavailable.</string>

@@ -488,6 +488,12 @@ struct SettingsView: View {
                 Section("About") {
                     LabeledContent("App version", value: "0.1")
                     if let origin = model.status.identity?.origin { LabeledContent("Server", value: origin) }
+                    Link(destination: URL(string: "https://peppy.pro/privacy")!) {
+                        Text("peppy.privacy_policy", tableName: "Peppy")
+                    }
+                    .accessibilityIdentifier("settings-privacy-policy")
+                    Text("peppy.privacy_policy_scope", tableName: "Peppy")
+                        .font(.footnote)
                 }
             }.formStyle(.grouped).navigationTitle(Text("peppy.settings", tableName: "Peppy"))
                 .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } } }

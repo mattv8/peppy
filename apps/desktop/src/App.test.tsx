@@ -2881,6 +2881,8 @@ describe("host state display", () => {
 
     expect(account).toHaveAttribute("aria-current", "location");
     expect(document.getElementById("settings-account-billing")).toHaveAttribute("data-settings-section", "account-billing");
+    expect(within(navigation).getAllByRole("link").at(-1)).toHaveTextContent("Privacy");
+    expect(document.getElementById("settings-privacy")).toHaveAttribute("data-settings-section", "privacy");
   });
 
   it.each([false, true])("scrolls only the settings content when selecting Account (reduced motion: %s)", async (reducedMotion) => {
