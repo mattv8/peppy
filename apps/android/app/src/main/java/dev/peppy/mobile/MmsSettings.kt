@@ -159,7 +159,8 @@ internal fun MmsSettings(
 
     Section("mms-settings-section", "MMS") {
         Text(
-            "Sync MMS after your phone's messaging app downloads it. Messages appear on other devices after encrypted uploads complete.",
+            stringResource(R.string.peppy_mms_capture_disclosure),
+            Modifier.testTag("mms-capture-disclosure"),
             style = MaterialTheme.typography.bodyMedium,
         )
         Row(Modifier.fillMaxWidth().testTag("mms-enable-row"), horizontalArrangement = Arrangement.SpaceBetween) {

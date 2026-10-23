@@ -81,6 +81,7 @@ import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { DevicesSettings } from "./DevicesSettings";
 import { HostedAccountSettings } from "./HostedAccountSettings";
+import { PrivacySettings } from "./PrivacySettings";
 import { SetupLanding, savedSetupMode } from "./SetupLanding";
 import { AppLockScreen, AppLockSettings } from "./AppLock";
 import { UpdatesSettings } from "./UpdatesSettings";
@@ -803,6 +804,7 @@ function SettingsView({
     ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
     ...(browserHost ? [] : [{ id: "app-lock", label: "App lock" }]),
     ...(hasAccount ? [{ id: "account-billing", label: "Account" }] : []),
+    { id: "privacy", label: "Privacy" },
   ];
   const sectionElementId = (id: string) => {
     if (id === "notifications") return "notification-settings";
@@ -1000,6 +1002,7 @@ function SettingsView({
         {!browserHost ? <button className="secondary-button" disabled={Boolean(pendingAction)} aria-busy={actionPending("account") || undefined} onClick={() => void runAction("account")}>Open account &amp; billing</button> : <a id="settings-account-billing-link" href={accountUrl} target="_blank" rel="noopener noreferrer" className="secondary-button">Open account &amp; billing<span className="visually-hidden"> (opens in a new tab)</span></a>}
         {actionAlert("account")}
       </section>}
+      <PrivacySettings browserHost={browserHost} />
       </div>
       </div>
     </section>

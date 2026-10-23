@@ -56,6 +56,11 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
 
     Section("notification-mirroring-section", "Notification mirroring", showDivider = false) {
         Text(
+            stringResource(R.string.peppy_notification_mirroring_disclosure),
+            Modifier.testTag("notification-mirroring-disclosure"),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
             "Upgrade your other Peppy clients before enabling mirroring. Notification history is retained like messages and shares the vault's 100,000-record recovery limit. Mute noisy apps to limit growth.",
             style = MaterialTheme.typography.bodySmall,
         )

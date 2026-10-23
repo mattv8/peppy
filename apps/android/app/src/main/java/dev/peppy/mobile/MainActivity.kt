@@ -1,6 +1,7 @@
 package dev.peppy.mobile
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -38,6 +40,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Contacts
@@ -410,9 +413,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
 
         Section("permissions-section", "SMS permissions") {
             Text(
-                "Receive SMS lets this phone save incoming texts, encrypted, to your Peppy vault. Read phone messages lets it capture sent and received SMS available in Android's message storage. Send SMS lets it send texts you queue from " +
-                    "your other devices, only after this phone's vault confirms each one. Contacts and calls are not read, " +
-                    "and Peppy never becomes the default SMS app.",
+                stringResource(R.string.peppy_permissions_sms_disclosure),
+                Modifier.testTag("sms-permissions-disclosure"),
                 style = MaterialTheme.typography.bodyMedium,
             )
             OutlinedButton(onClick = { permissionRequest.launch(SMS_PERMISSIONS) }, modifier = Modifier.testTag("permissions-button")) {
@@ -433,8 +435,8 @@ private fun CompanionScreen(activity: ComponentActivity) {
         Section("gateway-settings-section", "Phone settings") {
             Row(Modifier.fillMaxWidth().testTag("settings-sms-capture-toggle"), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f)) {
-                    Text("Enable SMS capture")
-                    Text("Stops new incoming carrier captures without changing pending or unknown send permits.", style = MaterialTheme.typography.bodySmall)
+                    Text(stringResource(R.string.peppy_sms_capture_enabled_label))
+                    Text(stringResource(R.string.peppy_sms_capture_disabled_hint), style = MaterialTheme.typography.bodySmall)
                 }
                 Switch(smsCaptureEnabled == true, enabled = smsCaptureEnabled != null, onCheckedChange = { value ->
                     scope.launch {
@@ -503,6 +505,17 @@ private fun CompanionScreen(activity: ComponentActivity) {
                 Section("about-section", "About") {
                     Text(stringResource(R.string.peppy_encrypted))
                     StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
+                    TextButton(
+                        onClick = {
+                            try {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/privacy")))
+                            } catch (_: ActivityNotFoundException) {
+                                Toast.makeText(context, "No app is available to open the Privacy Policy.", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.testTag("settings-privacy-policy"),
+                    ) { Text(stringResource(R.string.peppy_privacy_policy)) }
+                    Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
