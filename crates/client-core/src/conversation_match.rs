@@ -143,7 +143,7 @@ pub(crate) fn conversation_for_recipients(
     }
     let mut own_addresses = OwnAddressCache::new();
     let mut statement = conn.prepare(
-        "SELECT conversation_id,payload FROM messages WHERE local_order IN (SELECT MAX(local_order) FROM messages GROUP BY conversation_id) ORDER BY local_order DESC",
+        "SELECT conversation_id,payload FROM (SELECT conversation_id,payload,sort_at_ms,local_order,ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY sort_at_ms DESC,local_order DESC) AS newest FROM messages) WHERE newest=1 ORDER BY sort_at_ms DESC,local_order DESC",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

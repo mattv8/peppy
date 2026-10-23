@@ -103,6 +103,7 @@ internal data class MmsCapturePlan(
 internal interface MmsCaptureProvider {
     fun highWater(): Long
     fun page(afterId: Long, limit: Int): MmsProviderPage
+    fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage
     fun read(id: Long): MmsProviderRecord?
     fun readPartText(part: MmsProviderPart, byteLimit: Int): String?
     fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long
@@ -156,6 +157,8 @@ internal object MmsCapture {
         val provider = object : MmsCaptureProvider {
             override fun highWater() = currentHighWater(context)
             override fun page(afterId: Long, limit: Int) = reader.page(afterId, limit)
+            override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+                reader.descendingPage(cursor, upperBound, floor, limit)
             override fun read(id: Long) = reader.read(id)
             override fun readPartText(part: MmsProviderPart, byteLimit: Int) = reader.readPartText(part, byteLimit)
             override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long) = reader.copyPart(part, destination, byteLimit)
@@ -214,8 +217,10 @@ internal object MmsCapture {
                 val result = scan(
                     core, provider, tempDirectory, plan.generation,
                     imported = backfillPlan.phase == MmsBackfillPhase.HISTORY,
-                    after = backfillPlan.cursor?.toLongOrNull() ?: 0L,
+                    cursor = backfillPlan.cursor?.toLongOrNull(),
                     upperBound = if (backfillPlan.phase == MmsBackfillPhase.HISTORY) backfillPlan.historyUpperBound?.toLongOrNull() else null,
+                    descending = backfillPlan.phase == MmsBackfillPhase.HISTORY && backfillPlan.descending,
+                    floor = backfillPlan.historyFloor?.toLongOrNull(),
                     budget = backfillPlan.budget.coerceIn(1, PAGE),
                     budgetExpired = ::budgetExpired,
                 )
@@ -250,12 +255,18 @@ internal object MmsCapture {
         tempDirectory: File,
         generation: String,
         imported: Boolean,
-        after: Long,
+        cursor: Long?,
         upperBound: Long?,
+        descending: Boolean,
+        floor: Long?,
         budget: Int,
         budgetExpired: () -> Boolean,
     ): ScanResult {
-        val page = provider.page(after, budget)
+        val page = if (descending) {
+            provider.descendingPage(cursor, requireNotNull(upperBound), floor, budget)
+        } else {
+            provider.page(cursor ?: 0L, budget)
+        }
         var captured = 0
         var pending = 0
         var unavailable = 0
@@ -264,12 +275,29 @@ internal object MmsCapture {
         var stopped = false
         var checkpointBlocked = false
         for (record in page.records) {
-            if (upperBound != null && record.id > upperBound) { stopped = true; break }
+            if (!descending && upperBound != null && record.id > upperBound) { stopped = true; break }
             if (budgetExpired()) { followup = true; stopped = true; break }
             val subscriptionId = record.subscriptionId?.takeIf { it >= 0 }
             if (subscriptionId == null) {
-                pending++
-                checkpointBlocked = true
+                if (descending) {
+                    val outcome = try {
+                        unavailableUnknownSubscription(core, generation, record, imported)
+                    } catch (_: Exception) {
+                        ProcessResult(durable = false)
+                    }
+                    captured += outcome.captured
+                    pending += outcome.pending
+                    unavailable += outcome.unavailable
+                    followup = followup || outcome.followup
+                    if (!outcome.durable) {
+                        checkpointBlocked = true
+                        break
+                    }
+                    if (!checkpointBlocked) lastDurableId = record.id.toString()
+                } else {
+                    pending++
+                    checkpointBlocked = true
+                }
                 continue
             }
             val routeId = SimRoutes.routeId(subscriptionId)
@@ -284,12 +312,12 @@ internal object MmsCapture {
             followup = followup || outcome.followup
             if (!outcome.durable) {
                 checkpointBlocked = true
-                continue
+                if (descending) break else continue
             }
             if (!checkpointBlocked) lastDurableId = record.id.toString()
         }
-        val reachedBound = upperBound != null && page.records.any { it.id > upperBound }
-        val exhausted = !followup && (page.records.size < budget || reachedBound)
+        val reachedBound = !descending && upperBound != null && page.records.any { it.id > upperBound }
+        val exhausted = !followup && !(descending && checkpointBlocked) && (page.records.size < budget || reachedBound)
         return ScanResult(captured, pending, unavailable, followup || (!checkpointBlocked && !exhausted), lastDurableId, exhausted)
     }
 
@@ -362,6 +390,23 @@ internal object MmsCapture {
             NativeMmsAcquisitionState.BLOCKED -> ProcessResult(true, pending = 1)
             NativeMmsAcquisitionState.PENDING -> copyParts(core, provider, tempDirectory, updated, stable)
         }
+    }
+
+    private fun unavailableUnknownSubscription(
+        core: MmsCaptureCore,
+        generation: String,
+        record: MmsProviderRecord,
+        imported: Boolean,
+    ): ProcessResult {
+        val acquisition = when (val outcome = core.begin(input(generation, UNKNOWN_SUBSCRIPTION, record, imported, inlineText(record)))) {
+            is NativeMmsBeginOutcome.Acquired -> outcome.acquisition
+            is NativeMmsBeginOutcome.Quarantined -> return ProcessResult(durable = true)
+        }
+        if (acquisition.state == NativeMmsAcquisitionState.COMPLETE || acquisition.state == NativeMmsAcquisitionState.UNAVAILABLE) {
+            return ProcessResult(durable = true)
+        }
+        core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.UNAVAILABLE, "unknown_subscription")
+        return ProcessResult(durable = true, unavailable = 1)
     }
 
     private fun copyParts(core: MmsCaptureCore, provider: MmsCaptureProvider, tempDirectory: File, acquisition: NativeMmsAcquisition, record: MmsProviderRecord): ProcessResult {
@@ -505,6 +550,7 @@ internal object MmsCapture {
     private const val NOTIFICATION_IND = 130
     private const val RETRIEVE_CONF = 132
     private const val UNKNOWN_PROVIDER_DATE_MS = 0L
+    private const val UNKNOWN_SUBSCRIPTION = "android-mms-unknown-subscription"
 
     private data class ProcessResult(val durable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val followup: Boolean = false)
     private data class ScanResult(val captured: Int, val pending: Int, val unavailable: Int, val more: Boolean, val lastDurableId: String?, val exhausted: Boolean)
@@ -527,6 +573,8 @@ private class NativeCore(private val client: NativeClientInterface) : MmsCapture
                 it.historyComplete,
                 it.paused,
                 it.budget.coerceAtMost(Int.MAX_VALUE.toULong()).toInt(),
+                it.descending,
+                it.historyFloor,
             )
         }
 

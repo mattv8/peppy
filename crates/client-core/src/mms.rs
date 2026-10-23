@@ -1343,13 +1343,11 @@ fn conversation_for_mms_participants(
     };
     let mut statement = conn.prepare(
         "SELECT conversation_id,payload FROM messages
-         WHERE json_extract(payload,'$.transport')='mms'
-           AND local_order IN (
-             SELECT MAX(local_order) FROM messages
-             WHERE json_extract(payload,'$.transport')='mms'
-             GROUP BY conversation_id
-           )
-         ORDER BY local_order DESC",
+          WHERE json_extract(payload,'$.transport')='mms'
+            AND (conversation_id,sort_at_ms,local_order) IN (
+              SELECT conversation_id,sort_at_ms,local_order FROM (SELECT conversation_id,sort_at_ms,local_order,ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY sort_at_ms DESC,local_order DESC) AS newest FROM messages WHERE json_extract(payload,'$.transport')='mms') WHERE newest=1
+            )
+          ORDER BY sort_at_ms DESC,local_order DESC",
     )?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1557,7 +1555,12 @@ fn prune_terminal_acquisitions(conn: &rusqlite::Connection) -> Result<(), Error>
             SELECT a.acquisition_id FROM mms_acquisitions a
             WHERE a.state IN ('blocked','unavailable')
               AND NOT EXISTS (SELECT 1 FROM mms_acquisition_parts p WHERE p.acquisition_id=a.acquisition_id)
-            ORDER BY a.local_order DESC LIMIT -1 OFFSET ?
+            ORDER BY
+              CASE WHEN COALESCE(CAST(json_extract(a.input,'$.observed_at_ms') AS INTEGER),0)>0 THEN 0 ELSE 1 END,
+              CASE WHEN CAST(json_extract(a.input,'$.observed_at_ms') AS INTEGER)>0 THEN CAST(json_extract(a.input,'$.observed_at_ms') AS INTEGER) END DESC,
+              a.local_order DESC,
+              a.acquisition_id DESC
+            LIMIT -1 OFFSET ?
         )",
         params![MAX_MMS_ACQUISITIONS as i64],
     )?;
@@ -1734,6 +1737,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(decode_acquisition_row(&conn, row), Err(Error::Database));
+    }
+
+    #[test]
+    fn terminal_pruning_uses_local_order_for_undated_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mms_acquisitions(
+                acquisition_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                input TEXT NOT NULL,
+                local_order INTEGER NOT NULL
+            );
+            CREATE TABLE mms_acquisition_parts(acquisition_id TEXT NOT NULL);",
+        )
+        .unwrap();
+        for order in 1..=MAX_MMS_ACQUISITIONS + 1 {
+            conn.execute(
+                "INSERT INTO mms_acquisitions(acquisition_id,state,input,local_order) VALUES(?, 'blocked', '{\"observed_at_ms\":0}', ?)",
+                params![order.to_string(), i64::try_from(order).unwrap()],
+            )
+            .unwrap();
+        }
+
+        prune_terminal_acquisitions(&conn).unwrap();
+
+        let first: Option<String> = conn
+            .query_row(
+                "SELECT acquisition_id FROM mms_acquisitions WHERE acquisition_id='1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let newest: Option<String> = conn
+            .query_row(
+                "SELECT acquisition_id FROM mms_acquisitions WHERE acquisition_id=?",
+                params![(MAX_MMS_ACQUISITIONS + 1).to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(first, None);
+        assert_eq!(newest, Some((MAX_MMS_ACQUISITIONS + 1).to_string()));
     }
 
     #[test]

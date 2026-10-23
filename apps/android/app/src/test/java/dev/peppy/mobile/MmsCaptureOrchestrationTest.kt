@@ -49,6 +49,50 @@ class MmsCaptureOrchestrationTest {
         assertTrue(core.inputs.any { it.source.providerMessageId == "101" && !it.imported })
     }
 
+    @Test fun descendingHistoryStartsWithNullableCursorAndAdvancesToLowestDurableId() {
+        val core = FakeCore(historyUpperBound = "5", historyDescending = true, historyFloor = "2")
+        val provider = FakeProvider((1L..5L).map(::record))
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertTrue(core.advanced.contains(MmsBackfillPhase.HISTORY to "3"))
+    }
+
+    @Test fun descendingHistoryRecordsMissingSubscriptionsAsUnavailableAndContinues() {
+        val core = FakeCore(historyUpperBound = "5", historyDescending = true, historyFloor = "2")
+        val records = (3L..5L).map(::record).toMutableList()
+        records[0] = records[0].copy(subscriptionId = null)
+
+        MmsCapture.run(plan(), core, FakeProvider(records), temp())
+
+        assertTrue(core.advanced.contains(MmsBackfillPhase.HISTORY to "3"))
+        assertTrue(core.inputs.any { it.source.providerMessageId == "3" && it.source.subscriptionId == "android-mms-unknown-subscription" })
+    }
+
+    @Test fun shortDescendingPageWithBlockedCheckpointDoesNotFinishHistory() {
+        val core = FakeCore(
+            initialLiveCursor = "5",
+            historyUpperBound = "5",
+            historyDescending = true,
+            historyFloor = "2",
+            quarantinedProviderIds = setOf("5"),
+            failBeginProviderIds = setOf("4"),
+        )
+
+        MmsCapture.run(plan(), core, FakeProvider((3L..5L).map(::record)), temp())
+
+        assertTrue(core.advanced.contains(MmsBackfillPhase.HISTORY to "5"))
+        assertTrue(core.finished.isEmpty())
+        assertTrue(core.inputs.none { it.source.providerMessageId == "3" })
+    }
+
+    @Test fun partialLivePageWithMissingSubscriptionIsExhaustedWithoutAContinuationLoop() {
+        val core = FakeCore(historyUpperBound = "0")
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1).copy(subscriptionId = null))), temp())
+
+        assertFalse(result.more)
+    }
+
     @Test fun mappedOriginalPartIsNotCopiedAgainWhenOptionalMetadataIsAbsent() {
         val core = FakeCore(mappedParts = mapOf("10" to "attachment-10"))
         val provider = FakeProvider(listOf(record(1)))
@@ -155,6 +199,11 @@ class MmsCaptureOrchestrationTest {
         var copyCount = 0
         override fun highWater() = records.maxOfOrNull { it.id } ?: 0
         override fun page(afterId: Long, limit: Int) = MmsProviderPage(records.filter { it.id > afterId }.take(limit), afterId)
+        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage {
+            val ceiling = cursor ?: upperBound
+            val page = records.filter { it.id <= ceiling && it.id > (floor ?: 0L) }.sortedByDescending { it.id }.take(limit)
+            return MmsProviderPage(page, page.lastOrNull()?.id ?: ceiling)
+        }
         override fun read(id: Long) = records.firstOrNull { it.id == id }
         override fun readPartText(part: MmsProviderPart, byteLimit: Int) = part.text
         override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long {
@@ -169,9 +218,12 @@ class MmsCaptureOrchestrationTest {
     private class FakeCore(
         initialLiveCursor: String = "0",
         private val historyUpperBound: String? = null,
+        private val historyDescending: Boolean = false,
+        private val historyFloor: String? = null,
         private val mappedParts: Map<String, String> = emptyMap(),
         private val recheckRequests: List<MmsBackfillRecheckRequest> = emptyList(),
         private val quarantinedProviderIds: Set<String> = emptySet(),
+        private val failBeginProviderIds: Set<String> = emptySet(),
         private val failManualRecheck: Boolean = false,
         initialPreviewStates: Map<String, NativeMmsPreviewState> = emptyMap(),
         var pendingBytes: Long = 0,
@@ -192,7 +244,7 @@ class MmsCaptureOrchestrationTest {
         } else {
             listOf(
                 MmsBackfillScanPlan(MmsBackfillPhase.LIVE, liveCursor, historyUpperBound ?: observedMaxId, false, false, 50),
-                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, "0", historyUpperBound ?: observedMaxId, false, false, 50),
+                MmsBackfillScanPlan(MmsBackfillPhase.HISTORY, if (historyDescending) null else "0", historyUpperBound ?: observedMaxId, false, false, 50, historyDescending, historyFloor),
             )
         }
         override fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String) {
@@ -203,6 +255,7 @@ class MmsCaptureOrchestrationTest {
         override fun rechecks(generation: String, scope: String) = MmsBackfillRecheck(recheckRequests, 50)
         override fun begin(input: NativeMmsAcquisitionInput): NativeMmsBeginOutcome {
             inputs += input
+            if (input.source.providerMessageId in failBeginProviderIds) error("core unavailable")
             val acquisition = acquisitions.getOrPut(input.source.providerMessageId) {
                 NativeMmsAcquisition("acq-${input.source.providerMessageId}", "conversation", input, NativeMmsAcquisitionState.PENDING, "settling", emptyList())
             }

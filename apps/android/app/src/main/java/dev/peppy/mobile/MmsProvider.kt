@@ -19,11 +19,26 @@ class MmsProviderReader(context: Context) {
     private val resolver: ContentResolver = context.contentResolver
     fun page(afterId: Long, limit: Int): MmsProviderPage {
         require(afterId >= 0); val capped = limit.coerceIn(1, MAX_PAGE); val records = mutableListOf<MmsProviderRecord>(); var through = afterId
-        resolver.query(MMS, arrayOf("_id"), "_id > ?", arrayOf(afterId.toString()), "_id ASC LIMIT $capped")?.use { c ->
+        val cursor = resolver.query(MMS, arrayOf("_id"), "_id > ?", arrayOf(afterId.toString()), "_id ASC LIMIT $capped")
+            ?: throw MmsProviderException("MMS provider returned no cursor")
+        cursor.use { c ->
             val column = c.getColumnIndexOrThrow("_id")
             while (c.moveToNext() && records.size < capped) { val id = c.getLong(column); through = id; records += read(id) ?: deleted(id) }
         }
         return MmsProviderPage(records, through)
+    }
+    fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage {
+        require(upperBound >= 0); require(floor == null || floor >= 0)
+        val capped = limit.coerceIn(1, MAX_PAGE); val records = mutableListOf<MmsProviderRecord>()
+        val ceiling = cursor ?: upperBound; val minimum = floor ?: 0L
+        val selection = if (cursor == null) "_id <= ? AND _id > ?" else "_id < ? AND _id > ?"
+        val cursorResult = resolver.query(MMS, arrayOf("_id"), selection, arrayOf(ceiling.toString(), minimum.toString()), "_id DESC LIMIT $capped")
+            ?: throw MmsProviderException("MMS provider returned no cursor")
+        cursorResult.use { c ->
+            val column = c.getColumnIndexOrThrow("_id")
+            while (c.moveToNext() && records.size < capped) { val id = c.getLong(column); if (id > minimum && id <= ceiling) records += read(id) ?: deleted(id) }
+        }
+        return MmsProviderPage(records, records.lastOrNull()?.id ?: ceiling)
     }
     fun read(id: Long): MmsProviderRecord? {
         valid(id)

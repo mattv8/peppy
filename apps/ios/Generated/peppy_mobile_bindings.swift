@@ -758,6 +758,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func gatewaySettings() throws  -> NativeGatewaySettings
     
+    func historyImportGateOpen() throws  -> Bool
+    
     /**
      * Imports the opaque bytes previously retrieved from native secure storage.
      */
@@ -818,6 +820,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func notificationSourceDeviceId() throws  -> String
     
     func observeContactScan(inputJson: String) throws  -> String
+    
+    func openHistoryImportGate(reason: String) throws  -> Bool
     
     func openNativePlaintextFile(attachmentId: String) throws  -> NativePlaintextHandle
     
@@ -1570,6 +1574,15 @@ open func gatewaySettings()throws  -> NativeGatewaySettings  {
 })
 }
     
+open func historyImportGateOpen()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_history_import_gate_open(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
     /**
      * Imports the opaque bytes previously retrieved from native secure storage.
      */
@@ -1833,6 +1846,16 @@ open func observeContactScan(inputJson: String)throws  -> String  {
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_contact_scan(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(inputJson),uniffiCallStatus
+    )
+})
+}
+    
+open func openHistoryImportGate(reason: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_history_import_gate(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(reason),uniffiCallStatus
     )
 })
 }
@@ -5528,6 +5551,8 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
     public var sourceGeneration: String
     public var subscriptionId: String
     public var cursor: String?
+    public var descending: Bool
+    public var historyFloor: String?
     public var historyUpperBound: String?
     public var historyComplete: Bool
     public var paused: Bool
@@ -5536,11 +5561,13 @@ public struct NativeMmsBackfillScanPlan: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
+    public init(phase: NativeMmsBackfillPhase, sourceGeneration: String, subscriptionId: String, cursor: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pause: NativeMmsBackfillPause?, budget: UInt64) {
         self.phase = phase
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.cursor = cursor
+        self.descending = descending
+        self.historyFloor = historyFloor
         self.historyUpperBound = historyUpperBound
         self.historyComplete = historyComplete
         self.paused = paused
@@ -5568,6 +5595,8 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
                 sourceGeneration: FfiConverterString.read(from: &buf), 
                 subscriptionId: FfiConverterString.read(from: &buf), 
                 cursor: FfiConverterOptionString.read(from: &buf), 
+                descending: FfiConverterBool.read(from: &buf), 
+                historyFloor: FfiConverterOptionString.read(from: &buf), 
                 historyUpperBound: FfiConverterOptionString.read(from: &buf), 
                 historyComplete: FfiConverterBool.read(from: &buf), 
                 paused: FfiConverterBool.read(from: &buf), 
@@ -5581,6 +5610,8 @@ public struct FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer 
         FfiConverterString.write(value.sourceGeneration, into: &buf)
         FfiConverterString.write(value.subscriptionId, into: &buf)
         FfiConverterOptionString.write(value.cursor, into: &buf)
+        FfiConverterBool.write(value.descending, into: &buf)
+        FfiConverterOptionString.write(value.historyFloor, into: &buf)
         FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
         FfiConverterBool.write(value.historyComplete, into: &buf)
         FfiConverterBool.write(value.paused, into: &buf)
@@ -6906,6 +6937,8 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
     public var subscriptionId: String
     public var imported: Bool
     public var checkpoint: String?
+    public var descending: Bool
+    public var historyFloor: String?
     public var historyUpperBound: String?
     public var historyComplete: Bool
     public var paused: Bool
@@ -6913,11 +6946,13 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?) {
+    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?) {
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.imported = imported
         self.checkpoint = checkpoint
+        self.descending = descending
+        self.historyFloor = historyFloor
         self.historyUpperBound = historyUpperBound
         self.historyComplete = historyComplete
         self.paused = paused
@@ -6944,6 +6979,8 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
                 subscriptionId: FfiConverterString.read(from: &buf), 
                 imported: FfiConverterBool.read(from: &buf), 
                 checkpoint: FfiConverterOptionString.read(from: &buf), 
+                descending: FfiConverterBool.read(from: &buf), 
+                historyFloor: FfiConverterOptionString.read(from: &buf), 
                 historyUpperBound: FfiConverterOptionString.read(from: &buf), 
                 historyComplete: FfiConverterBool.read(from: &buf), 
                 paused: FfiConverterBool.read(from: &buf), 
@@ -6956,6 +6993,8 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
         FfiConverterString.write(value.subscriptionId, into: &buf)
         FfiConverterBool.write(value.imported, into: &buf)
         FfiConverterOptionString.write(value.checkpoint, into: &buf)
+        FfiConverterBool.write(value.descending, into: &buf)
+        FfiConverterOptionString.write(value.historyFloor, into: &buf)
         FfiConverterOptionString.write(value.historyUpperBound, into: &buf)
         FfiConverterBool.write(value.historyComplete, into: &buf)
         FfiConverterBool.write(value.paused, into: &buf)
@@ -10426,6 +10465,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_settings() != 45640) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_history_import_gate_open() != 51103) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_import_native_key_cache_from_native_storage() != 65110) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10502,6 +10544,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() != 7624) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() != 17220) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() != 2659) {

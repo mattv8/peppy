@@ -79,6 +79,26 @@ class SmsProviderReader(context: Context) {
         return SmsProviderPage(records, through)
     }
 
+    fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage {
+        require(upperBound >= 0)
+        require(floor == null || floor >= 0)
+        val capped = limit.coerceIn(1, MAX_PAGE)
+        val records = mutableListOf<SmsProviderRecord>()
+        val ceiling = cursor ?: upperBound
+        val selection = if (cursor == null) "_id <= ? AND _id > ?" else "_id < ? AND _id > ?"
+        val minimum = floor ?: 0L
+        diagnosedQuery(rows = { records.size.toLong() }) {
+            query(SMS, COLUMNS, selection, arrayOf(ceiling.toString(), minimum.toString()), "_id DESC LIMIT $capped") { providerCursor ->
+                while (providerCursor.moveToNext() && records.size < capped) {
+                    val id = providerCursor.long("_id") ?: throw SmsProviderException("provider row has no id")
+                    if (id <= minimum || id > ceiling) continue
+                    records += record(providerCursor, id)
+                }
+            }
+        }
+        return SmsProviderPage(records, records.lastOrNull()?.id ?: ceiling)
+    }
+
     fun read(id: Long): SmsProviderRecord? {
         require(id > 0)
         return diagnosedQuery(rows = { row: SmsProviderRecord? -> if (row == null) 0 else 1 }) {

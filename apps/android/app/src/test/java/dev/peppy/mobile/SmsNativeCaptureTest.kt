@@ -65,6 +65,9 @@ class SmsNativeCaptureTest : GatewayTestBase() {
     private fun provider(record: SmsProviderRecord) = object : SmsCaptureProvider {
         override fun page(afterId: Long, limit: Int) =
             if (record.id > afterId) SmsProviderPage(listOf(record), record.id) else SmsProviderPage(emptyList(), afterId)
+        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+            record.takeIf { it.id <= (cursor ?: upperBound) && it.id > (floor ?: 0L) }?.let { SmsProviderPage(listOf(it), it.id) }
+                ?: SmsProviderPage(emptyList(), cursor ?: upperBound)
         override fun read(id: Long) = record.takeIf { it.id == id }
     }
 

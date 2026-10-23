@@ -813,6 +813,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_settings(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_history_import_gate_open(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_import_native_key_cache_from_native_storage(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_ingest_raw(
@@ -864,6 +866,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_notification_source_device_id(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file(
     ): Int
@@ -1193,6 +1197,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_gateway_settings(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_history_import_gate_open(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_import_native_key_cache_from_native_storage(`ptr`: Long,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_ingest_raw(`ptr`: Long,`envelopeJson`: RustBuffer.ByValue,`cursor`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1245,6 +1251,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_observe_contact_scan(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_history_import_gate(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_native_plaintext_file(`ptr`: Long,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_pause_mms_backfill_for_local_capacity(`ptr`: Long,`generation`: RustBuffer.ByValue,`scope`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1837,6 +1845,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_gateway_settings() and 0xFFFF) != 45640) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_history_import_gate_open() and 0xFFFF) != 51103) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_import_native_key_cache_from_native_storage() and 0xFFFF) != 65110) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1913,6 +1924,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_observe_contact_scan() and 0xFFFF) != 7624) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_history_import_gate() and 0xFFFF) != 17220) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_open_native_plaintext_file() and 0xFFFF) != 2659) {
@@ -2799,6 +2813,8 @@ public interface NativeClientInterface {
     
     fun `gatewaySettings`(): NativeGatewaySettings
     
+    fun `historyImportGateOpen`(): kotlin.Boolean
+    
     /**
      * Imports the opaque bytes previously retrieved from native secure storage.
      */
@@ -2859,6 +2875,8 @@ public interface NativeClientInterface {
     fun `notificationSourceDeviceId`(): kotlin.String
     
     fun `observeContactScan`(`inputJson`: kotlin.String): kotlin.String
+    
+    fun `openHistoryImportGate`(`reason`: kotlin.String): kotlin.Boolean
     
     fun `openNativePlaintextFile`(`attachmentId`: kotlin.String): NativePlaintextHandle
     
@@ -3912,6 +3930,20 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     
 
     
+    @Throws(MobileBindingsException::class)override fun `historyImportGateOpen`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_history_import_gate_open(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
     /**
      * Imports the opaque bytes previously retrieved from native secure storage.
      */
@@ -4301,6 +4333,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         it,
         
         FfiConverterString.lower(`inputJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `openHistoryImportGate`(`reason`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_open_history_import_gate(
+        it,
+        
+        FfiConverterString.lower(`reason`),_status)
 }
     }
     )
@@ -8948,6 +8995,10 @@ data class NativeMmsBackfillScanPlan (
     , 
     var `cursor`: kotlin.String?
     , 
+    var `descending`: kotlin.Boolean
+    , 
+    var `historyFloor`: kotlin.String?
+    , 
     var `historyUpperBound`: kotlin.String?
     , 
     var `historyComplete`: kotlin.Boolean
@@ -8977,6 +9028,8 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
@@ -8990,6 +9043,8 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`sourceGeneration`) +
             FfiConverterString.allocationSize(value.`subscriptionId`) +
             FfiConverterOptionalString.allocationSize(value.`cursor`) +
+            FfiConverterBoolean.allocationSize(value.`descending`) +
+            FfiConverterOptionalString.allocationSize(value.`historyFloor`) +
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
             FfiConverterBoolean.allocationSize(value.`historyComplete`) +
             FfiConverterBoolean.allocationSize(value.`paused`) +
@@ -9002,6 +9057,8 @@ public object FfiConverterTypeNativeMmsBackfillScanPlan: FfiConverterRustBuffer<
             FfiConverterString.write(value.`sourceGeneration`, buf)
             FfiConverterString.write(value.`subscriptionId`, buf)
             FfiConverterOptionalString.write(value.`cursor`, buf)
+            FfiConverterBoolean.write(value.`descending`, buf)
+            FfiConverterOptionalString.write(value.`historyFloor`, buf)
             FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
             FfiConverterBoolean.write(value.`historyComplete`, buf)
             FfiConverterBoolean.write(value.`paused`, buf)
@@ -10032,6 +10089,10 @@ data class NativeSmsScanPlan (
     , 
     var `checkpoint`: kotlin.String?
     , 
+    var `descending`: kotlin.Boolean
+    , 
+    var `historyFloor`: kotlin.String?
+    , 
     var `historyUpperBound`: kotlin.String?
     , 
     var `historyComplete`: kotlin.Boolean
@@ -10059,6 +10120,8 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
@@ -10071,6 +10134,8 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterString.allocationSize(value.`subscriptionId`) +
             FfiConverterBoolean.allocationSize(value.`imported`) +
             FfiConverterOptionalString.allocationSize(value.`checkpoint`) +
+            FfiConverterBoolean.allocationSize(value.`descending`) +
+            FfiConverterOptionalString.allocationSize(value.`historyFloor`) +
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
             FfiConverterBoolean.allocationSize(value.`historyComplete`) +
             FfiConverterBoolean.allocationSize(value.`paused`) +
@@ -10082,6 +10147,8 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterString.write(value.`subscriptionId`, buf)
             FfiConverterBoolean.write(value.`imported`, buf)
             FfiConverterOptionalString.write(value.`checkpoint`, buf)
+            FfiConverterBoolean.write(value.`descending`, buf)
+            FfiConverterOptionalString.write(value.`historyFloor`, buf)
             FfiConverterOptionalString.write(value.`historyUpperBound`, buf)
             FfiConverterBoolean.write(value.`historyComplete`, buf)
             FfiConverterBoolean.write(value.`paused`, buf)

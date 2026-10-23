@@ -279,6 +279,236 @@ fn plans_freeze_history_and_require_explicit_exhaustion() {
 }
 
 #[test]
+fn history_plan_descends_and_gate_is_one_way() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+
+    let plans = client
+        .plan_sms_scans("install-1", "provider", "50")
+        .unwrap();
+    assert!(!plans[0].paused);
+    assert!(plans[1].paused);
+    assert!(plans[1].descending);
+    assert_eq!(plans[1].history_floor, None);
+    assert_eq!(plans[1].checkpoint, None);
+
+    assert!(client.open_history_import_gate("contacts_settled").unwrap());
+    assert!(client.history_import_gate_open().unwrap());
+    assert!(!client.open_history_import_gate("contacts_settled").unwrap());
+
+    client
+        .set_sms_scan_checkpoint("install-1", "provider", true, "40")
+        .unwrap();
+    client
+        .set_sms_scan_checkpoint("install-1", "provider", true, "42")
+        .unwrap();
+    client
+        .set_sms_scan_checkpoint("install-1", "provider", true, "0")
+        .unwrap();
+    client
+        .set_sms_scan_checkpoint("install-1", "provider", true, "51")
+        .unwrap();
+    let plans = client
+        .plan_sms_scans("install-1", "provider", "50")
+        .unwrap();
+    assert!(!plans[1].paused);
+    assert_eq!(plans[1].checkpoint.as_deref(), Some("40"));
+
+    let timeout_client = unlocked(&config(&dir, "timeout", &vault), &vault);
+    assert!(!timeout_client.observe_history_import_gate_at(1).unwrap());
+    assert!(
+        timeout_client
+            .observe_history_import_gate_at(600_001)
+            .unwrap()
+    );
+
+    let rollback_client = unlocked(&config(&dir, "rollback", &vault), &vault);
+    assert!(
+        !rollback_client
+            .observe_history_import_gate_at(1_000_000)
+            .unwrap()
+    );
+    assert!(!rollback_client.observe_history_import_gate_at(0).unwrap());
+    assert!(
+        !rollback_client
+            .observe_history_import_gate_at(599_999)
+            .unwrap()
+    );
+    assert!(
+        rollback_client
+            .observe_history_import_gate_at(600_000)
+            .unwrap()
+    );
+}
+
+#[test]
+fn incomplete_history_fences_reconciliation_above_its_frozen_bound() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    client
+        .plan_sms_scans("install-1", "provider", "100")
+        .unwrap();
+
+    let start = 1_800_000_000_000;
+    assert_eq!(
+        client
+            .plan_sms_reconciliation_at("install-1", "provider", "200", None, start)
+            .unwrap(),
+        None
+    );
+    let active = client
+        .plan_sms_reconciliation_at(
+            "install-1",
+            "provider",
+            "200",
+            None,
+            start + SMS_RECONCILIATION_INTERVAL_MS,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.cursor.as_deref(), Some("100"));
+    client
+        .complete_sms_reconciliation("install-1", "provider", "200", Some("20"), false)
+        .unwrap();
+    assert_eq!(
+        client
+            .plan_sms_reconciliation_at("install-1", "provider", "200", None, start + 2)
+            .unwrap()
+            .unwrap()
+            .cursor
+            .as_deref(),
+        Some("100")
+    );
+    client
+        .complete_sms_reconciliation("install-1", "provider", "200", Some("100"), true)
+        .unwrap();
+
+    let restarted = client
+        .plan_sms_reconciliation_at(
+            "install-1",
+            "provider",
+            "50",
+            None,
+            start + 2 * SMS_RECONCILIATION_INTERVAL_MS,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(restarted.upper_bound, "50");
+    assert_eq!(restarted.cursor.as_deref(), Some("100"));
+    client
+        .ack_sms_scan_exhausted("install-1", "provider", true, "100")
+        .unwrap();
+    client
+        .complete_sms_reconciliation("install-1", "provider", "50", Some("20"), false)
+        .unwrap();
+    assert_eq!(
+        client
+            .plan_sms_reconciliation_at("install-1", "provider", "50", None, start + 3)
+            .unwrap()
+            .unwrap()
+            .cursor
+            .as_deref(),
+        Some("20"),
+        "history completion releases the reconciliation fence"
+    );
+}
+
+#[test]
+fn outstanding_event_outbox_pauses_only_imported_history() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    client.open_history_import_gate("contacts_settled").unwrap();
+    client
+        .plan_sms_scans("install-1", "provider", "500")
+        .unwrap();
+    client
+        .plan_mms_backfill_scans("install-1", "provider", "500")
+        .unwrap();
+
+    for id in 0..499 {
+        let acquisition = client
+            .begin_sms_acquisition(provider_input(&id.to_string(), "queued", Some(id), None))
+            .unwrap();
+        client
+            .complete_sms_acquisition(&acquisition.acquisition_id)
+            .unwrap();
+    }
+    assert!(
+        !client
+            .plan_sms_scans("install-1", "provider", "500")
+            .unwrap()[1]
+            .paused
+    );
+    assert!(
+        !client
+            .plan_mms_backfill_scans("install-1", "provider", "500")
+            .unwrap()
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::History)
+            .unwrap()
+            .paused
+    );
+
+    let acquisition = client
+        .begin_sms_acquisition(provider_input("500", "queued", Some(500), None))
+        .unwrap();
+    client
+        .complete_sms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    let sms_plans = client
+        .plan_sms_scans("install-1", "provider", "500")
+        .unwrap();
+    assert!(!sms_plans[0].paused);
+    assert!(sms_plans[1].paused);
+    let mms_plans = client
+        .plan_mms_backfill_scans("install-1", "provider", "500")
+        .unwrap();
+    assert!(
+        !mms_plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Live)
+            .unwrap()
+            .paused
+    );
+    assert!(
+        mms_plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::History)
+            .unwrap()
+            .paused
+    );
+    assert!(
+        !mms_plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Recheck)
+            .unwrap()
+            .paused
+    );
+
+    for envelope in client.pending_outbox().unwrap() {
+        client.ack_outbox(envelope.envelope_id).unwrap();
+    }
+    assert!(
+        !client
+            .plan_sms_scans("install-1", "provider", "500")
+            .unwrap()[1]
+            .paused
+    );
+    assert!(
+        !client
+            .plan_mms_backfill_scans("install-1", "provider", "500")
+            .unwrap()
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::History)
+            .unwrap()
+            .paused
+    );
+}
+
+#[test]
 fn reconciliation_sweep_discovers_reused_or_decreased_ids_without_resetting_history() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

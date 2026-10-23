@@ -42,12 +42,14 @@ data class SmsAcquisition(val id: String, val input: SmsAcquisitionInput, val st
 internal data class SmsCapturePlan(
     val sourceGeneration: String,
     val imported: Boolean,
-    val checkpoint: Long,
+    val checkpoint: Long?,
     val subscriptionId: String = SmsCapture.PROVIDER_SCOPE,
     val pendingRecheckCursor: String? = null,
     val historyUpperBound: Long? = null,
     val historyComplete: Boolean = false,
     val paused: Boolean = false,
+    val descending: Boolean = false,
+    val historyFloor: Long? = null,
 )
 
 /** Core-owned frozen sweep state for IDs at or below forward scan checkpoints. */
@@ -94,6 +96,7 @@ internal interface SmsCaptureCore {
 
 internal interface SmsCaptureProvider {
     fun page(afterId: Long, limit: Int): SmsProviderPage
+    fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage
     fun read(id: Long): SmsProviderRecord?
 }
 
@@ -366,8 +369,7 @@ internal object SmsCapture {
                 val imported = plan.historyUpperBound != null && row.id <= plan.historyUpperBound
                 val outcome = process(core, row, plan.sourceGeneration, imported, existing = null)
                 result = merge(result, outcome.summary())
-                // A paused history row is left for the history scan, which has not passed it yet.
-                if (outcome.coreError || outcome.providerError) return SmsReconciliationResult(result, cursor, false)
+                if (outcome.coreError || outcome.providerError || !outcome.providerDurable) return SmsReconciliationResult(result, cursor, false)
                 cursor = row.id
             }
             val exhausted = page.records.isEmpty() || page.records.any { it.id > plan.upperBound } ||
@@ -439,7 +441,12 @@ internal object SmsCapture {
     }
 
     private fun scan(plan: SmsCapturePlan, core: SmsCaptureCore, provider: SmsCaptureProvider, expired: () -> Boolean): SmsCaptureSummary {
-        val page = provider.page(plan.checkpoint, PAGE)
+        val descending = plan.imported && plan.descending
+        val page = if (descending) {
+            provider.descendingPage(plan.checkpoint, requireNotNull(plan.historyUpperBound), plan.historyFloor, PAGE)
+        } else {
+            provider.page(requireNotNull(plan.checkpoint), PAGE)
+        }
         var result = SmsCaptureSummary()
         var checkpointBlocked = false
         for (row in page.records) {
@@ -455,9 +462,12 @@ internal object SmsCapture {
             }
             core.setCheckpoint(plan.sourceGeneration, plan.subscriptionId, plan.imported, row.id.toString())
         }
-        val reachedUpperBound = plan.historyUpperBound != null && page.records.any { it.id > plan.historyUpperBound }
-        val historyExhausted = plan.imported && plan.historyUpperBound != null && !checkpointBlocked &&
-            (reachedUpperBound || page.records.isEmpty() || page.scannedThroughId >= plan.historyUpperBound)
+        val reachedUpperBound = !descending && plan.historyUpperBound != null && page.records.any { it.id > plan.historyUpperBound }
+        val historyExhausted = plan.imported && plan.historyUpperBound != null && !checkpointBlocked && if (descending) {
+            page.records.size < PAGE
+        } else {
+            reachedUpperBound || page.records.isEmpty() || page.scannedThroughId >= plan.historyUpperBound
+        }
         return result.copy(
             more = result.more || (!checkpointBlocked && page.records.size == PAGE && !reachedUpperBound),
             historyExhausted = historyExhausted,

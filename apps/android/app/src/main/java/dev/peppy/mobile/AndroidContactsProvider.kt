@@ -567,20 +567,25 @@ internal class AndroidContactsProvider(context: Context) {
         ids.distinct().chunked(MAX_SQL_ARGS).forEach { chunk ->
             val selection = "$columnIn (${chunk.joinToString(",") { "?" }}) AND ${RawContacts.DELETED}=0"
             resolver.query(RawContacts.CONTENT_URI, RAW_PROJECTION, selection, chunk.map(Long::toString).toTypedArray(), "${RawContacts._ID} ASC")?.use { c ->
+                val idIndex = c.getColumnIndexOrThrow(RawContacts._ID)
+                val contactIdIndex = c.getColumnIndexOrThrow(RawContacts.CONTACT_ID)
+                val accountNameIndex = c.getColumnIndexOrThrow(RawContacts.ACCOUNT_NAME)
+                val accountTypeIndex = c.getColumnIndexOrThrow(RawContacts.ACCOUNT_TYPE)
+                val versionIndex = c.getColumnIndexOrThrow(RawContacts.VERSION)
                 while (c.moveToNext()) {
-                    val name = c.getString(2)
-                    val type = c.getString(3)
+                    val name = c.getString(accountNameIndex)
+                    val type = c.getString(accountTypeIndex)
                     val account = if (name != null && type != null) ContactAccount(name, type) else null
                     // Rows with only one account column set are malformed: fail closed.
                     val accountWritable = if (account == null) name == null && type == null else type in uploadable
-                    out += RawSource(c.getLong(0), c.getLong(1), account, c.getInt(4) == 0 && accountWritable, c.getInt(5))
+                    out += RawSource(c.getLong(idIndex), c.getLong(contactIdIndex), account, accountWritable, c.getInt(versionIndex))
                 }
             } ?: throw IOException("contacts provider unavailable")
         }
         return out
     }
 
-    /** All common-field rows of [raws]; read-only when the row or its raw contact is read-only. */
+    /** All common-field rows of [raws]; read-only when their raw contact is not writable. */
     private fun fields(raws: Collection<RawSource>): List<Field> {
         val writable = raws.associate { it.rawContactId to it.writable }
         val out = mutableListOf<Field>()
@@ -593,7 +598,7 @@ internal class AndroidContactsProvider(context: Context) {
                     val kind = Kind.of(c.getString(2) ?: continue) ?: continue
                     val rawId = c.getLong(1)
                     val values = kind.columns.associateWith { column -> c.getString(DATA_PROJECTION.indexOf(column)) }
-                    out += Field(c.getLong(0), rawId, kind, values, c.getInt(3) != 0 || writable[rawId] != true, c.getInt(4) != 0, c.getInt(5))
+                    out += Field(c.getLong(0), rawId, kind, values, writable[rawId] != true, c.getInt(3) != 0, c.getInt(4))
                 }
             } ?: throw IOException("contacts provider unavailable")
         }
@@ -633,9 +638,9 @@ internal class AndroidContactsProvider(context: Context) {
         private val PARTIAL_DATE = Regex("""^(\d{4}|-)-\d{2}-\d{2}$""")
         private val GUARDED_ROW = "${Data._ID}=? AND ${Data.RAW_CONTACT_ID}=? AND ${Data.DATA_VERSION}=?"
         private val CONTACT_PROJECTION = arrayOf(Contacts._ID, Contacts.LOOKUP_KEY, Contacts.DISPLAY_NAME, Contacts.CONTACT_LAST_UPDATED_TIMESTAMP, Contacts.PHOTO_ID)
-        private val RAW_PROJECTION = arrayOf(RawContacts._ID, RawContacts.CONTACT_ID, RawContacts.ACCOUNT_NAME, RawContacts.ACCOUNT_TYPE, RawContacts.RAW_CONTACT_IS_READ_ONLY, RawContacts.VERSION)
+        private val RAW_PROJECTION = arrayOf(RawContacts._ID, RawContacts.CONTACT_ID, RawContacts.ACCOUNT_NAME, RawContacts.ACCOUNT_TYPE, RawContacts.VERSION)
         private val DATA_PROJECTION = arrayOf(
-            Data._ID, Data.RAW_CONTACT_ID, Data.MIMETYPE, Data.IS_READ_ONLY, Data.IS_PRIMARY, Data.DATA_VERSION,
+            Data._ID, Data.RAW_CONTACT_ID, Data.MIMETYPE, Data.IS_PRIMARY, Data.DATA_VERSION,
             Data.DATA1, Data.DATA2, Data.DATA3, Data.DATA4, Data.DATA5, Data.DATA6, Data.DATA7, Data.DATA8, Data.DATA9, Data.DATA10, Data.DATA14,
         )
     }

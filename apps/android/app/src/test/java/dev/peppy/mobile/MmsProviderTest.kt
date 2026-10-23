@@ -51,6 +51,21 @@ class MmsProviderTest {
         assertTrue(page.records.any { it.id == 5L })
     }
 
+    @Test fun scansDescendingBetweenFrozenBounds() {
+        (1..8).forEach { id -> provider.messages += message(id.toLong(), 128); provider.parts[id.toLong()] = listOf(part(id.toLong())) }
+
+        val page = reader.descendingPage(cursor = null, upperBound = 7, floor = 3, limit = 50)
+
+        assertEquals(listOf(7L, 6L, 5L, 4L), page.records.map { it.id })
+        assertEquals(4L, page.scannedThroughId)
+    }
+
+    @Test fun nullProviderCursorIsAFailureRatherThanAnExhaustedPage() {
+        provider.returnNull = true
+
+        assertThrows(MmsProviderException::class.java) { reader.descendingPage(null, 1, null, 50) }
+    }
+
     @Test fun pendingUnsupportedZeroAndTooManyPartsAreRecordsAndPageContinues() {
         provider.messages += message(1, 130)
         provider.messages += message(2, 134)
@@ -133,11 +148,24 @@ class MmsProviderTest {
     data class Part(val id: Long)
     class FakeMmsProvider : ContentProvider() {
         val messages = mutableListOf<Msg>(); val parts = mutableMapOf<Long, List<Part>>(); val addresses = mutableMapOf<Long, List<Pair<String, Int>>>()
+        var returnNull = false
         override fun onCreate() = true
-        override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor {
+        override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
+            if (returnNull) return null
             val segments = uri.pathSegments
             return when {
-                segments.isEmpty() -> MatrixCursor(arrayOf("_id")).also { c -> messages.sortedBy { it.id }.forEach { c.addRow(arrayOf(it.id)) } }
+                segments.isEmpty() -> MatrixCursor(arrayOf("_id")).also { c ->
+                    messages.filter { message ->
+                        when (selection) {
+                            "_id > ?" -> message.id > selectionArgs!!.single().toLong()
+                            "_id <= ? AND _id > ?" -> message.id <= selectionArgs!![0].toLong() && message.id > selectionArgs[1].toLong()
+                            "_id < ? AND _id > ?" -> message.id < selectionArgs!![0].toLong() && message.id > selectionArgs[1].toLong()
+                            else -> true
+                        }
+                    }.let { rows ->
+                        if (sortOrder?.contains("DESC") == true) rows.sortedByDescending { it.id } else rows.sortedBy { it.id }
+                    }.forEach { c.addRow(arrayOf(it.id)) }
+                }
                 segments.size == 2 && segments[1] == "addr" -> MatrixCursor(arrayOf("address", "type")).also { c -> addresses[segments[0].toLong()].orEmpty().forEach { c.addRow(arrayOf(it.first, it.second)) } }
                 segments.firstOrNull() == "part" -> MatrixCursor(arrayOf("_id", "seq", "ct", "name", "fn", "chset", "text")).also { c ->
                     parts[selectionArgs!!.single().toLong()].orEmpty().forEachIndexed { i, p -> c.addRow(arrayOf(p.id, i, "text/plain", null, null, 106, null)) }

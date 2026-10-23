@@ -846,17 +846,25 @@ fn ambiguous_peppy_transaction_is_terminal_without_media_quota() {
 }
 
 #[test]
-fn terminal_history_does_not_consume_active_capacity_and_is_bounded() {
+fn terminal_history_retains_newest_observed_rows_without_consuming_active_capacity() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "terminal-history", &vault), &vault);
-    let mut first_id = None;
+    let mut newest = input("newest-terminal", Direction::Incoming);
+    newest.subject = Some("x".repeat(65_537));
+    newest.observed_at_ms = 10_000;
+    let newest_id = client
+        .begin_mms_acquisition(newest.clone())
+        .unwrap()
+        .acquisition_id;
+    let mut oldest_id = None;
     for number in 0..=MAX_MMS_ACQUISITIONS {
         let mut terminal = input(&format!("terminal-{number}"), Direction::Incoming);
         terminal.subject = Some("x".repeat(65_537));
+        terminal.observed_at_ms = i64::try_from(number).unwrap() + 1;
         let acquisition = client.begin_mms_acquisition(terminal).unwrap();
         if number == 0 {
-            first_id = Some(acquisition.acquisition_id);
+            oldest_id = Some(acquisition.acquisition_id);
         }
         assert_eq!(acquisition.state, MmsAcquisitionState::Unavailable);
     }
@@ -870,6 +878,10 @@ fn terminal_history_does_not_consume_active_capacity_and_is_bounded() {
             .iter()
             .any(|row| row.acquisition_id == active.acquisition_id)
     );
+    assert_eq!(
+        client.begin_mms_acquisition(newest).unwrap().acquisition_id,
+        newest_id
+    );
     assert!(visible.iter().any(|row| {
         row.input.source.provider_message_id == format!("terminal-{MAX_MMS_ACQUISITIONS}")
             && row.reason.as_deref() == Some("provider metadata unavailable")
@@ -882,7 +894,7 @@ fn terminal_history_does_not_consume_active_capacity_and_is_bounded() {
             .begin_mms_acquisition(first_again)
             .unwrap()
             .acquisition_id,
-        first_id.unwrap()
+        oldest_id.unwrap()
     );
 }
 

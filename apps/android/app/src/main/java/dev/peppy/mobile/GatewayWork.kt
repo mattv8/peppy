@@ -554,7 +554,9 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         NativeGateway.open(applicationContext)?.let { MmsCallbackReconciler.replay(it, mmsCallbacks) }
         MmsCaptureWork.ensurePeriodic(applicationContext)
         SmsCaptureWork.ensurePeriodic(applicationContext)
-        if (ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED) {
+        val smsReadGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (smsReadGranted) {
             SmsCaptureWork.enqueue(applicationContext)
         }
         // Not enrolled, database unopenable, or shared vault locked: nothing can be synced yet.
@@ -565,9 +567,11 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         val hostPolicy = GatewayPolicyHost(applicationContext)
         val policy = hostPolicy.decision(smsAvailable = sendGranted)
         val mmsEnabled = MmsPreferences(applicationContext).enabled && policy?.captureMms == true
-        val mmsReceiveGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) ==
-            PackageManager.PERMISSION_GRANTED && ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECEIVE_MMS) ==
-            PackageManager.PERMISSION_GRANTED
+        val mmsReceiveGranted = smsReadGranted && ContextCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.RECEIVE_MMS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (mmsEnabled && mmsReceiveGranted) MmsCaptureWork.enqueue(applicationContext)
         val binding = NativeGateway.reachabilityBinding(applicationContext)
         val sync = GatewaySync(
             client = session.client,

@@ -106,6 +106,8 @@ pub struct SmsScanPlan {
     pub subscription_id: String,
     pub imported: bool,
     pub checkpoint: Option<String>,
+    pub descending: bool,
+    pub history_floor: Option<String>,
     pub history_upper_bound: Option<String>,
     pub history_complete: bool,
     pub paused: bool,
@@ -131,6 +133,7 @@ pub struct SmsHistoryStatus {
     pub pending_count: u64,
     pub ambiguous_count: u64,
 }
+type DescendingCheckpoint = (bool, Option<String>, Option<String>, Option<String>);
 
 struct Limits {
     pending: usize,
@@ -433,7 +436,25 @@ impl Client {
             return Err(Error::InvalidRequest("SMS checkpoint"));
         }
         let guard = self.lock()?;
-        guard.conn.execute("INSERT INTO sms_scan_checkpoints(source_generation,subscription_id,imported,provider_message_id) VALUES(?,?,?,?) ON CONFLICT(source_generation,subscription_id,imported) DO UPDATE SET provider_message_id=CASE WHEN CAST(excluded.provider_message_id AS INTEGER)>CAST(sms_scan_checkpoints.provider_message_id AS INTEGER) THEN excluded.provider_message_id ELSE sms_scan_checkpoints.provider_message_id END",params![generation,subscription,imported,provider_id])?;
+        let row: Option<DescendingCheckpoint> = guard.conn.query_row("SELECT descending,history_floor,descending_cursor,history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=?", params![generation, subscription, imported], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()?;
+        match row {
+            Some((true, floor, current, Some(upper))) => {
+                if crate::history_import::advances_descending_cursor(
+                    current.as_deref(),
+                    floor.as_deref(),
+                    &upper,
+                    provider_id,
+                )? {
+                    guard.conn.execute("UPDATE sms_scan_checkpoints SET descending_cursor=? WHERE source_generation=? AND subscription_id=? AND imported=1", params![provider_id, generation, subscription])?;
+                }
+            }
+            // A corrupt descending scope must fail closed; treating it as an old ascending scope
+            // would move the legacy checkpoint into rows the history scan has not reached.
+            Some((true, _, _, None)) => return Err(Error::Database),
+            _ => {
+                guard.conn.execute("INSERT INTO sms_scan_checkpoints(source_generation,subscription_id,imported,provider_message_id) VALUES(?,?,?,?) ON CONFLICT(source_generation,subscription_id,imported) DO UPDATE SET provider_message_id=CASE WHEN CAST(excluded.provider_message_id AS INTEGER)>CAST(sms_scan_checkpoints.provider_message_id AS INTEGER) THEN excluded.provider_message_id ELSE sms_scan_checkpoints.provider_message_id END",params![generation,subscription,imported,provider_id])?;
+            }
+        }
         Ok(())
     }
     /// Returns the live and history plans. The first call atomically freezes the observed
@@ -454,12 +475,20 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("INSERT INTO sms_scan_checkpoints(source_generation,subscription_id,imported,provider_message_id,history_upper_bound) VALUES(?1,?2,0,?3,NULL) ON CONFLICT(source_generation,subscription_id,imported) DO NOTHING", params![generation, scope, observed_high_water])?;
-        tx.execute("INSERT INTO sms_scan_checkpoints(source_generation,subscription_id,imported,provider_message_id,history_upper_bound) VALUES(?1,?2,1,'',?3) ON CONFLICT(source_generation,subscription_id,imported) DO NOTHING", params![generation, scope, observed_high_water])?;
+        tx.execute("INSERT INTO sms_scan_checkpoints(source_generation,subscription_id,imported,provider_message_id,history_upper_bound,descending) VALUES(?1,?2,1,'',?3,1) ON CONFLICT(source_generation,subscription_id,imported) DO NOTHING", params![generation, scope, observed_high_water])?;
         let paused: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sms_scan_checkpoints WHERE source_generation=? AND imported=1 AND paused_reason=?)", params![generation, PAUSE_RECOVERY_CAPACITY], |r| r.get(0))?;
         if paused && !recovery_capacity_reached(&tx, &LIMITS)? {
             tx.execute("UPDATE sms_scan_checkpoints SET paused_reason=NULL WHERE source_generation=? AND imported=1 AND paused_reason=?", params![generation, PAUSE_RECOVERY_CAPACITY])?;
         }
-        let mut statement = tx.prepare("SELECT imported,provider_message_id,history_upper_bound,history_complete,paused_reason,pending_recheck_cursor FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? ORDER BY imported")?;
+        let history_incomplete: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1 AND history_complete=0)", params![generation, scope], |row| row.get(0))?;
+        let gate_open = if history_incomplete {
+            crate::history_import::history_import_gate_open(&tx, crate::notifications::now_ms())?
+        } else {
+            true
+        };
+        let outbox_backpressured =
+            history_incomplete && crate::history_import::outbox_backpressures_history(&tx)?;
+        let mut statement = tx.prepare("SELECT imported,provider_message_id,history_upper_bound,history_complete,paused_reason,pending_recheck_cursor,descending,history_floor,descending_cursor FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? ORDER BY imported")?;
         let plans = statement
             .query_map(params![generation, scope], |r| {
                 Ok(SmsScanPlan {
@@ -468,11 +497,18 @@ impl Client {
                     imported: r.get(0)?,
                     checkpoint: {
                         let v: String = r.get(1)?;
-                        (!v.is_empty()).then_some(v)
+                        if r.get::<_, bool>(6)? {
+                            r.get(8)?
+                        } else {
+                            (!v.is_empty()).then_some(v)
+                        }
                     },
+                    descending: r.get(6)?,
+                    history_floor: r.get(7)?,
                     history_upper_bound: r.get(2)?,
                     history_complete: r.get(3)?,
-                    paused: r.get::<_, Option<String>>(4)?.is_some(),
+                    paused: r.get::<_, Option<String>>(4)?.is_some()
+                        || (r.get::<_, bool>(0)? && (!gate_open || outbox_backpressured)),
                     pending_recheck_cursor: r.get(5)?,
                 })
             })?
@@ -543,7 +579,7 @@ impl Client {
             observed_high_water,
             live_anchor_fingerprint,
         )?;
-        let (cursor, upper_bound) = if !upper_bound.is_empty() {
+        let (mut cursor, upper_bound) = if !upper_bound.is_empty() {
             (cursor, upper_bound)
         } else if !reused
             && completed
@@ -564,14 +600,29 @@ impl Client {
             )?;
             (None, observed_high_water.to_owned())
         };
-        let history_upper_bound: Option<String> = tx
+        let history: Option<(String, bool)> = tx
             .query_row(
-                "SELECT history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1",
+                "SELECT history_upper_bound,history_complete FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1",
                 params![generation, scope],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?
-            .flatten();
+            .optional()?;
+        let history_upper_bound = history.as_ref().map(|(bound, _)| bound.clone());
+        if history.is_some_and(|(_, complete)| !complete) {
+            let bound = history_upper_bound.as_deref().ok_or(Error::Database)?;
+            let bound_id = bound.parse::<u64>().map_err(|_| Error::Database)?;
+            let cursor_id = cursor
+                .as_deref()
+                .map(|value| value.parse::<u64>().map_err(|_| Error::Database))
+                .transpose()?;
+            if cursor_id.is_none_or(|value| value < bound_id) {
+                cursor = Some(bound.into());
+                tx.execute(
+                    "UPDATE sms_reconciliation_scans SET scan_cursor=? WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
+                    params![bound, generation, scope, upper_bound],
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(Some(SmsReconciliationPlan {
             source_generation: generation.into(),
@@ -602,9 +653,34 @@ impl Client {
                 params![crate::notifications::now_ms(), generation, scope, upper_bound],
             )?;
         } else {
+            let history_bound: Option<String> = guard
+                .conn
+                .query_row(
+                    "SELECT history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=1 AND history_complete=0",
+                    params![generation, scope],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let cursor = match (cursor, history_bound) {
+                (Some(cursor), Some(bound)) => {
+                    let cursor_id = cursor
+                        .parse::<u64>()
+                        .map_err(|_| Error::InvalidRequest("SMS reconciliation cursor"))?;
+                    let bound_id = bound.parse::<u64>().map_err(|_| Error::Database)?;
+                    if cursor_id < bound_id {
+                        bound
+                    } else {
+                        cursor.into()
+                    }
+                }
+                (None, Some(bound)) => bound,
+                (Some(cursor), None) => cursor.into(),
+                (None, None) => String::new(),
+            };
             guard.conn.execute(
                 "UPDATE sms_reconciliation_scans SET scan_cursor=? WHERE source_generation=? AND subscription_id=? AND upper_bound=?",
-                params![cursor, generation, scope, upper_bound],
+                params![(!cursor.is_empty()).then_some(cursor), generation, scope, upper_bound],
             )?;
         }
         Ok(())
@@ -1144,6 +1220,7 @@ mod tests {
         live.imported = false;
         client.begin_sms_acquisition_with(live, &tight).unwrap();
         // With production limits capacity is available again, so the next plan resumes history.
+        client.open_history_import_gate("contacts_settled").unwrap();
         let plans = client
             .plan_sms_scans("install", "android-sms-provider", "10")
             .unwrap();
@@ -1182,6 +1259,38 @@ mod tests {
         client
             .begin_sms_acquisition_with(history_row(2), &tight)
             .unwrap();
+    }
+
+    #[test]
+    fn malformed_descending_upper_bound_cannot_advance_the_ascending_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "scope", "10").unwrap();
+        {
+            let guard = client.lock().unwrap();
+            guard
+                .conn
+                .execute(
+                    "UPDATE sms_scan_checkpoints SET history_upper_bound='bad' WHERE source_generation='install' AND subscription_id='scope' AND imported=1",
+                    [],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            client.set_sms_scan_checkpoint("install", "scope", true, "5"),
+            Err(Error::InvalidRequest("history checkpoint"))
+        );
+        let guard = client.lock().unwrap();
+        let checkpoint: String = guard
+            .conn
+            .query_row(
+                "SELECT provider_message_id FROM sms_scan_checkpoints WHERE source_generation='install' AND subscription_id='scope' AND imported=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(checkpoint.is_empty());
     }
 
     #[test]

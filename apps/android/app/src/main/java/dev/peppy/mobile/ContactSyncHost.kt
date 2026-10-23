@@ -95,7 +95,11 @@ internal object ContactSyncHost {
             val coordinator = coordinator(context, session.client, session.deviceId)
             runCatching { coordinator.setScanRequestCapability(false) }
             runCatching { coordinator.reportPendingSyncBlocked("sync_disabled") }
+            openHistoryImportGate(context, session, "contacts_disabled")
             return false
+        }
+        if (!access(context).read) {
+            openHistoryImportGate(context, session, "contacts_permission_denied")
         }
         val readiness = readiness(session.client)
         if (!readiness.contactsReady) return readiness.backfillPending
@@ -109,7 +113,19 @@ internal object ContactSyncHost {
             return false
         }
         coordinator.setScanRequestCapability(true)
-        return coordinator.run(charging = charging(context)).more
+        val report = coordinator.run(charging = charging(context))
+        if (report.scanFinished) openHistoryImportGate(context, session, "contacts_settled")
+        return report.more
+    }
+
+    private fun openHistoryImportGate(context: Context, session: GatewaySession, reason: String) {
+        val opened = runCatching { session.client.openHistoryImportGate(reason) }.getOrDefault(false)
+        if (!opened) return
+        val app = context.applicationContext
+        if (granted(app, Manifest.permission.READ_SMS)) SmsCaptureWork.enqueue(app)
+        if (granted(app, Manifest.permission.READ_SMS) && granted(app, Manifest.permission.RECEIVE_MMS)) {
+            MmsCaptureWork.enqueue(app)
+        }
     }
 
     /** Process-lifetime observer while enabled and readable; changes enqueue the unique gateway pass. */

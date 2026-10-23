@@ -15,6 +15,8 @@ internal data class MmsBackfillScanPlan(
     val historyComplete: Boolean,
     val paused: Boolean,
     val budget: Int,
+    val descending: Boolean = false,
+    val historyFloor: String? = null,
 )
 
 internal data class MmsBackfillRecheckRequest(val providerMessageId: String, val incoming: Boolean)

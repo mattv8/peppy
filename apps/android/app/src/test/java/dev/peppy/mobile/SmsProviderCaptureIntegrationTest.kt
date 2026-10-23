@@ -41,6 +41,7 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
 
     /** Runs bounded passes like WorkManager continuations until the scanner asks for no more. */
     private fun drain(client: NativeClient): List<SmsCaptureSummary> {
+        client.openHistoryImportGate("contacts_settled")
         val passes = mutableListOf<SmsCaptureSummary>()
         do {
             passes += pass(client)
@@ -128,6 +129,27 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
         assertEquals("new", client.messages(client.listConversations().single().conversationId).last().body)
     }
 
+    @Test fun closedContactsGateDefersHistoryWhileLiveCaptureContinuesThenReleasesIt() {
+        grant(Manifest.permission.READ_SMS)
+        val client = enrollAndUnlock()
+        provider.rows += row(1, 1, "+14155552671", "history", 1_600_000_000_001, 1_600_000_000_001, MESSAGES_APP)
+
+        val gated = pass(client)
+        provider.rows += row(2, 1, "+14155552671", "live", 1_700_000_000_002, 1_700_000_000_002, MESSAGES_APP)
+        val live = pass(client)
+
+        assertEquals(0, gated.captured)
+        assertEquals(1, live.captured)
+        assertEquals(listOf("live"), messages(client).map { it.body })
+
+        assertTrue(client.openHistoryImportGate("contacts_settled"))
+        val released = drain(client)
+
+        assertTrue(released.none { it.providerError || it.coreError })
+        assertEquals(listOf("history"), messages(client).filter { it.seen }.map { it.body })
+        assertEquals(listOf("live"), messages(client).filter { !it.seen }.map { it.body })
+    }
+
     @Test fun malformedRowsAreRecordedUnavailableAndHistoryContinuesPastThem() {
         grant(Manifest.permission.READ_SMS)
         val client = enrollAndUnlock()
@@ -171,7 +193,8 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
     @Test fun productionRunnerCapturesAndSchedulesUploadOnlyForNewMessages() {
         // The production runner is gated by READ_SMS and the core SMS policy (which needs RECEIVE_SMS).
         grant(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)
-        enrollAndUnlock()
+        val client = enrollAndUnlock()
+        client.openHistoryImportGate("contacts_settled")
         provider.rows += row(1, 1, "+14155552671", "one", 1_600_000_000_001, 1_600_000_000_001, MESSAGES_APP)
         val first = SmsNativeCapture.run(context)
         val again = SmsNativeCapture.run(context)

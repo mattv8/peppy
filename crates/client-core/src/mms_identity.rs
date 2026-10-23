@@ -73,7 +73,7 @@ impl Client {
     ) -> Result<MmsReplyContext, Error> {
         let s = self.lock()?;
         let payload: Option<crate::MessagePayload> = s.conn.query_row(
-            "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.transport')='mms' ORDER BY local_order DESC LIMIT 1",
+            "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.transport')='mms' ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
             params![conversation_id.to_string()],
             |row| row.get::<_, String>(0),
         ).optional()?.map(|json| crate::decode(json.as_bytes())).transpose()?;
@@ -83,7 +83,7 @@ impl Client {
         // Locally created outgoing replies have no provider source; retain the latest immutable
         // incoming/contextual source in this conversation for own-address confirmation.
         let contextual: Option<crate::MessagePayload> = s.conn.query_row(
-            "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.mms_context') IS NOT NULL ORDER BY local_order DESC LIMIT 1",
+            "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.mms_context') IS NOT NULL ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
             params![conversation_id.to_string()], |row| row.get::<_, String>(0),
         ).optional()?.map(|json| crate::decode(json.as_bytes())).transpose()?;
         let identity = payload
