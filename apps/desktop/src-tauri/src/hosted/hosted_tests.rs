@@ -956,6 +956,42 @@ async fn account_resumable_when_checkpoint_exists() {
 // ============================================================================
 
 #[tokio::test]
+async fn absent_hosted_session_requires_sign_in_without_claiming_expiry() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        || async { panic!("an absent Hosted session must not prompt") },
+        |_, _| async { panic!("an absent Hosted session must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "hosted-session-required");
+    assert!(error.message.contains("Sign in again"));
+    assert!(!error.message.contains("expired"));
+}
+
+#[tokio::test]
+async fn absent_hosted_session_for_enrollment_requires_sign_in_without_claiming_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryStore::default());
+    let state = crate::AppState::new(root.path().to_path_buf(), store, crate::tests::noop());
+    let origin = super::hosted_origin().unwrap();
+
+    let error = super::enrollment_account_session(&state, &HostedState::default(), &origin)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "hosted-session-required");
+    assert!(error.message.contains("Sign in again"));
+    assert!(!error.message.contains("expired"));
+}
+
+#[tokio::test]
 async fn fresh_provision_generates_a_vault_secret_without_prompting() {
     let store = MemoryStore::default();
     let hosted = HostedState::default();
@@ -2222,6 +2258,111 @@ async fn resume_with_an_expired_saved_grant_requests_a_new_one() {
 }
 
 #[tokio::test]
+async fn expired_hosted_session_requires_sign_in_and_preserves_recovery_data() {
+    let (store, hosted, server, _vault, _account) =
+        resumable_fixture(FakeServerState::default(), false).await;
+    let expired_at = super::now_unix().saturating_sub(1);
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_expiredtoken12345678901234567890123456",
+                expired_at,
+            ),
+        )
+        .unwrap();
+    *hosted.session.lock().await = Some(HostedSessionRecord {
+        account_id: ACCOUNT.into(),
+        bearer: Zeroizing::new("pst_expiredtoken12345678901234567890123456".into()),
+        expires_at_unix: expired_at,
+    });
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let provisioning = peppy_hosted_client::restore(
+        store.get(&checkpoint).unwrap().unwrap().to_vec(),
+        HTTPS_ORIGIN,
+        ACCOUNT,
+    )
+    .unwrap();
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&super::binding_for(&provisioning));
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, false)).unwrap(),
+        )
+        .unwrap();
+    let keys = [checkpoint.clone(), pending.clone(), index.clone()];
+    let saved: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|key| store.get(key).unwrap().unwrap().to_vec())
+        .collect();
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        || async { panic!("an expired Hosted session must not prompt") },
+        |_, _| async { panic!("an expired Hosted session must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "hosted-session-required");
+    assert!(store
+        .get(&super::session_key(HTTPS_ORIGIN))
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+    assert!(hosted.session.lock().await.is_none());
+    for (key, bytes) in keys.iter().zip(&saved) {
+        assert_eq!(
+            store.get(key).unwrap().unwrap().as_slice(),
+            bytes.as_slice()
+        );
+    }
+    {
+        let server = server.lock().unwrap();
+        assert!(server.grant_bodies.is_empty());
+        assert_eq!(server.complete_calls, 0);
+    }
+
+    store
+        .set(
+            &super::session_key(HTTPS_ORIGIN),
+            &encode_session(
+                ACCOUNT,
+                "pst_validtoken123456789012345678901234567",
+                super::now_unix() + 3600,
+            ),
+        )
+        .unwrap();
+    let activated = Arc::new(Mutex::new(0));
+    let sink = activated.clone();
+    super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        || async { panic!("the saved pending secret must avoid a prompt") },
+        move |_, secret| async move {
+            assert_eq!(secret.as_str(), RESUME_PHRASE);
+            *sink.lock().unwrap() += 1;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(*activated.lock().unwrap(), 1);
+    assert!(store
+        .get(&checkpoint)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+    let server = server.lock().unwrap();
+    assert_eq!(server.grant_bodies.len(), 1);
+    assert_eq!(server.complete_calls, 1);
+}
+
+#[tokio::test]
 async fn rejected_bearer_on_grant_ends_the_hosted_session() {
     let (store, hosted, _server, _vault, _account) = resumable_fixture(
         FakeServerState {
@@ -2231,6 +2372,27 @@ async fn rejected_bearer_on_grant_ends_the_hosted_session() {
         false,
     )
     .await;
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let provisioning = peppy_hosted_client::restore(
+        store.get(&checkpoint).unwrap().unwrap().to_vec(),
+        HTTPS_ORIGIN,
+        ACCOUNT,
+    )
+    .unwrap();
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&super::binding_for(&provisioning));
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, false)).unwrap(),
+        )
+        .unwrap();
+    let keys = [checkpoint.clone(), pending.clone(), index.clone()];
+    let saved: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|key| store.get(key).unwrap().unwrap().to_vec())
+        .collect();
     let error = super::provision_core(
         &store,
         &hosted,
@@ -2240,9 +2402,70 @@ async fn rejected_bearer_on_grant_ends_the_hosted_session() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "credentials-required");
+    assert_eq!(error.code, "hosted-session-required");
     assert!(store
         .get(&super::session_key(HTTPS_ORIGIN))
         .unwrap()
         .is_some_and(|value| value.is_empty()));
+    for (key, bytes) in keys.iter().zip(&saved) {
+        assert_eq!(
+            store.get(key).unwrap().unwrap().as_slice(),
+            bytes.as_slice()
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_bearer_while_loading_a_resumable_provisioning_keeps_recovery_data() {
+    let (store, hosted, _server, _vault, _account) = resumable_fixture(
+        FakeServerState {
+            account_revoked: true,
+            ..FakeServerState::default()
+        },
+        false,
+    )
+    .await;
+    let checkpoint = super::checkpoint_key(HTTPS_ORIGIN, ACCOUNT);
+    let provisioning = peppy_hosted_client::restore(
+        store.get(&checkpoint).unwrap().unwrap().to_vec(),
+        HTTPS_ORIGIN,
+        ACCOUNT,
+    )
+    .unwrap();
+    let pending = super::pending_secret_key(HTTPS_ORIGIN, ACCOUNT);
+    let index = super::recovery_index_key(&super::binding_for(&provisioning));
+    store.set(&pending, RESUME_PHRASE.as_bytes()).unwrap();
+    store
+        .set(
+            &index,
+            &serde_json::to_vec(&super::recovery_index(&provisioning, false)).unwrap(),
+        )
+        .unwrap();
+    let keys = [checkpoint.clone(), pending.clone(), index.clone()];
+    let saved: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|key| store.get(key).unwrap().unwrap().to_vec())
+        .collect();
+
+    let error = super::provision_core(
+        &store,
+        &hosted,
+        HTTPS_ORIGIN,
+        || async { panic!("a rejected bearer must not prompt") },
+        |_, _| async { panic!("a rejected bearer must not activate") },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "hosted-session-required");
+    assert!(store
+        .get(&super::session_key(HTTPS_ORIGIN))
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+    for (key, bytes) in keys.iter().zip(&saved) {
+        assert_eq!(
+            store.get(key).unwrap().unwrap().as_slice(),
+            bytes.as_slice()
+        );
+    }
 }

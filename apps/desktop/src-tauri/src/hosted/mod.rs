@@ -71,8 +71,8 @@ pub(crate) async fn enrollment_account_session(
         .await?
         .ok_or_else(|| {
             BridgeError::new(
-                "credentials-required",
-                "Sign in to Peppy Hosted before enrolling.",
+                "hosted-session-required",
+                "Sign in again to Peppy Hosted before enrolling.",
             )
         })?;
     Ok(Zeroizing::new(session.bearer.to_string()))
@@ -755,8 +755,8 @@ where
     let _provisioning = hosted.provisioning.lock().await;
     let Some(session) = load_session_from_store(store, hosted, origin).await? else {
         return Err(BridgeError::new(
-            "credentials-required",
-            "Sign in to Peppy Hosted first.",
+            "hosted-session-required",
+            "Sign in again to Peppy Hosted.",
         ));
     };
 
@@ -1106,7 +1106,7 @@ async fn session_expired(
         return error;
     }
     BridgeError::new(
-        "credentials-required",
+        "hosted-session-required",
         "Your Peppy Hosted sign-in expired. Sign in again to continue.",
     )
 }
