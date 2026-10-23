@@ -68,6 +68,8 @@ pub struct MmsBackfillScanPlan {
     pub subscription_id: String,
     /// Last acknowledged provider ID, if a page is resumable.
     pub cursor: Option<String>,
+    pub descending: bool,
+    pub history_floor: Option<String>,
     /// Frozen maximum ID for history/recheck classification; absent only before initialization.
     pub history_upper_bound: Option<String>,
     pub history_complete: bool,
@@ -161,7 +163,7 @@ impl Client {
             // it finishes. It is not completion evidence; only an exhausted Rust-owned scan may
             // mark history complete.
             tx.execute(
-                "INSERT INTO mms_backfill_scopes(source_generation,subscription_id,history_upper_bound,history_complete,pending_recheck_cursor,migration_done) VALUES(?,?,?,?,?,1)",
+                "INSERT INTO mms_backfill_scopes(source_generation,subscription_id,history_upper_bound,history_complete,pending_recheck_cursor,migration_done,history_descending) VALUES(?,?,?,?,?,1,1)",
                 params![generation, scope, legacy.history_baseline, false, recheck_cursor],
             )?;
             if let Some(bound) = legacy.history_baseline {
@@ -188,7 +190,8 @@ impl Client {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_scope(&tx, generation, scope, observed_max_id)?;
-        let (baseline, complete, pause, recheck_cursor) = scope_row(&tx, generation, scope)?;
+        let (baseline, complete, pause, recheck_cursor, descending, floor, history_cursor) =
+            scope_row(&tx, generation, scope)?;
         let baseline = match baseline {
             Some(baseline) => baseline,
             None => {
@@ -203,6 +206,13 @@ impl Client {
         };
         rewind_live_checkpoint_on_regression(&tx, generation, scope, observed_max_id)?;
         let pause = refresh_local_pause(&tx, generation, scope, pending_bytes, pause)?;
+        let gate_open = if complete {
+            true
+        } else {
+            crate::history_import::history_import_gate_open(&tx, crate::notifications::now_ms())?
+        };
+        let outbox_backpressured =
+            !complete && crate::history_import::outbox_backpressures_history(&tx)?;
         let live = checkpoint(&tx, generation, scope, false)?;
         let history = checkpoint(&tx, generation, scope, true)?;
         tx.commit()?;
@@ -212,6 +222,8 @@ impl Client {
                 source_generation: generation.into(),
                 subscription_id: scope.into(),
                 cursor: live,
+                descending: false,
+                history_floor: None,
                 history_upper_bound: Some(baseline.clone()),
                 history_complete: complete,
                 pause,
@@ -225,11 +237,13 @@ impl Client {
                 phase: MmsBackfillPhase::History,
                 source_generation: generation.into(),
                 subscription_id: scope.into(),
-                cursor: history,
+                cursor: if descending { history_cursor } else { history },
+                descending,
+                history_floor: floor,
                 history_upper_bound: Some(baseline),
                 history_complete: complete,
                 pause,
-                paused: pause.is_some(),
+                paused: pause.is_some() || !gate_open || outbox_backpressured,
                 budget: MAX_MMS_BACKFILL_RECHECK,
             },
             MmsBackfillScanPlan {
@@ -237,6 +251,8 @@ impl Client {
                 source_generation: generation.into(),
                 subscription_id: scope.into(),
                 cursor: recheck_cursor,
+                descending: false,
+                history_floor: None,
                 history_upper_bound: None,
                 history_complete: complete,
                 pause,
@@ -268,16 +284,34 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = checkpoint(&tx, generation, scope, imported)?;
-        let advances = match current.as_deref() {
-            Some(current) => id_number(provider_id)? > id_number(current)?,
-            None => true,
+        let (baseline, _, _, _, descending, floor, cursor) = scope_row(&tx, generation, scope)?;
+        let current = if phase == MmsBackfillPhase::History && descending {
+            cursor
+        } else {
+            checkpoint(&tx, generation, scope, imported)?
+        };
+        let advances = if phase == MmsBackfillPhase::History && descending {
+            crate::history_import::advances_descending_cursor(
+                current.as_deref(),
+                floor.as_deref(),
+                baseline.as_deref().ok_or(Error::Database)?,
+                provider_id,
+            )?
+        } else {
+            match current.as_deref() {
+                Some(current) => id_number(provider_id)? > id_number(current)?,
+                None => true,
+            }
         };
         if advances {
-            tx.execute(
+            if phase == MmsBackfillPhase::History && descending {
+                tx.execute("UPDATE mms_backfill_scopes SET history_cursor=? WHERE source_generation=? AND subscription_id=?", params![provider_id, generation, scope])?;
+            } else {
+                tx.execute(
                 "INSERT INTO mms_scan_checkpoints(source_generation,subscription_id,imported,provider_message_id) VALUES(?,?,?,?) ON CONFLICT(source_generation,subscription_id,imported) DO UPDATE SET provider_message_id=excluded.provider_message_id",
                 params![generation, scope, imported, provider_id],
             )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -302,7 +336,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (baseline, _, _, _) = scope_row(&tx, generation, scope)?;
+        let (baseline, _, _, _, _, _, _) = scope_row(&tx, generation, scope)?;
         if baseline.as_deref() != Some(bound) || pending_acquisitions(&tx, generation, scope)? {
             tx.commit()?;
             return Ok(false);
@@ -327,7 +361,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (_, _, _, legacy_cursor) = scope_row(&tx, generation, scope)?;
+        let (_, _, _, legacy_cursor, _, _, _) = scope_row(&tx, generation, scope)?;
         let legacy_cursor = legacy_cursor
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or_default();
@@ -398,6 +432,8 @@ impl Client {
                 SELECT acquisition_id FROM mms_acquisitions
                 WHERE source_generation=? AND (subscription_id=? OR ?='android-mms-provider')
                   AND state IN ('blocked','unavailable')
+                  AND reason IS NOT 'unknown_subscription'
+                  AND subscription_id <> 'android-mms-unknown-subscription'
                 ORDER BY local_order LIMIT ?
             )",
             params![generation, scope, scope, limit],
@@ -520,7 +556,7 @@ fn ensure_scope(
     observed_max_id: &str,
 ) -> Result<(), Error> {
     conn.execute(
-        "INSERT INTO mms_backfill_scopes(source_generation,subscription_id,migration_done) VALUES(?,?,1) ON CONFLICT(source_generation,subscription_id) DO NOTHING",
+        "INSERT INTO mms_backfill_scopes(source_generation,subscription_id,migration_done,history_descending) VALUES(?,?,1,1) ON CONFLICT(source_generation,subscription_id) DO NOTHING",
         params![generation, scope],
     )?;
     let missing: bool = conn.query_row(
@@ -599,15 +635,26 @@ type ScopeRow = (
     bool,
     Option<MmsBackfillPause>,
     Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
 );
 
 fn scope_row(conn: &Connection, generation: &str, scope: &str) -> Result<ScopeRow, Error> {
     let row = conn.query_row(
-        "SELECT history_upper_bound,history_complete,pause_reason,pending_recheck_cursor FROM mms_backfill_scopes WHERE source_generation=? AND subscription_id=?",
+        "SELECT history_upper_bound,history_complete,pause_reason,pending_recheck_cursor,history_descending,history_floor,history_cursor FROM mms_backfill_scopes WHERE source_generation=? AND subscription_id=?",
         params![generation, scope],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     ).optional()?.ok_or(Error::Database)?;
-    Ok((row.0, row.1, MmsBackfillPause::parse(row.2)?, row.3))
+    Ok((
+        row.0,
+        row.1,
+        MmsBackfillPause::parse(row.2)?,
+        row.3,
+        row.4,
+        row.5,
+        row.6,
+    ))
 }
 
 fn checkpoint(

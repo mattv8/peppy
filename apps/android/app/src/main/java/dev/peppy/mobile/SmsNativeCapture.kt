@@ -169,6 +169,9 @@ internal class AndroidSmsCaptureProvider(context: Context) : SmsCaptureProvider 
 
     override fun page(afterId: Long, limit: Int) = reader.page(afterId, limit)
 
+    override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+        reader.descendingPage(cursor, upperBound, floor, limit)
+
     override fun read(id: Long) = reader.read(id)
 }
 
@@ -176,11 +179,13 @@ private fun uniffi.peppy_mobile_bindings.NativeSmsScanPlan.toCapturePlan() = Sms
     sourceGeneration = sourceGeneration,
     subscriptionId = subscriptionId,
     imported = imported,
-    checkpoint = checkpoint?.toLongOrNull() ?: 0L,
+    checkpoint = checkpoint?.toLongOrNull() ?: if (descending) null else 0L,
     pendingRecheckCursor = pendingRecheckCursor,
     historyUpperBound = historyUpperBound?.toLongOrNull(),
     historyComplete = historyComplete,
     paused = paused,
+    descending = descending,
+    historyFloor = historyFloor?.toLongOrNull(),
 )
 
 private fun uniffi.peppy_mobile_bindings.NativeSmsReconciliationPlan.toCapturePlan() = SmsReconciliationPlan(

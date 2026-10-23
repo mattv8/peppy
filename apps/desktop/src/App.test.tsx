@@ -1120,6 +1120,98 @@ describe("lazy conversation history", () => {
     expect(bridge.load_state).toHaveBeenLastCalledWith(conversation.id, "m-first-loaded");
   });
 
+  it("preserves the visible message position when a subscription refresh prepends history", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100 });
+    try {
+      const conversation = host.conversations[0];
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      const messageRow = document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')!;
+      const list = document.getElementById("message-list") as HTMLDivElement;
+      vi.spyOn(list, "getBoundingClientRect").mockReturnValue({ top: 0, bottom: 100 } as DOMRect);
+      vi.spyOn(messageRow, "getBoundingClientRect").mockImplementation(() => ({
+        top: document.querySelector('[data-message-id="m-prepended"]') ? 70 : 20,
+        bottom: document.querySelector('[data-message-id="m-prepended"]') ? 90 : 40,
+      } as DOMRect));
+      list.scrollTop = 200;
+      fireEvent.scroll(list);
+
+      const refreshed = host.load(conversation.id);
+      refreshed.conversations[0].messages = [
+        { ...conversation.messages[0], id: "m-prepended", body: "Prepended history", attachments: [] },
+        ...refreshed.conversations[0].messages,
+      ];
+      vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+
+      await act(async () => hint?.());
+
+      expect(list.scrollTop).toBe(250);
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("preserves the visible message position when a refresh inserts above it with a stable first row", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100 });
+    try {
+      const conversation = host.conversations[0];
+      conversation.messages = [
+        { ...conversation.messages[0], id: "m-first", body: "First message", attachments: [] },
+        { ...conversation.messages[0], id: "m-visible", body: "Visible message", attachments: [] },
+        { ...conversation.messages[0], id: "m-last", body: "Last message", attachments: [] },
+      ];
+      render(<App />);
+      await screen.findByText("Visible message");
+      const visibleRow = document.querySelector<HTMLElement>('[data-message-id="m-visible"]')!;
+      const list = document.getElementById("message-list") as HTMLDivElement;
+      vi.spyOn(list, "getBoundingClientRect").mockReturnValue({ top: 0, bottom: 100 } as DOMRect);
+      vi.spyOn(visibleRow, "getBoundingClientRect").mockImplementation(() => ({
+        top: document.querySelector('[data-message-id="m-middle"]') ? 60 : 20,
+        bottom: document.querySelector('[data-message-id="m-middle"]') ? 80 : 40,
+      } as DOMRect));
+      vi.spyOn(document.querySelector<HTMLElement>('[data-message-id="m-first"]')!, "getBoundingClientRect")
+        .mockReturnValue({ top: -20, bottom: 0 } as DOMRect);
+      list.scrollTop = 200;
+      fireEvent.scroll(list);
+
+      const refreshed = host.load(conversation.id);
+      refreshed.conversations[0].messages = [
+        conversation.messages[0],
+        { ...conversation.messages[0], id: "m-middle", body: "Middle message", attachments: [] },
+        ...conversation.messages.slice(1),
+      ];
+      vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+
+      await act(async () => hint?.());
+
+      expect(list.scrollTop).toBe(240);
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("keeps the reader pinned to the bottom when a subscription refresh prepends history", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    try {
+      const conversation = host.conversations[0];
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      const list = document.getElementById("message-list") as HTMLDivElement;
+      const refreshed = host.load(conversation.id);
+      refreshed.conversations[0].messages = [
+        { ...conversation.messages[0], id: "m-prepended", body: "Prepended history", attachments: [] },
+        ...refreshed.conversations[0].messages,
+      ];
+      vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+
+      await act(async () => hint?.());
+
+      expect(list.scrollTop).toBe(list.scrollHeight);
+    } finally {
+      restoreGeometry();
+    }
+  });
+
   it("retains a prepended prefix and exhaustion when its deferred refresh resolves later", async () => {
     const conversation = host.conversations[0];
     conversation.hasOlderMessages = true;
@@ -1154,6 +1246,82 @@ describe("lazy conversation history", () => {
     expect(screen.getByText("Arrived during refresh")).toBeInTheDocument();
     expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  });
+
+  it("restores history loading when a refresh reports older messages", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-older-prefix", body: "Older prefix", attachments: [] }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Older prefix")).toBeInTheDocument();
+    expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
+
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].hasOlderMessages = true;
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+    await act(async () => hint?.());
+
+    expect(document.getElementById("history-beginning-marker")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load older messages" })).toBeInTheDocument();
+    expect(document.querySelector('#history-load-band[data-history-state="idle"]')).toBeInTheDocument();
+  });
+
+  it("keeps the beginning marker when a subscription refresh confirms history is exhausted", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: conversation.id,
+      messages: [{ ...conversation.messages[0], id: "m-older-prefix", body: "Older prefix", attachments: [] }],
+      hasMore: false,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+    expect(await screen.findByText("Older prefix")).toBeInTheDocument();
+
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].hasOlderMessages = false;
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+    await act(async () => hint?.());
+
+    expect(document.getElementById("history-beginning-marker")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  });
+
+  it("does not apply a subscription anchor while an older page is loading", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100 });
+    try {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValueOnce(page.promise);
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const messageRow = document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')!;
+    const rowBounds = vi.spyOn(messageRow, "getBoundingClientRect");
+    const list = document.getElementById("message-list") as HTMLDivElement;
+    list.scrollTop = 200;
+    fireEvent.scroll(list);
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    rowBounds.mockClear();
+
+    const refreshed = host.load(conversation.id);
+    refreshed.conversations[0].messages = [
+      { ...conversation.messages[0], id: "m-prepended", body: "Prepended history", attachments: [] },
+      ...refreshed.conversations[0].messages,
+    ];
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(refreshed);
+    await act(async () => hint?.());
+
+    expect(rowBounds).not.toHaveBeenCalled();
+    await act(async () => page.resolve({ conversationId: conversation.id, messages: [], hasMore: true }));
+    } finally {
+      restoreGeometry();
+    }
   });
 
   it("renders every arrival in an anchored refresh larger than fifty messages", async () => {

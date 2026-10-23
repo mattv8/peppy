@@ -66,6 +66,15 @@ class SmsProviderReaderTest {
         assertEquals(60L, reader.highWater())
     }
 
+    @Test fun scansDescendingBetweenFrozenBounds() {
+        repeat(8) { id -> provider.rows += row((id + 1).toLong()) }
+
+        val page = reader.descendingPage(cursor = null, upperBound = 7, floor = 3, limit = 50)
+
+        assertEquals(listOf(7L, 6L, 5L, 4L), page.records.map { it.id })
+        assertEquals(4L, page.scannedThroughId)
+    }
+
     @Test fun permissionFailureIsNotAnEmptyPage() {
         provider.deny = true
         assertThrows(SmsProviderException::class.java) { reader.page(0, 1) }
@@ -114,7 +123,16 @@ class SmsProviderReaderTest {
             if (returnNull) return null
             val cursor = MatrixCursor(COLUMNS)
             val requested = uri.lastPathSegment?.toLongOrNull()
-            val filtered = rows.filter { requested == null || it[0] == requested }
+            val filtered = rows.filter { row ->
+                if (requested != null) return@filter row[0] == requested
+                val id = row[0] as Long
+                when (selection) {
+                    "_id > ?" -> id > selectionArgs!!.single().toLong()
+                    "_id <= ? AND _id > ?" -> id <= selectionArgs!![0].toLong() && id > selectionArgs[1].toLong()
+                    "_id < ? AND _id > ?" -> id < selectionArgs!![0].toLong() && id > selectionArgs[1].toLong()
+                    else -> true
+                }
+            }
             (if (sortOrder?.contains("DESC") == true) filtered.sortedByDescending { it[0] as Long } else filtered.sortedBy { it[0] as Long })
                 .forEach(cursor::addRow)
             return cursor

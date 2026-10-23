@@ -53,6 +53,18 @@ class SmsCaptureOrchestrationTest {
         assertTrue(!summary.more)
     }
 
+    @Test fun descendingHistoryCheckpointsNewestToOldestAndExhaustsBelowFloor() {
+        val calls = mutableListOf<String>()
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", true, null, historyUpperBound = 5, descending = true, historyFloor = 2),
+            FakeCore(calls),
+            FakeProvider((1L..5L).map(::record)),
+        )
+
+        assertEquals(listOf("checkpoint:5", "checkpoint:4", "checkpoint:3"), calls.filter { it.startsWith("checkpoint:") })
+        assertTrue(summary.historyExhausted)
+    }
+
     @Test fun unknownSubscriptionDoesNotHoldCheckpointOrStarveLaterRows() {
         val calls = mutableListOf<String>()
         val rows = (1L..60L).map(::record).toMutableList()
@@ -99,6 +111,7 @@ class SmsCaptureOrchestrationTest {
     @Test fun providerFailureRequestsFollowupInsteadOfReportingEmptySuccess() {
         val summary = SmsCapture.run(SmsCapturePlan("shared-generation", false, 0), FakeCore(mutableListOf()), object : SmsCaptureProvider {
             override fun page(afterId: Long, limit: Int): SmsProviderPage = throw SmsProviderException("denied")
+            override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage = throw SmsProviderException("denied")
             override fun read(id: Long): SmsProviderRecord? = throw SmsProviderException("denied")
         })
         assertTrue(summary.providerError)
@@ -111,6 +124,7 @@ class SmsCaptureOrchestrationTest {
             FakeCore(mutableListOf(), listOf(acquisition("one", 1))),
             object : SmsCaptureProvider {
                 override fun page(afterId: Long, limit: Int): SmsProviderPage = throw SmsProviderException("denied")
+                override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage = throw SmsProviderException("denied")
                 override fun read(id: Long): SmsProviderRecord? = throw SmsProviderException("denied")
             },
         )
@@ -247,6 +261,24 @@ class SmsCaptureOrchestrationTest {
         assertTrue(calls.none { it == "checkpoint:2" || it == "begin:3" })
     }
 
+    @Test fun descendingHistoryStopsAtTheFirstNonDurableRow() {
+        val calls = mutableListOf<String>()
+        val core = object : SmsCaptureCore by FakeCore(calls) {
+            override fun begin(input: SmsAcquisitionInput): SmsAcquisition =
+                if (input.providerMessageId == "4") throw SmsCaptureCapacityException() else FakeCore(calls).begin(input)
+        }
+
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", true, null, historyUpperBound = 5, descending = true),
+            core,
+            FakeProvider((1L..5L).map(::record)),
+        )
+
+        assertEquals(listOf("checkpoint:5"), calls.filter { it.startsWith("checkpoint:") })
+        assertTrue(!summary.historyExhausted)
+        assertTrue(calls.none { it == "begin:3" })
+    }
+
     @Test fun pausedHistoryPlanStillDrainsPendingRows() {
         val calls = mutableListOf<String>()
         val summary = SmsCapture.run(SmsCapturePlan("shared-generation", true, 0, historyUpperBound = 5, paused = true), FakeCore(calls, listOf(acquisition("one", 1))), FakeProvider(listOf(record(1))))
@@ -277,6 +309,21 @@ class SmsCaptureOrchestrationTest {
         assertEquals(mapOf("99" to true, "100" to true, "101" to false), imported)
     }
 
+    @Test fun reconciliationPassesDurablyPausedRows() {
+        val core = object : SmsCaptureCore by FakeCore(mutableListOf()) {
+            override fun begin(input: SmsAcquisitionInput) = SmsAcquisition("paused", input, SmsAcquisitionState.PAUSED, null)
+        }
+
+        val result = SmsCapture.reconcile(
+            SmsReconciliationPlan("shared-generation", SmsCapture.PROVIDER_SCOPE, 0, 2),
+            core,
+            FakeProvider(listOf(record(1), record(2))),
+        )
+
+        assertEquals(2L, result.cursor)
+        assertTrue(result.exhausted)
+    }
+
     @Test fun incomingRowsCarryTheReceiverBroadcastIdentity() {
         val inputs = mutableListOf<SmsAcquisitionInput>()
         val core = object : SmsCaptureCore by FakeCore(mutableListOf()) {
@@ -296,6 +343,11 @@ class SmsCaptureOrchestrationTest {
 
     private class FakeProvider(private val rows: List<SmsProviderRecord>) : SmsCaptureProvider {
         override fun page(afterId: Long, limit: Int) = SmsProviderPage(rows.filter { it.id > afterId }.take(limit), rows.lastOrNull()?.id ?: afterId)
+        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage {
+            val ceiling = cursor ?: upperBound
+            val records = rows.filter { it.id <= ceiling && it.id > (floor ?: 0L) }.sortedByDescending { it.id }.take(limit)
+            return SmsProviderPage(records, records.lastOrNull()?.id ?: ceiling)
+        }
         override fun read(id: Long) = rows.firstOrNull { it.id == id }
     }
 
@@ -316,6 +368,9 @@ class SmsCaptureOrchestrationTest {
 
     private class MutableProvider(var row: SmsProviderRecord) : SmsCaptureProvider {
         override fun page(afterId: Long, limit: Int) = if (row.id > afterId) SmsProviderPage(listOf(row), row.id) else SmsProviderPage(emptyList(), afterId)
+        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+            row.takeIf { it.id <= (cursor ?: upperBound) && it.id > (floor ?: 0L) }?.let { SmsProviderPage(listOf(it), it.id) }
+                ?: SmsProviderPage(emptyList(), cursor ?: upperBound)
         override fun read(id: Long) = row.takeIf { it.id == id }
     }
 

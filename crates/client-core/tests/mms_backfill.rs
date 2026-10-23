@@ -74,7 +74,47 @@ fn absent_migration_is_not_zero_and_restart_keeps_frozen_baseline() {
 }
 
 #[test]
-fn explicit_zero_migration_and_reenable_preserve_progress() {
+fn history_plan_descends_while_gate_leaves_live_and_recheck_running() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+
+    let plans = client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "50")
+        .unwrap();
+    assert!(!live_plan(&plans).paused);
+    assert!(
+        !plans
+            .iter()
+            .find(|plan| plan.phase == MmsBackfillPhase::Recheck)
+            .unwrap()
+            .paused
+    );
+    assert!(history_plan(&plans).paused);
+    assert!(history_plan(&plans).descending);
+    assert_eq!(history_plan(&plans).history_floor, None);
+
+    assert!(client.open_history_import_gate("contacts_settled").unwrap());
+    client
+        .advance_mms_backfill_page("phone-install", "sim-1", MmsBackfillPhase::History, "40")
+        .unwrap();
+    client
+        .advance_mms_backfill_page("phone-install", "sim-1", MmsBackfillPhase::History, "42")
+        .unwrap();
+    assert_eq!(
+        history_plan(
+            &client
+                .plan_mms_backfill_scans("phone-install", "sim-1", "50")
+                .unwrap()
+        )
+        .cursor
+        .as_deref(),
+        Some("40")
+    );
+}
+
+#[test]
+fn explicit_zero_migration_keeps_the_frozen_upper_bound() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
     let cfg = config(&dir, "gateway", &vault);
@@ -98,7 +138,12 @@ fn explicit_zero_migration_and_reenable_preserve_progress() {
         .unwrap();
     let plan = history_plan(&plans);
     assert_eq!(plan.history_upper_bound.as_deref(), Some("0"));
-    assert_eq!(plan.cursor.as_deref(), Some("4"));
+    assert!(plan.descending);
+    assert_eq!(plan.history_floor, None);
+    // `0` is an explicit frozen maximum, so a later provider ID is outside this history pass
+    // rather than descending progress. The legacy migration has no old checkpoint to use as a
+    // floor, and therefore starts with a NULL descending cursor.
+    assert_eq!(plan.cursor, None);
 }
 
 #[test]
@@ -573,6 +618,73 @@ fn manual_recheck_reopens_only_bounded_terminal_work() {
             .count(),
         1
     );
+}
+
+#[test]
+fn manual_recheck_preserves_unknown_subscription_terminal_rows() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let regular = client.begin_mms_acquisition(input("regular")).unwrap();
+    let mut unknown_input = input("unknown");
+    unknown_input.source.subscription_id = "android-mms-unknown-subscription".into();
+    let unknown = client.begin_mms_acquisition(unknown_input).unwrap();
+    let mut namespace_unavailable_input = input("namespace-unavailable");
+    namespace_unavailable_input.source.subscription_id = "android-mms-unknown-subscription".into();
+    let namespace_unavailable = client
+        .begin_mms_acquisition(namespace_unavailable_input)
+        .unwrap();
+    let completed = client.begin_mms_acquisition(input("completed")).unwrap();
+    client
+        .set_mms_acquisition_state(
+            &regular.acquisition_id,
+            MmsAcquisitionState::Unavailable,
+            Some("provider missing"),
+        )
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &unknown.acquisition_id,
+            MmsAcquisitionState::Unavailable,
+            Some("unknown_subscription"),
+        )
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &namespace_unavailable.acquisition_id,
+            MmsAcquisitionState::Unavailable,
+            Some("provider metadata unavailable"),
+        )
+        .unwrap();
+    client
+        .complete_mms_acquisition(&completed.acquisition_id)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .request_mms_recheck("phone-install", "android-mms-provider", 10)
+            .unwrap(),
+        1
+    );
+    let acquisitions = client.mms_acquisitions(10).unwrap();
+    assert_eq!(
+        acquisitions
+            .iter()
+            .find(|acquisition| acquisition.acquisition_id == unknown.acquisition_id)
+            .unwrap()
+            .state,
+        MmsAcquisitionState::Unavailable
+    );
+    assert_eq!(
+        acquisitions
+            .iter()
+            .find(|acquisition| acquisition.acquisition_id == namespace_unavailable.acquisition_id)
+            .unwrap()
+            .state,
+        MmsAcquisitionState::Unavailable
+    );
+    // The changed count proves the completed acquisition was not reopened alongside the
+    // regular unavailable row; completed rows are intentionally omitted from this listing.
 }
 
 #[test]

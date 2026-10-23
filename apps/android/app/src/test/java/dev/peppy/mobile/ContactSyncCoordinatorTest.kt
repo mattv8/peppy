@@ -371,6 +371,7 @@ class ContactSyncCoordinatorTest : GatewayTestBase() {
         ContactSyncPreferences(context).enabled = false
         // A disabled contact source never returns more work, including when compaction is enabled.
         assertFalse(ContactSyncHost.pass(context, session))
+        assertTrue(gateway.historyImportGateOpen())
         ContactSyncPreferences(context).enabled = true
         gateway.setServerCompactionSupported(false)
         assertFalse(ContactSyncHost.pass(context, session))

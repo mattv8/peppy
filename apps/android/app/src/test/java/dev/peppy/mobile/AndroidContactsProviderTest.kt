@@ -145,11 +145,16 @@ class AndroidContactsProviderTest {
         assertTrue(fake.rows.none { it["mimetype"] == Note.CONTENT_ITEM_TYPE })
     }
 
-    @Test fun readOnlyRawsAndRowsAreRejectedBeforeProviderMutation() {
+    @Test fun readOnlyRawsAreRejectedBeforeProviderMutation() {
         assertEquals(WriteResult.ReadOnly, contacts.update(12, listOf(FieldOp.Replace(103, 0, mapOf(Phone.NUMBER to "x")))))
         assertEquals(WriteResult.ReadOnly, contacts.delete(12, 0))
-        fake.row(100)["is_read_only"] = 1
-        assertEquals(WriteResult.ReadOnly, contacts.update(10, listOf(FieldOp.Replace(100, 0, mapOf(StructuredName.GIVEN_NAME to "A")))))
+        assertEquals(0, fake.mutations)
+    }
+
+    @Test fun providerRejectedBatchIsConflict() {
+        fake.rejectBatch = true
+
+        assertEquals(WriteResult.Conflict, contacts.update(10, listOf(FieldOp.Replace(101, 0, mapOf(Phone.NUMBER to "x")))))
         assertEquals(0, fake.mutations)
     }
 
@@ -261,12 +266,13 @@ class AndroidContactsProviderTest {
         var denyAccess = false
         var failAfterCommit = false
         var bumpVersionBeforeBatch: Long? = null
+        var rejectBatch = false
         private var nextId = 1000L
 
         fun contact(id: Long, name: String, lookup: String? = "lookup-$id") { contacts += mutableMapOf("_id" to id, "lookup" to lookup, "display_name" to name, "contact_last_updated_timestamp" to 1L, "photo_id" to null) }
-        fun raw(id: Long, contactId: Long, account: ContactAccount?) { raws += mutableMapOf("_id" to id, "contact_id" to contactId, "account_name" to account?.name, "account_type" to account?.type, "raw_contact_is_read_only" to 0, "version" to 0, "deleted" to 0) }
+        fun raw(id: Long, contactId: Long, account: ContactAccount?) { raws += mutableMapOf("_id" to id, "contact_id" to contactId, "account_name" to account?.name, "account_type" to account?.type, "version" to 0, "deleted" to 0) }
         fun data(id: Long, rawId: Long, mime: String, vararg values: Pair<String, String>, primary: Boolean = false) {
-            rows += mutableMapOf<String, Any?>("_id" to id, "raw_contact_id" to rawId, "mimetype" to mime, "is_read_only" to 0, "is_primary" to if (primary) 1 else 0, "data_version" to 0).apply { putAll(values) }
+            rows += mutableMapOf<String, Any?>("_id" to id, "raw_contact_id" to rawId, "mimetype" to mime, "is_primary" to if (primary) 1 else 0, "data_version" to 0).apply { putAll(values) }
         }
         fun row(id: Long) = rows.single { it["_id"] == id }
 
@@ -279,12 +285,14 @@ class AndroidContactsProviderTest {
             if (table == nullCursorFor) return null
             val source: List<Map<String, Any?>> = when (table) { "contacts" -> contacts; "raw_contacts" -> raws; "data" -> rows; else -> emptyList() }
             val columns = projection ?: arrayOf("_id")
+            columns.firstOrNull { it !in columnsFor(table) }?.let { throw IllegalArgumentException("Invalid column $it") }
             val sorted = source.filter { matches(it, selection, selectionArgs) }
                 .sortedWith(compareBy<Map<String, Any?>>({ it["raw_contact_id"] as Long? }, { it["_id"] as Long }))
             return MatrixCursor(columns).also { c -> sorted.forEach { row -> c.addRow(columns.map { row[it] }) } }
         }
 
         override fun applyBatch(operations: ArrayList<ContentProviderOperation>): Array<ContentProviderResult> {
+            if (rejectBatch) throw android.content.OperationApplicationException("provider rejected batch")
             bumpVersionBeforeBatch?.let { id -> row(id)["data_version"] = (row(id)["data_version"] as Int) + 1; bumpVersionBeforeBatch = null }
             val snapshot = Triple(raws.map { HashMap(it) }, rows.map { HashMap(it) }, mutations)
             val results = try {
@@ -304,12 +312,12 @@ class AndroidContactsProviderTest {
             values?.keySet()?.forEach { map[it] = values.get(it) }
             return when (uri.pathSegments.first()) {
                 "raw_contacts" -> {
-                    raws += map.apply { putIfAbsent("account_name", null); putIfAbsent("account_type", null); put("contact_id", id); put("raw_contact_is_read_only", 0); put("version", 0); put("deleted", 0) }
+                    raws += map.apply { putIfAbsent("account_name", null); putIfAbsent("account_type", null); put("contact_id", id); put("version", 0); put("deleted", 0) }
                     contact(id, "created")
                     Uri.withAppendedPath(uri, "$id")
                 }
                 else -> {
-                    rows += map.apply { put("raw_contact_id", (get("raw_contact_id") as Number).toLong()); put("is_read_only", 0); put("is_primary", 0); put("data_version", 0) }
+                    rows += map.apply { put("raw_contact_id", (get("raw_contact_id") as Number).toLong()); put("is_primary", 0); put("data_version", 0) }
                     Uri.withAppendedPath(uri, "$id")
                 }
             }
@@ -351,6 +359,13 @@ class AndroidContactsProviderTest {
                     else -> row[clause.substringBefore("=").trim()]?.toString() == clause.substringAfter("=").trim()
                 }
             }
+        }
+
+        private fun columnsFor(table: String): Set<String> = when (table) {
+            "contacts" -> setOf("_id", "lookup", "display_name", "contact_last_updated_timestamp", "photo_id")
+            "raw_contacts" -> setOf("_id", "contact_id", "account_name", "account_type", "version", "deleted")
+            "data" -> setOf("_id", "raw_contact_id", "mimetype", "is_primary", "data_version") + (1..14).mapTo(mutableSetOf()) { "data$it" }
+            else -> emptySet()
         }
     }
 

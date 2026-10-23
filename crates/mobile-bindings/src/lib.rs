@@ -172,6 +172,8 @@ pub struct NativeSmsScanPlan {
     pub subscription_id: String,
     pub imported: bool,
     pub checkpoint: Option<String>,
+    pub descending: bool,
+    pub history_floor: Option<String>,
     pub history_upper_bound: Option<String>,
     pub history_complete: bool,
     pub paused: bool,
@@ -241,6 +243,8 @@ pub struct NativeMmsBackfillScanPlan {
     pub source_generation: String,
     pub subscription_id: String,
     pub cursor: Option<String>,
+    pub descending: bool,
+    pub history_floor: Option<String>,
     pub history_upper_bound: Option<String>,
     pub history_complete: bool,
     pub paused: bool,
@@ -1104,6 +1108,8 @@ fn sms_scan_plan_view(plan: SmsScanPlan) -> NativeSmsScanPlan {
         subscription_id: plan.subscription_id,
         imported: plan.imported,
         checkpoint: plan.checkpoint,
+        descending: plan.descending,
+        history_floor: plan.history_floor,
         history_upper_bound: plan.history_upper_bound,
         history_complete: plan.history_complete,
         paused: plan.paused,
@@ -1210,6 +1216,8 @@ fn mms_backfill_scan_plan_view(value: MmsBackfillScanPlan) -> NativeMmsBackfillS
         source_generation: value.source_generation,
         subscription_id: value.subscription_id,
         cursor: value.cursor,
+        descending: value.descending,
+        history_floor: value.history_floor,
         history_upper_bound: value.history_upper_bound,
         history_complete: value.history_complete,
         paused: value.paused,
@@ -1554,6 +1562,14 @@ impl NativeClient {
             client.plan_sms_scans(&source_generation, &provider_scope, &observed_high_water)
         })
         .map(|plans| plans.into_iter().map(sms_scan_plan_view).collect())
+    }
+    pub fn open_history_import_gate(&self, reason: String) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.open_history_import_gate(&reason)
+        })
+    }
+    pub fn history_import_gate_open(&self) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, Client::history_import_gate_open)
     }
     pub fn plan_sms_reconciliation(
         &self,

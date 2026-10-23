@@ -1200,6 +1200,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     });
   const store = storeRef.current;
 
+  const captureHistoryAnchor = (fallbackMessageId?: string) => {
+    const list = messageListRef.current;
+    const listBounds = list?.getBoundingClientRect();
+    const unobscuredBottom = (listBounds?.bottom ?? 0) - (overlayHeightRef.current ?? 0);
+    const visibleRow = listBounds
+      ? [...messageRows.current.values()]
+          .map((row) => ({ row, bounds: row.getBoundingClientRect() }))
+          .filter(({ bounds }) => bounds.bottom > listBounds.top && bounds.top < unobscuredBottom)
+          .sort((left, right) => left.bounds.top - right.bounds.top)[0]?.row
+      : undefined;
+    const row = visibleRow ?? (fallbackMessageId ? messageRows.current.get(fallbackMessageId) : undefined);
+    return row ? { row, top: row.getBoundingClientRect().top } : null;
+  };
+  const correctHistoryAnchorScroll = (anchor: { row: HTMLElement; top: number } | null) => {
+    const list = messageListRef.current;
+    if (!list || !anchor) return;
+    list.setAttribute("data-scroll-programmatic", "");
+    list.scrollTop += anchor.row.getBoundingClientRect().top - anchor.top;
+    if (typeof requestAnimationFrame === "undefined") list.removeAttribute("data-scroll-programmatic");
+    else requestAnimationFrame(() => list.removeAttribute("data-scroll-programmatic"));
+  };
+
   const persistLayout = persistLayoutPatch;
   const changeNavigationPosition = (position: NavigationPosition) => {
     setNavigationPosition(position);
@@ -1418,11 +1440,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       ? await bridge.load_state(requestedConversationId, historyFromMessageId)
       : await bridge.load_state(requestedConversationId);
     if (!mountedRef.current || sequence !== loadSequence.current) return;
-    setSnapshot((current) => {
+    const refreshed = state.conversations.find((item) => item.id === state.activeConversationId);
+    const shouldPreserveScrollPosition = Boolean(
+      !nearBottom.current &&
+      !historyLoadingRef.current,
+    );
+    if (shouldPreserveScrollPosition) historyAnchorRef.current = captureHistoryAnchor(historyFromMessageId);
+    const updateSnapshot = () => setSnapshot((current) => {
       const previous = historyFromMessageId && current && current.activeConversationId === state.activeConversationId
         ? current.conversations.find((item) => item.id === state.activeConversationId)
         : undefined;
-      const refreshed = state.conversations.find((item) => item.id === state.activeConversationId);
       if (!previous || !refreshed) return state;
       return {
         ...state,
@@ -1431,7 +1458,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           : item),
       };
     });
-    const activeConversation = state.conversations.find((item) => item.id === state.activeConversationId);
+    if (shouldPreserveScrollPosition) {
+      flushSync(updateSnapshot);
+      correctHistoryAnchorScroll(historyAnchorRef.current);
+    } else {
+      updateSnapshot();
+    }
+    const activeConversation = refreshed;
     if (state.activeConversationId)
       store.adopt(state.activeConversationId, state.draft);
     if (
@@ -1447,6 +1480,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (currentAnchor === historyFromMessageId || !currentAnchor) {
       hasOlderMessagesRef.current = responseHasOlder;
       setHasOlderMessages(responseHasOlder);
+      if (responseHasOlder) setHistoryExhausted(false);
     }
   };
 
@@ -1606,17 +1640,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         setHistoryError("Conversation changed while loading older messages. Reload and try again.");
         return;
       }
-      const list = messageListRef.current;
-      const listBounds = list?.getBoundingClientRect();
-      const unobscuredBottom = (listBounds?.bottom ?? 0) - (overlayHeightRef.current ?? 0);
-      const visibleRow = listBounds
-        ? [...messageRows.current.values()]
-            .map((row) => ({ row, bounds: row.getBoundingClientRect() }))
-            .filter(({ bounds }) => bounds.bottom > listBounds.top && bounds.top < unobscuredBottom)
-            .sort((left, right) => left.bounds.top - right.bounds.top)[0]?.row
-        : undefined;
-      const anchorRow = visibleRow ?? messageRows.current.get(beforeMessageId) ?? null;
-      historyAnchorRef.current = anchorRow ? { row: anchorRow, top: anchorRow.getBoundingClientRect().top } : null;
+      historyAnchorRef.current = captureHistoryAnchor(beforeMessageId);
       nearBottom.current = false;
       flushSync(() => {
         setSuppressHistoryAnnouncements(true);
@@ -1627,13 +1651,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           : item) };
         });
       });
-      const anchor = historyAnchorRef.current;
-      if (list && anchor) {
-        list.setAttribute("data-scroll-programmatic", "");
-        list.scrollTop += anchor.row.getBoundingClientRect().top - anchor.top;
-        if (typeof requestAnimationFrame === "undefined") list.removeAttribute("data-scroll-programmatic");
-        else requestAnimationFrame(() => list.removeAttribute("data-scroll-programmatic"));
-      }
+      correctHistoryAnchorScroll(historyAnchorRef.current);
       hasOlderMessagesRef.current = page.hasMore;
       setHasOlderMessages(page.hasMore);
       historyUserScrolled.current = false;

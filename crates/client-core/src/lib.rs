@@ -31,6 +31,7 @@ mod contact_sync_requests;
 mod contacts;
 mod conversation_match;
 mod gateway_settings;
+mod history_import;
 mod media;
 mod media_cache;
 mod media_paging;
@@ -90,7 +91,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 31;
+const SCHEMA_VERSION: i64 = 32;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -2209,7 +2210,10 @@ impl Client {
             // receiver would quarantine the record. They are never resealed (same identity,
             // different digest); they upload unchanged once support is recorded again. Rows
             // without metadata (SMS, commands, legacy events) are unaffected.
-            .prepare("SELECT wire FROM outbox WHERE state='queued' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND envelope_id NOT IN (SELECT envelope_id FROM contact_photo_registrations WHERE acknowledged=0) AND NOT EXISTS(SELECT 1 FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=outbox.envelope_id AND a.state!='uploaded') AND (compaction IS NULL OR EXISTS(SELECT 1 FROM metadata WHERE k='server_compaction_supported' AND v='1')) ORDER BY seq LIMIT ?")?;
+            .prepare(&format!(
+                "SELECT wire FROM outbox WHERE state='queued' AND {} ORDER BY seq LIMIT ?",
+                history_import::outbox_upload_eligible_predicate()
+            ))?;
         let wires = query
             .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
                 r.get::<_, Vec<u8>>(0)
@@ -2973,10 +2977,56 @@ impl Client {
     /// (see `contact_photo_transfer_state_json`).
     pub fn pending_uploads(&self) -> Result<Vec<CipherObject>, Error> {
         let sql = format!(
-            "SELECT attachment_id FROM attachments WHERE attachment_id IN (SELECT m.attachment_id FROM attachments a JOIN message_attachments m ON m.attachment_id=a.attachment_id WHERE a.state='pending_upload' UNION SELECT thumbnail_attachment_id FROM message_media_meta JOIN attachments a ON a.attachment_id=thumbnail_attachment_id WHERE a.state='pending_upload' UNION {}) ORDER BY rowid",
+            "WITH candidate(attachment_id,payload) AS (SELECT ma.attachment_id,m.payload FROM message_attachments ma JOIN messages m ON m.id=ma.message_id UNION ALL SELECT mm.thumbnail_attachment_id,m.payload FROM message_media_meta mm JOIN messages m ON m.id=mm.message_id UNION ALL SELECT attachment_id,NULL FROM ({}) contact_uploads) SELECT a.attachment_id FROM attachments a JOIN candidate c ON c.attachment_id=a.attachment_id WHERE a.state='pending_upload' GROUP BY a.attachment_id ORDER BY MIN(CASE WHEN c.payload IS NULL THEN 1 WHEN COALESCE(json_extract(c.payload,'$.imported'),0)=0 THEN 0 ELSE 2 END),MIN(a.rowid)",
             contact_media::UPLOAD_IDS_SQL
         );
         self.cipher_objects(&sql)
+    }
+
+    pub fn open_history_import_gate(&self, reason: &str) -> Result<bool, Error> {
+        if reason.is_empty() {
+            return Err(Error::InvalidRequest("history import gate reason"));
+        }
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now_ms = notifications::now_ms();
+        tx.execute(
+            "INSERT INTO history_import_gate(id,opened_at_ms,first_closed_at_ms,reason) VALUES(1,?,NULL,?) ON CONFLICT(id) DO NOTHING",
+            params![now_ms, reason],
+        )?;
+        let changed = tx.changes() != 0
+            || tx.execute(
+                "UPDATE history_import_gate SET opened_at_ms=?,reason=? WHERE id=1 AND opened_at_ms IS NULL",
+                params![now_ms, reason],
+            )? != 0;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn history_import_gate_open(&self) -> Result<bool, Error> {
+        let guard = self.lock()?;
+        Ok(guard
+            .conn
+            .query_row(
+                "SELECT opened_at_ms IS NOT NULL FROM history_import_gate WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    #[doc(hidden)]
+    pub fn observe_history_import_gate_at(&self, now_ms: i64) -> Result<bool, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let open = history_import::history_import_gate_open(&tx, now_ms)?;
+        tx.commit()?;
+        Ok(open)
     }
 
     /// Pages locally verified ciphertext identities for host checkpoints, including draft-only
@@ -4258,6 +4308,46 @@ ON CONFLICT(source_generation,subscription_id,provider_message_id,direction)
 DO UPDATE SET evidence_json=excluded.evidence_json,recorded_at_ms=excluded.recorded_at_ms;
 DROP TABLE mms_provider_identity_conflicts;
 ";
+const MIGRATION_32: &str = "
+UPDATE sms_scan_checkpoints SET history_floor=NULLIF(provider_message_id,''),descending=1 WHERE imported=1 AND history_complete=0;
+UPDATE mms_backfill_scopes SET history_floor=(SELECT NULLIF(provider_message_id,'') FROM mms_scan_checkpoints c WHERE c.source_generation=mms_backfill_scopes.source_generation AND c.subscription_id=mms_backfill_scopes.subscription_id AND c.imported=1),history_descending=1 WHERE history_complete=0;
+CREATE TABLE IF NOT EXISTS history_import_gate(id INTEGER PRIMARY KEY CHECK(id=1),opened_at_ms INTEGER,first_closed_at_ms INTEGER,reason TEXT);
+";
+
+fn apply_migration_32(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(
+        conn,
+        "sms_scan_checkpoints",
+        "descending INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "sms_scan_checkpoints", "history_floor TEXT")?;
+    add_column_if_missing(conn, "sms_scan_checkpoints", "descending_cursor TEXT")?;
+    add_column_if_missing(
+        conn,
+        "mms_backfill_scopes",
+        "history_descending INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "mms_backfill_scopes", "history_floor TEXT")?;
+    add_column_if_missing(conn, "mms_backfill_scopes", "history_cursor TEXT")?;
+    conn.execute_batch(MIGRATION_32)?;
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
+    let column = definition
+        .split_whitespace()
+        .next()
+        .ok_or(Error::Database)?;
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))?;
+    }
+    Ok(())
+}
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
 const DECODER_REVISION: &str = "4";
@@ -4332,6 +4422,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_30)?;
             mms_backfill::initialize(&tx)?;
             tx.execute_batch(MIGRATION_31)?;
+            apply_migration_32(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4340,7 +4431,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=30)) => {
+        Some(version @ (4..=31)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4421,6 +4512,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 30 {
                 mms_backfill::initialize(&tx)?;
                 tx.execute_batch(MIGRATION_31)?;
+            }
+            if version <= 31 {
+                apply_migration_32(&tx)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
