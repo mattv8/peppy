@@ -1,4 +1,5 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 type ExistingNotification = (
     String,
@@ -11,7 +12,31 @@ type ExistingNotification = (
     Option<String>,
     i64,
     bool,
+    Option<String>,
 );
+
+const MAX_NOTIFICATION_ICON_BYTES: usize = 8_192;
+const MAX_NOTIFICATION_ICON_BASE64_BYTES: usize = MAX_NOTIFICATION_ICON_BYTES.div_ceil(3) * 4;
+const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+const PNG_IHDR: [u8; 8] = [0, 0, 0, 13, 73, 72, 68, 82];
+const PNG_32PX_DIMENSIONS: [u8; 8] = [0, 0, 0, 32, 0, 0, 0, 32];
+
+fn valid_icon(icon: Option<&str>) -> bool {
+    let Some(icon) = icon else {
+        return true;
+    };
+    if icon.len() > MAX_NOTIFICATION_ICON_BASE64_BYTES {
+        return false;
+    }
+    let Ok(bytes) = STANDARD.decode(icon) else {
+        return false;
+    };
+    bytes.len() <= MAX_NOTIFICATION_ICON_BYTES
+        && bytes.len() >= 24
+        && bytes[..8] == PNG_SIGNATURE
+        && bytes[8..16] == PNG_IHDR
+        && bytes[16..24] == PNG_32PX_DIMENSIONS
+}
 
 fn execute_cached<P: rusqlite::Params>(
     conn: &Connection,
@@ -44,6 +69,7 @@ pub(super) fn valid_wire(n: &NotificationWire) -> bool {
         && valid(&n.instance)
         && valid(&n.package_name)
         && n.app_name.len() <= MAX_NOTIFICATION_ID_BYTES
+        && valid_icon(n.app_icon_png_base64.as_deref())
         && n.title.len() + n.text.len() <= MAX_NOTIFICATION_TEXT_BYTES
         && (0..=253_402_300_799_999).contains(&n.posted_at)
         && n.category
@@ -63,6 +89,7 @@ impl Client {
             || !valid(&input.instance)
             || !valid(&input.package_name)
             || input.app_name.len() > MAX_NOTIFICATION_ID_BYTES
+            || !valid_icon(input.app_icon_png_base64.as_deref())
             || input.title.len() + input.text.len() > MAX_NOTIFICATION_TEXT_BYTES
             || !(0..=253_402_300_799_999).contains(&input.posted_at)
             || input
@@ -94,7 +121,7 @@ impl Client {
         if muted {
             return Ok(NotificationCaptureOutcome::FilteredOut);
         }
-        let existing: Option<ExistingNotification> = tx.query_row("SELECT lifetime,instance,removed,package_name,app_name,title,text,category,posted_at,dismissible FROM notifications WHERE source_device_id=? AND notification_key=?", params![ctx.device_id.to_string(), input.notification_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).optional()?;
+        let existing: Option<ExistingNotification> = tx.query_row("SELECT lifetime,instance,removed,package_name,app_name,title,text,category,posted_at,dismissible,app_icon_png_base64 FROM notifications WHERE source_device_id=? AND notification_key=?", params![ctx.device_id.to_string(), input.notification_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?))).optional()?;
         let retained_post: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM notifications n JOIN outbox o ON o.seq=n.source_sequence WHERE n.source_device_id=? AND n.notification_key=?)", params![source,input.notification_key], |r| r.get(0))?;
         if retained_post
             && existing.as_ref().is_some_and(
@@ -109,6 +136,7 @@ impl Client {
                     category,
                     _posted_at,
                     dismissible,
+                    icon,
                 )| {
                     !removed
                         && package == &input.package_name
@@ -117,6 +145,7 @@ impl Client {
                         && text == &input.text
                         && category == &input.category
                         && *dismissible == input.dismissible
+                        && icon == &input.app_icon_png_base64
                 },
             )
         {
@@ -144,6 +173,7 @@ impl Client {
             instance: input.instance,
             package_name: input.package_name,
             app_name: input.app_name,
+            app_icon_png_base64: input.app_icon_png_base64,
             title: input.title,
             text: input.text,
             category: input.category,
@@ -206,7 +236,7 @@ impl Client {
     pub fn notification_snapshot(&self) -> Result<NotificationSnapshot, Error> {
         let s = self.lock()?;
         prune_banners(&s.conn)?;
-        let mut q = s.conn.prepare("SELECT source_device_id,notification_key,lifetime,package_name,app_name,title,text,category,posted_at,dismissible,seen, EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=notifications.source_device_id AND d.notification_key=notifications.notification_key AND d.lifetime=notifications.lifetime) FROM notifications WHERE removed=0 AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=notifications.source_device_id AND f.package_name=notifications.package_name AND f.muted=1) ORDER BY posted_at DESC LIMIT 1000")?;
+        let mut q = s.conn.prepare("SELECT source_device_id,notification_key,lifetime,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen, EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=notifications.source_device_id AND d.notification_key=notifications.notification_key AND d.lifetime=notifications.lifetime) FROM notifications WHERE removed=0 AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=notifications.source_device_id AND f.package_name=notifications.package_name AND f.muted=1) ORDER BY posted_at DESC,source_device_id,notification_key,lifetime LIMIT 1000")?;
         let notifications = q
             .query_map([], |r| {
                 Ok(MirroredNotification {
@@ -217,13 +247,14 @@ impl Client {
                     },
                     package_name: r.get(3)?,
                     app_name: r.get(4)?,
-                    title: r.get(5)?,
-                    text: r.get(6)?,
-                    category: r.get(7)?,
-                    posted_at: r.get(8)?,
-                    dismissible: r.get(9)?,
-                    seen: r.get(10)?,
-                    dismissal_pending: r.get(11)?,
+                    app_icon_png_base64: r.get(5)?,
+                    title: r.get(6)?,
+                    text: r.get(7)?,
+                    category: r.get(8)?,
+                    posted_at: r.get(9)?,
+                    dismissible: r.get(10)?,
+                    seen: r.get(11)?,
+                    dismissal_pending: r.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -310,31 +341,51 @@ impl Client {
             return Err(Error::KeysUnavailable);
         }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let clearable: Option<bool> = tx.query_row(
+        dismiss_in_tx(&tx, &ctx, &target)?;
+        Ok(tx.commit()?)
+    }
+    pub fn dismiss_all_notifications(&self) -> Result<(), Error> {
+        let mut g = self.lock()?;
+        let (conn, ctx) = g.parts();
+        if !unlocked(&ctx) {
+            return Err(Error::KeysUnavailable);
+        }
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let targets = tx.prepare("SELECT n.source_device_id,n.notification_key,n.lifetime FROM notifications n WHERE n.removed=0 AND n.dismissible=1 AND NOT EXISTS(SELECT 1 FROM notification_dismissals d WHERE d.source_device_id=n.source_device_id AND d.notification_key=n.notification_key AND d.lifetime=n.lifetime) AND NOT EXISTS(SELECT 1 FROM app_filters f WHERE f.source_device_id=n.source_device_id AND f.package_name=n.package_name AND f.muted=1) ORDER BY n.posted_at DESC,n.source_device_id,n.notification_key,n.lifetime LIMIT 100")?.query_map([], |r| Ok(NotificationTarget { source_device_id: r.get(0)?, notification_key: r.get(1)?, lifetime: r.get(2)? }))?.collect::<Result<Vec<_>, _>>()?;
+        for target in &targets {
+            dismiss_in_tx(&tx, &ctx, target)?;
+        }
+        Ok(tx.commit()?)
+    }
+}
+
+fn dismiss_in_tx(c: &Connection, ctx: &Ctx<'_>, target: &NotificationTarget) -> Result<(), Error> {
+    let clearable: Option<bool> = c.query_row(
             "SELECT dismissible FROM notifications WHERE source_device_id=? AND notification_key=? AND lifetime=? AND removed=0",
             params![target.source_device_id,target.notification_key,target.lifetime], |r| r.get(0),
         ).optional()?;
-        match clearable {
-            Some(false) => return Err(Error::InvalidRequest("notification cannot be dismissed")),
-            None => return Ok(()), // stale UI action cannot target a repost
-            Some(true) => {}
-        }
-        if has_dismissal(&tx, &target)? {
-            return Ok(());
-        }
-        enqueue(
-            &tx,
-            &ctx,
-            EnvelopePurpose::Event,
-            None,
-            None,
-            &PrivatePayload::NotificationDismiss {
-                target: target.clone(),
-            },
-        )?;
-        apply_dismiss(&tx, &target, false, ctx.active_epoch.unwrap())?;
-        Ok(tx.commit()?)
+    match clearable {
+        Some(false) => return Err(Error::InvalidRequest("notification cannot be dismissed")),
+        None => return Ok(()), // stale UI action cannot target a repost
+        Some(true) => {}
     }
+    if has_dismissal(c, target)? {
+        return Ok(());
+    }
+    enqueue(
+        c,
+        ctx,
+        EnvelopePurpose::Event,
+        None,
+        None,
+        &PrivatePayload::NotificationDismiss {
+            target: target.clone(),
+        },
+    )?;
+    apply_dismiss(c, target, false, ctx.active_epoch.unwrap())
+}
+
+impl Client {
     pub fn mark_notifications_seen(&self, targets: Vec<NotificationTarget>) -> Result<(), Error> {
         if targets.len() > 1000 || targets.iter().any(|target| !valid_target(target)) {
             return Err(Error::InvalidRequest("notification targets"));
@@ -449,7 +500,7 @@ fn upsert_notification(
     }
     execute_cached(
         c,
-        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,0,?) ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",
+        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?) ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,app_icon_png_base64=excluded.app_icon_png_base64,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",
         params![
             n.target.source_device_id,
             n.target.notification_key,
@@ -457,6 +508,7 @@ fn upsert_notification(
             n.instance,
             n.package_name,
             n.app_name,
+            n.app_icon_png_base64,
             n.title,
             n.text,
             n.category,
@@ -489,7 +541,11 @@ fn upsert_notification(
     prune_banners(c)?;
     Ok(())
 }
-fn remove_applied(c: &Connection, t: &NotificationTarget, seq: u64) -> Result<(), Error> {
+pub(super) fn remove_applied(
+    c: &Connection,
+    t: &NotificationTarget,
+    seq: u64,
+) -> Result<(), Error> {
     execute_cached(
         c,
         "INSERT INTO notification_tombstones(source_device_id,notification_key,lifetime,source_sequence) VALUES(?,?,?,?) ON CONFLICT(source_device_id,notification_key,lifetime) DO UPDATE SET source_sequence=MAX(source_sequence,excluded.source_sequence)",
@@ -502,7 +558,7 @@ fn remove_applied(c: &Connection, t: &NotificationTarget, seq: u64) -> Result<()
     )?;
     execute_cached(
         c,
-        "UPDATE notifications SET removed=1,title='',text='',source_sequence=? WHERE source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",
+        "UPDATE notifications SET removed=1,title='',text='',app_icon_png_base64=NULL,source_sequence=? WHERE source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",
         params![
             seq as i64,
             t.source_device_id,

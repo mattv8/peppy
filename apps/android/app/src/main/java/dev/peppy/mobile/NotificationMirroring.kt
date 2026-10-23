@@ -53,7 +53,7 @@ internal object NotificationTestCapture {
                 NativeNotificationCapture(
                     SYNTHETIC_KEY, "$SYNTHETIC_KEY:$id", "dev.peppy.mobile.synthetic",
                     "Peppy test", "Peppy test notification", "This is a safe test record.", "peppy_test",
-                    System.currentTimeMillis(), true,
+                    System.currentTimeMillis(), true, null,
                 ),
             )
             if (outcome == NativeNotificationCaptureOutcome.CAPTURED) {
@@ -114,6 +114,7 @@ internal object NotificationExtraction {
         val category: String?,
         val postedAt: Long,
         val dismissible: Boolean,
+        val appIconPngBase64: String?,
         val isSilent: Boolean,
     )
 
@@ -129,12 +130,11 @@ internal object NotificationExtraction {
         val title = utf8Truncate(rawTitle, MAX_BODY_BYTES)
         val text = utf8Truncate(rawText, MAX_BODY_BYTES - title.toByteArray(Charsets.UTF_8).size)
         if (title.isEmpty() && text.isEmpty()) return null
-        val label = try {
-            context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(sbn.packageName, 0)).safeText(MAX_LABEL)
-        } catch (_: Exception) { sbn.packageName.take(MAX_LABEL) }
+        val metadata = NotificationAppMetadata.resolve(context.packageManager, sbn.packageName)
+        val label = metadata?.label ?: utf8Truncate(sbn.packageName, MAX_LABEL)
         // Android's key plus post time distinguishes ordinary remove/repost lifetimes where possible.
         return Captured(sbn.key, "${sbn.key}:${sbn.postTime}", sbn.packageName, label, title, text,
-            notification.category, sbn.postTime, sbn.isClearable, isSilent)
+            notification.category, sbn.postTime, sbn.isClearable, metadata?.iconPngBase64, isSilent)
     }
 
     private fun defaultSmsPackage(context: Context): String? = try { android.provider.Telephony.Sms.getDefaultSmsPackage(context) } catch (_: Exception) { null }
@@ -207,7 +207,7 @@ class NotificationMirrorService : NotificationListenerService() {
         try {
             val outcome = session.client.captureNotification(NativeNotificationCapture(
                 capture.key, capture.instance, capture.packageName, capture.appName, capture.title, capture.text,
-                capture.category, capture.postedAt, capture.dismissible,
+                capture.category, capture.postedAt, capture.dismissible, capture.appIconPngBase64,
             ))
             if (outcome == NativeNotificationCaptureOutcome.CAPTURED) GatewayWork.enqueueUrgent(applicationContext)
         } catch (_: MobileBindingsException) {

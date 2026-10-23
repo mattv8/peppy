@@ -76,7 +76,7 @@ import {
   type ContactResolutionMap,
   type AppLockStatus,
 } from "./bridge";
-import { notificationMuteKey, NotificationsView } from "./Notifications";
+import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard } from "./Contacts";
 import { DevicesSettings } from "./DevicesSettings";
@@ -1112,9 +1112,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
   const settingsOpen = activeView === "settings";
   const notificationsOpen = activeView === "notifications";
+  const notificationsLocked = snapshot?.encryption.state !== "unlocked";
+  const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
   const contactsOpen = activeView === "contacts";
   const notificationSettingsRequested = useRef(false);
+  const dismissingNotificationsRef = useRef(false);
   const [notice, setNotice] = useState("");
+  const [notificationActionNotice, setNotificationActionNotice] = useState("");
+  const [dismissingNotifications, setDismissingNotifications] = useState(false);
   const [addingPhone, setAddingPhone] = useState(false);
   const [initialEnrollmentActive, setInitialEnrollmentActive] = useState(false);
   const [phoneDeferredOrigin, setPhoneDeferredOrigin] = useState<string | null>(null);
@@ -2727,7 +2732,28 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 <Trash2 size={16} aria-hidden />
               </button>}
             </div>
+            {notificationsOpen && <button
+              id="notifications-dismiss-all"
+              className="btn"
+              disabled={notificationsLocked || !dismissibleNotificationsCount || dismissingNotifications}
+              onClick={() => {
+                if (dismissingNotificationsRef.current) return;
+                dismissingNotificationsRef.current = true;
+                setDismissingNotifications(true);
+                setNotificationActionNotice("");
+                void bridge.dismiss_all_notifications()
+                  .then(() => refresh())
+                  .catch(error => setNotificationActionNotice(`Could not dismiss notifications. ${errorText(error)}`))
+                  .finally(() => {
+                    dismissingNotificationsRef.current = false;
+                    setDismissingNotifications(false);
+                  });
+              }}
+            >
+              {dismissibleNotificationsCount > 100 ? "Dismiss up to 100" : "Dismiss all"}
+            </button>}
           </header>
+          {notificationsOpen && notificationActionNotice && <p id="notifications-action-notice" role="status">{notificationActionNotice}</p>}
           <ServerOfflineAnnouncement offline={serverOffline} />
           {serverOffline && <ServerOfflineBanner />}
           {settingsOpen ? (
@@ -2770,11 +2796,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               displayTitle={(title) => resolution[title]?.displayName ?? title}
               filters={snapshot?.appFilters ?? []}
               sources={snapshot?.gateways ?? []}
-              locked={snapshot?.encryption.state !== "unlocked"}
-              onDismiss={target => void bridge.dismiss_notification(target).then(() => refresh()).catch(report("Could not dismiss notification. "))}
-              onDismissAll={() => void bridge.dismiss_all_notifications().then(() => refresh()).catch(report("Could not dismiss notifications. "))}
-              onMute={filter => void bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, true).then(() => refresh()).catch(report("Could not mute app. "))}
-              onSeen={targets => bridge.mark_notifications_seen(targets).then(() => refresh()).catch(error => { report("")(error); throw error; })}
+              locked={notificationsLocked}
+              onDismiss={target => {
+                setNotificationActionNotice("");
+                void bridge.dismiss_notification(target).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not dismiss notification. ${errorText(error)}`));
+              }}
+              onMute={filter => {
+                setNotificationActionNotice("");
+                void bridge.set_app_muted(filter.sourceDeviceId, filter.packageName, filter.appName, true).then(() => refresh()).catch(error => setNotificationActionNotice(`Could not mute app. ${errorText(error)}`));
+              }}
+              onSeen={targets => {
+                return bridge.mark_notifications_seen(targets).then(() => refresh()).catch(error => {
+                  setNotificationActionNotice(errorText(error));
+                  throw error;
+                });
+              }}
               onSettings={() => { notificationSettingsRequested.current = true; setActiveView("settings"); }}
             />
           ) : contactsOpen ? (

@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+base64.workspace = true
 peppy-crypto.workspace = true
 peppy-domain.workspace = true
 peppy-protocol.workspace = true

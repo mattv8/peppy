@@ -55,6 +55,18 @@ it("keeps the stored mute choice over observed defaults and allows unmuting that
   await waitFor(() => expect(input.onMute).toHaveBeenCalledWith({ ...filter, muted: false }));
 });
 
+it("uses friendly names for legacy package labels without changing mute payloads", async () => {
+  const input = props();
+  const legacyFilter = { ...filter, packageName: "com.example.chat", appName: "com.example.chat" };
+  render(<NotificationSettings {...input} filters={[legacyFilter]} notifications={[{ ...notification, appName: legacyFilter.appName }]} />);
+  fireEvent.click(screen.getByText("Per-app mirroring"));
+
+  expect(screen.getByText("Chat")).toBeVisible();
+  expect(screen.getByRole("switch", { name: "Mirror Chat from Pixel" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("switch", { name: "Mirror Chat from Pixel" }));
+  await waitFor(() => expect(input.onMute).toHaveBeenCalledWith({ ...legacyFilter, muted: false }));
+});
+
 it("disables preferences while saving so a second click cannot submit a stale snapshot", async () => {
   let resolve!: () => void;
   const input = props();

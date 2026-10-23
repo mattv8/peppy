@@ -587,6 +587,7 @@ function createHost() {
     failSaves: undefined as HostError | undefined,
     contactResolution: undefined as DesktopSnapshot["contactResolution"],
     notifications: [] as DesktopSnapshot["notifications"],
+    appFilters: [] as DesktopSnapshot["appFilters"],
     sent: [] as Draft[],
     load(conversationId?: string): DesktopSnapshot {
       const known = [
@@ -629,7 +630,7 @@ function createHost() {
         quarantineCount: 0,
         notifications: host.notifications,
         contactResolution: host.contactResolution,
-        appFilters: [],
+        appFilters: host.appFilters,
         notificationPreferences: {
           messageBanners: true,
           mirroredBanners: true,
@@ -3940,8 +3941,107 @@ describe("display-only contact names", () => {
     host.contactResolution = { "+12025550100": { contactId: "c1", bookId: "b1", displayName: "Ada Lovelace" } };
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
-    expect(await screen.findByLabelText("Ada Lovelace: Lunch?")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Chat on Phone 1: Ada Lovelace: Lunch?")).toBeInTheDocument();
     expect(host.notifications[0].title).toBe("+12025550100");
+  });
+});
+
+describe("notification bulk dismissal", () => {
+  const notification = (index: number, overrides: Partial<DesktopSnapshot["notifications"][number]> = {}) => ({
+    target: { sourceDeviceId: "phone-1", notificationKey: `notification-${index}`, lifetime: "1" },
+    packageName: "com.example.chat",
+    appName: "Chat",
+    title: `Message ${index}`,
+    text: "Body",
+    postedAt: Date.now() - index,
+    dismissible: true,
+    seen: false,
+    dismissalPending: false,
+    ...overrides,
+  });
+
+  it("disables bulk dismissal for locked or ineligible notifications", async () => {
+    host.encryption = { state: "locked" };
+    host.notifications = [notification(1)];
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    expect(screen.getByRole("button", { name: "Dismiss all" })).toBeDisabled();
+  });
+
+  it("disables bulk dismissal when unlocked notifications are all pending, nondismissible, or muted", async () => {
+    host.notifications = [
+      notification(1, { dismissalPending: true }),
+      notification(2, { dismissible: false }),
+      notification(3, { packageName: "com.example.mail" }),
+    ];
+    host.appFilters = [{ sourceDeviceId: "phone-1", packageName: "com.example.mail", appName: "Mail", muted: true }];
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    expect(screen.getByRole("button", { name: "Dismiss all" })).toBeDisabled();
+  });
+
+  it("labels more than one hundred eligible notifications and suppresses same-turn duplicate dismissal", async () => {
+    host.notifications = Array.from({ length: 101 }, (_, index) => notification(index));
+    const request = deferred<void>();
+    const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications").mockReturnValue(request.promise);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    const bulk = screen.getByRole("button", { name: "Dismiss up to 100" });
+    fireEvent.click(bulk);
+    fireEvent.click(bulk);
+    expect(dismissAll).toHaveBeenCalledTimes(1);
+    expect(bulk).toBeDisabled();
+    request.resolve();
+    await waitFor(() => expect(bulk).toBeEnabled());
+  });
+
+  it("labels exactly one hundred eligible notifications as dismiss all", async () => {
+    host.notifications = Array.from({ length: 100 }, (_, index) => notification(index));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+
+    expect(screen.getByRole("button", { name: "Dismiss all" })).toBeEnabled();
+  });
+
+  it("calls, refreshes, and positions the eligible bulk action in the header", async () => {
+    host.notifications = [notification(1)];
+    const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications").mockResolvedValue();
+    const load = vi.mocked(bridge.load_state);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    const bulk = screen.getByRole("button", { name: "Dismiss all" });
+    expect(bulk).toHaveClass("btn");
+    expect(bulk.closest("#thread-pane-header")).not.toBeNull();
+    expect(bulk.closest(".header-actions")).toBeNull();
+    const initialLoads = load.mock.calls.length;
+    fireEvent.click(bulk);
+    await waitFor(() => expect(dismissAll).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(initialLoads));
+  });
+
+  it("shows bulk dismissal failures", async () => {
+    host.notifications = [notification(1)];
+    vi.spyOn(bridge, "dismiss_all_notifications").mockRejectedValue(new Error("offline"));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss all" }));
+    expect(await screen.findByText("Could not dismiss notifications. offline")).toBeVisible();
+  });
+
+  it("clears a bulk dismissal error before a successful retry", async () => {
+    host.notifications = [notification(1)];
+    const dismissAll = vi.spyOn(bridge, "dismiss_all_notifications")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notifications/ }));
+    const bulk = screen.getByRole("button", { name: "Dismiss all" });
+    fireEvent.click(bulk);
+    expect(await screen.findByText("Could not dismiss notifications. offline")).toBeVisible();
+
+    fireEvent.click(bulk);
+    await waitFor(() => expect(dismissAll).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Could not dismiss notifications. offline")).not.toBeInTheDocument();
   });
 });
 

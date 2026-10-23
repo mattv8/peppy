@@ -9327,6 +9327,8 @@ data class NativeNotificationCapture (
     var `postedAt`: kotlin.Long
     , 
     var `dismissible`: kotlin.Boolean
+    , 
+    var `appIconPngBase64`: kotlin.String?
     
 ){
     
@@ -9352,6 +9354,7 @@ public object FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer<
             FfiConverterOptionalString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -9364,7 +9367,8 @@ public object FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer<
             FfiConverterString.allocationSize(value.`text`) +
             FfiConverterOptionalString.allocationSize(value.`category`) +
             FfiConverterLong.allocationSize(value.`postedAt`) +
-            FfiConverterBoolean.allocationSize(value.`dismissible`)
+            FfiConverterBoolean.allocationSize(value.`dismissible`) +
+            FfiConverterOptionalString.allocationSize(value.`appIconPngBase64`)
     )
 
     override fun write(value: NativeNotificationCapture, buf: ByteBuffer) {
@@ -9377,6 +9381,7 @@ public object FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer<
             FfiConverterOptionalString.write(value.`category`, buf)
             FfiConverterLong.write(value.`postedAt`, buf)
             FfiConverterBoolean.write(value.`dismissible`, buf)
+            FfiConverterOptionalString.write(value.`appIconPngBase64`, buf)
     }
 }
 

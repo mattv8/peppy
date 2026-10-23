@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS projection_contacts(generation INTEGER NOT NULL, book
   revision INTEGER NOT NULL, body TEXT NOT NULL, deleted_at INTEGER, PRIMARY KEY(generation,book_id,contact_id));
 CREATE TABLE IF NOT EXISTS projection_notifications(generation INTEGER NOT NULL, source_device_id TEXT NOT NULL,
   notification_key TEXT NOT NULL, lifetime TEXT NOT NULL, instance TEXT NOT NULL, package_name TEXT NOT NULL,
-  app_name TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, category TEXT, posted_at INTEGER NOT NULL,
+  app_name TEXT NOT NULL, app_icon_png_base64 TEXT, title TEXT NOT NULL, text TEXT NOT NULL, category TEXT, posted_at INTEGER NOT NULL,
   dismissible INTEGER NOT NULL, removed INTEGER NOT NULL, source_sequence INTEGER NOT NULL,
   PRIMARY KEY(generation,source_device_id,notification_key));
 CREATE TABLE IF NOT EXISTS projection_tombstones(generation INTEGER NOT NULL, source_device_id TEXT NOT NULL,
@@ -369,7 +369,7 @@ fn stage(
     }
 }
 
-fn reduce(
+pub(super) fn reduce(
     conn: &Connection,
     generation: i64,
     me: &str,
@@ -598,14 +598,14 @@ fn stage_post(
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(generation,source_device_id,notification_key) DO UPDATE SET lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>projection_notifications.source_sequence",
-        params![generation, t.source_device_id, t.notification_key, t.lifetime, n.instance, n.package_name, n.app_name, n.title, n.text, n.category, n.posted_at, n.dismissible, sequence],
+        "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(generation,source_device_id,notification_key) DO UPDATE SET lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,app_icon_png_base64=excluded.app_icon_png_base64,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>projection_notifications.source_sequence",
+        params![generation, t.source_device_id, t.notification_key, t.lifetime, n.instance, n.package_name, n.app_name, n.app_icon_png_base64, n.title, n.text, n.category, n.posted_at, n.dismissible, sequence],
     )?;
     Ok(())
 }
 
 /// Mirrors `notifications::remove_applied` against the stage.
-fn stage_removal(
+pub(super) fn stage_removal(
     conn: &Connection,
     generation: i64,
     t: &NotificationTarget,
@@ -616,7 +616,7 @@ fn stage_removal(
         params![generation, t.source_device_id, t.notification_key, t.lifetime, sequence],
     )?;
     conn.execute(
-        "UPDATE projection_notifications SET removed=1,title='',text='',source_sequence=? WHERE generation=? AND source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",
+        "UPDATE projection_notifications SET removed=1,title='',text='',app_icon_png_base64=NULL,source_sequence=? WHERE generation=? AND source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",
         params![sequence, generation, t.source_device_id, t.notification_key, t.lifetime, sequence],
     )?;
     Ok(())
@@ -677,7 +677,7 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
         params![me, generation],
     )?;
     conn.execute(
-        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,title,text,category,posted_at,dismissible,seen,removed,source_sequence) SELECT source_device_id,notification_key,lifetime,instance,package_name,app_name,title,text,category,posted_at,dismissible,0,removed,source_sequence FROM projection_notifications WHERE generation=?2 AND source_device_id!=?1 ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=excluded.removed,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",
+        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence) SELECT source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,0,removed,source_sequence FROM projection_notifications WHERE generation=?2 AND source_device_id!=?1 ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,app_icon_png_base64=excluded.app_icon_png_base64,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=excluded.removed,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",
         params![me, generation],
     )?;
     conn.execute(

@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { Bell, formatElapsedShort, isoDateTime, Lock, X } from "@peppy/desktop-ui";
+import { useEffect, useRef, useState } from "react";
+import { Bell, formatDateTime, formatElapsedShort, isoDateTime, Lock, X } from "@peppy/desktop-ui";
 import type {
   AppFilter,
   MirroredNotification,
@@ -20,13 +20,31 @@ export function notificationSourceName(id: string, sources: Source[], knownIds: 
     `Phone ${[...new Set(knownIds)].sort().indexOf(id) + 1}`;
 }
 
+export function notificationAppName(appName: string, packageName: string) {
+  if (appName.trim() && appName !== packageName) return appName;
+  const parts = packageName.split(".").filter(Boolean);
+  const segment = parts.at(-1) === "app" || parts.at(-1) === "android"
+    ? parts.at(-2)
+    : parts.at(-1);
+  return segment ? segment.replace(/[-_]+/g, " ").replace(/\b\w/g, letter => letter.toUpperCase()) : "App";
+}
+
+export function visibleNotifications(notifications: MirroredNotification[], filters: AppFilter[], locked: boolean) {
+  if (locked) return [];
+  const muted = new Set(filters.filter(filter => filter.muted).map(filter => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
+  return notifications.filter(notification => !muted.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName)));
+}
+
+export function dismissibleNotifications(notifications: MirroredNotification[], filters: AppFilter[], locked: boolean) {
+  return visibleNotifications(notifications, filters, locked).filter(notification => notification.dismissible && !notification.dismissalPending);
+}
+
 export function NotificationsView({
   notifications,
   filters,
   sources,
   locked,
   onDismiss,
-  onDismissAll,
   onMute,
   onSeen,
   onSettings,
@@ -39,7 +57,6 @@ export function NotificationsView({
   sources: Source[];
   locked: boolean;
   onDismiss(target: NotificationTarget): void;
-  onDismissAll(): void;
   onMute(filter: AppFilter): void;
   onSeen(targets: NotificationTarget[]): SeenResult;
   onSettings(): void;
@@ -50,9 +67,9 @@ export function NotificationsView({
   const inFlight = useRef(new Set<string>());
   const onSeenRef = useRef(onSeen);
   onSeenRef.current = onSeen;
-  const mutedFilters = new Set(filters.filter((filter) => filter.muted).map((filter) => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
-  const isMuted = (notification: MirroredNotification) => mutedFilters.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName));
-  const shown = notifications.filter((notification) => !isMuted(notification));
+  const shown = visibleNotifications(notifications, filters, locked);
+  const knownSourceIds = [...new Set(shown.map(notification => notification.target.sourceDeviceId))];
+  const filtersByApp = new Map(filters.map(filter => [notificationMuteKey(filter.sourceDeviceId, filter.packageName), filter]));
   const shownKey = shown
     .map((notification) =>
       notificationTuple(
@@ -128,19 +145,8 @@ export function NotificationsView({
     </section>;
   }
 
-  const dismissible = shown.filter(
-    (notification) => notification.dismissible && !notification.dismissalPending,
-  );
-  const dismissAll = dismissible.length > 100 ? "Dismiss up to 100" : "Dismiss all";
-  const toolbar = <header id="notifications-header" role="toolbar" aria-label="Notifications toolbar">
-    <button id="notifications-dismiss-all" disabled={!dismissible.length} onClick={onDismissAll}>
-      {dismissAll}
-    </button>
-  </header>;
-
   if (!shown.length) {
     return <section id="notifications-view" role="region" aria-label="Notifications">
-      {toolbar}
       <div id="notifications-empty-state" role="status">
         <Bell size={32} aria-hidden />
         <p>No notifications</p>
@@ -158,57 +164,43 @@ export function NotificationsView({
     </section>;
   }
 
-  const phoneGroups = new Map<string, MirroredNotification[]>();
-  shown.forEach((notification) => {
-    const key = notification.target.sourceDeviceId;
-    phoneGroups.set(key, [...(phoneGroups.get(key) ?? []), notification]);
-  });
   return <section id="notifications-view" role="region" aria-label="Notifications">
-    {toolbar}
     <div id="notifications-feed" ref={feedRef} role="feed" aria-label="Notification feed">
-      {[...phoneGroups].map(([sourceDeviceId, phoneNotifications]) => {
-        const phoneName = notificationSourceName(sourceDeviceId, sources, [...phoneGroups.keys()]);
-        const apps = new Map<string, MirroredNotification[]>();
-        phoneNotifications.forEach((notification) => {
-          apps.set(notification.packageName, [...(apps.get(notification.packageName) ?? []), notification]);
-        });
-        return <section key={sourceDeviceId} id={`notif-phone-${notificationTuple(sourceDeviceId)}`} data-device-id={sourceDeviceId} className="notif-phone-group" aria-label={`Notifications from ${phoneName}`}>
-          <header className="notif-group-header">
-            <span className="avatar" aria-hidden>{phoneName.slice(0, 1).toUpperCase()}</span>
-            <b className="notif-group-name">{phoneName}</b>
-            <span className="notif-group-count">{apps.size} apps</span>
-          </header>
-          {[...apps].map(([packageName, appNotifications]) => {
-            const app = appNotifications[0];
-            const filter = filters.find((item) => item.sourceDeviceId === sourceDeviceId && item.packageName === packageName) ?? { sourceDeviceId, packageName, appName: app.appName, muted: false };
-            return <section key={packageName} id={`notif-app-${notificationTuple(sourceDeviceId, packageName)}`} data-device-id={sourceDeviceId} data-package={packageName} className="notif-app-group" aria-label={`${app.appName} on ${phoneName}`}>
-              <header className="notif-app-header">
-                <span className="notif-app-letter-avatar" aria-hidden>{app.appName.slice(0, 1).toUpperCase()}</span>
-                <b className="notif-app-name">{app.appName}</b>
-                <span className="notif-app-count">{appNotifications.length}</span>
-                <button className="notif-inline-action" aria-label={`Mute ${app.appName} on ${phoneName}`} onClick={() => onMute(filter)}>Mute</button>
-              </header>
-              {appNotifications.map((notification) => <NotificationRow key={notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime)} notification={notification} title={displayTitle(notification.title)} onDismiss={onDismiss} />)}
-            </section>;
-          })}
-        </section>;
-      })}
+      {shown.map(notification => <NotificationRow
+        key={notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime)}
+        notification={notification}
+        phoneName={notificationSourceName(notification.target.sourceDeviceId, sources, knownSourceIds)}
+        appName={notificationAppName(notification.appName, notification.packageName)}
+        filter={filtersByApp.get(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName)) ?? { sourceDeviceId: notification.target.sourceDeviceId, packageName: notification.packageName, appName: notification.appName, muted: false }}
+        title={displayTitle(notification.title)}
+        onDismiss={onDismiss}
+        onMute={onMute}
+      />)}
     </div>
   </section>;
 }
 
-function NotificationRow({ notification, title, onDismiss }: { notification: MirroredNotification; title: string; onDismiss(target: NotificationTarget): void }) {
+function NotificationRow({ notification, phoneName, appName, filter, title, onDismiss, onMute }: { notification: MirroredNotification; phoneName: string; appName: string; filter: AppFilter; title: string; onDismiss(target: NotificationTarget): void; onMute(filter: AppFilter): void }) {
   const pending = notification.dismissalPending;
   const id = notificationTuple(notification.target.sourceDeviceId, notification.target.notificationKey, notification.target.lifetime);
-  return <article id={`notif-${id}`} data-device-id={notification.target.sourceDeviceId} data-notification-key={notification.target.notificationKey} data-dismiss-state={pending ? "pending" : "idle"} data-notification-target={JSON.stringify(notification.target)} className="notif-row" aria-label={`${title}: ${notification.text}`}>
+  return <article id={`notif-${id}`} data-device-id={notification.target.sourceDeviceId} data-notification-key={notification.target.notificationKey} data-dismiss-state={pending ? "pending" : "idle"} data-notification-target={JSON.stringify(notification.target)} className="notif-row" aria-label={`${appName} on ${phoneName}: ${title}: ${notification.text}`}>
+    <NotificationAppIcon key={notification.appIconPngBase64} appName={appName} base64={notification.appIconPngBase64} />
     <div className="notif-row-body">
+      <span className="notif-row-app-source"><b>{appName}</b><span>{phoneName}</span></span>
       <b className="notif-row-title">{title}</b>
       <span className="notif-row-text">{notification.text}</span>
       {pending && <span className="notif-pending" role="status">Dismissal pending — will apply on your phone&apos;s next sync.</span>}
     </div>
-    <time className="notif-row-time" dateTime={isoDateTime(notification.postedAt)}>{formatElapsedShort(notification.postedAt) ?? "Unknown time"}</time>
-    <button className="notif-dismiss-btn" disabled={pending || !notification.dismissible} title={pending ? "Dismissal pending — will apply on your phone's next sync." : "Dismiss"} aria-label={`Dismiss ${title || notification.appName || "notification"}`} onClick={() => onDismiss(notification.target)}>
+    <time className="notif-row-time" dateTime={isoDateTime(notification.postedAt)} title={formatDateTime(notification.postedAt) ?? "Unknown time"}>{formatElapsedShort(notification.postedAt) ?? "Unknown time"}</time>
+    <button className="notif-inline-action" aria-label={`Mute ${appName} on ${phoneName}`} onClick={() => onMute(filter)}>Mute</button>
+    <button className="notif-dismiss-btn" disabled={pending || !notification.dismissible} title={pending ? "Dismissal pending — will apply on your phone's next sync." : "Dismiss"} aria-label={`Dismiss ${title || appName || "notification"} from ${appName} on ${phoneName}`} onClick={() => onDismiss(notification.target)}>
       <X size={14} aria-hidden />
     </button>
   </article>;
+}
+
+function NotificationAppIcon({ appName, base64 }: { appName: string; base64?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!base64 || failed) return <span className="notif-app-icon-fallback" data-notification-app-icon="fallback" aria-hidden>{Array.from(appName)[0]?.toUpperCase() ?? "A"}</span>;
+  return <img className="notif-app-icon" data-notification-app-icon="image" src={`data:image/png;base64,${base64}`} alt="" onError={() => setFailed(true)} />;
 }

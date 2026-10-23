@@ -5956,10 +5956,11 @@ public struct NativeNotificationCapture: Equatable, Hashable {
     public var category: String?
     public var postedAt: Int64
     public var dismissible: Bool
+    public var appIconPngBase64: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(notificationKey: String, instance: String, packageName: String, appName: String, title: String, text: String, category: String?, postedAt: Int64, dismissible: Bool) {
+    public init(notificationKey: String, instance: String, packageName: String, appName: String, title: String, text: String, category: String?, postedAt: Int64, dismissible: Bool, appIconPngBase64: String?) {
         self.notificationKey = notificationKey
         self.instance = instance
         self.packageName = packageName
@@ -5969,6 +5970,7 @@ public struct NativeNotificationCapture: Equatable, Hashable {
         self.category = category
         self.postedAt = postedAt
         self.dismissible = dismissible
+        self.appIconPngBase64 = appIconPngBase64
     }
 
     
@@ -5995,7 +5997,8 @@ public struct FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer 
                 text: FfiConverterString.read(from: &buf), 
                 category: FfiConverterOptionString.read(from: &buf), 
                 postedAt: FfiConverterInt64.read(from: &buf), 
-                dismissible: FfiConverterBool.read(from: &buf)
+                dismissible: FfiConverterBool.read(from: &buf), 
+                appIconPngBase64: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -6009,6 +6012,7 @@ public struct FfiConverterTypeNativeNotificationCapture: FfiConverterRustBuffer 
         FfiConverterOptionString.write(value.category, into: &buf)
         FfiConverterInt64.write(value.postedAt, into: &buf)
         FfiConverterBool.write(value.dismissible, into: &buf)
+        FfiConverterOptionString.write(value.appIconPngBase64, into: &buf)
     }
 }
 

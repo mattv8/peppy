@@ -3058,6 +3058,7 @@ async fn real_client_history_purges_on_the_real_server_and_fresh_snapshot_does_n
         instance: "i".into(),
         package_name: "com.example".into(),
         app_name: "App".into(),
+        app_icon_png_base64: None,
         title: "Download".into(),
         text: text.into(),
         category: None,

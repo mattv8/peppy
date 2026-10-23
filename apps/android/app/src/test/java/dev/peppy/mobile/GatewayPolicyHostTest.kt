@@ -53,7 +53,7 @@ class GatewayPolicyHostTest : GatewayTestBase() {
         val client = enrollAndUnlock()
         val realKey = "0|com.example.chat|1|null|10001"
         client.captureNotification(NativeNotificationCapture(
-            realKey, "$realKey:1", "com.example.chat", "Chat", "Morgan", "Lunch?", null, System.currentTimeMillis(), true,
+            realKey, "$realKey:1", "com.example.chat", "Chat", "Morgan", "Lunch?", null, System.currentTimeMillis(), true, null,
         ))
         assertEquals(NotificationTestCaptureResult.CAPTURED, NotificationTestCapture.capture(client, permitted = true, enqueue = {}))
 
@@ -71,7 +71,7 @@ class GatewayPolicyHostTest : GatewayTestBase() {
         client.captureNotification(NativeNotificationCapture(
             NotificationTestCapture.SYNTHETIC_KEY, "${NotificationTestCapture.SYNTHETIC_KEY}:legacy",
             "dev.peppy.mobile.synthetic", "Peppy test", "Peppy test notification",
-            "This is a safe test record.", "peppy_test", System.currentTimeMillis(), false,
+            "This is a safe test record.", "peppy_test", System.currentTimeMillis(), false, null,
         ))
         val legacyLifetime = client.notificationSnapshot().notifications.single().target.lifetime
 

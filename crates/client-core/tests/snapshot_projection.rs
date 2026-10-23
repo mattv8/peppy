@@ -458,6 +458,7 @@ fn notification(key: &str, package: &str, text: &str) -> NotificationCapture {
         instance: format!("{key}-1"),
         package_name: package.into(),
         app_name: "App".into(),
+        app_icon_png_base64: None,
         title: "Title".into(),
         text: text.into(),
         category: None,
@@ -465,6 +466,8 @@ fn notification(key: &str, package: &str, text: &str) -> NotificationCapture {
         dismissible: true,
     }
 }
+
+const ICON_32PX: &str = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAg";
 fn shown(client: &Client) -> Vec<String> {
     let mut keys: Vec<String> = client
         .notification_snapshot()
@@ -538,6 +541,65 @@ fn purged_notification_disappears_and_filters_keep_lww_and_unsent_writes() {
     p.server.upload(desktop);
     p.server.sync(phone);
     assert_eq!(muted(phone, "com.example.chat"), Some(true));
+}
+
+#[test]
+fn snapshot_promotion_retains_icons_and_newer_absent_icons_overwrite_them() {
+    let mut p = pair();
+    let mut posted = notification("icon", "com.example.mail", "with icon");
+    posted.app_icon_png_base64 = Some(ICON_32PX.into());
+    p.owner.capture_notification(posted).unwrap();
+    p.server.upload(&p.owner);
+
+    let high_water = p.server.log.len();
+    import(
+        &p.peer,
+        &p.server
+            .log
+            .iter()
+            .enumerate()
+            .map(|(index, envelope)| SnapshotRecord {
+                cursor: Cursor(index as u64 + 1),
+                envelope: envelope.clone(),
+            })
+            .collect::<Vec<_>>(),
+        high_water,
+        Some(20),
+    );
+    settle(&p.peer);
+    assert_eq!(
+        p.peer.notification_snapshot().unwrap().notifications[0].app_icon_png_base64,
+        Some(ICON_32PX.into())
+    );
+
+    p.owner
+        .capture_notification(notification("icon", "com.example.mail", "without icon"))
+        .unwrap();
+    p.server.upload(&p.owner);
+    let high_water = p.server.log.len();
+    import(
+        &p.peer,
+        &p.server
+            .log
+            .iter()
+            .enumerate()
+            .map(|(index, envelope)| SnapshotRecord {
+                cursor: Cursor(index as u64 + 1),
+                envelope: envelope.clone(),
+            })
+            .collect::<Vec<_>>(),
+        high_water,
+        Some(21),
+    );
+    settle(&p.peer);
+    let updated = p
+        .peer
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    assert_eq!(updated.app_icon_png_base64, None);
+    assert_eq!(updated.text, "without icon");
 }
 
 fn books(client: &Client) -> Value {
