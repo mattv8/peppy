@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ContactAvatar, X } from "@peppy/desktop-ui";
+import { ContactAvatar, Modal, Plus, X, contactSeed } from "@peppy/desktop-ui";
 import {
   type ContactView,
   type ContactPhone,
@@ -48,12 +48,28 @@ const PHONE_LABELS: [string, string][] = [["mobile", "Mobile"], ["home", "Home"]
 const EMAIL_LABELS: [string, string][] = [["personal", "Personal"], ["work", "Work"], ["other", "Other"]];
 const ADDRESS_LABELS: [string, string][] = [["home", "Home"], ["work", "Work"], ["other", "Other"]];
 
+const VALIDATION_DISCLOSURES = [
+  { name: "nickname", focusSelector: "#contact-form-nickname" },
+  { name: "organization", focusSelector: "#contact-form-organization" },
+  { name: "title", focusSelector: "#contact-form-title" },
+  { name: "addresses", focusSelector: "#contact-form-addresses-list input" },
+  { name: "birthday", focusSelector: "#contact-form-birthday-month" },
+  { name: "notes", focusSelector: "#contact-form-notes" },
+] as const;
+
+function validationDisclosureFor(message: string) {
+  return /^The birthday is invalid\.$/i.test(message)
+    ? VALIDATION_DISCLOSURES[4]
+    : undefined;
+}
+
 export function ContactForm({
   initial,
   onCancel,
   onSave,
   onDirtyChange,
   error,
+  validationError,
   busy,
   bookCapabilities,
 }: {
@@ -62,6 +78,7 @@ export function ContactForm({
   onSave(draft: ContactEditDraft): void;
   onDirtyChange?(dirty: boolean): void;
   error: string;
+  validationError?: string;
   busy?: boolean;
   bookCapabilities?: { canWrite: boolean; supportsNotes: boolean; supportsPhoto: boolean; supportsBirthday?: boolean };
 }) {
@@ -93,16 +110,27 @@ export function ContactForm({
   );
 
   const initialDraftJson = useRef(JSON.stringify(draft));
+  const latestDraft = useRef(draft);
+  latestDraft.current = draft;
   useEffect(() => {
     onDirtyChange?.(JSON.stringify(draft) !== initialDraftJson.current);
   }, [draft, onDirtyChange]);
 
   const [photoError, setPhotoError] = useState("");
+  const [openDisclosures, setOpenDisclosures] = useState(() => ({
+    nickname: Boolean(draft.nickname),
+    organization: Boolean(draft.organization),
+    title: Boolean(draft.title),
+    addresses: draft.addresses.length > 0,
+    birthday: Boolean(draft.birthday && Object.values(draft.birthday).some(Boolean)),
+    notes: Boolean(draft.notes),
+  }));
   const [cropDialog, setCropDialog] = useState<{
     dataUrl: string;
     naturalWidth: number;
     naturalHeight: number;
   } | null>(null);
+  const photoPickerRef = useRef<HTMLButtonElement>(null);
 
   const displayName =
     [draft.givenName, draft.familyName].filter(Boolean).join(" ") ||
@@ -217,6 +245,31 @@ export function ContactForm({
 
   const fieldReadOnly = bookCapabilities ? !bookCapabilities.canWrite : false;
 
+  useEffect(() => {
+    const disclosure = validationError ? validationDisclosureFor(validationError) : undefined;
+    if (disclosure) {
+      setOpenDisclosures(current => ({ ...current, [disclosure.name]: true }));
+      const focusTimer = window.requestAnimationFrame(() => document.querySelector<HTMLElement>(disclosure.focusSelector)?.focus());
+      return () => window.cancelAnimationFrame(focusTimer);
+    }
+    if (validationError) {
+      const currentDraft = latestDraft.current;
+      setOpenDisclosures(current => ({
+        ...current,
+        nickname: current.nickname || Boolean(currentDraft.nickname),
+        organization: current.organization || Boolean(currentDraft.organization),
+        title: current.title || Boolean(currentDraft.title),
+        addresses: current.addresses || currentDraft.addresses.length > 0,
+        birthday: current.birthday || Boolean(currentDraft.birthday && Object.values(currentDraft.birthday).some(Boolean)),
+        notes: current.notes || Boolean(currentDraft.notes),
+      }));
+    }
+  }, [validationError]);
+
+  const setDisclosureOpen = (name: keyof typeof openDisclosures, open: boolean) => {
+    setOpenDisclosures(current => ({ ...current, [name]: open }));
+  };
+
   return (
     <section
       id="contact-edit-form"
@@ -274,29 +327,32 @@ export function ContactForm({
           />
         </section>
 
-        <section data-form-section="name">
-          <label htmlFor="contact-form-nickname">Nickname</label>
-          <input
-            id="contact-form-nickname"
-            readOnly={fieldReadOnly}
-            value={draft.nickname ?? ""}
-            onChange={e =>
-              setDraft(prev => ({ ...prev, nickname: e.target.value }))
-            }
-          />
-        </section>
+        <details data-form-disclosure="nickname" open={openDisclosures.nickname} onToggle={event => setDisclosureOpen("nickname", event.currentTarget.open)}>
+          <summary>Nickname</summary>
+          <section data-form-section="nickname">
+            <label htmlFor="contact-form-nickname">Nickname</label>
+            <input
+              id="contact-form-nickname"
+              readOnly={fieldReadOnly}
+              value={draft.nickname ?? ""}
+              onChange={e => setDraft(prev => ({ ...prev, nickname: e.target.value }))}
+            />
+          </section>
+        </details>
 
         {bookCapabilities?.supportsPhoto && (
           <section data-form-section="photo">
             <label htmlFor="contact-photo-picker">Photo</label>
             <button
               id="contact-photo-picker"
+              ref={photoPickerRef}
               data-action="pick-photo"
+              data-has-photo={draft.photoDataUrl ? "true" : "false"}
               aria-label={draft.photoDataUrl ? "Change photo" : "Add photo"}
               onClick={handlePhotoPickerClick}
               type="button"
             >
-              <ContactAvatar name={displayName} photoDataUrl={draft.photoDataUrl} size={64} />
+              <ContactAvatar seed={contactSeed(draft.phones, initial?.id ?? "new")} name={displayName} photoDataUrl={draft.photoDataUrl} size={64} />
             </button>
             {/* Remove is distinct from keep: shown for a new crop or an existing photo. */}
             {draft.photoKind !== "remove" && (draft.photoDataUrl || initial?.photoPending) && !fieldReadOnly && (
@@ -328,32 +384,36 @@ export function ContactForm({
           </section>
         )}
 
-        <section data-form-section="organization">
-          <label htmlFor="contact-form-organization">Organization</label>
-          <input
-            id="contact-form-organization"
-            readOnly={fieldReadOnly}
-            value={draft.organization ?? ""}
-            onChange={e =>
-              setDraft(prev => ({ ...prev, organization: e.target.value }))
-            }
-          />
-        </section>
+        <details data-form-disclosure="organization" open={openDisclosures.organization} onToggle={event => setDisclosureOpen("organization", event.currentTarget.open)}>
+          <summary>Organization</summary>
+          <section data-form-section="organization">
+            <label htmlFor="contact-form-organization">Organization</label>
+            <input
+              id="contact-form-organization"
+              readOnly={fieldReadOnly}
+              value={draft.organization ?? ""}
+              onChange={e => setDraft(prev => ({ ...prev, organization: e.target.value }))}
+            />
+          </section>
+        </details>
 
-        <section data-form-section="title">
-          <label htmlFor="contact-form-title">Title</label>
-          <input
-            id="contact-form-title"
-            readOnly={fieldReadOnly}
-            value={draft.title ?? ""}
-            onChange={e =>
-              setDraft(prev => ({ ...prev, title: e.target.value }))
-            }
-          />
-        </section>
+        <details data-form-disclosure="title" open={openDisclosures.title} onToggle={event => setDisclosureOpen("title", event.currentTarget.open)}>
+          <summary>Title</summary>
+          <section data-form-section="title">
+            <label htmlFor="contact-form-title">Title</label>
+            <input
+              id="contact-form-title"
+              readOnly={fieldReadOnly}
+              value={draft.title ?? ""}
+              onChange={e => setDraft(prev => ({ ...prev, title: e.target.value }))}
+            />
+          </section>
+        </details>
 
         {bookCapabilities?.supportsBirthday && (
-        <section data-form-section="birthday">
+        <details data-form-disclosure="birthday" open={openDisclosures.birthday} onToggle={event => setDisclosureOpen("birthday", event.currentTarget.open)}>
+          <summary>Birthday</summary>
+          <section data-form-section="birthday">
           <fieldset id="contact-form-birthday-fieldset">
             <legend>Birthday (optional)</legend>
             <div id="contact-form-birthday-inputs">
@@ -396,7 +456,8 @@ export function ContactForm({
               </div>
             </div>
           </fieldset>
-        </section>
+          </section>
+        </details>
         )}
 
         <section data-form-section="phones">
@@ -409,7 +470,7 @@ export function ContactForm({
               onClick={handlePhoneAdd}
               type="button"
             >
-              +
+              <Plus size={14} strokeWidth={1.75} aria-hidden />
             </button>
           </header>
           {draft.phones.length > 0 ? (
@@ -463,7 +524,7 @@ export function ContactForm({
               onClick={handleEmailAdd}
               type="button"
             >
-              +
+              <Plus size={14} strokeWidth={1.75} aria-hidden />
             </button>
           </header>
           {draft.emails.length > 0 ? (
@@ -507,6 +568,8 @@ export function ContactForm({
           )}
         </section>
 
+        <details data-form-disclosure="addresses" open={openDisclosures.addresses} onToggle={event => setDisclosureOpen("addresses", event.currentTarget.open)}>
+          <summary>Addresses</summary>
         <section data-form-section="addresses">
           <header id="contact-form-addresses-header">
             <h3>Addresses</h3>
@@ -517,7 +580,7 @@ export function ContactForm({
               onClick={handleAddressAdd}
               type="button"
             >
-              +
+              <Plus size={14} strokeWidth={1.75} aria-hidden />
             </button>
           </header>
           {draft.addresses.length > 0 ? (
@@ -595,9 +658,12 @@ export function ContactForm({
             <p id="contact-form-addresses-empty">No addresses added yet</p>
           )}
         </section>
+        </details>
 
         {bookCapabilities?.supportsNotes && (
-          <section data-form-section="notes">
+          <details data-form-disclosure="notes" open={openDisclosures.notes} onToggle={event => setDisclosureOpen("notes", event.currentTarget.open)}>
+            <summary>Notes</summary>
+            <section data-form-section="notes">
             <label htmlFor="contact-form-notes">Notes</label>
             <textarea
               id="contact-form-notes"
@@ -609,13 +675,15 @@ export function ContactForm({
               placeholder="Add notes"
               rows={4}
             />
-          </section>
+            </section>
+          </details>
         )}
       </div>
 
       {cropDialog && (
         <PhotoCropDialog
           photo={cropDialog}
+          opener={photoPickerRef}
           onConfirm={handleCropConfirm}
           onCancel={() => setCropDialog(null)}
         />
@@ -626,10 +694,12 @@ export function ContactForm({
 
 function PhotoCropDialog({
   photo,
+  opener,
   onConfirm,
   onCancel,
 }: {
   photo: { dataUrl: string; naturalWidth: number; naturalHeight: number };
+  opener: React.RefObject<HTMLButtonElement | null>;
   onConfirm(croppedDataUrl: string): void;
   onCancel(): void;
 }) {
@@ -730,40 +800,47 @@ function PhotoCropDialog({
   };
 
   return (
-    <dialog id="photo-crop-dialog" aria-labelledby="photo-crop-title" open>
-      <div id="photo-crop-container">
-        <h3 id="photo-crop-title">Crop photo to square</h3>
-        <div
-          id="photo-crop-viewport"
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
-          onKeyDown={handleKeyDown}
-          tabIndex={0}
-          aria-label="Photo crop position"
-          aria-describedby="photo-crop-hint"
-        >
-          <img
-            id="photo-crop-image"
-            src={photo.dataUrl}
-            alt="Original photo to crop"
-            style={{
-              width: photo.naturalWidth * scale,
-              height: photo.naturalHeight * scale,
-              transform: `translate(-${offset.x}px, -${offset.y}px)`,
-            }}
-          />
-        </div>
-        <canvas id="photo-crop-preview" ref={canvasRef} width={targetSize} height={targetSize} />
-        <p id="photo-crop-hint">Use arrow keys or drag to position. Shift+arrow moves faster.</p>
-        <div id="photo-crop-actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className="primary-button" onClick={handleConfirm}>
+    <Modal
+      id="photo-crop-dialog"
+      className="photo-crop-panel"
+      title="Crop photo to square"
+      opener={opener}
+      onDismiss={onCancel}
+      actions={
+        <>
+          <button type="button" className="secondary-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="primary-button" onClick={handleConfirm}>
             Confirm crop
           </button>
-        </div>
+        </>
+      }
+    >
+      <div
+        id="photo-crop-viewport"
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        aria-label="Photo crop position"
+        aria-describedby="photo-crop-hint"
+      >
+        <img
+          id="photo-crop-image"
+          src={photo.dataUrl}
+          alt="Original photo to crop"
+          style={{
+            width: photo.naturalWidth * scale,
+            height: photo.naturalHeight * scale,
+            transform: `translate(-${offset.x}px, -${offset.y}px)`,
+          }}
+        />
       </div>
-    </dialog>
+      <canvas id="photo-crop-preview" ref={canvasRef} width={targetSize} height={targetSize} />
+      <p id="photo-crop-hint">Use arrow keys or drag to position. Shift+arrow moves faster.</p>
+    </Modal>
   );
 }

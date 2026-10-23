@@ -7,7 +7,7 @@ export const semanticTokens = Object.freeze([
   "surface-widget", "surface-hover", "surface-active", "surface-input",
   "border", "border-strong", "text-primary", "text-strong", "text-secondary",
   "text-muted", "brand", "accent", "accent-hover", "accent-text", "success", "error",
-  "error-text", "warning-text", "focus", "focus-ring", "primary", "primary-text"
+  "error-text", "warning-text", "warning-surface", "warning-border", "focus", "focus-ring", "primary", "primary-text"
 ]);
 
 export const kotlinNames = Object.freeze({
@@ -19,6 +19,7 @@ export const kotlinNames = Object.freeze({
   "text-strong": "textStrong", "text-secondary": "textSecondary", "text-muted": "textMuted",
   brand: "brand", accent: "accent", "accent-hover": "accentHover", "accent-text": "accentText",
   success: "success", error: "error", "error-text": "errorText", "warning-text": "warningText",
+  "warning-surface": "warningSurface", "warning-border": "warningBorder",
   focus: "focus", "focus-ring": "focusRing", primary: "primary", "primary-text": "primaryText"
 });
 

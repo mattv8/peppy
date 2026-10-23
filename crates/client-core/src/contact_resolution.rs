@@ -127,18 +127,25 @@ fn refresh(conn: &mut Connection) -> Result<bool, Error> {
     };
     let has_more = rows.len() == BATCH as usize;
     let tx = conn.transaction()?;
+    let mut book_regions: BTreeMap<String, Option<String>> = BTreeMap::new();
     for (book_id, contact_id, revision, body, deleted_at) in &rows {
         tx.execute(
             "DELETE FROM contact_address_index WHERE book_id=? AND contact_id=?",
             params![book_id, contact_id],
         )?;
         if deleted_at.is_none() {
-            let book_body: String = tx.query_row(
-                "SELECT body FROM contact_books WHERE id=?",
-                [book_id],
-                |row| row.get(0),
-            )?;
-            let book_region = region(&book_body);
+            let book_region = if let Some(region) = book_regions.get(book_id) {
+                region.clone()
+            } else {
+                let book_body: String = tx.query_row(
+                    "SELECT body FROM contact_books WHERE id=?",
+                    [book_id],
+                    |row| row.get(0),
+                )?;
+                let region = region(&book_body);
+                book_regions.insert(book_id.clone(), region.clone());
+                region
+            };
             if let Some(phones) = serde_json::from_str::<Value>(body)
                 .ok()
                 .and_then(|v| v.get("phones").cloned())
@@ -178,24 +185,32 @@ struct Candidate {
     owner: String,
 }
 
+struct Book {
+    owner: String,
+    region: Option<String>,
+}
+
+fn books(conn: &Connection) -> Result<Vec<Book>, Error> {
+    let mut statement =
+        conn.prepare("SELECT owner_device_id,body FROM contact_books WHERE forgotten=0")?;
+    statement
+        .query_map([], |row| {
+            let body: String = row.get(1)?;
+            Ok(Book {
+                owner: row.get(0)?,
+                region: region(&body),
+            })
+        })?
+        .collect::<Result<_, _>>()
+        .map_err(Error::from)
+}
+
 fn candidates(
     conn: &Connection,
     address: &str,
     source: Option<&str>,
+    books: &[Book],
 ) -> Result<Vec<Candidate>, Error> {
-    let books: Vec<(String, String, Option<String>)> = {
-        let mut statement =
-            conn.prepare("SELECT id,owner_device_id,body FROM contact_books WHERE forgotten=0")?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    region(&row.get::<_, String>(2)?),
-                ))
-            })?
-            .collect::<Result<_, _>>()?
-    };
     let mut keys = BTreeSet::from([(ORIGINAL, address.to_owned())]);
     if address.starts_with('+') {
         if let Some(key) = normalized(address, None) {
@@ -205,8 +220,8 @@ fn candidates(
         // A source phone's address book supplies the only allowed national context.
         let regions = books
             .iter()
-            .filter(|(_, owner, _)| owner == source)
-            .filter_map(|(_, _, region)| region.clone())
+            .filter(|book| book.owner == source)
+            .filter_map(|book| book.region.clone())
             .collect::<BTreeSet<_>>();
         if regions.len() == 1
             && let Some(key) = normalized(address, regions.iter().next().map(String::as_str))
@@ -218,7 +233,7 @@ fn candidates(
         // comes from one explicit shared region.
         let regions = books
             .iter()
-            .filter_map(|(_, _, region)| region.clone())
+            .filter_map(|book| book.region.clone())
             .collect::<BTreeSet<_>>();
         if regions.len() == 1
             && let Some(key) = normalized(address, regions.iter().next().map(String::as_str))
@@ -320,10 +335,11 @@ pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Erro
         })
         .collect::<Result<Vec<_>, _>>()?;
     let more_indexing = refresh(conn)?;
+    let books = books(conn)?;
     let mut matches = Vec::new();
     let mut ambiguous = Vec::new();
     for address in addresses {
-        if let Some(candidate) = choose(candidates(conn, &address, source)?, source) {
+        if let Some(candidate) = choose(candidates(conn, &address, source, &books)?, source) {
             let mut item = json!({"address": address, "contact_id": candidate.contact_id, "book_id": candidate.book_id, "display_name": candidate.display_name});
             if let Some(photo_attachment_id) = candidate.photo_attachment_id {
                 item["photo_attachment_id"] = json!(photo_attachment_id);

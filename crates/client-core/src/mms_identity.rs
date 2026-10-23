@@ -128,14 +128,14 @@ impl Client {
         if payload.direction == crate::Direction::Incoming && group {
             let blocked_reason = if own.is_none() {
                 Some(
-                    "The gateway phone hasn't detected its number for this SIM. Open Peppy on the phone to detect or enter it.",
+                    "This phone hasn't detected its number for this SIM. Open Peppy on the phone to detect or enter it.",
                 )
             } else if !unique.iter().any(|address| {
                 own.as_deref()
                     .is_some_and(|own| same_own_address(own, address))
             }) {
                 Some(
-                    "This SIM's saved number isn't among this group's participants. Check the number on the gateway phone.",
+                    "This SIM's saved number isn't among this group's participants. Check the number on this phone.",
                 )
             } else {
                 None
@@ -207,7 +207,7 @@ fn validate_subscription_id(subscription_id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn same_own_address(own: &str, participant: &str) -> bool {
+pub(crate) fn same_own_address(own: &str, participant: &str) -> bool {
     if address_key(own) == address_key(participant) {
         return true;
     }

@@ -18,21 +18,36 @@ just dev-down
 
 `dev-setup` creates a mode-`0600` `.env` with random synthetic local credentials only when `.env` is absent. It refuses a symlinked `.env` and preserves an existing file. It also installs or merges the tracked OpenChamber action template into ignored `.openchamber/project.json`, preserving existing local configuration. Run `just dev-actions` (or `bash infra/dev/dev.sh dev-actions`) to refresh actions without creating or changing `.env`. OpenChamber still asks you to trust shared commands; after refreshing, reopen or reselect the project if the actions do not appear. The action template and installer are `infra/dev/openchamber-project.json` and `infra/dev/install-actions.py`; use VS Code tasks from `.vscode/tasks.json`.
 
-`just dev-up` stops and removes obsolete `api` and `migrate` containers from the former development topology (without removing volumes), then merges the development overlay with Compose, builds the tooling image, starts PostgreSQL and SeaweedFS, and runs the `dev` service. The `dev` service synchronizes the source, builds `cargo build --locked -p peppy-server`, runs pending migrations against PostgreSQL, and serves the API published to `127.0.0.1:7000` (internal binding `0.0.0.0:8080`). It waits for PostgreSQL and SeaweedFS to be healthy before starting, with a cold-startup timeout of 1800 seconds; cold-build compilation may take several minutes. Build or migration failure exits nonzero and never serves. `just dev-down` stops and removes the `dev`, PostgreSQL, and SeaweedFS containers and cleans up obsolete `api` and `migrate` containers without removing any database or cache volumes. Run it before base-stack checks such as `just smoke-infra` or `just storage-contract`, which share this project and host port. Production deployments retain a separate small release image with independent `api` and `migrate` services.
+`just dev-up` stops and removes obsolete `api` and `migrate` containers from the former development topology (without removing volumes), rebuilds the web assets into a named volume, then merges the development overlay with Compose and starts PostgreSQL, SeaweedFS, and the `dev` service. The `dev` service synchronizes the source, builds `cargo build --locked -p peppy-server`, runs pending migrations against PostgreSQL, and serves the browser UI and API on `127.0.0.1:7000` (internal binding `0.0.0.0:8080`). It waits for PostgreSQL, SeaweedFS, and successful asset population before starting, with a cold-startup timeout of 1800 seconds; cold-build compilation may take several minutes. Build or migration failure exits nonzero and never serves. `just dev-down` stops and removes the `dev`, web, PostgreSQL, and SeaweedFS containers and cleans up obsolete `api` and `migrate` containers without removing any database or cache volumes. Run it before base-stack checks such as `just smoke-infra` or `just storage-contract`, which share this project and host port. Production deployments retain a separate small release image with independent `api` and `migrate` services.
 
-After first-run setup, OpenChamber and VS Code offer these five everyday shortcuts:
+After first-run setup, OpenChamber and VS Code offer these eight everyday shortcuts. Run `just dev-actions` to refresh the ignored local OpenChamber configuration after pulling these actions.
 
 | Shortcut | What it does |
 | --- | --- |
 | Dev: Start development | Preserves `.env`, starts and waits for the backend, readies the emulator, and opens the latest desktop build; it does not build Android. |
+| Desktop: Develop (hot reload) | Runs the desktop development server with hot reload. |
 | Desktop: Rebuild and open | Builds before opening a fresh desktop instance; it does not open a stale app after a build failure. |
 | Android: Rebuild and open | Requires `PEPPY_ACCEPT_ANDROID_LICENSES=1` before any effect, then starts the backend, builds, readies the emulator, deploys, and opens the app. |
+| Android: Rebuild and open (fast) | Requires `PEPPY_ACCEPT_ANDROID_LICENSES=1`, `.env`, a reachable existing backend, and one supported running emulator. It rebuilds, deploys, and opens without starting or rebuilding the backend or booting an emulator. |
 | iOS: Rebuild and open | macOS only: starts the backend, boots an iPhone simulator, rebuilds the Debug Rust library and iOS app, then installs and launches it. Requires full Xcode and an iOS 26+ simulator runtime. |
+| CI: Run all tests | macOS only: runs every locally executable CI test and check family, including disposable integration infrastructure, Android checks, and host Swift checks. It does not package or publish artifacts. |
 | Dev: Stop backend | Stops backend containers while preserving data and caches; native apps and the emulator remain running. |
 
-The shortcuts require a running Docker daemon, installed native desktop tools, and a configured Android SDK/AVD where applicable. They do not reload a healthy backend; restart it to apply backend source changes. SDK license approval is always explicit. Granular `just` commands remain available, including `just dev-actions`, `just dev-setup`, `just dev-demo`, testing commands, and `just android-sms`; SMS is CLI-only. Retired editor actions are removed only when their original released command is unchanged, so customized actions are preserved. Reselect the project to review OpenChamber trust prompts after refreshing actions.
+The shortcuts require a running Docker daemon, installed native desktop tools, and a configured Android SDK/AVD where applicable. They do not reload a healthy backend; restart it to apply backend source changes. SDK license approval is always explicit. Granular `just` commands remain available, including `just dev-actions`, `just dev-setup`, `just dev-demo`, testing commands, and `just android-sms`; SMS is CLI-only. Retired editor actions are removed only when their original released command is unchanged. A customized command on a managed action ID, including `peppy.desktop-dev`, blocks the refresh atomically; rename the local action to retain it, then refresh. Reselect the project to review OpenChamber trust prompts after refreshing actions.
 
-The API listens on `127.0.0.1:7000` by default; `API_HOST_PORT` changes that host port, while normal backend `BIND_ADDR` remains `0.0.0.0:8080` internally. PostgreSQL and SeaweedFS do not publish host ports. Run `bash infra/dev/dev.sh dev-demo` for an isolated synthetic gateway exercise. A successful run exercises private synthetic state, normal replay/sync of a new simulated message, and SQLCipher reopening. It is not carrier, keychain, password-dialog, store, or production evidence. The controller retains private synthetic credentials and logs under `.opencode/dev/artifacts/gateway-demo-*` for failure diagnosis; it does not retain the simulated vault passphrase on disk.
+### Worktree source selection
+
+Editor build and run shortcuts enter `infra/dev/dev.sh`. For starts, server/web builds, and native desktop, Android, and iOS builds, it selects the current checkout by default and offers registered worktrees that are ahead of `origin/HEAD` or dirty, including untracked files. Enter keeps the current checkout. Set `PEPPY_SOURCE_TREE` to a registered worktree path or branch name to select it noninteractively; the helper normalizes and validates it before running any development command. In a noninteractive shell the current checkout is retained and the helper explains how to set the override. `dev-down`, tests, open/deploy actions, direct `just` recipes, CI, and release commands never prompt. Calling-checkout scripts, configuration, Compose project state, artifacts, and data remain owned by the calling checkout; the selected source path is only inherited by nested build commands. Do not set `PEPPY_SOURCE_ROOT` on the host: it is reserved for container-internal use.
+
+### Development migration repair limits
+
+`dev-up` may repair the local development migration history only when every required applied migration has an exact SHA-384 match for its original up SQL and a paired down SQL from the same worktree snapshot or commit. It rejects ambiguous duplicate versions, unsuccessful or duplicate applied rows, missing exact pairs, transaction-control or psql commands in down SQL, and non-transactional down migration options. It never uses a same-name fallback or mixes an up file from one provenance with a down file from another.
+
+An unchanged older target up without a down SQL does not trigger a reversal; every new or changed forward migration must have a paired down SQL. Some historical downs intentionally remove queue cleanup intents that old schemas cannot represent, which can orphan development object-storage objects. The required backup preserves the metadata for manual recovery; do not rely on an automatic object cleanup after a lossy downgrade.
+
+Before a rollback, development commands stop code writers, lock the complete transition, verify the local Docker endpoint and development Compose service, require PostgreSQL to be healthy, create a private `pg_dump -Fc` backup, and validate it with `pg_restore --list`. The backup is retained and is never automatically deleted. Rollback and metadata deletion run in one guarded transaction with a PostgreSQL advisory lock; a failed repair or forward migration leaves code stopped and retains the backup for manual recovery. The host lock protects maintained development commands only: manual SQL and other external writers are outside that guarantee. Nonsequential numeric migration versions alone are valid and are not repaired as corruption.
+
+The browser UI and API listen on `127.0.0.1:7000` by default; set `API_HOST_PORT` before `dev-setup` to generate matching public URLs, or set it with matching loopback `PUBLIC_API_URL` and `PUBLIC_ATTACHMENT_URL` values. Existing external public URLs are preserved. `just dev-up` rejects mismatched loopback URLs rather than silently advertising the wrong port. `WEB_UI_ENABLED=false` keeps the API development stack running without serving the browser UI. Run `just dev-smoke` after `dev-up` to check the root UI, one referenced asset, runtime config, and API readiness. Android emulator forwarding defaults to this same port; set `PEPPY_DEBUG_SERVER` explicitly to override it. Normal backend `BIND_ADDR` remains `0.0.0.0:8080` internally. PostgreSQL and SeaweedFS do not publish host ports. Run `bash infra/dev/dev.sh dev-demo` for an isolated synthetic gateway exercise. It runs its disposable API boundary at `https://127.0.0.1` with the local development CA trusted only by its controller and simulator; it does not install host trust. A successful run exercises private synthetic state, normal replay/sync of a new simulated message, and SQLCipher reopening. It is not carrier, keychain, password-dialog, store, or production evidence. The controller retains private synthetic credentials and logs under `.opencode/dev/artifacts/gateway-demo-*` for failure diagnosis; it does not retain the simulated vault passphrase on disk.
 
 `just dev-up`, `just dev-build`, and `just dev-test` create the private artifact directory and the externally named, UID/GID-keyed Docker cache volumes before use. The volumes persist across container removal. After `just dev-up`, you can invoke the container PATH helper directly while the `dev` service is running:
 
@@ -72,33 +87,93 @@ Retry after startup completes, or override the timeout via `-e PEPPY_WORKSPACE_L
 | Web PATH-helper checks | Running `dev` service | `docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run build web`; `docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml exec dev run test web` |
 | Native macOS desktop | Node from `.node-version`, pnpm 12.8.1, Rust from `rust-toolchain.toml` | `just desktop-dev`, `just desktop-bundle`, `just desktop-run`, `just desktop-open` |
 | Native Windows desktop from WSL | Current NTFS checkout plus native Windows Node, pnpm, Rust, MSVC/Windows SDK, WebView2, and native Perl | `just desktop-dev`, `just desktop-bundle`, `just desktop-run`, `just desktop-open` |
-| Android builder | Docker Compose; explicit SDK license approval in shell environment or `.opencode/dev/android.env`; optional linux/amd64 image on Apple Silicon may run slowly under emulation | `just android-build` |
-| Android emulator operations | Host Android SDK with `platform-tools`, an AVD, and emulator tools | `just android-emulator`, `just android-deploy`, `just android-smoke`, `just android-sms` |
+| Android builder | macOS: native host prerequisites below; Linux and Windows via WSL: Docker Compose and `.env`; explicit SDK license approval | `just android-build` |
+| Android emulator operations | Host Android SDK with `platform-tools`, an AVD, and emulator tools | `just android-emulator`, `just android-forward`, `just android-deploy`, `just android-smoke`, `just android-sms` |
 | iOS host checks | macOS Command Line Tools, Swift, and generated mobile bindings | `just ios-test` |
 
-On macOS, `desktop-dev`, `desktop-bundle`, and `desktop-run` use already-installed Homebrew `node@24` and `rustup` kegs when the current PATH is missing or mismatches the repository pins. They do not install tools or change global environment configuration; missing kegs leave the normal actionable pin check in place. For other commands, select the pinned kegs in the current terminal:
+Use a stable Node 26 release (`.node-version` selects the major version), pnpm 12.8.1, and the pinned Rust toolchain. Node minor and patch updates within 26 are supported. On macOS, `desktop-dev`, `desktop-bundle`, and `desktop-run` keep a compatible Node on PATH; otherwise they look for already-installed Homebrew `node@26` or `node` and `rustup` kegs. The helpers do not install tools or change global environment configuration. For other commands, select the installed kegs in the current terminal:
 
 ```sh
-export PATH="$(brew --prefix rustup)/bin:$(brew --prefix node@24)/bin:$PATH"
+export PATH="$(brew --prefix rustup)/bin:$(brew --prefix node)/bin:$PATH"
 ```
 
-The Android builder needs explicit SDK license approval. After reviewing the Android SDK licenses, set `PEPPY_ACCEPT_ANDROID_LICENSES=1` in the current shell or once in ignored `.opencode/dev/android.env`; a shell value, including `0` or empty, takes precedence over that file. It installs API 36, build-tools 35.0.0, and NDK 27.2.12479018. The Linux Android NDK prebuilts require the linux/amd64 builder image, including on Apple Silicon.
+This example uses Homebrew's unversioned `node` formula; substitute `node@26` if that is the formula you installed.
+
+## Android build backends
+
+`just android-build`, `just android-test`, and the editor Android build action select a backend through `PEPPY_ANDROID_BUILD_BACKEND`. Leave it unset (or empty), or set it to `auto`, to use native on macOS and the existing Docker backend on Linux and Windows via WSL. Set `PEPPY_ANDROID_BUILD_BACKEND=native` to require the macOS backend or `PEPPY_ANDROID_BUILD_BACKEND=docker` to require Docker, including on macOS. Native is macOS-only; selecting it elsewhere fails with setup guidance rather than falling back to Docker.
+
+The native `android-build` route does not need Docker or `.env`. `just android-run` still calls `just dev-up` before building, so the complete rebuild-and-open action requires Docker and `.env` even when its build uses the native backend. The Docker backend retains the linux/amd64 builder image, including on Apple Silicon; it can run slowly under emulation.
+
+`just` reads optional Android overrides and the one-time license choice from ignored `.opencode/dev/android.env`. You can instead export them in the shell; a shell value, including `0` or empty, takes precedence. Direct `bash infra/dev/android.sh ...` calls do not read that file, so export the needed variables in that shell.
+
+### Native macOS prerequisites
+
+Install JDK 17, the repository-pinned Rust toolchain, `pkg-config`, and host `libsodium`. On macOS, install the host libraries with `brew install pkg-config libsodium`. Add both Android Rust targets explicitly:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+```
+
+Install Android SDK command-line tools and make available `platforms;android-36`, `build-tools;35.0.0`, `platform-tools`, and `ndk;27.2.12479018`. The SDK resolves from `ANDROID_SDK_ROOT`, then `ANDROID_HOME`, then `~/Library/Android/sdk`; set either SDK variable to use another location.
+
+#### JDK 17 discovery
+
+Set `JAVA_HOME` to JDK 17, or let the native helper discover it automatically. If `JAVA_HOME` is not set, the helper checks for a registered JDK 17 using `/usr/libexec/java_home -F -v 17`, then falls back to an already-installed Homebrew `openjdk@17` package without requiring global registration. An explicit non-empty `JAVA_HOME` takes precedence and must point to a valid JDK; the helper reports an error if the path is invalid rather than silently using another JDK.
+
+```sh
+# Optional: set explicitly if needed
+export JAVA_HOME="$(/usr/libexec/java_home -F -v 17)"
+```
+
+#### Cargo and Rustup shims
+
+The native helper locates Cargo and Rustup using the current `PATH`. If not found on `PATH`, it appends fallback discovery directories to the builder process PATH without modifying your shell or global environment: `$CARGO_HOME/bin` (if `CARGO_HOME` is set), then `~/.cargo/bin`, then the installed Homebrew rustup prefix. Existing visible tools remain authoritative; fallback discovery only adds to the builder's PATH when still needed.
+
+The native helper only discovers already-installed tools. It does not install Homebrew packages, register global symlinks, modify shell profiles, or change your environment outside the build process itself.
+
+#### Building with automatic discovery
+
+The native helper provisions the pinned SDK packages only after explicit license approval and does not install global packages, Rust toolchains, or Rust targets. After reviewing the SDK licenses, make the approval explicit before building:
+
+```sh
+PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-build
+```
+
+Native host tooling avoids Linux QEMU. Some Android NDK tools can still require Rosetta on macOS.
+
+### Android outputs and generated files
+
+`just android-build` produces only `app-debug.apk`. `just android-test` routes through the Android helper and uses the same backend selector. It runs the native verifier and five Gradle tasks (`:jvm-smoke:run`, `:app:testDebugUnitTest`, `:app:lintDebug`, `:app:assembleDebug`, and `:app:assembleDebugAndroidTest`), then copies `app-debug.apk` and `app-debug-androidTest.apk` for `just android-smoke`.
+
+Outputs default to `.opencode/dev/artifacts/android/`; set `PEPPY_ANDROID_ARTIFACTS` to override that path. The native backend uses the checkout's `target` directory by default (or an explicit `CARGO_TARGET_DIR`), separate from Docker's named volumes but shared with other native FFI builds. A native build regenerates tracked Rust-owned Kotlin and ignored JNI libraries in the checkout; inspect generated diffs afterwards. Docker generates these files in its private workspace.
+
+### Fast Android rebuilds
+
+Use `just android-run` for the full workflow: it starts the backend, readies an emulator, rebuilds the default two Android ABIs, deploys, and opens the app. Use `PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-run-fast` only when `.env` exists, the backend is already reachable over its configured HTTP or HTTPS URL, and one supported Android emulator is already running. The fast command does not start, rebuild, or restart the backend and does not create or boot an emulator. It selects the running emulator ABI, rebuilds only that ABI, then deploys and opens it.
+
+Normal builds keep their APK at `.opencode/dev/artifacts/android/app-debug.apk` by default. Fast builds use `.opencode/dev/artifacts/android/fast/<abi>/app-debug.apk`, so normal deploy and smoke commands cannot consume a fast APK. Set `PEPPY_ANDROID_ARTIFACTS` to an absolute alternate artifact root.
+
+`PEPPY_ANDROID_ABI` accepts only `all`, `arm64-v8a`, or `x86_64`; unset or empty means `all`. `PEPPY_ANDROID_FORCE_NATIVE_CLEAN=1` requests targeted native recovery; unset, empty, or `0` uses normal validation. Other values fail before native tool effects. A fast selected-ABI build can leave unselected JNI libraries on disk stale until a full verifier run. Do not use a bare Gradle invocation as a replacement for the maintained Android helper: it bypasses required native verification and generated-binding checks.
+
+On macOS the native Android path can reuse the Gradle daemon when `JAVA_HOME` remains stable, and Gradle's global build cache is enabled. Docker and test/CI invocations remain one-shot without daemon reuse, although the cache can still help. Healthy native caches are retained; cache validation and targeted recovery protect against incomplete native artifacts, but no measured benchmark is available.
 
 ## Android emulator workflow
 
-Set `ANDROID_SDK_ROOT` or `ANDROID_HOME`. Create normal host AVDs with Android Studio or `avdmanager`: `~/.android/avd` on macOS/Linux, or Windows `%USERPROFILE%\.android\avd` when using WSL. Without overrides, `just android-emulator` reuses one running emulator, or starts the sole configured AVD when none runs; it refuses zero or ambiguous choices. Set `PEPPY_ANDROID_AVD` in the shell or ignored `.opencode/dev/android.env` to choose an existing AVD, and `PEPPY_ANDROID_SERIAL` to choose a running `emulator-*` serial; shell values take precedence. Physical devices are rejected. The command returns after the emulator is ready and leaves it running.
+Set `ANDROID_SDK_ROOT` or `ANDROID_HOME`. Create normal host AVDs with Android Studio or `avdmanager`: `~/.android/avd` on macOS/Linux, or Windows `%USERPROFILE%\.android\avd` when using WSL. Without overrides, `just android-emulator` reuses one running emulator, or starts the sole configured AVD when none runs; it refuses zero or ambiguous choices. Set `PEPPY_ANDROID_AVD` in the shell or ignored `.opencode/dev/android.env` to choose an existing AVD, and `PEPPY_ANDROID_SERIAL` to choose a running `emulator-*` serial; shell values take precedence. Physical devices are rejected. The command returns after the emulator is ready and leaves it running. Once ready, it also forwards the development server port into the emulator (`adb reverse`), so `just dev-start` leaves the emulator able to reach the local server. If the server is not reachable yet, it warns instead of failing. Forwarding is lost when the emulator or the adb server restarts; run `just android-forward` to restore it.
 
-Build output defaults to `.opencode/dev/artifacts/android/`: `app-debug.apk` and `app-debug-androidTest.apk`. Override the location with `PEPPY_ANDROID_ARTIFACTS`. `PEPPY_ANDROID_BOOT_TIMEOUT` defaults to `180`; `PEPPY_DEBUG_SERVER` defaults to `http://127.0.0.1:7000`. In WSL, the helper uses Windows SDK `adb.exe` and `emulator.exe`, obtains the SDK from `ANDROID_SDK_ROOT`, `ANDROID_HOME`, or Windows `LOCALAPPDATA`, and checks `PEPPY_DEBUG_SERVER/healthz` from Windows before `adb reverse`. It supports SDK and APK paths with spaces.
+Android outputs default to `.opencode/dev/artifacts/android/`. `android-build` writes `app-debug.apk`; `android-test` also writes `app-debug-androidTest.apk`. Override the location with `PEPPY_ANDROID_ARTIFACTS`. `PEPPY_ANDROID_BOOT_TIMEOUT` defaults to `180`; an unset or empty `PEPPY_DEBUG_SERVER` uses the loopback URL derived from `.env` (defaulting to `http://127.0.0.1:7000`). In WSL, the helper uses Windows SDK `adb.exe` and `emulator.exe`, obtains the SDK from `ANDROID_SDK_ROOT`, `ANDROID_HOME`, or Windows `LOCALAPPDATA`, and checks `PEPPY_DEBUG_SERVER/healthz` from Windows before `adb reverse`. It supports SDK and APK paths with spaces.
 
 ```sh
 PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-build
 just android-emulator
 just android-deploy
-just android-smoke
+PEPPY_ACCEPT_ANDROID_LICENSES=1 just android-test
+just android-smoke # requires the test-built app and instrumentation APKs
 just android-sms +15555550123 "synthetic test message"
 ```
 
-`android-smoke` installs the debug and instrumentation APKs and accepts only an instrumentation result with `OK` for at least one test and `INSTRUMENTATION_CODE: -1`. It does not wipe or uninstall an app when signatures conflict. SMS remains configurable through `just android-sms <number> <message>`. On WSL, `android-emulator` uses the tracked Windows helper to start or stop only its owned process.
+`just android-test` routes through the Android helper with the selected backend, runs the verifier and five Gradle tasks, and produces both APKs for an explicit smoke run. `android-smoke` installs the debug and instrumentation APKs and accepts only an instrumentation result with `OK` for at least one test and `INSTRUMENTATION_CODE: -1`. It does not wipe or uninstall an app when signatures conflict. SMS remains configurable through `just android-sms <number> <message>`. On WSL, `android-emulator` uses the tracked Windows helper to start or stop only its owned process.
 
 ## iOS Simulator workflow
 
@@ -116,19 +191,56 @@ cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen 
 
 ## Native desktop workflow
 
-On macOS, `desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory. `desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`.
+### Local HTTPS for native development
+
+Set `DEBUG=true` in your local `.env` (or export it in the shell) to enable
+development HTTPS on the configured `API_HOST_PORT`, defaulting to
+`https://127.0.0.1:7000`. Restart the backend and rebuild both native apps after
+changing this setting; opening an existing bundle does not update its certificate
+trust.
+
+Use `just dev-up`, `just desktop-bundle`, and `just android-build` to apply that
+setting on macOS. The macOS and Android build helpers pass the resolved flag and
+public certificate path to their build tools. A direct Android Gradle invocation does not read
+`.env`; export `DEBUG=true` and `PEPPY_DEV_TLS_CERT` yourself in that case.
+
+The development helpers generate a local certificate authority and a server
+certificate under ignored `.opencode/dev/tls/`. Only the public CA certificate is
+included in the Android debug app and the explicitly enabled `Peppy_dev` build.
+They trust it only for local endpoints and still verify certificate hostnames.
+Production trust is unchanged; `DEBUG=true` cannot enable this trust in an
+already-built production app. No certificate is installed in the operating
+system's trust store, so a browser visiting the development server may warn.
+
+Use the same `https://127.0.0.1:7000` origin on the Mac and Android emulator.
+Android deployment/open helpers reverse-forward the configured port through ADB.
+Keep `.opencode/dev/tls/` private and preserve its CA across restarts. Replacing
+the CA requires rebuilding the native apps. Unset `DEBUG` or set `DEBUG=false`
+and restart/rebuild to return to the existing loopback HTTP workflow.
+
+On macOS, `desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory.
+
+`desktop-dev`, `desktop-bundle`, and `desktop-run` run `pnpm install --frozen-lockfile` before building to synchronize dependencies with the selected source tree's lockfile. An install failure stops the build; `desktop-run` does not open an older bundle. These commands do not upgrade packages beyond the lockfile.
 
 Development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources. Development uses a separate Keychain namespace. The first dev launch creates an empty profile. Any prior app data and Keychain records stored under the production identity `org.peppy.desktop` remain unchanged; there is no automatic migration. Legacy Keychain records copy only within the current namespace, never from production into dev.
 
 Each ad-hoc rebuild has a new code identity, so macOS asks again before the dev app can read its Keychain record. To stop the prompts across rebuilds, set `PEPPY_MACOS_SIGNING_IDENTITY` to the exact name or SHA-1 of an Apple Development identity (Xcode, signed in with your Apple ID) or a Developer ID identity, then choose **Always Allow** once. This applies when building the bundle; `desktop-open` only opens the existing bundle, and `desktop-dev` does not use it. Switching identities asks once more, and Apple Development certificates expire after a year.
 
-Production installers use the `tauri.conf.json` configuration (`productName: Peppy`, identifier: `org.peppy.desktop`) and are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
+The base `tauri.conf.json` uses the development identity (`productName: Peppy_dev`, identifier: `org.peppy.desktop.dev`) so direct Tauri commands cannot collide with an installed release. The supported macOS helpers retain their explicit `tauri.dev.conf.json` overlay for compatibility. Trusted production installers explicitly override the base to `productName: Peppy`, identifier `org.peppy.desktop`; they are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
 
 From WSL, the same commands invoke PowerShell against the current Windows checkout. Windows builds write NSIS/MSI bundles below `$CARGO_TARGET_DIR/release/bundle/{nsis,msi}`; `desktop-open` starts `$CARGO_TARGET_DIR/release/peppy-desktop.exe`. The helper uses process-scoped `-ExecutionPolicy Bypass` with `-NoProfile` and does not change machine or user policy. Neither platform path proves a signed, notarized, or production-distributable artifact. See [apps/desktop/README.md](apps/desktop/README.md) for details.
 
 Windows native pnpm installs win32 dependencies into the shared NTFS checkout's `node_modules`. Reinstall dependencies before returning to Linux-side pnpm work in that checkout.
 
 ## Checks and audits
+
+Run the full local CI-equivalent suite on macOS with full Xcode, Docker Compose, Python 3.11+, the pinned Rust/Node/pnpm tools, `shellcheck`, `gitleaks`, `git-cliff`, `cargo-deny` 0.20.2, `cargo-audit` 0.22.2, an `.env` created by `dev-setup`, Android SDK license consent, and Android builder prerequisites:
+
+```sh
+PEPPY_ACCEPT_ANDROID_LICENSES=1 just ci-test
+```
+
+It runs release and development tooling, source/dependency audits, Rust, browser, desktop, Tauri, disposable PostgreSQL/S3 integration, Android, and Swift binding checks. The integration fixtures are isolated and removed on exit. It does not publish, deploy, sign/package release artifacts, run instrumentation on an emulator, or replace the Linux/Windows/macOS CI matrix.
 
 Run the smallest relevant check before relying on a change:
 
@@ -157,9 +269,9 @@ Declare shared Rust versions and paths in the root `[workspace.dependencies]` an
 
 ## Security and recovery limits
 
-The manually shared vault passphrase stays on clients. React receives sanitized view models only, never passphrases, database keys, device credentials, or encryption keys. SMS/MMS carrier transport is plaintext outside the application boundary. Keep transport acknowledgement, local durable receipt, application state, carrier submission, and delivery evidence separate. Do not automatically resend a carrier attempt with an uncertain outcome. Public attachment copies are explicit plaintext derivatives, separate from encrypted originals.
+The generated vault shared secret stays on clients. Enrollment supports manual proof of that secret and explicitly approved encrypted key transfer. The QR secret never reaches the server; the owner verifies the phone's authenticated claim before approval. React receives sanitized view models, not passwords, database keys or device credentials. Browser secret entry uses a dedicated bridge-owned form and worker; it is not equivalent to native OS secret isolation. SMS/MMS carrier transport is plaintext outside the application boundary. Keep transport acknowledgement, local durable receipt, application state, carrier submission, and delivery evidence separate. Do not automatically resend a carrier attempt with an uncertain outcome. Public attachment copies are explicit plaintext derivatives, separate from encrypted originals.
 
-Native clients require manual credential import and manual passphrase unlock. Snapshot history cannot execute carrier work. The Android shell remains companion-first: do not request the default-SMS role, `WRITE_SMS`, hidden APIs, or unverified RCS access. Do not claim store or carrier readiness from simulator or native-build results. Health routes must not disclose configuration, credentials, or dependency diagnostics. See [infra/compose/README.md](infra/compose/README.md) before backup, restore, key rotation, revocation, or recovery work. Do not use `docker compose down -v` as a recovery shortcut.
+Native clients enroll through first-run setup, the single Connect your phone QR, or shared-secret admission. Credential-file onboarding and the reversed computer-join flow are removed; credential serialization remains internal to protected storage. Snapshot history cannot execute carrier work. The Android shell remains companion-first: do not request the default-SMS role, `WRITE_SMS`, hidden APIs, or unverified RCS access. Do not claim store or carrier readiness from simulator or native-build results. Health routes must not disclose configuration, credentials, or dependency diagnostics. See [infra/compose/README.md](infra/compose/README.md) before backup, restore, key rotation, revocation, or recovery work. Do not use `docker compose down -v` as a recovery shortcut.
 
 ## Branches and pull requests
 

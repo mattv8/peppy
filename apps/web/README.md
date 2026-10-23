@@ -18,7 +18,7 @@ This produces `apps/web/dist/` with the bundled UI and WASM core.
 
 - **Emscripten** 6.0.11
 - **Rust** from the repository's pinned toolchain with `wasm32-unknown-emscripten` target
-- **Node** 24.21.0 (pinned in `.node-version`)
+- **Node** 26 (major version selected in `.node-version`; minor and patch updates supported)
 - **pnpm** 12.8.1
 
 Build sources include:
@@ -28,17 +28,20 @@ Build sources include:
 
 ## Deployment
 
-Build artifacts are served from `PEPPY_WEB_CLIENT_DIR` on `PEPPY_WEB_CLIENT_HOST`.
-The same server provides `/v1/*` APIs on that origin using `PUBLIC_API_URL` as
-the canonical reference.
+Build artifacts are served from `PEPPY_WEB_CLIENT_DIR`. Community enables
+`PEPPY_WEB_CLIENT_ROOT=true` by default, so the same server serves the UI at `/`
+and provides `/v1/*` APIs on that origin using `PUBLIC_API_URL` as the canonical
+reference.
 
 **Hostname separation (hosted only):** Account and billing remain on a separate origin configured
 by `PEPPY_WEB_ASSET_DIR` and `PEPPY_WEB_ORIGIN`. The messaging origin (`PEPPY_WEB_CLIENT_HOST`)
 is independently configurable and uses same-origin fetch with HTTPS required.
 
-Community has no hosted account or billing site. Set `WEB_CLIENT_HOST` to serve
-messaging and its `/v1/*` API on that hostname; it may equal `PUBLIC_HOST` or use
-a separate hostname. Leave `WEB_CLIENT_HOST` empty to disable browser messaging.
+Community has no hosted account or billing site. Its Compose configuration maps
+`WEB_UI_ENABLED` to root mode; set `WEB_UI_ENABLED=false` to disable browser
+messaging. `WEB_CLIENT_HOST` is retired: migrate users to `https://PUBLIC_HOST/`
+and remove the separate hostname and DNS record. Configurable external account
+navigation remains available through `WEB_CLIENT_ACCOUNT_URL`.
 
 ## Capabilities and constraints
 

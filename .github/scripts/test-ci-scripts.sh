@@ -27,11 +27,13 @@ expect_failure() {
   fi
 }
 
-for case_name in force_full docs_only rust desktop android ios mobile_design server build ci unclassified; do
+scope_cases=(force_full production_push docs_only rust desktop android ios mobile_design server build ci unclassified)
+for case_name in "${scope_cases[@]}"; do
   output="$temp_dir/$case_name"
   : > "$output"
   case "$case_name" in
     force_full) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true "$SCOPE" ;;
+    production_push) env GITHUB_OUTPUT="$output" FILTER_FORCE_FULL=true PRODUCTION_PUSH=true "$SCOPE" ;;
     docs_only) env GITHUB_OUTPUT="$output" "$SCOPE" ;;
     rust) env GITHUB_OUTPUT="$output" FILTER_RUST=true "$SCOPE" ;;
     desktop) env GITHUB_OUTPUT="$output" FILTER_DESKTOP=true "$SCOPE" ;;
@@ -43,6 +45,20 @@ for case_name in force_full docs_only rust desktop android ios mobile_design ser
     ci) env GITHUB_OUTPUT="$output" FILTER_CI=true "$SCOPE" ;;
     unclassified) env GITHUB_OUTPUT="$output" FILTER_UNCLASSIFIED=true "$SCOPE" ;;
   esac
+done
+
+expect_output "$temp_dir/production_push" 'rust=true'
+expect_output "$temp_dir/production_push" 'container_image=true'
+expect_output "$temp_dir/production_push" 'development_artifacts=false'
+
+for case_name in "${scope_cases[@]}"; do
+  output="$temp_dir/$case_name"
+  if grep -Fqx 'integration=true' "$output"; then
+    expect_output "$output" 'desktop=true'
+  fi
+  if grep -Fqx 'rust=true' "$output"; then
+    expect_output "$output" 'integration=true'
+  fi
 done
 
 for name in rust integration desktop android swift_bindings container_image development_artifacts; do
@@ -73,6 +89,7 @@ expect_output "$temp_dir/mobile_design" 'swift_bindings=true'
 expect_output "$temp_dir/mobile_design" 'development_artifacts=true'
 expect_output "$temp_dir/server" 'rust=false'
 expect_output "$temp_dir/server" 'integration=true'
+expect_output "$temp_dir/server" 'desktop=true'
 expect_output "$temp_dir/server" 'container_image=true'
 expect_output "$temp_dir/server" 'development_artifacts=false'
 expect_output "$temp_dir/build" 'rust=false'
@@ -105,9 +122,23 @@ expect_failure env "${gate_env[@]}" RUST_RESULT=invalid "$GATE"
 expect_failure env CHANGES_RESULT=success "$GATE"
 expect_failure env "${gate_env[@]}" CHANGES_RESULT=failure RUST_RESULT=skipped RUST_REQUIRED= "$GATE"
 
+for prefix in INTEGRATION DESKTOP DEVELOPMENT_ARTIFACTS; do
+  env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=false" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_RESULT=skipped" "${prefix}_REQUIRED=true" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_RESULT=failure" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_RESULT=cancelled" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_RESULT=invalid" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_RESULT=" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_REQUIRED=maybe" "$GATE"
+  expect_failure env "${gate_env[@]}" "${prefix}_REQUIRED=" "$GATE"
+done
+
 summary="$temp_dir/summary"
 expect_failure env "${gate_env[@]}" GITHUB_STEP_SUMMARY="$summary" RUST_REQUIRED= "$GATE"
 expect_output "$summary" '| job | required | result |'
 
 echo 'CI script tests passed'
+bash "$SCRIPT_DIR/test-release-context-guard.sh"
+ruby "$SCRIPT_DIR/test-release-workflows.rb"
+"$SCRIPT_DIR/test-release-signing-readiness.sh"
 "$SCRIPT_DIR/test-publish-community-image.sh"

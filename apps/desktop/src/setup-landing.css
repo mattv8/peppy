@@ -1,34 +1,37 @@
 #setup-landing {
-  color: var(--peppy-text);
+  color: var(--peppy-text-primary);
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  background: radial-gradient(circle at top, var(--peppy-surface-widget), var(--peppy-surface-desk) 56%);
 }
 
 #setup-landing-inner {
   box-sizing: border-box;
   display: grid;
-  gap: 12px;
+  gap: 20px;
   width: 100%;
-  max-width: 520px;
+  max-width: 640px;
   margin: 0 auto;
-  padding: 20px 16px;
+  padding: 32px 24px;
 }
 
 #setup-landing-header {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--peppy-border);
 }
 
 #setup-landing-header h1 {
   min-width: 0;
   margin: 0;
   color: var(--peppy-text-primary);
-  font-size: 20px;
+  font-size: 16px;
   line-height: 1.3;
 }
 
@@ -39,14 +42,73 @@
 
 #setup-landing-body,
 #setup-landing-body > section,
-#hosted-signin-panel {
+#hosted-signin-panel,
+#enrollment-panel {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* The wizard sits flat on the landing background: steps are separated by a rule, never nested cards. */
+#self-hosted-panel > #enrollment-panel:not(:first-child) {
+  padding-top: 16px;
+  border-top: 1px solid var(--peppy-border);
+}
+
+#setup-landing-body > section > h2 {
+  color: var(--peppy-text-primary);
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+#self-hosted-panel > #enrollment-panel > .enrollment-stage > h2 {
+  font-size: 16px;
+}
+
+.enrollment-stage {
   display: grid;
   gap: 12px;
   min-width: 0;
 }
 
+.enrollment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.enrollment-actions:empty {
+  display: none;
+}
+
+.enrollment-methods {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.enrollment-methods label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
 #setup-landing-body :is(h2, h3, h4, h5, h6, p) {
   margin: 0;
+}
+
+#setup-landing-body p,
+#fixed-self-hosted-origin {
+  overflow-wrap: anywhere;
+}
+
+/* Headings receive programmatic focus for screen-reader route announcements, not interactive navigation */
+#setup-landing-body h2[tabindex="-1"]:focus {
+  outline: none;
 }
 
 #hosted-path-chooser {
@@ -68,8 +130,8 @@
   min-width: 0;
   padding: 14px 16px;
   border: 1px solid var(--peppy-border-strong);
-  border-radius: var(--peppy-control-radius);
-  background: transparent;
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius));
+  background: var(--peppy-surface-widget);
   color: var(--peppy-text-primary);
   cursor: pointer;
   text-align: left;
@@ -99,58 +161,41 @@
 #setup-back-button {
   align-self: start;
   justify-self: start;
-  margin-top: 4px;
 }
 
-#join-qr-hero {
+#enrollment-qr-hero {
   align-items: center;
   display: grid;
+  gap: 8px;
   justify-items: center;
+  margin-block: 8px;
 }
 
-#hosted-join-panel[data-join-state="claimed"] #join-qr-image {
-  opacity: .3;
-}
-
-#hosted-join-panel[data-join-state="confirm"] #join-qr-image {
-  display: none;
-}
-
-#join-qr-image {
+#enrollment-qr-image {
   width: clamp(160px, 38vh, 256px);
   max-width: 100%;
   height: auto;
   image-rendering: auto;
 }
 
-#join-sas-panel {
-  display: grid;
-  gap: 8px;
+#enrollment-countdown {
+  padding: 3px 8px;
+  border: 1px solid var(--peppy-border);
+  border-radius: var(--peppy-radius-pill, var(--peppy-control-radius));
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
 }
 
-#join-sas-code {
+#enrollment-panel > .enrollment-stage > .setup-hint {
+  line-height: 1.5;
+}
+
+#enrollment-verification-code {
   font-family: monospace;
   font-size: 24px;
   letter-spacing: .12em;
-}
-
-#join-confirm-actions {
-  display: grid;
-  gap: 8px;
-}
-
-#join-confirm-button {
-  margin-top: 8px;
-}
-
-#join-cancel-button-confirm {
-  margin-top: 0;
-}
-
-.join-retrying-hint {
-  color: var(--peppy-text-secondary, var(--peppy-text));
-  font-size: 13px;
-  margin: 4px 0 0;
 }
 
 #self-hosted-url-input {
@@ -159,11 +204,24 @@
   width: 100%;
 }
 
-#self-hosted-advanced {
-  margin-top: 8px;
+.setup-url-field {
+  display: grid;
+  gap: 4px;
+}
+
+.setup-field-error {
+  display: block;
+  color: var(--peppy-error-text);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 @media (max-width: 360px) {
+  #setup-landing-inner {
+    gap: 16px;
+    padding: 16px 12px;
+  }
+
   #setup-mode-select {
     margin-left: 0;
   }

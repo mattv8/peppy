@@ -8,12 +8,14 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 channel=dev
 bump=auto
 explicit_version=
+allow_auto_patch_fallback=false
 while (($#)); do
     case $1 in
         --channel) channel=${2:-}; shift 2 ;;
         --bump) bump=${2:-}; shift 2 ;;
         --version) explicit_version=${2:-}; shift 2 ;;
-        *) release_die "usage: $0 [--channel stable|prerelease|dev] [--bump auto|patch|minor|major] [--version X.Y.Z]" 2 ;;
+        --allow-auto-patch-fallback) allow_auto_patch_fallback=true; shift ;;
+        *) release_die "usage: $0 [--channel stable|prerelease|dev] [--bump auto|patch|minor|major] [--version X.Y.Z] [--allow-auto-patch-fallback]" 2 ;;
     esac
 done
 case $channel in stable|prerelease|dev) ;; *) release_die "invalid channel: $channel" 2 ;; esac
@@ -64,7 +66,7 @@ elif [[ $bump == auto ]]; then
         if [[ $only_non_releasable == true ]]; then base_version=${last_stable#v}; fi
     fi
     if [[ $base_version == "${last_stable#v}" ]]; then
-        if [[ $channel == stable ]]; then release_die "no releasable commits since $last_stable; pass --bump or --version" 3; fi
+        if [[ $channel == stable && $allow_auto_patch_fallback != true ]]; then release_die "no releasable commits since $last_stable; pass --bump or --version" 3; fi
         base_version=$(semver_bump "$last_stable" patch)
         resolved_bump=none-patch
     else

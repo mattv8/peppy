@@ -1,0 +1,13 @@
+{
+	auto_https off
+	persist_config off
+}
+
+:443 {
+	tls /certs/server.pem /certs/server-key.pem
+
+	reverse_proxy dev:8080 {
+		header_up Host {http.request.host}
+		header_up X-Forwarded-Proto https
+	}
+}

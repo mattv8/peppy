@@ -5,9 +5,13 @@ use peppy_client_core::{
     AttachmentInfo, AttachmentState, Captured, CipherObject, Client, ClientConfig,
     ComposeDraftUpdate, DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts,
     GatewayPlatform, GatewaySettings, IncomingSms, KeyProfile, MAX_SEAL_BATCH, Message,
-    MmsAcquisitionInput, MmsAcquisitionState, MmsSource, NativeKeyCache, NotificationCapture,
-    NotificationCaptureOutcome, NotificationTarget, PermitBlock, PermitDecision, ReceivedCommand,
-    SendResult, Transport, VaultCheckHeader, VaultId,
+    MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause, MmsBackfillPhase,
+    MmsBackfillRecheck, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
+    MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
+    NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
+    PermitBlock, PermitDecision, ReceivedCommand, SendResult, SmsAcquisitionInput,
+    SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
+    Transport, VaultCheckHeader, VaultId,
 };
 use std::{
     fmt,
@@ -17,6 +21,7 @@ use std::{
 use zeroize::Zeroize;
 
 mod hosted;
+pub mod newenrollment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum CapabilityState {
@@ -83,28 +88,6 @@ pub struct NativeGatewayPolicyDecision {
     pub rcs_supported: bool,
 }
 
-/// Canonical bytes to sign with the phone-owned enrollment key. This binding
-/// deliberately does not create, import, or expose private enrollment keys.
-#[uniffi::export]
-pub fn pairing_proof_bytes(
-    challenge_token: String,
-    vault_id: String,
-    device_id: String,
-    profile_fingerprint: String,
-    key_epoch: u32,
-    approved_role: String,
-) -> Result<Vec<u8>, MobileBindingsError> {
-    peppy_hosted_client::claim::pairing_proof_bytes(
-        &challenge_token,
-        &vault_id,
-        &device_id,
-        &profile_fingerprint,
-        key_epoch,
-        &approved_role,
-    )
-    .map_err(|_| MobileBindingsError::InvalidRequest)
-}
-
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeOpenConfig {
     pub database_path: String,
@@ -141,11 +124,139 @@ pub struct NativeIncomingSms {
     pub imported: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsSource {
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub provider_message_id: String,
+    pub provider_thread_id: Option<String>,
+    pub broadcast_id: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsProviderAcquisitionInput {
+    pub source: NativeSmsSource,
+    pub incoming: bool,
+    pub sender_address: Option<String>,
+    pub recipients: Vec<String>,
+    pub body: String,
+    pub imported: bool,
+    pub sent_at_ms: Option<i64>,
+    pub date_sent_ms: Option<i64>,
+    pub creator: Option<String>,
+    pub source_row_fingerprint: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeSmsAcquisitionState {
+    Pending,
+    Unavailable,
+    Complete,
+    Paused,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsAcquisition {
+    pub acquisition_id: String,
+    pub conversation_id: String,
+    pub input: NativeSmsProviderAcquisitionInput,
+    pub state: NativeSmsAcquisitionState,
+    pub reason: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsScanStatus {
+    pub checkpoint: Option<String>,
+    pub history_complete: bool,
+    pub paused: bool,
+    pub reason: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsScanPlan {
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub imported: bool,
+    pub checkpoint: Option<String>,
+    pub history_upper_bound: Option<String>,
+    pub history_complete: bool,
+    pub paused: bool,
+    pub pending_recheck_cursor: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsReconciliationPlan {
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub cursor: Option<String>,
+    pub upper_bound: String,
+    pub history_upper_bound: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeSmsHistoryStatus {
+    pub baseline_initialized: bool,
+    pub scanning: bool,
+    pub history_complete: bool,
+    pub paused: bool,
+    pub provider_error: bool,
+    pub pending_count: u64,
+    pub ambiguous_count: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsSource {
     pub source_generation: String,
     pub subscription_id: String,
     pub provider_message_id: String,
     pub provider_thread_id: Option<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsBackfillPause {
+    RecoveryCapacity,
+    LocalCapacity,
+    RemoteStorage,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsBackfillPhase {
+    Live,
+    History,
+    Recheck,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsBackfillDirection {
+    Incoming,
+    Outgoing,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsLegacyBackfillState {
+    pub history_baseline: Option<String>,
+    pub import_history: Option<bool>,
+    pub recheck_cursor: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsBackfillStatus {
+    pub baseline_initialized: bool,
+    pub history_upper_bound: Option<String>,
+    pub history_complete: bool,
+    pub pause: Option<NativeMmsBackfillPause>,
+    pub pending_count: u64,
+    pub quarantined_count: u64,
+    pub recheck_cursor: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsBackfillScanPlan {
+    pub phase: NativeMmsBackfillPhase,
+    pub source_generation: String,
+    pub subscription_id: String,
+    pub cursor: Option<String>,
+    pub history_upper_bound: Option<String>,
+    pub history_complete: bool,
+    pub paused: bool,
+    pub pause: Option<NativeMmsBackfillPause>,
+    pub budget: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsBackfillRecheckRequest {
+    pub provider_message_id: String,
+    pub direction: NativeMmsBackfillDirection,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsBackfillRecheck {
+    pub requests: Vec<NativeMmsBackfillRecheckRequest>,
+    pub cursor: Option<String>,
+    pub budget: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsAcquisitionInput {
@@ -176,9 +287,38 @@ pub struct NativeMmsAcquisition {
     pub attachment_ids: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsProviderIdentityQuarantine {
+    pub source: NativeMmsSource,
+    pub incoming: bool,
+    pub reason: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsBeginOutcome {
+    Acquired {
+        // UniFFI lowers Box<Record> transparently while keeping this enum compact.
+        acquisition: Box<NativeMmsAcquisition>,
+    },
+    Quarantined {
+        quarantine: NativeMmsProviderIdentityQuarantine,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsPreviewState {
+    Pending,
+    Deferred,
+    PermanentlyUnavailable,
+    Ready,
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsAcquisitionPart {
     pub provider_part_id: String,
     pub attachment_id: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub thumbnail_attachment_id: Option<String>,
+    pub preview_state: NativeMmsPreviewState,
+    pub metadata_recorded: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsReplyContext {
@@ -272,6 +412,7 @@ pub struct NativeMessage {
     pub incoming: bool,
     pub seen: bool,
     pub send_state: Option<String>,
+    pub sent_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -493,6 +634,8 @@ pub enum MobileBindingsError {
     MmsAcquisitionLimit,
     #[error("MMS pending media quota exceeded")]
     MmsMediaQuota,
+    #[error("SMS acquisition capacity reached")]
+    SmsCapacity,
 }
 
 impl From<CoreError> for MobileBindingsError {
@@ -512,7 +655,10 @@ impl From<CoreError> for MobileBindingsError {
             | CoreError::IllegalTransition { .. } => Self::InvalidRequest,
             CoreError::Conflict => Self::Conflict,
             CoreError::NotFound => Self::NotFound,
-            CoreError::StaleDraft { .. } => Self::StaleDraft,
+            CoreError::StaleDraft { .. } | CoreError::DraftMoved { .. } => Self::StaleDraft,
+            CoreError::DraftNotDiscardable
+            | CoreError::RecipientlessDraftExists
+            | CoreError::DraftMergeOverflow => Self::Conflict,
             CoreError::InvalidKeyCache => Self::InvalidKeyCache,
             CoreError::KeysUnavailable => Self::KeysUnavailable,
             CoreError::InvalidMedia => Self::InvalidMedia,
@@ -520,6 +666,7 @@ impl From<CoreError> for MobileBindingsError {
             CoreError::SnapshotMismatch => Self::Conflict,
             CoreError::MmsAcquisitionLimit => Self::MmsAcquisitionLimit,
             CoreError::MmsMediaQuota => Self::MmsMediaQuota,
+            CoreError::SmsCapacity => Self::SmsCapacity,
         }
     }
 }
@@ -534,59 +681,6 @@ pub struct NativeClient {
 #[derive(uniffi::Object)]
 pub struct NativePlaintextHandle {
     file: Mutex<Option<peppy_client_core::NativePlaintextFile>>,
-}
-
-/// Phone-owned Ed25519 enrollment seed. The only byte export is for an
-/// Android Keystore/Keychain caller; it is never included in a view DTO.
-#[derive(uniffi::Object)]
-pub struct NativeEnrollmentKey {
-    key: peppy_hosted_client::claim::EnrollmentKey,
-}
-
-#[uniffi::export]
-pub fn generate_native_enrollment_key() -> Result<Arc<NativeEnrollmentKey>, MobileBindingsError> {
-    Ok(Arc::new(NativeEnrollmentKey {
-        key: peppy_hosted_client::claim::EnrollmentKey::generate()
-            .map_err(|_| MobileBindingsError::Crypto)?,
-    }))
-}
-
-#[uniffi::export]
-pub fn native_enrollment_key_from_native_secure_storage(
-    seed: Vec<u8>,
-) -> Result<Arc<NativeEnrollmentKey>, MobileBindingsError> {
-    Ok(Arc::new(NativeEnrollmentKey {
-        key: peppy_hosted_client::claim::EnrollmentKey::from_seed(&seed)
-            .map_err(|_| MobileBindingsError::InvalidRequest)?,
-    }))
-}
-
-#[uniffi::export]
-impl NativeEnrollmentKey {
-    pub fn export_seed_for_native_secure_storage(&self) -> Vec<u8> {
-        self.key.export_seed_for_native_secure_storage()
-    }
-    pub fn public_key_base64url(&self) -> Result<String, MobileBindingsError> {
-        self.key
-            .public_key_base64url()
-            .map_err(|_| MobileBindingsError::Crypto)
-    }
-    pub fn sign_pairing_proof(&self, proof: Vec<u8>) -> Result<String, MobileBindingsError> {
-        self.key
-            .sign_pairing_proof(&proof)
-            .map_err(|_| MobileBindingsError::Crypto)
-    }
-    /// Computes the SAS only after the returned server digest matches this key.
-    pub fn pairing_sas(
-        &self,
-        intent_token: String,
-        device_id: String,
-        server_key_digest: String,
-    ) -> Result<String, MobileBindingsError> {
-        self.key
-            .pairing_sas(&intent_token, &device_id, &server_key_digest)
-            .map_err(|_| MobileBindingsError::InvalidRequest)
-    }
 }
 
 fn parse_id<T: FromStr>(value: &str) -> Result<T, MobileBindingsError> {
@@ -727,6 +821,7 @@ fn message_view(message: Message) -> NativeMessage {
         ),
         seen: message.seen,
         send_state: message.send_state.map(|state| format!("{state:?}")),
+        sent_at_ms: message.payload.sent_at_ms.filter(|time| *time > 0),
     }
 }
 
@@ -748,6 +843,7 @@ fn payload_view(payload: peppy_client_core::MessagePayload) -> NativeMessage {
         incoming: matches!(payload.direction, peppy_client_core::Direction::Incoming),
         seen: false,
         send_state: None,
+        sent_at_ms: payload.sent_at_ms.filter(|time| *time > 0),
     }
 }
 
@@ -850,6 +946,17 @@ fn with_client<T>(
     operation(&client).map_err(Into::into)
 }
 
+impl NativeClient {
+    pub(crate) fn activate_enrollment_identity(
+        &self,
+        activation: peppy_hosted_client::newenrollment::NativeIdentityActivation,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            activation.activate(client).map_err(|_| CoreError::Crypto)
+        })
+    }
+}
+
 fn draft_view(
     draft: peppy_client_core::ComposeDraft,
 ) -> Result<NativeComposeDraft, MobileBindingsError> {
@@ -913,6 +1020,116 @@ fn mms_input(input: NativeMmsAcquisitionInput) -> MmsAcquisitionInput {
         transaction_id: input.transaction_id,
     }
 }
+fn incoming_sms(sms: NativeIncomingSms) -> Result<IncomingSms, MobileBindingsError> {
+    Ok(IncomingSms {
+        conversation_id: sms.conversation_id.as_deref().map(parse_id).transpose()?,
+        sender_address: sms.sender_address,
+        body: sms.body,
+        provider_message_id: sms.provider_message_id,
+        imported: sms.imported,
+    })
+}
+fn sms_input(input: NativeSmsProviderAcquisitionInput) -> SmsAcquisitionInput {
+    SmsAcquisitionInput {
+        source: SmsSource {
+            source_generation: input.source.source_generation,
+            subscription_id: input.source.subscription_id,
+            provider_message_id: input.source.provider_message_id,
+            provider_thread_id: input.source.provider_thread_id,
+            broadcast_id: input.source.broadcast_id,
+        },
+        direction: if input.incoming {
+            peppy_client_core::Direction::Incoming
+        } else {
+            peppy_client_core::Direction::Outgoing
+        },
+        sender_address: input.sender_address,
+        recipients: input.recipients,
+        body: input.body,
+        imported: input.imported,
+        sent_at_ms: input.sent_at_ms,
+        date_sent_ms: input.date_sent_ms,
+        creator: input.creator,
+        source_row_fingerprint: input.source_row_fingerprint,
+    }
+}
+fn sms_input_view(input: SmsAcquisitionInput) -> NativeSmsProviderAcquisitionInput {
+    NativeSmsProviderAcquisitionInput {
+        source: NativeSmsSource {
+            source_generation: input.source.source_generation,
+            subscription_id: input.source.subscription_id,
+            provider_message_id: input.source.provider_message_id,
+            provider_thread_id: input.source.provider_thread_id,
+            broadcast_id: input.source.broadcast_id,
+        },
+        incoming: input.direction == peppy_client_core::Direction::Incoming,
+        sender_address: input.sender_address,
+        recipients: input.recipients,
+        body: input.body,
+        imported: input.imported,
+        sent_at_ms: input.sent_at_ms,
+        date_sent_ms: input.date_sent_ms,
+        creator: input.creator,
+        source_row_fingerprint: input.source_row_fingerprint,
+    }
+}
+fn sms_state_view(state: SmsAcquisitionState) -> NativeSmsAcquisitionState {
+    match state {
+        SmsAcquisitionState::Pending => NativeSmsAcquisitionState::Pending,
+        SmsAcquisitionState::Unavailable => NativeSmsAcquisitionState::Unavailable,
+        SmsAcquisitionState::Complete => NativeSmsAcquisitionState::Complete,
+        SmsAcquisitionState::Paused => NativeSmsAcquisitionState::Paused,
+    }
+}
+fn sms_state(state: NativeSmsAcquisitionState) -> SmsAcquisitionState {
+    match state {
+        NativeSmsAcquisitionState::Pending => SmsAcquisitionState::Pending,
+        NativeSmsAcquisitionState::Unavailable => SmsAcquisitionState::Unavailable,
+        NativeSmsAcquisitionState::Complete => SmsAcquisitionState::Complete,
+        NativeSmsAcquisitionState::Paused => SmsAcquisitionState::Paused,
+    }
+}
+fn sms_acquisition_view(item: peppy_client_core::SmsAcquisition) -> NativeSmsAcquisition {
+    NativeSmsAcquisition {
+        acquisition_id: item.acquisition_id,
+        conversation_id: item.conversation_id.to_string(),
+        input: sms_input_view(item.input),
+        state: sms_state_view(item.state),
+        reason: item.reason,
+    }
+}
+fn sms_scan_plan_view(plan: SmsScanPlan) -> NativeSmsScanPlan {
+    NativeSmsScanPlan {
+        source_generation: plan.source_generation,
+        subscription_id: plan.subscription_id,
+        imported: plan.imported,
+        checkpoint: plan.checkpoint,
+        history_upper_bound: plan.history_upper_bound,
+        history_complete: plan.history_complete,
+        paused: plan.paused,
+        pending_recheck_cursor: plan.pending_recheck_cursor,
+    }
+}
+fn sms_reconciliation_plan_view(plan: SmsReconciliationPlan) -> NativeSmsReconciliationPlan {
+    NativeSmsReconciliationPlan {
+        source_generation: plan.source_generation,
+        subscription_id: plan.subscription_id,
+        cursor: plan.cursor,
+        upper_bound: plan.upper_bound,
+        history_upper_bound: plan.history_upper_bound,
+    }
+}
+fn sms_history_status_view(status: SmsHistoryStatus) -> NativeSmsHistoryStatus {
+    NativeSmsHistoryStatus {
+        baseline_initialized: status.baseline_initialized,
+        scanning: status.scanning,
+        history_complete: status.history_complete,
+        paused: status.paused,
+        provider_error: status.provider_error,
+        pending_count: status.pending_count,
+        ambiguous_count: status.ambiguous_count,
+    }
+}
 fn mms_input_view(input: MmsAcquisitionInput) -> NativeMmsAcquisitionInput {
     NativeMmsAcquisitionInput {
         source: NativeMmsSource {
@@ -945,6 +1162,118 @@ fn mms_state_view(state: MmsAcquisitionState) -> NativeMmsAcquisitionState {
         MmsAcquisitionState::Blocked => NativeMmsAcquisitionState::Blocked,
         MmsAcquisitionState::Unavailable => NativeMmsAcquisitionState::Unavailable,
         MmsAcquisitionState::Complete => NativeMmsAcquisitionState::Complete,
+    }
+}
+fn mms_backfill_pause_view(value: MmsBackfillPause) -> NativeMmsBackfillPause {
+    match value {
+        MmsBackfillPause::RecoveryCapacity => NativeMmsBackfillPause::RecoveryCapacity,
+        MmsBackfillPause::LocalCapacity => NativeMmsBackfillPause::LocalCapacity,
+        MmsBackfillPause::RemoteStorage => NativeMmsBackfillPause::RemoteStorage,
+    }
+}
+fn mms_backfill_phase(value: NativeMmsBackfillPhase) -> MmsBackfillPhase {
+    match value {
+        NativeMmsBackfillPhase::Live => MmsBackfillPhase::Live,
+        NativeMmsBackfillPhase::History => MmsBackfillPhase::History,
+        NativeMmsBackfillPhase::Recheck => MmsBackfillPhase::Recheck,
+    }
+}
+fn mms_backfill_phase_view(value: MmsBackfillPhase) -> NativeMmsBackfillPhase {
+    match value {
+        MmsBackfillPhase::Live => NativeMmsBackfillPhase::Live,
+        MmsBackfillPhase::History => NativeMmsBackfillPhase::History,
+        MmsBackfillPhase::Recheck => NativeMmsBackfillPhase::Recheck,
+    }
+}
+fn mms_backfill_direction_view(value: peppy_client_core::Direction) -> NativeMmsBackfillDirection {
+    match value {
+        peppy_client_core::Direction::Incoming => NativeMmsBackfillDirection::Incoming,
+        peppy_client_core::Direction::Outgoing => NativeMmsBackfillDirection::Outgoing,
+    }
+}
+fn mms_backfill_status_view(
+    value: peppy_client_core::MmsBackfillStatus,
+) -> NativeMmsBackfillStatus {
+    NativeMmsBackfillStatus {
+        baseline_initialized: value.baseline_initialized,
+        history_upper_bound: value.history_upper_bound,
+        history_complete: value.history_complete,
+        pause: value.pause.map(mms_backfill_pause_view),
+        pending_count: value.pending_count,
+        quarantined_count: value.quarantined_count,
+        recheck_cursor: value.recheck_cursor,
+    }
+}
+fn mms_backfill_scan_plan_view(value: MmsBackfillScanPlan) -> NativeMmsBackfillScanPlan {
+    NativeMmsBackfillScanPlan {
+        phase: mms_backfill_phase_view(value.phase),
+        source_generation: value.source_generation,
+        subscription_id: value.subscription_id,
+        cursor: value.cursor,
+        history_upper_bound: value.history_upper_bound,
+        history_complete: value.history_complete,
+        paused: value.paused,
+        pause: value.pause.map(mms_backfill_pause_view),
+        budget: value.budget as u64,
+    }
+}
+fn mms_preview_state(value: NativeMmsPreviewState) -> MmsPreviewState {
+    match value {
+        NativeMmsPreviewState::Pending => MmsPreviewState::Pending,
+        NativeMmsPreviewState::Deferred => MmsPreviewState::Deferred,
+        NativeMmsPreviewState::PermanentlyUnavailable => MmsPreviewState::PermanentlyUnavailable,
+        NativeMmsPreviewState::Ready => MmsPreviewState::Ready,
+    }
+}
+fn mms_preview_state_view(value: MmsPreviewState) -> NativeMmsPreviewState {
+    match value {
+        MmsPreviewState::Pending => NativeMmsPreviewState::Pending,
+        MmsPreviewState::Deferred => NativeMmsPreviewState::Deferred,
+        MmsPreviewState::PermanentlyUnavailable => NativeMmsPreviewState::PermanentlyUnavailable,
+        MmsPreviewState::Ready => NativeMmsPreviewState::Ready,
+    }
+}
+fn mms_quarantine_view(
+    value: MmsProviderIdentityQuarantine,
+) -> NativeMmsProviderIdentityQuarantine {
+    NativeMmsProviderIdentityQuarantine {
+        source: NativeMmsSource {
+            source_generation: value.source.source_generation,
+            subscription_id: value.source.subscription_id,
+            provider_message_id: value.source.provider_message_id,
+            provider_thread_id: value.source.provider_thread_id,
+        },
+        incoming: value.direction == peppy_client_core::Direction::Incoming,
+        reason: value.reason,
+    }
+}
+fn mms_begin_outcome_view(value: MmsBeginOutcome) -> NativeMmsBeginOutcome {
+    match value {
+        MmsBeginOutcome::Acquired(acquisition) => NativeMmsBeginOutcome::Acquired {
+            acquisition: Box::new(mms_acquisition_view(acquisition)),
+        },
+        MmsBeginOutcome::Quarantined(quarantine) => NativeMmsBeginOutcome::Quarantined {
+            quarantine: mms_quarantine_view(quarantine),
+        },
+    }
+}
+fn mms_backfill_recheck_request_view(
+    value: MmsBackfillRecheckRequest,
+) -> NativeMmsBackfillRecheckRequest {
+    NativeMmsBackfillRecheckRequest {
+        provider_message_id: value.provider_message_id,
+        direction: mms_backfill_direction_view(value.direction),
+    }
+}
+fn mms_backfill_recheck_view(value: MmsBackfillRecheck) -> NativeMmsBackfillRecheck {
+    NativeMmsBackfillRecheck {
+        requests: value
+            .requests
+            .into_iter()
+            .map(mms_backfill_recheck_request_view)
+            .collect(),
+        cursor: value.cursor,
+        budget: value.budget as u64,
     }
 }
 fn mms_acquisition_view(item: peppy_client_core::MmsAcquisition) -> NativeMmsAcquisition {
@@ -1107,17 +1436,8 @@ impl NativeClient {
         &self,
         sms: NativeIncomingSms,
     ) -> Result<NativeCaptured, MobileBindingsError> {
-        let conversation_id = sms.conversation_id.as_deref().map(parse_id).transpose()?;
-        with_client(&self.client, |client| {
-            client.capture_incoming(IncomingSms {
-                conversation_id,
-                sender_address: sms.sender_address,
-                body: sms.body,
-                provider_message_id: sms.provider_message_id,
-                imported: sms.imported,
-            })
-        })
-        .map(
+        let sms = incoming_sms(sms)?;
+        with_client(&self.client, |client| client.capture_incoming(sms)).map(
             |Captured {
                  message_id,
                  conversation_id,
@@ -1130,6 +1450,199 @@ impl NativeClient {
         )
     }
 
+    /// Timestamp-aware `SMS_RECEIVED` capture. `sms.provider_message_id` carries the broadcast
+    /// identity; `smsc_at_ms` is the carrier timestamp (provider `date_sent`) kept as
+    /// reconciliation evidence, and `received_at_ms` is the local receipt time users see. A
+    /// provider row captured first for the same message is reused, never duplicated.
+    pub fn capture_incoming_timed(
+        &self,
+        sms: NativeIncomingSms,
+        smsc_at_ms: Option<i64>,
+        received_at_ms: Option<i64>,
+    ) -> Result<NativeCaptured, MobileBindingsError> {
+        let sms = incoming_sms(sms)?;
+        with_client(&self.client, |client| {
+            client.capture_incoming_broadcast(sms, smsc_at_ms, received_at_ms)
+        })
+        .map(|captured| NativeCaptured {
+            message_id: captured.message_id.to_string(),
+            conversation_id: captured.conversation_id.to_string(),
+            duplicate: captured.duplicate,
+        })
+    }
+    pub fn begin_sms_provider_acquisition(
+        &self,
+        input: NativeSmsProviderAcquisitionInput,
+    ) -> Result<NativeSmsAcquisition, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.begin_sms_acquisition(sms_input(input))
+        })
+        .map(sms_acquisition_view)
+    }
+    pub fn complete_sms_acquisition(
+        &self,
+        id: String,
+    ) -> Result<NativeCaptured, MobileBindingsError> {
+        with_client(&self.client, |client| client.complete_sms_acquisition(&id)).map(|captured| {
+            NativeCaptured {
+                message_id: captured.message_id.to_string(),
+                conversation_id: captured.conversation_id.to_string(),
+                duplicate: captured.duplicate,
+            }
+        })
+    }
+    pub fn sms_acquisitions_after(
+        &self,
+        after_id: Option<String>,
+        limit: u64,
+    ) -> Result<Vec<NativeSmsAcquisition>, MobileBindingsError> {
+        let limit = usize::try_from(limit).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.sms_acquisitions_after(after_id.as_deref(), limit)
+        })
+        .map(|items| items.into_iter().map(sms_acquisition_view).collect())
+    }
+    pub fn set_sms_acquisition_state(
+        &self,
+        id: String,
+        state: NativeSmsAcquisitionState,
+        reason: Option<String>,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_sms_acquisition_state(&id, sms_state(state), reason.as_deref())
+        })
+    }
+    pub fn sms_scan_status(
+        &self,
+        source_generation: String,
+        subscription_id: String,
+        imported: bool,
+    ) -> Result<NativeSmsScanStatus, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.sms_scan_status(&source_generation, &subscription_id, imported)
+        })
+        .map(|status| NativeSmsScanStatus {
+            checkpoint: status.checkpoint,
+            history_complete: status.history_complete,
+            paused: status.paused,
+            reason: status.reason,
+        })
+    }
+    pub fn set_sms_scan_checkpoint(
+        &self,
+        source_generation: String,
+        subscription_id: String,
+        imported: bool,
+        provider_message_id: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_sms_scan_checkpoint(
+                &source_generation,
+                &subscription_id,
+                imported,
+                &provider_message_id,
+            )
+        })
+    }
+    pub fn plan_sms_scans(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        observed_high_water: String,
+    ) -> Result<Vec<NativeSmsScanPlan>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.plan_sms_scans(&source_generation, &provider_scope, &observed_high_water)
+        })
+        .map(|plans| plans.into_iter().map(sms_scan_plan_view).collect())
+    }
+    pub fn plan_sms_reconciliation(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        observed_high_water: String,
+        live_anchor_fingerprint: Option<String>,
+    ) -> Result<Option<NativeSmsReconciliationPlan>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.plan_sms_reconciliation(
+                &source_generation,
+                &provider_scope,
+                &observed_high_water,
+                live_anchor_fingerprint.as_deref(),
+            )
+        })
+        .map(|plan| plan.map(sms_reconciliation_plan_view))
+    }
+    pub fn complete_sms_reconciliation(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        upper_bound: String,
+        cursor: Option<String>,
+        exhausted: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.complete_sms_reconciliation(
+                &source_generation,
+                &provider_scope,
+                &upper_bound,
+                cursor.as_deref(),
+                exhausted,
+            )
+        })
+    }
+    pub fn set_sms_pending_recheck_cursor(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        imported: bool,
+        acquisition_id: Option<String>,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_sms_pending_recheck_cursor(
+                &source_generation,
+                &provider_scope,
+                imported,
+                acquisition_id.as_deref(),
+            )
+        })
+    }
+    pub fn ack_sms_scan_exhausted(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        imported: bool,
+        frozen_upper_bound: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.ack_sms_scan_exhausted(
+                &source_generation,
+                &provider_scope,
+                imported,
+                &frozen_upper_bound,
+            )
+        })
+    }
+    pub fn set_sms_provider_error(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        provider_error: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_sms_provider_error(&source_generation, &provider_scope, provider_error)
+        })
+    }
+    pub fn sms_history_status(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+    ) -> Result<NativeSmsHistoryStatus, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.sms_history_status(&source_generation, &provider_scope)
+        })
+        .map(sms_history_status_view)
+    }
+
     pub fn begin_mms_acquisition(
         &self,
         input: NativeMmsAcquisitionInput,
@@ -1138,6 +1651,18 @@ impl NativeClient {
             client.begin_mms_acquisition(mms_input(input))
         })
         .map(mms_acquisition_view)
+    }
+    pub fn begin_mms_acquisition_outcome(
+        &self,
+        input: NativeMmsAcquisitionInput,
+    ) -> Result<NativeMmsBeginOutcome, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.begin_mms_acquisition_outcome(mms_input(input))
+        })
+        .map(mms_begin_outcome_view)
+    }
+    pub fn mms_content_version(&self) -> u32 {
+        peppy_client_core::MMS_CONTENT_VERSION
     }
     pub fn mms_acquisitions(
         &self,
@@ -1178,8 +1703,52 @@ impl NativeClient {
                 .map(|part| NativeMmsAcquisitionPart {
                     provider_part_id: part.provider_part_id,
                     attachment_id: part.attachment_id.to_string(),
+                    width: part.width,
+                    height: part.height,
+                    duration_ms: part.duration_ms,
+                    thumbnail_attachment_id: part.thumbnail_attachment_id.map(|id| id.to_string()),
+                    preview_state: mms_preview_state_view(part.preview_state),
+                    metadata_recorded: part.metadata_recorded,
                 })
                 .collect()
+        })
+    }
+    pub fn set_mms_acquisition_part_metadata(
+        &self,
+        id: String,
+        provider_part_id: String,
+        width: Option<u32>,
+        height: Option<u32>,
+        duration_ms: Option<u64>,
+        thumbnail_attachment_id: Option<String>,
+    ) -> Result<(), MobileBindingsError> {
+        let thumbnail_attachment_id = thumbnail_attachment_id
+            .as_deref()
+            .map(parse_id)
+            .transpose()?;
+        with_client(&self.client, |client| {
+            client.set_mms_acquisition_part_metadata(
+                &id,
+                &provider_part_id,
+                width,
+                height,
+                duration_ms,
+                thumbnail_attachment_id,
+            )
+        })
+    }
+    pub fn set_mms_acquisition_part_preview_state(
+        &self,
+        id: String,
+        provider_part_id: String,
+        state: NativeMmsPreviewState,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_mms_acquisition_part_preview_state(
+                &id,
+                &provider_part_id,
+                mms_preview_state(state),
+            )
         })
     }
     pub fn complete_mms_acquisition(
@@ -1202,6 +1771,129 @@ impl NativeClient {
     ) -> Result<Option<String>, MobileBindingsError> {
         with_client(&self.client, |client| {
             client.mms_scan_checkpoint(&source_generation, &subscription_id, imported)
+        })
+    }
+    pub fn migrate_mms_backfill_state(
+        &self,
+        generation: String,
+        scope: String,
+        legacy: NativeMmsLegacyBackfillState,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.migrate_mms_backfill_state(
+                &generation,
+                &scope,
+                MmsLegacyBackfillState {
+                    history_baseline: legacy.history_baseline,
+                    import_history: legacy.import_history,
+                    recheck_cursor: legacy.recheck_cursor,
+                },
+            )
+        })
+    }
+    pub fn plan_mms_backfill_scans(
+        &self,
+        generation: String,
+        scope: String,
+        observed_max_id: String,
+    ) -> Result<Vec<NativeMmsBackfillScanPlan>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.plan_mms_backfill_scans(&generation, &scope, &observed_max_id)
+        })
+        .map(|plans| plans.into_iter().map(mms_backfill_scan_plan_view).collect())
+    }
+    pub fn advance_mms_backfill_page(
+        &self,
+        generation: String,
+        scope: String,
+        phase: NativeMmsBackfillPhase,
+        provider_id: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.advance_mms_backfill_page(
+                &generation,
+                &scope,
+                mms_backfill_phase(phase),
+                &provider_id,
+            )
+        })
+    }
+    pub fn finish_mms_backfill_phase(
+        &self,
+        generation: String,
+        scope: String,
+        phase: NativeMmsBackfillPhase,
+        bound: String,
+        exhausted: bool,
+    ) -> Result<bool, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.finish_mms_backfill_phase(
+                &generation,
+                &scope,
+                mms_backfill_phase(phase),
+                &bound,
+                exhausted,
+            )
+        })
+    }
+    pub fn mms_backfill_recheck_requests(
+        &self,
+        generation: String,
+        scope: String,
+    ) -> Result<NativeMmsBackfillRecheck, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.mms_backfill_recheck_requests(&generation, &scope)
+        })
+        .map(mms_backfill_recheck_view)
+    }
+    pub fn request_mms_recheck(
+        &self,
+        generation: String,
+        scope: String,
+        limit: u64,
+    ) -> Result<u64, MobileBindingsError> {
+        let limit = usize::try_from(limit).map_err(|_| MobileBindingsError::InvalidRequest)?;
+        with_client(&self.client, |client| {
+            client.request_mms_recheck(&generation, &scope, limit)
+        })
+        .and_then(|count| u64::try_from(count).map_err(|_| MobileBindingsError::InvalidRequest))
+    }
+    pub fn mms_backfill_status(
+        &self,
+        generation: String,
+        scope: String,
+    ) -> Result<NativeMmsBackfillStatus, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.mms_backfill_status(&generation, &scope)
+        })
+        .map(mms_backfill_status_view)
+    }
+    pub fn pause_mms_backfill_for_local_capacity(
+        &self,
+        generation: String,
+        scope: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.pause_mms_backfill_for_local_capacity(&generation, &scope)
+        })
+    }
+    pub fn report_mms_backfill_vault_quota_exceeded(
+        &self,
+        generation: String,
+        scope: String,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.report_mms_backfill_vault_quota_exceeded(&generation, &scope)
+        })
+    }
+    pub fn report_mms_backfill_remote_capacity(
+        &self,
+        generation: String,
+        scope: String,
+        has_capacity: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.report_mms_backfill_remote_capacity(&generation, &scope, has_capacity)
         })
     }
     pub fn set_mms_scan_checkpoint(
@@ -1314,6 +2006,43 @@ impl NativeClient {
     pub fn finish_contact_scan(&self, input_json: String) -> Result<String, MobileBindingsError> {
         with_client(&self.client, |client| {
             client.finish_contact_scan(&input_json)
+        })
+    }
+    pub fn request_contact_sync(&self, input_json: String) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.request_contact_sync(&input_json)
+        })
+    }
+    pub fn contact_sync_request_status(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.contact_sync_request_status(&input_json)
+        })
+    }
+    pub fn pending_contact_sync_scans(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.pending_contact_sync_scans(&input_json)
+        })
+    }
+    pub fn report_contact_sync_blocked(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.report_contact_sync_blocked(&input_json)
+        })
+    }
+    pub fn set_contact_scan_request_capability(
+        &self,
+        input_json: String,
+    ) -> Result<String, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.set_contact_scan_request_capability(&input_json)
         })
     }
     pub fn contact_book_view(&self, input_json: String) -> Result<String, MobileBindingsError> {
@@ -1969,6 +2698,26 @@ impl NativeClient {
             .map(|items| items.into_iter().map(cipher_view).collect())
     }
 
+    pub fn request_attachment_download(
+        &self,
+        attachment_id: String,
+    ) -> Result<(), MobileBindingsError> {
+        let attachment_id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.request_attachment_download(attachment_id)
+        })
+    }
+
+    pub fn evict_attachment_ciphertext(
+        &self,
+        attachment_id: String,
+    ) -> Result<bool, MobileBindingsError> {
+        let attachment_id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.evict_attachment_ciphertext(attachment_id)
+        })
+    }
+
     /// Native-only verified cipher path for upload; never expose it to web content.
     pub fn native_cipher_file_for_upload(
         &self,
@@ -2043,89 +2792,7 @@ impl NativePlaintextHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-    #[test]
-    fn enrollment_seed_roundtrip_signs_only_the_canonical_pairing_proof() {
-        let seed = vec![7; 32];
-        let key = native_enrollment_key_from_native_secure_storage(seed.clone()).unwrap();
-        assert_eq!(key.export_seed_for_native_secure_storage(), seed);
-        let proof = pairing_proof_bytes(
-            URL_SAFE_NO_PAD.encode([3; 32]),
-            "00000000-0000-0000-0000-000000000001".into(),
-            "00000000-0000-0000-0000-000000000002".into(),
-            "a".repeat(64),
-            1,
-            "gateway".into(),
-        )
-        .unwrap();
-        let signature: [u8; 64] = URL_SAFE_NO_PAD
-            .decode(key.sign_pairing_proof(proof.clone()).unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let public = libsodium_rs::crypto_sign::PublicKey::from_bytes(
-            &URL_SAFE_NO_PAD
-                .decode(key.public_key_base64url().unwrap())
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(libsodium_rs::crypto_sign::verify_detached(
-            &signature, &proof, &public
-        ));
-        let digest = peppy_protocol::pairing_key_digest(public.as_bytes());
-        assert_eq!(
-            key.pairing_sas(
-                "intent-1".into(),
-                "00000000-0000-0000-0000-000000000002".into(),
-                digest.clone()
-            )
-            .unwrap(),
-            "168435"
-        );
-        assert!(
-            key.pairing_sas(
-                "intent-1".into(),
-                "00000000-0000-0000-0000-000000000002".into(),
-                format!("x{digest}")
-            )
-            .is_err()
-        );
-        for changed in [
-            pairing_proof_bytes(
-                URL_SAFE_NO_PAD.encode([4; 32]),
-                "00000000-0000-0000-0000-000000000001".into(),
-                "00000000-0000-0000-0000-000000000002".into(),
-                "a".repeat(64),
-                1,
-                "gateway".into(),
-            )
-            .unwrap(),
-            pairing_proof_bytes(
-                URL_SAFE_NO_PAD.encode([3; 32]),
-                "00000000-0000-0000-0000-000000000001".into(),
-                "00000000-0000-0000-0000-000000000003".into(),
-                "a".repeat(64),
-                2,
-                "owner".into(),
-            )
-            .unwrap(),
-        ] {
-            assert!(!libsodium_rs::crypto_sign::verify_detached(
-                &signature, &changed, &public
-            ));
-        }
-    }
-
-    #[test]
-    fn enrollment_seed_length_is_rejected_without_panic() {
-        for len in [0, 31, 33, 64] {
-            assert!(matches!(
-                native_enrollment_key_from_native_secure_storage(vec![0; len]),
-                Err(MobileBindingsError::InvalidRequest)
-            ));
-        }
-    }
     #[test]
     fn native_transport_strings_match_carrier_dispatch_contract() {
         assert_eq!(transport_name(Transport::Sms), "sms");
@@ -2184,6 +2851,43 @@ mod tests {
         assert_eq!(status.state, NativeSnapshotProjectionState::Promoted);
         assert_eq!(status.reason, None);
         assert!(!client.contact_repair_required().unwrap());
+    }
+
+    #[test]
+    fn contact_sync_request_methods_forward_json_to_core() {
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "peppy-mobile-contact-sync-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id,
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![9; 32],
+        })
+        .unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+
+        for result in [
+            client.request_contact_sync("{".into()),
+            client.contact_sync_request_status("{".into()),
+            client.pending_contact_sync_scans("{".into()),
+            client.report_contact_sync_blocked("{".into()),
+            client.set_contact_scan_request_capability("{".into()),
+        ] {
+            assert!(matches!(result, Err(MobileBindingsError::InvalidRequest)));
+        }
+
+        client.dispose().unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -2291,6 +2995,234 @@ mod tests {
                 .any(|item| item.conversation_id.to_string() == captured.conversation_id)
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    fn provider_inbox_row(
+        id: &str,
+        address: &str,
+        body: &str,
+        date: i64,
+        date_sent: i64,
+    ) -> NativeSmsProviderAcquisitionInput {
+        NativeSmsProviderAcquisitionInput {
+            source: NativeSmsSource {
+                source_generation: "install".into(),
+                subscription_id: "sim-1".into(),
+                provider_message_id: id.into(),
+                provider_thread_id: Some("3".into()),
+                broadcast_id: None,
+            },
+            incoming: true,
+            sender_address: Some(address.into()),
+            recipients: vec![],
+            body: body.into(),
+            imported: false,
+            sent_at_ms: Some(date),
+            date_sent_ms: Some(date_sent),
+            creator: Some("com.google.android.apps.messaging".into()),
+            source_row_fingerprint: format!("fp-{id}-{date}"),
+        }
+    }
+
+    #[test]
+    fn receiver_broadcast_then_provider_row_is_one_message() {
+        let path = std::env::temp_dir().join(format!("peppy-sms-c2-{}.db", uuid::Uuid::new_v4()));
+        let native = open_at(
+            &path,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        // Exactly what IncomingCapture.handle sends: no provider source, the SMSC timestamp.
+        let smsc = 1_790_879_048_000;
+        let broadcast_id = "broadcast:c2".to_string();
+        let broadcast = native
+            .capture_incoming_timed(
+                NativeIncomingSms {
+                    conversation_id: None,
+                    sender_address: "+15557654321".into(),
+                    body: "see you soon".into(),
+                    provider_message_id: Some(broadcast_id.clone()),
+                    imported: false,
+                },
+                Some(smsc),
+                Some(smsc - 3_600_000 + 400),
+            )
+            .unwrap();
+        // The default SMS app then writes the inbox row: local receipt `date`, SMSC `date_sent`.
+        let row = native
+            .begin_sms_provider_acquisition(provider_inbox_row(
+                "1",
+                "+15557654321",
+                "see you soon",
+                smsc - 3_600_000 + 413,
+                smsc,
+            ))
+            .unwrap();
+        let provider = native.complete_sms_acquisition(row.acquisition_id).unwrap();
+        assert_eq!(provider.message_id, broadcast.message_id);
+        let messages = native.messages(broadcast.conversation_id.clone()).unwrap();
+        assert_eq!(messages.len(), 1);
+        // The user sees the local receipt time, not the skewed SMSC time.
+        assert_eq!(messages[0].sent_at_ms, Some(smsc - 3_600_000 + 400));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_row_then_receiver_broadcast_and_redelivery_are_one_message() {
+        let path = std::env::temp_dir().join(format!("peppy-sms-c2b-{}.db", uuid::Uuid::new_v4()));
+        let native = open_at(
+            &path,
+            &uuid::Uuid::new_v4().to_string(),
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        let smsc = 1_790_879_048_000;
+        let row = native
+            .begin_sms_provider_acquisition(provider_inbox_row(
+                "8",
+                "+1 (415) 555-2671",
+                "ok",
+                smsc + 900,
+                smsc,
+            ))
+            .unwrap();
+        let provider = native.complete_sms_acquisition(row.acquisition_id).unwrap();
+        let broadcast = || NativeIncomingSms {
+            conversation_id: None,
+            sender_address: "+14155552671".into(),
+            body: "ok".into(),
+            provider_message_id: Some("broadcast:c2b".into()),
+            imported: false,
+        };
+        let first = native
+            .capture_incoming_timed(broadcast(), Some(smsc), Some(smsc + 950))
+            .unwrap();
+        let redelivered = native
+            .capture_incoming_timed(broadcast(), Some(smsc), Some(smsc + 2_000))
+            .unwrap();
+        assert!(first.duplicate && redelivered.duplicate);
+        assert_eq!(first.message_id, provider.message_id);
+        assert_eq!(redelivered.message_id, provider.message_id);
+
+        // A genuinely repeated identical text is a second broadcast and a second provider row.
+        let again = native
+            .capture_incoming_timed(
+                NativeIncomingSms {
+                    provider_message_id: Some("broadcast:c2b-2".into()),
+                    ..broadcast()
+                },
+                Some(smsc + 60_000),
+                Some(smsc + 60_500),
+            )
+            .unwrap();
+        assert!(!again.duplicate);
+        let second_row = native
+            .begin_sms_provider_acquisition(provider_inbox_row(
+                "9",
+                "+14155552671",
+                "ok",
+                smsc + 60_400,
+                smsc + 60_000,
+            ))
+            .unwrap();
+        let second = native
+            .complete_sms_acquisition(second_row.acquisition_id)
+            .unwrap();
+        assert_eq!(second.message_id, again.message_id);
+        assert_eq!(native.messages(provider.conversation_id).unwrap().len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn gateway_send_and_its_provider_row_are_one_message_through_the_bridge() {
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let gateway_id = uuid::Uuid::new_v4().to_string();
+        let root = std::env::temp_dir().join(format!("peppy-sms-c1-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let material = create_vault_material(vault_id.clone(), "test passphrase".into()).unwrap();
+        let desktop = open_at(
+            &root.join("desktop.db"),
+            &vault_id,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        let gateway = open_at(&root.join("gateway.db"), &vault_id, &gateway_id);
+        for client in [&desktop, &gateway] {
+            client
+                .unlock(
+                    material.profile_json.clone(),
+                    material.header_json.clone(),
+                    "test passphrase".into(),
+                )
+                .unwrap();
+        }
+        let draft = desktop.create_compose_draft(None).unwrap();
+        let route =
+            serde_json::json!({"gateway_device_id": gateway_id, "subscription_id": "sim-1"})
+                .to_string();
+        let saved = desktop
+            .save_compose_draft(
+                draft.draft_id,
+                draft.revision,
+                NativeComposeDraftUpdate {
+                    text: "running late".into(),
+                    recipients: vec!["+15551234567".into()],
+                    attachment_ids: vec![],
+                    route_json: Some(route),
+                },
+            )
+            .unwrap();
+        let queued = desktop
+            .send_compose_draft(saved.draft_id, saved.revision)
+            .unwrap();
+        let _ = desktop.pending_outbox_json_batch(10).unwrap();
+        let wire = desktop.pending_outbox_json().unwrap().pop().unwrap();
+        desktop.ack_outbox(queued.envelope_id).unwrap();
+        gateway.ingest_raw(wire.into_bytes(), "1".into()).unwrap();
+        gateway.apply_pending(1).unwrap();
+        let command = gateway.pending_commands().unwrap().pop().unwrap();
+        let permit = gateway
+            .begin_send_attempt(command.command_id.clone())
+            .unwrap();
+        assert_eq!(permit.state, NativePermitState::Permit);
+        let sent_message = permit.command.unwrap().message;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        // The platform-written row: Peppy creator, `date` at submission, `date_sent=0`.
+        let row = gateway
+            .begin_sms_provider_acquisition(NativeSmsProviderAcquisitionInput {
+                source: NativeSmsSource {
+                    source_generation: "install".into(),
+                    subscription_id: "sim-1".into(),
+                    provider_message_id: "2".into(),
+                    provider_thread_id: Some("4".into()),
+                    broadcast_id: None,
+                },
+                incoming: false,
+                sender_address: None,
+                recipients: vec!["+15551234567".into()],
+                body: "running late".into(),
+                imported: false,
+                sent_at_ms: Some(now + 250),
+                date_sent_ms: Some(0),
+                creator: Some("dev.peppy.mobile".into()),
+                source_row_fingerprint: "fp-2".into(),
+            })
+            .unwrap();
+        assert_eq!(row.state, NativeSmsAcquisitionState::Complete);
+        let captured = gateway
+            .complete_sms_acquisition(row.acquisition_id)
+            .unwrap();
+        assert!(captured.duplicate);
+        assert_eq!(captured.message_id, sent_message.message_id);
+        assert_eq!(
+            gateway
+                .messages(sent_message.conversation_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn open_at(path: &std::path::Path, vault_id: &str, device_id: &str) -> Arc<NativeClient> {

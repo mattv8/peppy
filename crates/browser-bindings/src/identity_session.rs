@@ -11,6 +11,30 @@ pub(super) struct IdentitySession {
     wrapped: Vec<u8>,
 }
 
+impl IdentitySession {
+    pub(super) fn owner_enrollment_material(
+        &self,
+        client: &Client,
+    ) -> Result<(String, KeyProfile, VaultCheckHeader), Failure> {
+        if self.metadata.role != local_identity::DeviceRole::Owner {
+            return Err(unavailable());
+        }
+        let keys = client.key_status().map_err(core)?;
+        if keys.active_epoch != Some(self.metadata.profile.key_epoch)
+            || !keys
+                .unlocked_epochs
+                .contains(&self.metadata.profile.key_epoch)
+        {
+            return Err(Failure::new("locked", "Unlock sync before this operation."));
+        }
+        Ok((
+            self.metadata.origin.clone(),
+            self.metadata.profile.clone(),
+            self.metadata.header.clone(),
+        ))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Initialize {
@@ -116,6 +140,150 @@ impl BrowserCore {
         self.client = Some(client);
         self.identity_session = Some(IdentitySession {
             metadata: input.metadata,
+            secrets,
+            wrapped: serialized,
+        });
+        Ok(public_state(
+            self.identity_session.as_ref().expect("identity was set"),
+        ))
+    }
+
+    pub(super) fn install_enrollment_identity(
+        &mut self,
+        identity: peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
+        passphrase: String,
+    ) -> Result<Value, Failure> {
+        let origin = self.trusted_origin.as_deref().ok_or_else(invalid)?;
+        if self.client.is_some()
+            || self.identity_session.is_some()
+            || self.root.join("client.db").exists()
+            || identity.origin() != origin
+        {
+            return Err(Failure::new(
+                "identity-exists",
+                "A local identity already exists. Nothing was reset.",
+            ));
+        }
+
+        let enrollment = identity.metadata().clone();
+        let metadata = IdentityMetadata {
+            version: 1,
+            origin: origin.to_owned(),
+            vault_id: enrollment.vault_id,
+            device_id: enrollment.device_id,
+            role: match enrollment.role {
+                peppy_hosted_api::enrollment::EnrollmentRole::Owner => {
+                    local_identity::DeviceRole::Owner
+                }
+                peppy_hosted_api::enrollment::EnrollmentRole::Device => {
+                    local_identity::DeviceRole::Device
+                }
+                peppy_hosted_api::enrollment::EnrollmentRole::Gateway => {
+                    local_identity::DeviceRole::Gateway
+                }
+            },
+            profile: enrollment.profile,
+            header: enrollment.header,
+        };
+        local_identity::validate_metadata(&metadata).map_err(identity_failure)?;
+
+        let mut database_key = Zeroizing::new([0_u8; 32]);
+        libsodium_rs::ensure_init()
+            .map_err(|_| Failure::new("unavailable", "Secure random generation is unavailable."))?;
+        libsodium_rs::random::fill_bytes(&mut *database_key);
+        let credential = identity.device_credential_for_native_secure_store();
+        let secrets = IdentitySecrets::new(*database_key, credential).map_err(identity_failure)?;
+        let wrapped = local_identity::seal_identity(metadata.clone(), &secrets, &passphrase)
+            .map_err(identity_failure)?;
+        let serialized = serialize_wrapped(&wrapped)?;
+        let client = open_client(&self.root, &metadata, &secrets)?;
+        let activated = match identity.into_activation() {
+            Some(activation) => activation.activate(&client).is_ok(),
+            None => client
+                .unlock(&metadata.profile, &metadata.header, &passphrase)
+                .is_ok(),
+        };
+        if !activated {
+            drop(client);
+            discard_new_identity_database(&self.root);
+            return Err(invalid());
+        }
+
+        self.device_id = Some(DeviceId(metadata.device_id));
+        self.context.origin = Some(origin.to_owned());
+        self.context.device_role = Some(role_name(metadata.role).to_owned());
+        self.client = Some(client);
+        self.identity_session = Some(IdentitySession {
+            metadata,
+            secrets,
+            wrapped: serialized,
+        });
+        Ok(public_state(
+            self.identity_session.as_ref().expect("identity was set"),
+        ))
+    }
+
+    pub(super) fn install_hosted_owner_identity(
+        &mut self,
+        profile: KeyProfile,
+        header: VaultCheckHeader,
+        device_id: uuid::Uuid,
+        credential: Zeroizing<String>,
+        passphrase: SecretString,
+    ) -> Result<Value, Failure> {
+        let origin = self.trusted_origin.as_deref().ok_or_else(invalid)?;
+        if self.client.is_some()
+            || self.identity_session.is_some()
+            || self.root.join("client.db").exists()
+        {
+            return Err(Failure::new(
+                "identity-exists",
+                "A local identity already exists. Nothing was reset.",
+            ));
+        }
+        let metadata = IdentityMetadata {
+            version: 1,
+            origin: origin.to_owned(),
+            vault_id: profile.vault_id,
+            device_id,
+            role: local_identity::DeviceRole::Owner,
+            profile,
+            header,
+        };
+        local_identity::validate_metadata(&metadata).map_err(identity_failure)?;
+        self.install_identity(metadata, credential, &passphrase.0)
+    }
+
+    fn install_identity(
+        &mut self,
+        metadata: IdentityMetadata,
+        mut credential: Zeroizing<String>,
+        passphrase: &str,
+    ) -> Result<Value, Failure> {
+        let mut database_key = Zeroizing::new([0_u8; 32]);
+        libsodium_rs::ensure_init()
+            .map_err(|_| Failure::new("unavailable", "Secure random generation is unavailable."))?;
+        libsodium_rs::random::fill_bytes(&mut *database_key);
+        let secrets = IdentitySecrets::new(*database_key, std::mem::take(&mut *credential))
+            .map_err(identity_failure)?;
+        let wrapped = local_identity::seal_identity(metadata.clone(), &secrets, passphrase)
+            .map_err(identity_failure)?;
+        let serialized = serialize_wrapped(&wrapped)?;
+        let client = open_client(&self.root, &metadata, &secrets)?;
+        if client
+            .unlock(&metadata.profile, &metadata.header, passphrase)
+            .is_err()
+        {
+            drop(client);
+            discard_new_identity_database(&self.root);
+            return Err(invalid());
+        }
+        self.device_id = Some(DeviceId(metadata.device_id));
+        self.context.origin = Some(metadata.origin.clone());
+        self.context.device_role = Some(role_name(metadata.role).to_owned());
+        self.client = Some(client);
+        self.identity_session = Some(IdentitySession {
+            metadata,
             secrets,
             wrapped: serialized,
         });
@@ -253,6 +421,12 @@ fn open_client(
         )
         .map_err(core)
     })
+}
+
+fn discard_new_identity_database(root: &Path) {
+    for suffix in ["client.db", "client.db-shm", "client.db-wal"] {
+        let _ = std::fs::remove_file(root.join(suffix));
+    }
 }
 
 fn serialize_wrapped(wrapped: &WrappedIdentity) -> Result<Vec<u8>, Failure> {
@@ -548,6 +722,43 @@ mod tests {
     }
 
     #[test]
+    fn worker_initialize_allows_only_loopback_http_origins() {
+        for origin in [
+            "http://localhost:7100",
+            "http://127.0.0.1:7100",
+            "http://[::1]:7100",
+            "https://example.test",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut core = BrowserCore::new(root.path().to_owned());
+            assert_eq!(
+                dispatch(&mut core, "_worker_initialize", json!({"origin": origin}))["ok"],
+                true,
+                "{origin}"
+            );
+        }
+
+        for origin in [
+            "http://192.168.1.1",
+            "http://example.test",
+            "http://localhost.evil.test",
+            "http://127.0.0.1.evil.test",
+            "http://user:secret@localhost",
+            "http://localhost/path",
+            "http://localhost?query=value",
+            "http://localhost#fragment",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut core = BrowserCore::new(root.path().to_owned());
+            assert_eq!(
+                error_code(&mut core, "_worker_initialize", json!({"origin": origin})),
+                "invalid-request",
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
     fn rotation_failures_preserve_old_state_and_success_cuts_over_atomically() {
         let root = tempfile::tempdir().unwrap();
         let device_id = Uuid::new_v4();
@@ -678,5 +889,31 @@ mod tests {
         assert!(core.client.is_none());
         assert!(core.identity_session.is_none());
         assert!(root.path().join("client.db").is_file());
+    }
+
+    #[test]
+    fn retired_credential_commands_are_unknown_to_private_and_general_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut core = BrowserCore::new(root.path().to_owned());
+
+        for command in [
+            "_worker_export_credential",
+            "_worker_parse_credential_file",
+            "_worker_portable_identity_metadata",
+        ] {
+            let raw = serde_json::value::to_raw_value(&json!({})).unwrap();
+            assert_eq!(
+                core.identity_command(command, raw.as_ref())
+                    .unwrap_err()
+                    .code,
+                "unknown-command",
+                "private dispatch accepted {command}",
+            );
+            assert_eq!(
+                error_code(&mut core, command, json!({})),
+                "unknown-command",
+                "general dispatch accepted {command}",
+            );
+        }
     }
 }

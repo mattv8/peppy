@@ -1,3 +1,7 @@
+:where(.theme-system, .theme-light, .theme-dark) {
+  --peppy-surface-native-chrome: color-mix(in srgb, var(--peppy-surface-chrome) 82%, transparent);
+}
+
 @font-face {
   font-family: "Droid Sans";
   src: url("./fonts/DroidSans.ttf") format("truetype");
@@ -46,12 +50,33 @@
   --peppy-primary-text: #1a1a1a;
   --peppy-scrollbar-thumb: rgba(255, 255, 255, 0.18);
   --peppy-scrollbar-thumb-active: rgba(255, 255, 255, 0.35);
-  --peppy-shadow-floating: 0 4px 16px rgba(0, 0, 0, 0.28);
+  --peppy-glass-tint: rgba(30, 30, 32, 0.78);
+  --peppy-glass-fallback: #202020;
+  --peppy-glass-surface: var(--peppy-glass-fallback);
+  --peppy-glass-blur: 12px;
+  --peppy-glass-backdrop-filter: none;
+  --peppy-glass-border: rgba(255, 255, 255, 0.1);
+  --peppy-glass-highlight: rgba(255, 255, 255, 0.06);
+  --peppy-shadow-2: 0 1px 4px rgba(0, 0, 0, 0.18);
+  --peppy-shadow-3: 0 4px 20px rgba(0, 0, 0, 0.3), 0 1px 4px rgba(0, 0, 0, 0.18);
+  --peppy-shadow-floating: var(--peppy-shadow-3);
+  --peppy-radius-sm: 4px;
+  --peppy-radius-md: 8px;
+  --peppy-radius-lg: 12px;
+  --peppy-radius-pill: 999px;
+  --peppy-duration-fast: 80ms;
+  --peppy-duration-base: 150ms;
+  --peppy-duration-slow: 250ms;
+  --peppy-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --peppy-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --peppy-backdrop: rgba(0, 0, 0, 0.4);
+  --peppy-danger-hover: #c42b1c;
+  --peppy-danger-text: #fff;
   --peppy-titlebar-height: 35px;
   --peppy-window-radius: 12px;
   --peppy-toolbar-height: 32px;
   --peppy-control-height: 28px;
-  --peppy-control-radius: 4px;
+  --peppy-control-radius: var(--peppy-radius-sm);
   --peppy-rail-width: 48px;
   --peppy-font-body:
     "Droid Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -92,7 +117,21 @@
   --peppy-primary-text: #fff;
   --peppy-scrollbar-thumb: rgba(0, 0, 0, 0.28);
   --peppy-scrollbar-thumb-active: rgba(0, 0, 0, 0.35);
-  --peppy-shadow-floating: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --peppy-glass-tint: rgba(248, 248, 250, 0.82);
+  --peppy-glass-fallback: #f8f8fa;
+  --peppy-glass-surface: var(--peppy-glass-fallback);
+  --peppy-glass-backdrop-filter: none;
+  --peppy-glass-border: rgba(0, 0, 0, 0.08);
+  --peppy-glass-highlight: rgba(255, 255, 255, 0.9);
+  --peppy-shadow-2: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --peppy-shadow-3: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.08);
+  --peppy-shadow-floating: var(--peppy-shadow-3);
+  --peppy-backdrop: rgba(0, 0, 0, 0.35);
+}
+.theme-dark {
+  color-scheme: dark;
+  --peppy-glass-surface: var(--peppy-glass-fallback);
+  --peppy-glass-backdrop-filter: none;
 }
 @media (prefers-color-scheme: light) {
   .theme-system {
@@ -112,7 +151,7 @@
     --peppy-text-secondary: #616161;
     --peppy-text-muted: #616161;
     --peppy-brand: #e5533d;
-  --peppy-accent: #c9422d;
+    --peppy-accent: #c9422d;
     --peppy-accent-hover: #b23a27;
     --peppy-accent-text: #fff;
     --peppy-success: #2e7d32;
@@ -130,7 +169,87 @@
     --peppy-primary-text: #fff;
     --peppy-scrollbar-thumb: rgba(0, 0, 0, 0.28);
     --peppy-scrollbar-thumb-active: rgba(0, 0, 0, 0.35);
-    --peppy-shadow-floating: 0 4px 16px rgba(0, 0, 0, 0.1);
+    --peppy-glass-tint: rgba(248, 248, 250, 0.82);
+    --peppy-glass-fallback: #f8f8fa;
+    --peppy-glass-surface: var(--peppy-glass-fallback);
+    --peppy-glass-backdrop-filter: none;
+    --peppy-glass-border: rgba(0, 0, 0, 0.08);
+    --peppy-glass-highlight: rgba(255, 255, 255, 0.9);
+    --peppy-shadow-2: 0 1px 4px rgba(0, 0, 0, 0.06);
+    --peppy-shadow-3: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.08);
+    --peppy-shadow-floating: var(--peppy-shadow-3);
+    --peppy-backdrop: rgba(0, 0, 0, 0.35);
+  }
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root,
+  .theme-system,
+  .theme-light,
+  .theme-dark {
+    --peppy-glass-surface: var(--peppy-glass-tint);
+    --peppy-glass-backdrop-filter: blur(var(--peppy-glass-blur));
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root,
+  .theme-system,
+  .theme-light,
+  .theme-dark {
+    --peppy-glass-surface: var(--peppy-glass-fallback);
+    --peppy-glass-backdrop-filter: none;
+  }
+}
+@media (forced-colors: active) {
+  :root,
+  .theme-system,
+  .theme-light,
+  .theme-dark {
+    color-scheme: light dark;
+    --peppy-surface-desk: Canvas;
+    --peppy-surface-chrome: Canvas;
+    --peppy-surface-panel: Canvas;
+    --peppy-surface-editor: Canvas;
+    --peppy-surface-widget: Canvas;
+    --peppy-surface-hover: Canvas;
+    --peppy-surface-active: Canvas;
+    --peppy-window-control-idle: ButtonFace;
+    --peppy-border: ButtonText;
+    --peppy-border-strong: ButtonText;
+    --peppy-text-primary: CanvasText;
+    --peppy-text-strong: CanvasText;
+    --peppy-text-secondary: CanvasText;
+    --peppy-text-muted: CanvasText;
+    --peppy-brand: Highlight;
+    --peppy-accent: Highlight;
+    --peppy-accent-hover: Highlight;
+    --peppy-accent-text: HighlightText;
+    --peppy-success: CanvasText;
+    --peppy-error: CanvasText;
+    --peppy-warning-text: CanvasText;
+    --peppy-warning-border: ButtonText;
+    --peppy-focus: Highlight;
+    --peppy-focus-ring: Highlight;
+    --peppy-focus-ring-alpha: Highlight;
+    --peppy-error-surface: Canvas;
+    --peppy-error-text: CanvasText;
+    --peppy-warning-surface: Canvas;
+    --peppy-surface-input: Field;
+    --peppy-primary: Highlight;
+    --peppy-primary-text: HighlightText;
+    --peppy-scrollbar-thumb: ButtonText;
+    --peppy-scrollbar-thumb-active: ButtonText;
+    --peppy-glass-tint: Canvas;
+    --peppy-glass-fallback: Canvas;
+    --peppy-glass-surface: Canvas;
+    --peppy-glass-backdrop-filter: none;
+    --peppy-glass-border: ButtonText;
+    --peppy-glass-highlight: Canvas;
+    --peppy-shadow-2: 0 0 transparent;
+    --peppy-shadow-3: 0 0 transparent, 0 0 transparent;
+    --peppy-shadow-floating: var(--peppy-shadow-3);
+    --peppy-backdrop: Canvas;
+    --peppy-danger-hover: Highlight;
+    --peppy-danger-text: HighlightText;
   }
 }
 @media (prefers-reduced-motion: reduce) {

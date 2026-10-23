@@ -4,7 +4,7 @@ set dotenv-path := ".opencode/dev/android.env"
 set dotenv-required := false
 
 compose := "docker compose --env-file .env -f docker-compose.yml"
-dev_compose := "DEV_UID=$(id -u) DEV_GID=$(id -g) docker compose --env-file .env -f docker-compose.yml -f infra/compose/compose.dev.yml"
+dev_compose := "python3 infra/dev/dev_tls.py compose"
 dev_prepare := "mkdir -p .opencode/dev/artifacts && chmod 700 .opencode/dev/artifacts && for cache in cargo pnpm target; do docker volume create peppy-dev-${cache}-$(id -u)-$(id -g) >/dev/null; done"
 dev_prereq := "command -v docker >/dev/null || { echo 'docker is required for container development' >&2; exit 1; }; docker compose version >/dev/null || { echo 'docker compose is required for container development' >&2; exit 1; }; test -f .env || { echo '.env is required; run bash infra/dev/dev.sh dev-setup' >&2; exit 1; }"
 
@@ -17,6 +17,7 @@ version *args:
 release-test:
     infra/release/test-compute-version.sh
     infra/release/test-release-scripts.sh
+    infra/release/test-android-signing.sh
 
 doctor:
     @command -v cargo >/dev/null || { echo "cargo is required; install the pinned Rust toolchain" >&2; exit 1; }
@@ -25,7 +26,7 @@ doctor:
     @command -v pnpm >/dev/null || { echo "pnpm is required" >&2; exit 1; }
     @command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
     @expected_rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml); actual_rust=$(rustc -V | awk '{print $2}'); test "$actual_rust" = "$expected_rust" || { echo "rustc $expected_rust is required (found $actual_rust)" >&2; exit 1; }
-    @expected_node=$(cat .node-version); actual_node=$(node -p 'process.versions.node'); test "$actual_node" = "$expected_node" || { echo "Node $expected_node is required (found $actual_node)" >&2; exit 1; }
+    @expected_node=$(tr -d '[:space:]' < .node-version); actual_node=$(node -p 'process.versions.node'); [[ "$actual_node" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ".$actual_node." == ".$expected_node."* ]] || { echo "Node $expected_node is required (found $actual_node)" >&2; exit 1; }
     @test "$(pnpm --version)" = "12.8.1" || { echo "pnpm 12.8.1 is required" >&2; exit 1; }
     @cargo --version && pnpm --version && docker version && docker compose version
     @test -f .env || { echo ".env is required; copy .env.example and set synthetic development credentials" >&2; exit 1; }
@@ -34,15 +35,30 @@ doctor:
     @if xcode-select -p >/dev/null 2>&1 && xcrun --sdk iphonesimulator --show-sdk-path >/dev/null 2>&1; then echo "iOS SDK: available"; else echo "iOS SDK: unavailable (full Xcode is required for an iOS simulator build)"; fi
 
 dev-up:
+    python3 infra/dev/migration_repair.py dev-up
+
+_dev-up-build:
     {{ dev_prereq }}
+    python3 infra/dev/dev_port.py validate .env
+    python3 infra/dev/dev_tls.py prepare .env
     {{ dev_prepare }}
+    {{ dev_compose }} build web dev
+
+_dev-up-stop-writers:
     {{ compose }} rm --stop --force api migrate
-    {{ dev_compose }} up --build --detach --wait --wait-timeout 1800
+    {{ dev_compose }} --teardown rm --stop --force web dev caddy
+
+_dev-up-start:
+    {{ dev_compose }} up --detach --wait --wait-timeout 1800 --force-recreate dev
+    @echo "Development UI/API: $(python3 infra/dev/dev_port.py smoke-url .env)"
 
 dev-down:
+    python3 infra/dev/migration_repair.py dev-down
+
+_dev-down-raw:
     {{ dev_prereq }}
     {{ compose }} rm --stop --force api migrate
-    {{ dev_compose }} down
+    {{ dev_compose }} --teardown down
 
 dev-setup:
     bash infra/dev/dev.sh dev-setup
@@ -66,14 +82,26 @@ dev-test:
     {{ dev_prepare }}
     {{ dev_compose }} run --rm --no-deps dev run test rust
 
+dev-smoke:
+    bash infra/dev/dev-smoke.sh
+
+ci-test:
+    bash infra/dev/ci-test.sh
+
 dev-demo:
     bash infra/dev/dev.sh dev-demo
 
 android-build *args:
     bash infra/dev/android.sh build "$@"
 
+android-test:
+    bash infra/dev/android.sh test
+
 android-emulator:
     bash infra/dev/android.sh emulator
+
+android-forward:
+    bash infra/dev/android.sh forward
 
 android-deploy:
     bash infra/dev/android.sh deploy
@@ -88,6 +116,10 @@ android-run:
     bash infra/dev/android.sh emulator
     bash infra/dev/android.sh deploy
     bash infra/dev/android.sh open
+
+android-run-fast:
+    @test "${PEPPY_ACCEPT_ANDROID_LICENSES:-}" = 1 || { echo "PEPPY_ACCEPT_ANDROID_LICENSES=1 is required before Android build/deploy; review and accept Android SDK licenses first, then make the one-time setting in .opencode/dev/android.env" >&2; exit 1; }
+    bash infra/dev/android.sh run-fast
 
 android-smoke:
     bash infra/dev/android.sh smoke
@@ -112,9 +144,9 @@ desktop-open:
 
 smoke-infra:
     @test -f .env || { echo ".env is required; copy .env.example and set synthetic development credentials" >&2; exit 1; }
+    python3 infra/dev/dev_port.py validate .env
     {{ compose }} up --detach --wait
-    @curl --fail --silent --show-error http://127.0.0.1:7000/healthz
-    @curl --fail --silent --show-error http://127.0.0.1:7000/readyz
+    @base_url=http://127.0.0.1:$(python3 infra/dev/dev_port.py port .env); curl --fail --silent --show-error "$base_url/healthz"; curl --fail --silent --show-error "$base_url/readyz"
     {{ compose }} run --rm api storage-check
 
 cargo-fmt:
@@ -127,7 +159,11 @@ test:
     cargo test --workspace --locked
 
 integration-test:
+    just seaweedfs-entrypoint-test
     source infra/compose/test-env.sh; trap peppy_test_infra_down EXIT; peppy_test_infra_up; cargo test --workspace --locked
+
+seaweedfs-entrypoint-test:
+    bash infra/docker/test-seaweedfs-entrypoint.sh
 
 server-test:
     cargo test -p peppy-server --locked
@@ -148,9 +184,6 @@ ffi-smoke:
     cargo run --locked -p peppy-mobile-bindings --features cli --bin uniffi-bindgen -- generate --library target/debug/libpeppy_mobile_bindings.dylib --language swift --out-dir apps/ios/Generated
     cargo test -p peppy-mobile-bindings --locked
     cd apps/ios && DYLD_LIBRARY_PATH="$PWD/../../target/debug" swift run PeppyMobileSmoke
-
-android-test:
-    cd apps/android && ./gradlew :jvm-smoke:run :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
 ios-test:
     cd apps/ios && DYLD_LIBRARY_PATH="$PWD/../../target/debug" swift test --no-parallel

@@ -5,6 +5,11 @@ all-features = true
 confidence-threshold = 0.8
 allow = ["Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "CC0-1.0", "CDLA-Permissive-2.0", "ISC", "MIT", "MPL-2.0", "Unicode-3.0", "Zlib"]
 private = { ignore = true }
+# The desktop clipboard (arboard) uses these Windows backends; allow BSL-1.0 only for them.
+exceptions = [
+    { allow = ["BSL-1.0"], crate = "clipboard-win" },
+    { allow = ["BSL-1.0"], crate = "error-code" },
+]
 
 [advisories]
 # Tauri 2's GTK3 build-time macros still require this crate; no compatible
@@ -12,6 +17,12 @@ private = { ignore = true }
 # This exception is for maintenance status, not a runtime vulnerability.
 ignore = [
   { id = "RUSTSEC-2024-0370", reason = "Transitive build-time proc-macro-error via Tauri GTK3/glib; no compatible patched release. Track upstream replacement." },
+  # These standalone crates moved into zbus 6. Remove these maintenance-only
+  # exceptions when Tauri notification/opener/single-instance and notify-rust migrate.
+  { id = "RUSTSEC-2026-0370", reason = "Transitive zvariant via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
+  { id = "RUSTSEC-2026-0371", reason = "Transitive zbus_names via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
+  { id = "RUSTSEC-2026-0372", reason = "Transitive zvariant_derive via Tauri plugins on zbus 5; no released compatible zbus 6 migration. Track upstream Tauri and notify-rust updates." },
+  { id = "RUSTSEC-2026-0374", reason = "Transitive build-time parser via UniFFI CLI bindgen and Askama 0.16.1; no released compatible replacement. Remove after Askama replaces basic-toml in a release." },
 ]
 
 [bans]

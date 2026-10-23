@@ -12,6 +12,7 @@ struct HostedWebContracts {
     operation: billing::BillingOperationRequest,
     subscribe_request: billing::SubscribeRequest,
     subscribe_response: billing::SubscribeResponse,
+    storage_pack_request: billing::StoragePackRequest,
     payment_method_confirm: billing::PaymentMethodConfirmRequest,
     payment_method_setup: billing::PaymentMethodSetupResponse,
 }
@@ -30,6 +31,7 @@ fn main() {
         "paymentMethodConfirm": billing::routes::PAYMENT_METHOD_CONFIRM,
         "cancel": billing::routes::CANCEL, "resume": billing::routes::RESUME,
         "invoices": billing::routes::INVOICES,
+        "storagePack": billing::routes::STORAGE_PACK,
     });
     println!("{}", serde_json::to_string_pretty(&schema).unwrap());
 }

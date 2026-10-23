@@ -3,7 +3,6 @@ packages:
   - apps/web
   - packages/*
 catalog:
-  '@remixicon/react': ^4.9.0
   '@testing-library/jest-dom': ^6.6.3
   '@testing-library/react': ^16.1.0
   '@types/qrcode': ^1.5.6

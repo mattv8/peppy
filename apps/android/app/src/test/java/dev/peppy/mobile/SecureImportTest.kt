@@ -162,10 +162,17 @@ class SecureImportTest : GatewayTestBase() {
         assertEquals(ImportResult.IMPORTED, enroll())
         val rotated = uniffi.peppy_mobile_bindings.createVaultMaterial(vaultId, TEST_PASSPHRASE)
         var result: UnlockResult? = null
-        val unlocking = Thread { result = NativeGateway.unlock(context, TEST_PASSPHRASE) }.apply { start() }
+        val unlocking = Thread { result = NativeGateway.unlock(context, TEST_PASSPHRASE) }.apply {
+            isDaemon = true
+            start()
+        }
         Thread.sleep(50)
         assertEquals(ImportResult.UPDATED, NativeGateway.persistVerified(context, parsed(), VaultMaterial(rotated.profileJson, rotated.headerJson)))
         unlocking.join(120_000)
+        assertFalse(
+            "concurrent native unlock did not finish; thread=${unlocking.stackTrace.joinToString(" <- ")}",
+            unlocking.isAlive,
+        )
         assertNotNull(result)
         val status = NativeGateway.status(context)
         assertFalse("keys from the replaced vault material must not count as ready", status.sharedKeysReady)

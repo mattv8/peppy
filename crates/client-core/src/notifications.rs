@@ -13,6 +13,14 @@ type ExistingNotification = (
     bool,
 );
 
+fn execute_cached<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<usize, Error> {
+    Ok(conn.prepare_cached(sql)?.execute(params)?)
+}
+
 pub(super) fn valid(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_NOTIFICATION_ID_BYTES
 }
@@ -335,9 +343,13 @@ impl Client {
         let tx = s
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut mark_seen = tx.prepare(
+            "UPDATE notifications SET seen=1 WHERE source_device_id=? AND notification_key=? AND lifetime=?",
+        )?;
         for t in targets {
-            tx.execute("UPDATE notifications SET seen=1 WHERE source_device_id=? AND notification_key=? AND lifetime=?",params![t.source_device_id,t.notification_key,t.lifetime])?;
+            mark_seen.execute(params![t.source_device_id, t.notification_key, t.lifetime])?;
         }
+        drop(mark_seen);
         prune_banners(&tx)?;
         tx.commit()?;
         Ok(())
@@ -409,9 +421,9 @@ impl Client {
     }
     pub fn ack_banner_candidates(&self, ids: Vec<String>) -> Result<(), Error> {
         let s = self.lock()?;
+        let mut delete = s.conn.prepare("DELETE FROM banner_candidates WHERE id=?")?;
         for id in ids {
-            s.conn
-                .execute("DELETE FROM banner_candidates WHERE id=?", params![id])?;
+            delete.execute(params![id])?;
         }
         Ok(())
     }
@@ -435,11 +447,41 @@ fn upsert_notification(
     if old.as_ref().is_some_and(|(_, s)| *s >= seq as i64) {
         return Ok(());
     }
-    c.execute("INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,0,?) ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",params![n.target.source_device_id,n.target.notification_key,n.target.lifetime,n.instance,n.package_name,n.app_name,n.title,n.text,n.category,n.posted_at,n.dismissible,seq as i64])?;
+    execute_cached(
+        c,
+        "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,0,?) ON CONFLICT(source_device_id,notification_key) DO UPDATE SET seen=CASE WHEN notifications.lifetime=excluded.lifetime THEN notifications.seen ELSE 0 END,lifetime=excluded.lifetime,instance=excluded.instance,package_name=excluded.package_name,app_name=excluded.app_name,title=excluded.title,text=excluded.text,category=excluded.category,posted_at=excluded.posted_at,dismissible=excluded.dismissible,removed=0,source_sequence=excluded.source_sequence WHERE excluded.source_sequence>notifications.source_sequence",
+        params![
+            n.target.source_device_id,
+            n.target.notification_key,
+            n.target.lifetime,
+            n.instance,
+            n.package_name,
+            n.app_name,
+            n.title,
+            n.text,
+            n.category,
+            n.posted_at,
+            n.dismissible,
+            seq as i64
+        ],
+    )?;
     // A dismissal received before the post remains presentation state; bind its eventual
     // OS effect to the first matching instance only, never to a subsequent update.
-    c.execute("UPDATE notification_dismissals SET instance=? WHERE source_device_id=? AND notification_key=? AND lifetime=? AND completed=0", params![n.instance,n.target.source_device_id,n.target.notification_key,n.target.lifetime])?;
-    c.execute("INSERT OR IGNORE INTO app_filters(source_device_id,package_name,app_name,muted) VALUES(?,?,?,0)", params![n.target.source_device_id,n.package_name,n.app_name])?;
+    execute_cached(
+        c,
+        "UPDATE notification_dismissals SET instance=? WHERE source_device_id=? AND notification_key=? AND lifetime=? AND completed=0",
+        params![
+            n.instance,
+            n.target.source_device_id,
+            n.target.notification_key,
+            n.target.lifetime
+        ],
+    )?;
+    execute_cached(
+        c,
+        "INSERT OR IGNORE INTO app_filters(source_device_id,package_name,app_name,muted) VALUES(?,?,?,0)",
+        params![n.target.source_device_id, n.package_name, n.app_name],
+    )?;
     if !historical && first_post {
         let id = json(&n.target)?;
         c.execute("INSERT OR IGNORE INTO banner_candidates(id,kind,conversation_id,source_device_id,notification_key,lifetime,title,body,created_at) VALUES(?, 'notification',NULL,?,?,?,?,?,?)",params![id,n.target.source_device_id,n.target.notification_key,n.target.lifetime,if n.title.is_empty() { &n.app_name } else { &n.title },n.text,now_ms()])?;
@@ -448,10 +490,37 @@ fn upsert_notification(
     Ok(())
 }
 fn remove_applied(c: &Connection, t: &NotificationTarget, seq: u64) -> Result<(), Error> {
-    c.execute("INSERT INTO notification_tombstones(source_device_id,notification_key,lifetime,source_sequence) VALUES(?,?,?,?) ON CONFLICT(source_device_id,notification_key,lifetime) DO UPDATE SET source_sequence=MAX(source_sequence,excluded.source_sequence)",params![t.source_device_id,t.notification_key,t.lifetime,seq as i64])?;
-    c.execute("UPDATE notifications SET removed=1,title='',text='',source_sequence=? WHERE source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",params![seq as i64,t.source_device_id,t.notification_key,t.lifetime,seq as i64])?;
-    c.execute("DELETE FROM banner_candidates WHERE source_device_id=? AND notification_key=? AND lifetime=?", params![t.source_device_id,t.notification_key,t.lifetime])?;
-    c.execute("UPDATE notification_dismissals SET completed=1 WHERE source_device_id=? AND notification_key=? AND lifetime=?", params![t.source_device_id,t.notification_key,t.lifetime])?;
+    execute_cached(
+        c,
+        "INSERT INTO notification_tombstones(source_device_id,notification_key,lifetime,source_sequence) VALUES(?,?,?,?) ON CONFLICT(source_device_id,notification_key,lifetime) DO UPDATE SET source_sequence=MAX(source_sequence,excluded.source_sequence)",
+        params![
+            t.source_device_id,
+            t.notification_key,
+            t.lifetime,
+            seq as i64
+        ],
+    )?;
+    execute_cached(
+        c,
+        "UPDATE notifications SET removed=1,title='',text='',source_sequence=? WHERE source_device_id=? AND notification_key=? AND lifetime=? AND source_sequence<=?",
+        params![
+            seq as i64,
+            t.source_device_id,
+            t.notification_key,
+            t.lifetime,
+            seq as i64
+        ],
+    )?;
+    execute_cached(
+        c,
+        "DELETE FROM banner_candidates WHERE source_device_id=? AND notification_key=? AND lifetime=?",
+        params![t.source_device_id, t.notification_key, t.lifetime],
+    )?;
+    execute_cached(
+        c,
+        "UPDATE notification_dismissals SET completed=1 WHERE source_device_id=? AND notification_key=? AND lifetime=?",
+        params![t.source_device_id, t.notification_key, t.lifetime],
+    )?;
     Ok(())
 }
 pub(super) fn apply_filter(

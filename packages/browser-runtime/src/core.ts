@@ -22,7 +22,7 @@ const HANDLED_CORE_CODES = [
   "already-open", "attachment-invalid", "attachment-local", "core", "credential-mismatch",
   "credentials-required", "database-key-mismatch", "gateway-offline", "gateway-unavailable",
   "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found",
-  "request-too-large", "stale-draft", "unknown-command", "unlock-failed",
+  "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed",
   "invalid-contact-edit", "contact-book-read-only", "contact-photo-invalid",
   "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable",
   "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message",
@@ -30,12 +30,18 @@ const HANDLED_CORE_CODES = [
   "public-copy-unsupported", "public-copy-too-large",
 ] as const;
 
+export type CoreErrorDetails = Readonly<{
+  conversationId?: string;
+  currentRevision?: string;
+  draftId?: string;
+}>;
+
 export type CoreErrorCode = typeof HANDLED_CORE_CODES[number];
 
 export class BrowserCoreError extends Error {
   public constructor(
     public readonly code: string,
-    public readonly details?: Readonly<{ currentRevision?: string }>,
+    public readonly details?: CoreErrorDetails,
   ) {
     super(code === "core-unavailable" ? "Core runtime unavailable" : "Core operation failed");
   }
@@ -43,7 +49,7 @@ export class BrowserCoreError extends Error {
 
 /** A well-formed, handled Rust rejection; unlike a trap it may have committed a restore guard. */
 export class CoreRejectedError extends BrowserCoreError {
-  public constructor(code: string, details?: Readonly<{currentRevision?: string}>) {
+  public constructor(code: string, details?: CoreErrorDetails) {
     super(code, details);
   }
 }
@@ -74,17 +80,21 @@ function responseResult(json: string): CoreResult {
 
 function coreErrorDetails(error: unknown): BrowserCoreError {
   if (typeof error !== "object" || error === null || Array.isArray(error)) return new BrowserCoreError("core-error");
-  const candidate = error as { code?: unknown; currentRevision?: unknown };
+  const candidate = error as { code?: unknown; conversationId?: unknown; currentRevision?: unknown; draftId?: unknown };
   if (typeof candidate.code !== "string" || candidate.code === "core-poisoned" || !/^[a-z][a-z0-9-]{0,63}$/.test(candidate.code)) {
     return new BrowserCoreError("core-error");
   }
   const code = candidate.code;
-  const details = typeof candidate.currentRevision === "string" &&
-    /^(0|[1-9][0-9]{0,19})$/.test(candidate.currentRevision) &&
-    BigInt(candidate.currentRevision) <= 18_446_744_073_709_551_615n
-    ? { currentRevision: candidate.currentRevision }
-    : undefined;
-  return new CoreRejectedError(code, details);
+  const details: CoreErrorDetails = {
+    ...(safeErrorId(candidate.conversationId) ? { conversationId: candidate.conversationId } : {}),
+    ...(typeof candidate.currentRevision === "string" && /^(0|[1-9][0-9]{0,19})$/.test(candidate.currentRevision) && BigInt(candidate.currentRevision) <= 18_446_744_073_709_551_615n ? { currentRevision: candidate.currentRevision } : {}),
+    ...(safeErrorId(candidate.draftId) ? { draftId: candidate.draftId } : {}),
+  };
+  return new CoreRejectedError(code, Object.keys(details).length > 0 ? details : undefined);
+}
+
+function safeErrorId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 }
 
 function requestBytes(request: CoreRequest): Uint8Array {

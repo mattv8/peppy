@@ -1,30 +1,43 @@
 //! Peppy desktop native host. The webview only receives sanitized view models (`dto`) and
 //! state-change hints; credentials, keys, passphrases, tokens and file paths stay in Rust.
 use std::{
+    collections::HashMap,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::PathBuf,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_notification::NotificationExt;
 
+mod app_lock;
+mod composer_scope;
 mod contacts;
 mod credentials;
+mod devices;
 mod dialogs;
 mod dto;
+mod enrollment;
 mod error;
 mod fsutil;
 mod gateways;
+mod head_palette;
 mod heads;
 mod heads_runtime;
 
+#[cfg(test)]
+mod activation_session_tests;
+#[cfg(test)]
+mod draft_command_tests;
 mod hosted;
-mod join;
 mod lifecycle;
+mod material_state;
 mod media;
 mod net;
 mod notifications;
@@ -37,28 +50,88 @@ mod startup;
 mod sync;
 #[cfg(test)]
 mod tests;
+mod tls;
 mod tray;
+#[cfg(any(target_os = "linux", test))]
+mod update_linux;
+mod update_safety;
+mod updates;
 mod window_chrome;
 mod windows;
 
 use credentials::{
-    check_origin_binding, ensure_database_key, load_config, parse_credential, read_credential_file,
-    save_config, store_credential, HostConfig,
+    check_origin_binding, ensure_database_key, load_config, parse_credential, save_config,
+    store_credential, HostConfig,
 };
-use dto::{DraftView, Head, PublicCopyView, SendResultView, Snapshot};
+use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot};
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
-use peppy_client_core::{AttachmentId, ConversationId, NotificationTarget};
+use peppy_client_core::{
+    AttachmentId, AttachmentInfo, ConversationId, MessageId, NativePlaintextFile,
+    NotificationTarget,
+};
+use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
-use session::{
-    open_session, DraftInput, Notifier, PairingIntentView, PairingStatusView, Session, VaultSummary,
-};
+use session::{open_session, DraftInput, Notifier, Session, VaultSummary};
 use sync::{blocking, fetch_vault, vault_header};
 
 pub const STATE_EVENT: &str = "peppy://state";
 static TRAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+const MAX_OPEN_MEDIA_CAPABILITIES: usize = 8;
+const MAX_OPEN_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_INLINE_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_MEDIA_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CONCURRENT_MEDIA_READS: usize = 2;
+
+struct MediaReadBudget {
+    available: Mutex<usize>,
+}
+
+impl MediaReadBudget {
+    fn new(maximum: usize) -> Self {
+        Self {
+            available: Mutex::new(maximum),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<MediaReadPermit> {
+        let mut available = self
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *available == 0 {
+            return None;
+        }
+        *available -= 1;
+        Some(MediaReadPermit {
+            budget: self.clone(),
+        })
+    }
+}
+
+struct MediaReadPermit {
+    budget: Arc<MediaReadBudget>,
+}
+
+impl Drop for MediaReadPermit {
+    fn drop(&mut self) {
+        if let Ok(mut available) = self.budget.available.lock() {
+            *available += 1;
+        }
+    }
+}
+
+struct MediaCapability {
+    session: Arc<Session>,
+    attachment_id: AttachmentId,
+    window_label: String,
+    media_type: String,
+    plaintext_bytes: u64,
+    plaintext: NativePlaintextFile,
+    opened_at: Instant,
+}
 
 pub struct AppState {
     root: PathBuf,
@@ -66,8 +139,11 @@ pub struct AppState {
     store: Arc<dyn SecretStore>,
     config_lock: Mutex<()>,
     session: tokio::sync::Mutex<Option<Arc<Session>>>,
-    /// Serializes credential import: origin check, key initialization, credential storage,
-    /// config activation and session replacement happen as one unit.
+    /// Serializes session retirement and opening without holding `session` across a worker drain.
+    session_open_lock: tokio::sync::Mutex<()>,
+    composer_scopes: Mutex<HashMap<String, composer_scope::MovedScope>>,
+    enrollment: Mutex<enrollment::Controller>,
+    /// Serializes credential import and post-dialog credential export against configuration changes.
     import_lock: tokio::sync::Mutex<()>,
     notifier: Notifier,
     notifications: Arc<NotificationSettings>,
@@ -76,17 +152,32 @@ pub struct AppState {
     head_generation: std::sync::Mutex<heads::GenerationFence>,
     allow_exit: AtomicBool,
     quit_requested: AtomicBool,
+    app_locked: AtomicBool,
+    app_lock_storage_available: AtomicBool,
+    app_lock_attempts: Arc<app_lock::Attempts>,
+    media_capabilities: Mutex<HashMap<String, MediaCapability>>,
+    media_read_budget: Arc<MediaReadBudget>,
+    update_safety: update_safety::SafetyGate,
+    updates: updates::UpdateManager,
 }
 
 /// Commands a composer window may call (mirrors `capabilities/composer.json`).
 pub const COMPOSER_COMMANDS: &[&str] = &[
     "load_state",
+    "load_history",
     "save_draft",
     "send_draft",
     "mark_seen",
     "pick_attachments",
     "retry_attachment",
     "save_attachment",
+    "request_attachment_download",
+    "media_page",
+    "media_page_around",
+    "media_page_newer",
+    "open_media",
+    "load_media",
+    "close_media",
     "search_contact_recipients",
     "close_composer",
     "close_head_panel",
@@ -100,6 +191,13 @@ fn window_error() -> BridgeError {
     )
 }
 
+fn admit_update_operation(state: &AppState) -> BridgeResult<update_safety::OperationGuard> {
+    state
+        .update_safety
+        .enter()
+        .map_err(|message| BridgeError::new("update-busy", message))
+}
+
 /// Runtime defense in depth behind the Tauri ACL: settings, import, unlock, publication,
 /// composer creation and head commands are main-window only.
 pub fn require_main(label: &str) -> BridgeResult<()> {
@@ -110,18 +208,73 @@ pub fn require_main(label: &str) -> BridgeResult<()> {
     }
 }
 
-/// A composer window is scoped to the conversation in its label; the main window is unscoped.
-pub fn check_conversation_scope(label: &str, conversation: Option<&str>) -> BridgeResult<()> {
-    if label == tray::MAIN {
-        return Ok(());
+/// A composer may follow only a move that was returned to this same window in its active session.
+fn effective_composer_conversation(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    conversation: Option<&str>,
+) -> BridgeResult<Option<ConversationId>> {
+    let source = tray::composer_conversation(label).ok_or_else(window_error)?;
+    let requested = conversation
+        .and_then(|id| ConversationId::from_str(id).ok())
+        .ok_or_else(window_error)?;
+    let scopes = state
+        .composer_scopes
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    composer_scope::effective_conversation(source, scopes.get(label), &session.binding, requested)
+        .map(Some)
+        .ok_or_else(window_error)
+}
+
+fn remember_composer_move(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    error: &BridgeError,
+) {
+    if error.code != "draft-moved" || tray::composer_conversation(label).is_none() {
+        return;
     }
-    let scope = tray::composer_conversation(label).ok_or_else(window_error)?;
-    match conversation.map(ConversationId::from_str) {
-        Some(Ok(id)) if id == scope => Ok(()),
-        _ => Err(BridgeError::new(
-            "window-context",
-            "A composer window can only access its own conversation.",
-        )),
+    let Some(conversation) = error
+        .conversation_id
+        .as_deref()
+        .and_then(|id| ConversationId::from_str(id).ok())
+    else {
+        return;
+    };
+    if let Ok(mut scopes) = state.composer_scopes.lock() {
+        scopes.insert(
+            label.to_owned(),
+            composer_scope::MovedScope {
+                binding: session.binding.clone(),
+                conversation,
+            },
+        );
+    }
+}
+
+fn remember_composer_target(
+    state: &AppState,
+    label: &str,
+    session: &Arc<Session>,
+    conversation: &str,
+) {
+    if tray::composer_conversation(label).is_none() {
+        return;
+    }
+    let Some(conversation) = ConversationId::from_str(conversation).ok() else {
+        return;
+    };
+    if let Ok(mut scopes) = state.composer_scopes.lock() {
+        scopes.insert(
+            label.to_owned(),
+            composer_scope::MovedScope {
+                binding: session.binding.clone(),
+                conversation,
+            },
+        );
     }
 }
 
@@ -134,6 +287,9 @@ impl AppState {
             store,
             config_lock: Mutex::new(()),
             session: tokio::sync::Mutex::new(None),
+            session_open_lock: tokio::sync::Mutex::new(()),
+            composer_scopes: Mutex::new(HashMap::new()),
+            enrollment: Mutex::new(enrollment::Controller::default()),
             import_lock: tokio::sync::Mutex::new(()),
             notifier,
             notifications,
@@ -142,6 +298,13 @@ impl AppState {
             head_generation: std::sync::Mutex::new(heads::GenerationFence::default()),
             allow_exit: AtomicBool::new(false),
             quit_requested: AtomicBool::new(false),
+            app_locked: AtomicBool::new(true),
+            app_lock_storage_available: AtomicBool::new(true),
+            app_lock_attempts: Arc::new(app_lock::Attempts::default()),
+            media_capabilities: Mutex::new(HashMap::new()),
+            media_read_budget: Arc::new(MediaReadBudget::new(MAX_CONCURRENT_MEDIA_READS)),
+            update_safety: update_safety::SafetyGate::default(),
+            updates: updates::UpdateManager::new(env!("CARGO_PKG_VERSION").into()),
         }
     }
 
@@ -161,12 +324,18 @@ impl AppState {
     }
 
     async fn close_session_preserving_heads(&self, preserve_heads: bool) {
+        let _opening = self.session_open_lock.lock().await;
+        if let Ok(mut scopes) = self.composer_scopes.lock() {
+            scopes.clear();
+        }
         if !preserve_heads {
             if let Ok(mut generation) = self.head_generation.lock() {
                 generation.invalidate();
             }
         }
-        if let Some(session) = self.session.lock().await.take() {
+        let session = self.session.lock().await.take();
+        self.revoke_media_capabilities();
+        if let Some(session) = session {
             session.cancel.cancel();
         }
     }
@@ -178,38 +347,134 @@ impl AppState {
     /// The session for the active binding, opened on demand. A session for any other binding is
     /// stopped first, so a client/key opened for one credential is never reused for another.
     pub async fn session(&self) -> BridgeResult<Option<Arc<Session>>> {
+        let _operation = self
+            .update_safety
+            .enter()
+            .map_err(|message| BridgeError::new("update-busy", message))?;
+        let _opening = self.session_open_lock.lock().await;
         let config = self.config()?;
-        let mut guard = self.session.lock().await;
         let Some(binding) = config.active_binding().cloned() else {
-            if let Some(old) = guard.take() {
+            if let Some(old) = self.session.lock().await.take() {
                 old.cancel.cancel();
             }
+            self.revoke_media_capabilities();
             return Ok(None);
         };
-        if let Some(existing) = guard.as_ref() {
-            if existing.binding == binding {
-                return Ok(Some(existing.clone()));
+        let retiring = {
+            let mut current = self.session.lock().await;
+            if let Some(existing) = current.as_ref() {
+                if existing.binding == binding && !existing.cancel.is_cancelled() {
+                    return Ok(Some(existing.clone()));
+                }
             }
-            existing.cancel.cancel();
-            *guard = None;
+            current.take()
+        };
+        if let Some(retiring) = retiring {
+            retiring.cancel.cancel();
+            self.revoke_media_capabilities();
+            if !sync::drain(&retiring, std::time::Duration::from_secs(30)).await {
+                // Keep the retiring session observable while its workers own
+                // storage. `session_open_lock` serializes every opener, so a
+                // timeout must never leave an empty slot that admits another.
+                let mut current = self.session.lock().await;
+                if current.is_none() {
+                    *current = Some(retiring);
+                }
+                return Err(BridgeError::new(
+                    "session-draining",
+                    "Peppy is still finishing the previous account session.",
+                ));
+            }
+            let current = self.session.lock().await.clone();
+            if current.is_some() {
+                return Ok(current);
+            }
+        }
+        if let Ok(mut scopes) = self.composer_scopes.lock() {
+            composer_scope::clear_for_binding(&mut scopes, &binding);
         }
         let epochs = config
             .known(&binding)
             .map(|known| known.cached_epochs.clone())
             .unwrap_or_default();
-        let (root, store, notifier) =
-            (self.root.clone(), self.store.clone(), self.notifier.clone());
+        let (root, store, notifier, opening_binding) = (
+            self.root.clone(),
+            self.store.clone(),
+            self.notifier.clone(),
+            binding.clone(),
+        );
         let session = Arc::new(
-            blocking(move || open_session(&root, &*store, &binding, &epochs, notifier)).await?,
+            blocking(move || open_session(&root, &*store, &opening_binding, &epochs, notifier))
+                .await?,
         );
         sync::start(&session);
-        *guard = Some(session.clone());
+        let mut current = self.session.lock().await;
+        if let Some(existing) = current.as_ref() {
+            if existing.binding == binding && !existing.cancel.is_cancelled() {
+                return Ok(Some(existing.clone()));
+            }
+        }
+        *current = Some(session.clone());
         Ok(Some(session))
+    }
+
+    fn revoke_media_capabilities(&self) {
+        if let Ok(mut capabilities) = self.media_capabilities.lock() {
+            capabilities.clear();
+        }
     }
 
     async fn require_session(&self) -> BridgeResult<Arc<Session>> {
         self.session().await?.ok_or_else(BridgeError::no_session)
     }
+}
+
+async fn release_media_capabilities(
+    state: &AppState,
+    capabilities: Vec<(Arc<Session>, AttachmentId)>,
+) {
+    let Ok(_operation) = admit_update_operation(state) else {
+        return;
+    };
+    for (session, attachment) in capabilities {
+        let active = state.session.lock().await;
+        let current = !state.app_locked.load(Ordering::Acquire)
+            && active
+                .as_ref()
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+        drop(active);
+        if current {
+            let _ = blocking(move || {
+                session
+                    .client
+                    .release_attachment_ciphertext(attachment)
+                    .map_err(core_error)
+            })
+            .await;
+        }
+    }
+}
+
+fn take_window_media_capabilities(
+    state: &AppState,
+    window_label: &str,
+) -> Vec<(Arc<Session>, AttachmentId)> {
+    let Ok(mut capabilities) = state.media_capabilities.lock() else {
+        return Vec::new();
+    };
+    let tokens: Vec<_> = capabilities
+        .iter()
+        .filter(|(_, capability)| capability.window_label == window_label)
+        .map(|(token, _)| token.clone())
+        .collect();
+    tokens
+        .into_iter()
+        .filter_map(|token| {
+            capabilities
+                .remove(&token)
+                .map(|capability| (capability.session, capability.attachment_id))
+        })
+        .collect()
 }
 
 fn head() -> Head {
@@ -267,23 +532,95 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
     }
 }
 
+fn locked_snapshot(storage_available: bool) -> Snapshot {
+    let mut snapshot = empty_snapshot(None);
+    snapshot.connection.error_code = Some(if storage_available {
+        "app-locked"
+    } else {
+        "secure-store-unavailable"
+    });
+    snapshot
+}
+
+/// Opens the current binding for state snapshots, preserving secure-store and session failures.
+async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>> {
+    state.session().await
+}
+
+/// Loads a snapshot using the same window scope policy as the Tauri command.
+async fn load_state_for_window(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    conversation_id: Option<String>,
+    history_from_message_id: Option<String>,
+    origin: Option<String>,
+    preferences: NotificationPreferences,
+) -> BridgeResult<(Snapshot, bool)> {
+    if label == tray::MAIN {
+        return blocking(move || {
+            session.snapshot(
+                conversation_id.as_deref(),
+                history_from_message_id.as_deref(),
+                head(),
+                origin,
+                preferences,
+            )
+        })
+        .await;
+    }
+    let conversation_id =
+        effective_composer_conversation(state, label, &session, conversation_id.as_deref())?
+            .expect("composer conversation");
+    blocking(move || {
+        session.snapshot_scoped(
+            &conversation_id.to_string(),
+            history_from_message_id.as_deref(),
+            head(),
+            origin,
+            preferences,
+        )
+    })
+    .await
+}
+
 #[tauri::command]
 async fn load_state(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     conversation_id: Option<String>,
+    history_from_message_id: Option<String>,
 ) -> BridgeResult<Snapshot> {
-    check_conversation_scope(window.label(), conversation_id.as_deref())?;
+    let _operation = admit_update_operation(&state)?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(locked_snapshot(
+            state.app_lock_storage_available.load(Ordering::Acquire),
+        ));
+    }
     let origin = state.config()?.origin;
-    let Some(session) = state.session().await? else {
+    let Some(session) = snapshot_session(&state).await? else {
         return Ok(empty_snapshot(origin));
     };
-    let s = session.clone();
     let preferences = state.notifications.preferences();
-    let (mut snapshot, deferred) =
-        blocking(move || s.snapshot(conversation_id.as_deref(), head(), origin, preferences))
-            .await?;
+    let (mut snapshot, deferred) = load_state_for_window(
+        &state,
+        window.label(),
+        session.clone(),
+        conversation_id,
+        history_from_message_id,
+        origin,
+        preferences,
+    )
+    .await?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Ok(locked_snapshot(
+            state.app_lock_storage_available.load(Ordering::Acquire),
+        ));
+    }
+    if !session_is_current(&state, &session).await {
+        return Ok(empty_snapshot(state.config()?.origin));
+    }
     let (pinned_conversation_ids, panel) = heads_runtime::snapshot(&app, window.label());
     snapshot.head.pinned_conversation_ids = Some(pinned_conversation_ids);
     snapshot.head.panel = Some(panel);
@@ -299,6 +636,45 @@ async fn load_state(
     Ok(snapshot)
 }
 
+async fn session_is_current(state: &AppState, session: &Arc<Session>) -> bool {
+    state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, session))
+}
+
+#[tauri::command]
+async fn load_history(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    before_message_id: String,
+) -> BridgeResult<HistoryPage> {
+    let _operation = admit_update_operation(&state)?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let session = state.require_session().await?;
+    let scoped_conversation = if window.label() == tray::MAIN {
+        ConversationId::from_str(&conversation_id)
+            .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?
+    } else {
+        effective_composer_conversation(&state, window.label(), &session, Some(&conversation_id))?
+            .expect("composer conversation")
+    };
+    let history_session = session.clone();
+    let page = blocking(move || {
+        history_session.history_page(&scoped_conversation.to_string(), &before_message_id)
+    })
+    .await?;
+    if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    Ok(page)
+}
+
 #[tauri::command]
 async fn configure_server(
     window: tauri::WebviewWindow,
@@ -306,6 +682,7 @@ async fn configure_server(
     state: State<'_, AppState>,
     origin: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let origin = origin::validate_origin(&origin)?;
     let _import = state.import_lock.lock().await;
@@ -335,44 +712,15 @@ async fn configure_server(
     Ok(())
 }
 
-#[tauri::command]
-async fn import_credentials(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> BridgeResult<()> {
-    require_main(window.label())?;
-    let Some(path) = dialogs::pick_file(&app, "Import Peppy device credential").await? else {
-        return Ok(());
-    };
-    let bytes = blocking(move || read_credential_file(&path)).await?;
-    let credential = Arc::new(parse_credential(&bytes)?);
-    drop(bytes);
-    verify_import(&state, &credential).await?;
-    let _import = state.import_lock.lock().await;
-    let target = credential.binding();
-    let switching = state.config()?.active_binding() != Some(&target);
-    let permit = if switching {
-        Some(lifecycle::prepare_switch(&app).await?)
-    } else {
-        None
-    };
-    activate_import_locked(&state, credential).await?;
-    if let Some(permit) = permit {
-        permit.finish().await?;
-    }
-    (state.notifier)();
-    Ok(())
-}
-
-/// Activates a credential produced natively by hosted provisioning or QR join. Its origin is
-/// selected first so the existing origin-binding, verification and activation checks apply
-/// unchanged; the previous configuration is restored if any step fails.
+/// Activates a credential produced by a native enrollment flow. Its origin is selected first so
+/// the existing origin-binding, verification, and activation checks apply unchanged; the previous
+/// configuration is restored if any step fails.
 async fn activate_native_credential(
     app: &tauri::AppHandle,
     state: &AppState,
     bytes: zeroize::Zeroizing<Vec<u8>>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(state)?;
     let credential = Arc::new(parse_credential(&bytes)?);
     drop(bytes);
     let _import = state.import_lock.lock().await;
@@ -403,7 +751,7 @@ async fn activate_native_credential(
 /// Shared by tests: proves the credential at its own origin,
 /// then activates it under the import lock.
 #[cfg(test)]
-async fn import_credential(
+async fn verify_and_activate_test_credential(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
@@ -492,6 +840,7 @@ async fn unlock_sync(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let vault = fetch_vault(
@@ -505,6 +854,7 @@ async fn unlock_sync(
     else {
         return Ok(());
     };
+    let verified_passphrase = passphrase.clone();
     let result = unlock_with(
         &state,
         &session,
@@ -514,50 +864,122 @@ async fn unlock_sync(
         vault.profile_fingerprint,
     )
     .await;
+    if result.is_ok() {
+        if let Ok(current) = state.require_session().await {
+            if Arc::ptr_eq(&current, &session) && current.binding == session.binding {
+                let _ = enrollment::save_verified_vault_secret_if_empty(
+                    &*state.store,
+                    &session.binding.vault_secret_account(),
+                    &verified_passphrase,
+                );
+            }
+        }
+    }
     session.notify();
     result
 }
 
-/// Creates a short-lived server intent using the native credential. The webview receives only
-/// the canonical origin and public intent token needed to render the QR code.
-#[tauri::command]
-async fn create_pairing_intent(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-) -> BridgeResult<PairingIntentView> {
-    require_main(window.label())?;
-    state.require_session().await?.create_pairing_intent().await
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppLockStatus {
+    enabled: bool,
+    locked: bool,
+    storage_available: bool,
 }
 
 #[tauri::command]
-async fn pairing_intent_status(
+fn get_app_lock_status(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-    intent_token: String,
-) -> BridgeResult<PairingStatusView> {
+) -> BridgeResult<AppLockStatus> {
     require_main(window.label())?;
-    state
-        .require_session()
-        .await?
-        .pairing_intent_status(&intent_token)
-        .await
+    let configured = app_lock::status(&*state.store);
+    let storage_available =
+        state.app_lock_storage_available.load(Ordering::Acquire) && configured.is_ok();
+    let enabled = storage_available && matches!(configured, Ok(app_lock::Status::Enabled));
+    Ok(AppLockStatus {
+        enabled,
+        locked: state.app_locked.load(Ordering::Acquire),
+        storage_available,
+    })
 }
 
-/// Approval echoes the exact claimed key digest after the person compares the SAS. The server's
-/// challenge response remains native because it is consumed by the phone, not the webview.
 #[tauri::command]
-async fn approve_pairing_intent(
+async fn unlock_app(
     window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
-    intent_token: String,
-    key_digest: String,
-) -> BridgeResult<()> {
+) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    state
-        .require_session()
-        .await?
-        .approve_pairing_intent(&intent_token, &key_digest)
-        .await
+    if !state.app_locked.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    if !state.app_lock_storage_available.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let Some(password) =
+        dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockUnlock).await?
+    else {
+        return Ok(false);
+    };
+    let store = state.store.clone();
+    let attempts = state.app_lock_attempts.clone();
+    let verified = blocking(move || app_lock::verify(&*store, password, &attempts)).await?;
+    if verified {
+        state.app_locked.store(false, Ordering::Release);
+        (state.notifier)();
+    }
+    Ok(verified)
+}
+
+#[tauri::command]
+async fn set_app_lock(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    if !state.app_lock_storage_available.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let currently_enabled = matches!(app_lock::status(&*state.store)?, app_lock::Status::Enabled);
+    if enabled == currently_enabled {
+        return Ok(true);
+    }
+    if enabled {
+        let Some(password) =
+            dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockCreate).await?
+        else {
+            return Ok(false);
+        };
+        let Some(confirm) =
+            dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockConfirm).await?
+        else {
+            return Ok(false);
+        };
+        if password != confirm {
+            return Ok(false);
+        }
+        let store = state.store.clone();
+        blocking(move || app_lock::enable(&*store, &password)).await?;
+    } else {
+        let Some(password) =
+            dialogs::passphrase(&app, dialogs::PassphrasePurpose::AppLockDisable).await?
+        else {
+            return Ok(false);
+        };
+        let store = state.store.clone();
+        let attempts = state.app_lock_attempts.clone();
+        if !blocking(move || app_lock::verify(&*store, password, &attempts)).await? {
+            return Ok(false);
+        }
+        let store = state.store.clone();
+        blocking(move || app_lock::disable(&*store)).await?;
+    }
+    Ok(true)
 }
 
 async fn unlock_with(
@@ -601,9 +1023,45 @@ async fn unlock_with(
     let binding = session.binding.clone();
     state.update_config(|config| config.add_cached_epoch(&binding, epoch))?;
     session.set_status(|status| status.vault = Some(VaultSummary { epoch, fingerprint }));
+    // The renderer refreshes only on state events; the claim path notifies before this unlock.
+    session.notify();
     session.request_work();
     session.reconnect_wake.notify_one();
     Ok(())
+}
+
+/// Saves a draft and records a returned move only for the originating composer window.
+async fn save_draft_for_window(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    input: DraftInput,
+) -> BridgeResult<DraftView> {
+    if label != tray::MAIN {
+        effective_composer_conversation(
+            state,
+            label,
+            &session,
+            Some(input.conversation_id.as_str()),
+        )?;
+    }
+    let requested_conversation = input.conversation_id.clone();
+    let result = blocking({
+        let session = session.clone();
+        move || session.save_draft(&input)
+    })
+    .await;
+    if let Ok(draft) = &result {
+        if draft.conversation_id != requested_conversation {
+            remember_composer_target(state, label, &session, &draft.conversation_id);
+        }
+    } else if let Err(error) = &result {
+        remember_composer_move(state, label, &session, error);
+        if error.code == "draft-moved" {
+            session.notify();
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -612,9 +1070,89 @@ async fn save_draft(
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<DraftView> {
-    check_conversation_scope(window.label(), Some(input.conversation_id.as_str()))?;
+    // The lifecycle reservation permits only the already-open session for a captured webview
+    // that still owes its update draft flush. It must not create or replace a session.
+    let session = if lifecycle::update_flush_pending(window.app_handle(), window.label()) {
+        state
+            .session
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(BridgeError::no_session)?
+    } else {
+        let _operation = admit_update_operation(&state)?;
+        let session = state.require_session().await?;
+        return save_draft_for_window(&state, window.label(), session, input).await;
+    };
+    save_draft_for_window(&state, window.label(), session, input).await
+}
+
+#[tauri::command]
+async fn discard_draft(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: DiscardDraftInput,
+) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
     let session = state.require_session().await?;
-    blocking(move || session.save_draft(&input)).await
+    let conversation_id = input.conversation_id.clone();
+    blocking(move || session.discard_draft(&input)).await?;
+    if let Err(error) = heads_runtime::forget_deleted_conversation(&app, &conversation_id) {
+        eprintln!(
+            "could not clear deleted conversation pin: {}",
+            error.message
+        );
+    }
+    close_deleted_composers(&app, &state, &conversation_id);
+    Ok(())
+}
+
+fn close_deleted_composers(app: &tauri::AppHandle, state: &AppState, conversation_id: &str) {
+    let Ok(deleted) = ConversationId::from_str(conversation_id) else {
+        return;
+    };
+    let moved = state.composer_scopes.lock().ok();
+    for label in app.webview_windows().keys() {
+        let matches_source =
+            tray::composer_conversation(label).is_some_and(|source| source == deleted);
+        let matches_moved = moved
+            .as_ref()
+            .and_then(|scopes| scopes.get(label))
+            .is_some_and(|scope| scope.conversation == deleted);
+        if matches_source || matches_moved {
+            let _ = lifecycle::request_window(app, label, lifecycle::Action::Close);
+        }
+    }
+}
+
+/// Sends a draft through the same scoped path as the Tauri command.
+async fn send_draft_for_window(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    input: DraftInput,
+) -> BridgeResult<SendResultView> {
+    if label != tray::MAIN {
+        effective_composer_conversation(
+            state,
+            label,
+            &session,
+            Some(input.conversation_id.as_str()),
+        )?;
+    }
+    let s = session.clone();
+    let result = blocking(move || s.send_draft(&input)).await;
+    if let Err(error) = &result {
+        remember_composer_move(state, label, &session, error);
+        if error.code == "draft-moved" {
+            session.notify();
+        }
+    } else {
+        session.notify();
+    }
+    result
 }
 
 #[tauri::command]
@@ -623,12 +1161,9 @@ async fn send_draft(
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<SendResultView> {
-    check_conversation_scope(window.label(), Some(input.conversation_id.as_str()))?;
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
-    let s = session.clone();
-    let result = blocking(move || s.send_draft(&input)).await;
-    session.notify();
-    result
+    send_draft_for_window(&state, window.label(), session, input).await
 }
 
 #[tauri::command]
@@ -637,6 +1172,7 @@ async fn mark_seen(
     state: State<'_, AppState>,
     visible_message_ids: Vec<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     // A composer must never acknowledge another conversation's messages. The
     // UI supplies message IDs rather than a conversation ID, so resolve each
     // one through the scoped native session before applying the acknowledgement.
@@ -653,15 +1189,36 @@ async fn mark_seen(
     let conversation = if window.label() == tray::MAIN {
         None
     } else {
-        Some(tray::composer_conversation(window.label()).ok_or_else(window_error)?)
+        let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+        effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&source.to_string()),
+        )?
     };
     blocking(move || session.mark_seen_scoped(&visible_message_ids, conversation)).await
 }
 
 #[tauri::command]
 async fn list_contact_books(state: State<'_, AppState>) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::list_books(&session)).await
+}
+
+#[tauri::command]
+async fn list_devices(state: State<'_, AppState>) -> BridgeResult<devices::DeviceRosterView> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    devices::list(&session).await
+}
+
+#[tauri::command]
+async fn revoke_device(state: State<'_, AppState>, device_id: String) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    devices::revoke(&session, &device_id).await
 }
 
 #[tauri::command]
@@ -671,6 +1228,7 @@ async fn list_contacts(
     query: Option<String>,
     offset: Option<u32>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::list_contacts(&session, &book_id, query.as_deref(), offset)).await
 }
@@ -682,6 +1240,7 @@ async fn search_contact_recipients(
     query: String,
     source_device_id: Option<String>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::search_recipients(&session, &query, source_device_id.as_deref()))
         .await
@@ -690,8 +1249,29 @@ async fn search_contact_recipients(
 /// Latches a contact projection repair; the live loop runs one fenced snapshot.
 #[tauri::command]
 async fn request_contact_repair(state: State<'_, AppState>) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::request_repair(&session)).await
+}
+
+#[tauri::command]
+async fn request_contact_sync(
+    state: State<'_, AppState>,
+    book_id: String,
+) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    blocking(move || contacts::request_sync(&session, &book_id)).await
+}
+
+#[tauri::command]
+async fn get_contact_sync_request(
+    state: State<'_, AppState>,
+    book_id: String,
+) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    blocking(move || contacts::sync_request_status(&session, &book_id)).await
 }
 
 /// This device's contact edit requests and the owner results recorded in the local ledger.
@@ -700,6 +1280,7 @@ async fn list_contact_edits(
     state: State<'_, AppState>,
     book_id: Option<String>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::list_edits(&session, book_id.as_deref())).await
 }
@@ -711,6 +1292,7 @@ async fn pick_contact_photo(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<Option<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     state.require_session().await?;
     let Some(path) = dialogs::pick_file(&app, "Choose a contact photo").await? else {
         return Ok(None);
@@ -722,6 +1304,7 @@ async fn pick_contact_photo(
 
 #[tauri::command]
 async fn forget_contact_book(state: State<'_, AppState>, book_id: String) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::forget_book(&session, &book_id)).await
 }
@@ -731,6 +1314,7 @@ async fn submit_contact_edit(
     state: State<'_, AppState>,
     input: serde_json::Value,
 ) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::submit(&session, &input)).await
 }
@@ -740,6 +1324,7 @@ async fn list_restorable_contacts(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<Vec<serde_json::Value>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::restorable(&session, &book_id)).await
 }
@@ -750,6 +1335,7 @@ async fn restore_contact(
     book_id: String,
     contact_id: String,
 ) -> BridgeResult<serde_json::Value> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     blocking(move || contacts::restore(&session, &book_id, &contact_id)).await
 }
@@ -759,6 +1345,7 @@ async fn pick_attachments(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<Vec<dto::AttachmentView>> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
     let paths = dialogs::pick_files(&app, "Attach files (encrypted before upload)").await?;
     if paths.len() > 10 {
@@ -847,17 +1434,46 @@ mod mms_filename_tests {
 }
 
 async fn check_attachment_window_scope(
+    state: &AppState,
     session: &Arc<Session>,
-    label: &str,
+    window: &tauri::WebviewWindow,
     id: &str,
 ) -> BridgeResult<()> {
-    if label == tray::MAIN {
+    if window.label() == tray::MAIN {
         return Ok(());
     }
-    let conversation = tray::composer_conversation(label).ok_or_else(window_error)?;
+    let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+    let conversation =
+        effective_composer_conversation(state, window.label(), session, Some(&source.to_string()))?
+            .ok_or_else(window_error)?;
     let (session, id) = (session.clone(), id.to_owned());
     let belongs = blocking(move || session.attachment_in_conversation(&id, conversation)).await?;
     belongs.then_some(()).ok_or_else(window_error)
+}
+
+async fn demand_attachment_if_needed(
+    session: &Arc<Session>,
+    attachment: AttachmentId,
+) -> BridgeResult<bool> {
+    let client = session.client.clone();
+    let demanded = blocking(move || {
+        if client
+            .attachment_download_requested(attachment)
+            .map_err(core_error)?
+        {
+            return Ok(false);
+        }
+        client
+            .request_attachment_download(attachment)
+            .map_err(core_error)?;
+        Ok(true)
+    })
+    .await?;
+    if demanded {
+        session.request_work();
+        session.notify();
+    }
+    Ok(demanded)
 }
 
 #[tauri::command]
@@ -866,8 +1482,9 @@ async fn retry_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
-    check_attachment_window_scope(&session, window.label(), &id).await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
     let s = session.clone();
     blocking(move || s.retry_attachment(&id)).await?;
     session.notify();
@@ -881,16 +1498,18 @@ async fn save_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
     let session = state.require_session().await?;
-    check_attachment_window_scope(&session, window.label(), &id).await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     let s = session.clone();
     let info = blocking(move || s.client.attachment_info(attachment).map_err(core_error)).await?;
     if !info.state.is_local() {
+        demand_attachment_if_needed(&session, attachment).await?;
         return Err(BridgeError::new(
-            "attachment-unavailable",
-            "This attachment is not verified and ready to save.",
+            "media-pending",
+            "The attachment is downloading. Try Save again when it is ready.",
         ));
     }
     let Some(destination) = dialogs::save_file(
@@ -904,6 +1523,1111 @@ async fn save_attachment(
     };
     blocking(move || session.save_attachment(&id, &destination)).await?;
     Ok(true)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenMediaView {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_size: Option<u64>,
+}
+
+#[cfg(target_os = "windows")]
+fn media_capability_url(token: &str) -> String {
+    format!("http://peppy-media.localhost/{token}")
+}
+#[cfg(not(target_os = "windows"))]
+fn media_capability_url(token: &str) -> String {
+    format!("peppy-media://localhost/{token}")
+}
+
+fn media_capability_token(url: &str) -> Option<&str> {
+    let prefix = if cfg!(target_os = "windows") {
+        "http://peppy-media.localhost/"
+    } else {
+        "peppy-media://localhost/"
+    };
+    let token = url.strip_prefix(prefix)?;
+    (!token.is_empty() && !token.contains('/')).then_some(token)
+}
+
+fn inline_media_type(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "image/jpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "video/mp4" => Some("video/mp4"),
+        "video/3gpp" => Some("video/3gpp"),
+        "audio/mpeg" => Some("audio/mpeg"),
+        "audio/amr" => Some("audio/amr"),
+        _ => None,
+    }
+}
+
+fn store_media_capability(
+    state: &AppState,
+    session: Arc<Session>,
+    window_label: &str,
+    info: AttachmentInfo,
+    plaintext: NativePlaintextFile,
+) -> BridgeResult<(OpenMediaView, Vec<(Arc<Session>, AttachmentId)>)> {
+    let media_type = inline_media_type(&info.media_type).ok_or_else(|| {
+        BridgeError::new(
+            "unsupported",
+            "Save this media to open it in another application.",
+        )
+    })?;
+    if info.plaintext_bytes > MAX_INLINE_MEDIA_BYTES {
+        return Err(BridgeError::new(
+            "media-too-large",
+            "This media item is too large to open safely.",
+        ));
+    }
+    let mut capabilities = state
+        .media_capabilities
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    let mut released = Vec::new();
+    while capabilities.len() >= MAX_OPEN_MEDIA_CAPABILITIES
+        || capabilities
+            .values()
+            .map(|capability| capability.plaintext_bytes)
+            .sum::<u64>()
+            + info.plaintext_bytes
+            > MAX_OPEN_MEDIA_BYTES
+    {
+        let Some(token) = capabilities
+            .iter()
+            .min_by_key(|(_, capability)| capability.opened_at)
+            .map(|(token, _)| token.clone())
+        else {
+            break;
+        };
+        if let Some(capability) = capabilities.remove(&token) {
+            released.push((capability.session, capability.attachment_id));
+        }
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    capabilities.insert(
+        token.clone(),
+        MediaCapability {
+            session,
+            attachment_id: info.attachment_id,
+            window_label: window_label.to_owned(),
+            media_type: media_type.to_owned(),
+            plaintext_bytes: info.plaintext_bytes,
+            plaintext,
+            opened_at: Instant::now(),
+        },
+    );
+    Ok((
+        OpenMediaView {
+            state: "ready",
+            url: Some(media_capability_url(&token)),
+            media_type: Some(media_type.to_owned()),
+            byte_size: Some(info.plaintext_bytes),
+        },
+        released,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaCursorInput {
+    sort_at_ms: String,
+    local_order: String,
+    message_id: String,
+    attachment_position: u32,
+}
+
+impl TryFrom<MediaCursorInput> for peppy_client_core::MediaCursor {
+    type Error = BridgeError;
+
+    fn try_from(value: MediaCursorInput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            sort_at_ms: value
+                .sort_at_ms
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-request", "The media cursor is invalid."))?,
+            local_order: value
+                .local_order
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-request", "The media cursor is invalid."))?,
+            message_id: value
+                .message_id
+                .parse()
+                .map_err(|_| BridgeError::new("invalid-request", "The media cursor is invalid."))?,
+            attachment_position: value.attachment_position,
+        })
+    }
+}
+
+#[tauri::command]
+async fn request_attachment_download(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    demand_attachment_if_needed(&session, attachment).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn media_page(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    cursor: Option<MediaCursorInput>,
+    limit: Option<usize>,
+) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    if window.label() != tray::MAIN {
+        let scoped = effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&conversation_id),
+        )?;
+        if scoped != Some(conversation) {
+            return Err(window_error());
+        }
+    }
+    let cursor = cursor
+        .map(peppy_client_core::MediaCursor::try_from)
+        .transpose()?;
+    blocking(move || session.media_page(conversation, cursor.as_ref(), limit.unwrap_or(50))).await
+}
+
+#[tauri::command]
+async fn media_page_around(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    attachment_id: String,
+    message_id: Option<String>,
+    limit: Option<usize>,
+) -> BridgeResult<peppy_desktop_api::MediaPageAroundView> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    let attachment = AttachmentId::from_str(&attachment_id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let message = message_id
+        .map(|id| {
+            MessageId::from_str(&id)
+                .map_err(|_| BridgeError::new("invalid-request", "The message ID is invalid."))
+        })
+        .transpose()?;
+    if window.label() != tray::MAIN {
+        let scoped = effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&conversation_id),
+        )?;
+        if scoped != Some(conversation) {
+            return Err(window_error());
+        }
+    }
+    blocking(move || {
+        session.media_page_around(conversation, attachment, message, limit.unwrap_or(50))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn media_page_newer(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    conversation_id: String,
+    cursor: MediaCursorInput,
+    limit: Option<usize>,
+) -> BridgeResult<peppy_desktop_api::MediaPageView> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    let conversation = ConversationId::from_str(&conversation_id)
+        .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
+    if window.label() != tray::MAIN {
+        let scoped = effective_composer_conversation(
+            &state,
+            window.label(),
+            &session,
+            Some(&conversation_id),
+        )?;
+        if scoped != Some(conversation) {
+            return Err(window_error());
+        }
+    }
+    let cursor = peppy_client_core::MediaCursor::try_from(cursor)?;
+    blocking(move || session.media_page_newer(conversation, &cursor, limit.unwrap_or(50))).await
+}
+
+#[tauri::command]
+async fn open_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<OpenMediaView> {
+    let _operation = admit_update_operation(&state)?;
+    let session = state.require_session().await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let acquired_session = session.clone();
+    let ready = blocking(move || {
+        let info = acquired_session
+            .client
+            .attachment_info(attachment)
+            .map_err(core_error)?;
+        if !info.state.is_local() {
+            return Ok(None);
+        }
+        acquired_session
+            .client
+            .retain_attachment_ciphertext(attachment)
+            .map_err(core_error)?;
+        match acquired_session.client.open_native_plaintext(attachment) {
+            Ok(plaintext) => {
+                if let Err(error) = acquired_session
+                    .client
+                    .touch_attachment_ciphertext(attachment)
+                {
+                    let _ = acquired_session
+                        .client
+                        .release_attachment_ciphertext(attachment);
+                    return Err(core_error(error));
+                }
+                Ok(Some((info, plaintext)))
+            }
+            Err(error) => {
+                let _ = acquired_session
+                    .client
+                    .release_attachment_ciphertext(attachment);
+                Err(core_error(error))
+            }
+        }
+    })
+    .await?;
+    match ready {
+        Some((info, plaintext)) => {
+            let active = state.session.lock().await;
+            if state.app_locked.load(Ordering::Acquire)
+                || !active
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                drop(active);
+                let release = session.clone();
+                let _ = blocking(move || {
+                    release
+                        .client
+                        .release_attachment_ciphertext(attachment)
+                        .map_err(core_error)
+                })
+                .await;
+                return Err(BridgeError::new("locked", "Peppy is locked."));
+            }
+            match store_media_capability(&state, session.clone(), window.label(), info, plaintext) {
+                Ok((view, evicted)) => {
+                    drop(active);
+                    release_media_capabilities(&state, evicted).await;
+                    Ok(view)
+                }
+                Err(error) => {
+                    drop(active);
+                    let release = session.clone();
+                    let _ = blocking(move || {
+                        release
+                            .client
+                            .release_attachment_ciphertext(attachment)
+                            .map_err(core_error)
+                    })
+                    .await;
+                    Err(error)
+                }
+            }
+        }
+        None => Ok(OpenMediaView {
+            state: "pending",
+            url: None,
+            media_type: None,
+            byte_size: None,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn load_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<OpenMediaView> {
+    let _operation = admit_update_operation(&state)?;
+    request_attachment_download(window.clone(), state.clone(), id.clone()).await?;
+    open_media(window, state, id).await
+}
+
+#[tauri::command]
+async fn close_media(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    url: Option<String>,
+) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let released_sessions = {
+        let mut capabilities = state
+            .media_capabilities
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let mut released_sessions = Vec::new();
+        if let Some(url) = url {
+            let token = media_capability_token(&url)
+                .ok_or_else(|| BridgeError::new("invalid-request", "The media URL is invalid."))?;
+            if capabilities.get(token).is_some_and(|capability| {
+                capability.window_label == window.label() && capability.attachment_id == attachment
+            }) {
+                if let Some(capability) = capabilities.remove(token) {
+                    released_sessions.push(capability.session);
+                }
+            }
+        } else {
+            let tokens: Vec<_> = capabilities
+                .iter()
+                .filter(|(_, capability)| {
+                    capability.window_label == window.label()
+                        && capability.attachment_id == attachment
+                })
+                .map(|(token, _)| token.clone())
+                .collect();
+            for token in tokens {
+                if let Some(capability) = capabilities.remove(&token) {
+                    released_sessions.push(capability.session);
+                }
+            }
+        }
+        released_sessions
+    };
+    for session in released_sessions {
+        let active = state.session.lock().await;
+        let current = !state.app_locked.load(Ordering::Acquire)
+            && active
+                .as_ref()
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+        drop(active);
+        if current {
+            blocking(move || {
+                session
+                    .client
+                    .release_attachment_ciphertext(attachment)
+                    .map_err(core_error)
+            })
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn media_range(value: Option<&tauri::http::HeaderValue>, total: u64) -> Result<(u64, u64), ()> {
+    if total == 0 {
+        return Err(());
+    }
+    let Some(value) = value else {
+        return Ok((0, total.saturating_sub(1)));
+    };
+    let value = value.to_str().map_err(|_| ())?;
+    let range = value.strip_prefix("bytes=").ok_or(())?;
+    if range.contains(',') {
+        return Err(());
+    }
+    let (start, end) = range.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        if end.is_empty() || !end.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(());
+        }
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        let start = total.saturating_sub(suffix);
+        return Ok((start, (start + MAX_MEDIA_RANGE_BYTES - 1).min(total - 1)));
+    }
+    if !start.bytes().all(|byte| byte.is_ascii_digit())
+        || (!end.is_empty() && !end.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(());
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(total - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok((start, end.min(start + MAX_MEDIA_RANGE_BYTES - 1)))
+}
+
+fn media_protocol_response<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    webview_label: String,
+    request: tauri::http::Request<Vec<u8>>,
+    admission: MediaReadPermit,
+) -> tauri::http::Response<Vec<u8>> {
+    media_protocol_response_for_state(&app.state::<AppState>(), &webview_label, request, admission)
+}
+
+fn media_protocol_response_for_state(
+    state: &AppState,
+    webview_label: &str,
+    request: tauri::http::Request<Vec<u8>>,
+    admission: MediaReadPermit,
+) -> tauri::http::Response<Vec<u8>> {
+    media_protocol_response_with_reader(
+        state,
+        webview_label,
+        request,
+        admission,
+        |path, start, bytes| {
+            let mut file = File::open(path)?;
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(bytes)
+        },
+    )
+}
+
+fn media_protocol_response_with_reader<F>(
+    state: &AppState,
+    webview_label: &str,
+    request: tauri::http::Request<Vec<u8>>,
+    _admission: MediaReadPermit,
+    read_range: F,
+) -> tauri::http::Response<Vec<u8>>
+where
+    F: FnOnce(&std::path::Path, u64, &mut [u8]) -> std::io::Result<()>,
+{
+    let token = request
+        .uri()
+        .path()
+        .strip_prefix('/')
+        .filter(|value| !value.is_empty() && !value.contains('/'));
+    let Some(token) = token else {
+        return tauri::http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .unwrap();
+    };
+    if state.app_locked.load(Ordering::Acquire) {
+        return tauri::http::Response::builder()
+            .status(403)
+            .body(Vec::new())
+            .unwrap();
+    }
+    let (
+        capability_session,
+        capability_window,
+        capability_media_type,
+        capability_bytes,
+        capability_path,
+    ) = {
+        let capabilities = match state.media_capabilities.lock() {
+            Ok(value) => value,
+            Err(_) => {
+                return tauri::http::Response::builder()
+                    .status(503)
+                    .body(Vec::new())
+                    .unwrap()
+            }
+        };
+        let Some(capability) = capabilities.get(token) else {
+            return tauri::http::Response::builder()
+                .status(404)
+                .body(Vec::new())
+                .unwrap();
+        };
+        (
+            capability.session.clone(),
+            capability.window_label.clone(),
+            capability.media_type.clone(),
+            capability.plaintext_bytes,
+            capability.plaintext.path().to_path_buf(),
+        )
+    };
+    let active = tauri::async_runtime::block_on(state.session.lock());
+    if !active
+        .as_ref()
+        .is_some_and(|session| Arc::ptr_eq(session, &capability_session))
+        || capability_window != webview_label
+        || !(request.method() == tauri::http::Method::GET
+            || request.method() == tauri::http::Method::HEAD)
+    {
+        return tauri::http::Response::builder()
+            .status(403)
+            .body(Vec::new())
+            .unwrap();
+    }
+    drop(active);
+    let had_range = request.headers().contains_key(tauri::http::header::RANGE);
+    if !had_range && capability_bytes > MAX_INLINE_MEDIA_BYTES {
+        return tauri::http::Response::builder()
+            .status(413)
+            .header(tauri::http::header::CACHE_CONTROL, "no-store")
+            .body(Vec::new())
+            .unwrap();
+    }
+    if request
+        .headers()
+        .get_all(tauri::http::header::RANGE)
+        .iter()
+        .count()
+        != 1
+        && request.headers().contains_key(tauri::http::header::RANGE)
+    {
+        return tauri::http::Response::builder()
+            .status(416)
+            .body(Vec::new())
+            .unwrap();
+    }
+    let (start, end) = match media_range(
+        request.headers().get(tauri::http::header::RANGE),
+        capability_bytes,
+    ) {
+        Ok(range) => range,
+        Err(()) => {
+            return tauri::http::Response::builder()
+                .status(416)
+                .header(
+                    tauri::http::header::CONTENT_RANGE,
+                    format!("bytes */{capability_bytes}"),
+                )
+                .body(Vec::new())
+                .unwrap();
+        }
+    };
+    let length = usize::try_from(end - start + 1).unwrap_or(0);
+    let mut bytes = Vec::new();
+    if request.method() == tauri::http::Method::GET {
+        bytes.resize(length, 0);
+        if read_range(&capability_path, start, &mut bytes).is_err() {
+            return tauri::http::Response::builder()
+                .status(404)
+                .body(Vec::new())
+                .unwrap();
+        }
+    }
+    let active = tauri::async_runtime::block_on(state.session.lock());
+    if state.app_locked.load(Ordering::Acquire)
+        || !active
+            .as_ref()
+            .is_some_and(|session| Arc::ptr_eq(session, &capability_session))
+    {
+        return tauri::http::Response::builder()
+            .status(403)
+            .body(Vec::new())
+            .unwrap();
+    }
+    let partial = had_range || start != 0 || end + 1 != capability_bytes;
+    let mut response = tauri::http::Response::builder()
+        .status(if partial { 206 } else { 200 })
+        .header(tauri::http::header::CONTENT_TYPE, &capability_media_type)
+        .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header(
+            tauri::http::header::CONTENT_LENGTH,
+            if request.method() == tauri::http::Method::HEAD {
+                length
+            } else {
+                bytes.len()
+            },
+        );
+    if partial {
+        response = response.header(
+            tauri::http::header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{capability_bytes}"),
+        );
+    }
+    response.body(bytes).unwrap()
+}
+
+#[cfg(test)]
+mod media_protocol_tests {
+    use super::{
+        media_protocol_response_for_state, media_protocol_response_with_reader, media_range,
+        release_media_capabilities, store_media_capability, take_window_media_capabilities,
+        AppState, MediaReadBudget, MAX_MEDIA_RANGE_BYTES, MAX_OPEN_MEDIA_CAPABILITIES,
+    };
+    use crate::{secure_store::MemoryStore, tests};
+    use peppy_client_core::AttachmentId;
+    use std::{
+        fs,
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
+    use tauri::http::{HeaderValue, Method, Request, StatusCode};
+
+    struct ProtocolHarness {
+        _fixture: tests::Fixture,
+        state: Arc<AppState>,
+        session: Arc<crate::session::Session>,
+        attachment: AttachmentId,
+        token: String,
+    }
+
+    impl ProtocolHarness {
+        fn new(bytes: &[u8]) -> Self {
+            let fixture = tests::fixture_at("http://127.0.0.1:9");
+            let session = Arc::new(tests::open(&fixture, &fixture.binding, &[]));
+            session
+                .client
+                .unlock(&fixture.profile, &fixture.header, tests::PHRASE)
+                .unwrap();
+            let source = fixture.dir.path().join("protocol-media.png");
+            fs::write(&source, bytes).unwrap();
+            let info = session
+                .client
+                .prepare_attachment(&source, "image/png", "protocol-media.png")
+                .unwrap();
+            session
+                .client
+                .retain_attachment_ciphertext(info.attachment_id)
+                .unwrap();
+            let plaintext = session
+                .client
+                .open_native_plaintext(info.attachment_id)
+                .unwrap();
+            let state = Arc::new(AppState::new(
+                fixture.dir.path().to_path_buf(),
+                Arc::new(MemoryStore::default()),
+                tests::noop(),
+            ));
+            state
+                .app_locked
+                .store(false, std::sync::atomic::Ordering::Release);
+            tauri::async_runtime::block_on(async {
+                *state.session.lock().await = Some(session.clone());
+            });
+            let (view, evicted) =
+                store_media_capability(&state, session.clone(), "main", info.clone(), plaintext)
+                    .unwrap();
+            assert!(evicted.is_empty());
+            let token = super::media_capability_token(view.url.as_deref().unwrap())
+                .unwrap()
+                .to_owned();
+            Self {
+                _fixture: fixture,
+                state,
+                session,
+                attachment: info.attachment_id,
+                token,
+            }
+        }
+
+        fn request(&self, method: Method, range: Option<&str>) -> Request<Vec<u8>> {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("/{}", self.token));
+            if let Some(range) = range {
+                request = request.header(tauri::http::header::RANGE, range);
+            }
+            request.body(Vec::new()).unwrap()
+        }
+
+        fn respond(&self, method: Method, range: Option<&str>) -> tauri::http::Response<Vec<u8>> {
+            let admission = self
+                .state
+                .media_read_budget
+                .try_acquire()
+                .expect("request admitted");
+            media_protocol_response_for_state(
+                &self.state,
+                "main",
+                self.request(method, range),
+                admission,
+            )
+        }
+
+        fn add_capability(
+            &self,
+            name: &str,
+            bytes: &[u8],
+            window_label: &str,
+        ) -> (
+            AttachmentId,
+            String,
+            Vec<(Arc<crate::session::Session>, AttachmentId)>,
+        ) {
+            let source = self._fixture.dir.path().join(name);
+            fs::write(&source, bytes).unwrap();
+            let info = self
+                .session
+                .client
+                .prepare_attachment(&source, "image/png", name)
+                .unwrap();
+            self.session
+                .client
+                .retain_attachment_ciphertext(info.attachment_id)
+                .unwrap();
+            let plaintext = self
+                .session
+                .client
+                .open_native_plaintext(info.attachment_id)
+                .unwrap();
+            let attachment = info.attachment_id;
+            let (view, evicted) = store_media_capability(
+                &self.state,
+                self.session.clone(),
+                window_label,
+                info,
+                plaintext,
+            )
+            .unwrap();
+            let token = super::media_capability_token(view.url.as_deref().unwrap())
+                .unwrap()
+                .to_owned();
+            (attachment, token, evicted)
+        }
+    }
+
+    #[test]
+    fn valid_get_completes_without_relocking_its_session_guard() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let state = harness.state.clone();
+        let request = harness.request(Method::GET, None);
+        let admission = state.media_read_budget.try_acquire().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(media_protocol_response_for_state(
+                    &state, "main", request, admission,
+                ))
+                .unwrap();
+        });
+
+        let response = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("valid GET deadlocked while reacquiring the session mutex");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"0123456789");
+    }
+
+    #[test]
+    fn get_and_head_return_expected_bodies_and_security_headers() {
+        let harness = ProtocolHarness::new(b"0123456789");
+
+        let get = harness.respond(Method::GET, None);
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(get.body(), b"0123456789");
+        assert_eq!(
+            get.headers()[tauri::http::header::CONTENT_TYPE],
+            "image/png"
+        );
+        assert_eq!(get.headers()[tauri::http::header::CONTENT_LENGTH], "10");
+        assert_eq!(get.headers()[tauri::http::header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            get.headers()[tauri::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(get.headers()["X-Content-Type-Options"], "nosniff");
+
+        let head = harness.respond(Method::HEAD, None);
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.body().is_empty());
+        assert_eq!(head.headers()[tauri::http::header::CONTENT_LENGTH], "10");
+        assert_eq!(
+            head.headers()[tauri::http::header::CONTENT_TYPE],
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn valid_and_invalid_ranges_return_206_and_416() {
+        let harness = ProtocolHarness::new(b"0123456789");
+
+        let partial = harness.respond(Method::GET, Some("bytes=2-5"));
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(partial.body(), b"2345");
+        assert_eq!(partial.headers()[tauri::http::header::CONTENT_LENGTH], "4");
+        assert_eq!(
+            partial.headers()[tauri::http::header::CONTENT_RANGE],
+            "bytes 2-5/10"
+        );
+
+        let invalid = harness.respond(Method::GET, Some("bytes=10-11"));
+        assert_eq!(invalid.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert!(invalid.body().is_empty());
+        assert_eq!(
+            invalid.headers()[tauri::http::header::CONTENT_RANGE],
+            "bytes */10"
+        );
+    }
+
+    #[test]
+    fn token_window_method_lock_and_session_checks_fail_closed() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let respond = |path: &str, window: &str, method: Method| {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Vec::new())
+                .unwrap();
+            let admission = harness.state.media_read_budget.try_acquire().unwrap();
+            media_protocol_response_for_state(&harness.state, window, request, admission)
+        };
+
+        assert_eq!(respond("/wrong-token", "main", Method::GET).status(), 404);
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "other", Method::GET).status(),
+            403
+        );
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "main", Method::POST).status(),
+            403
+        );
+
+        harness
+            .state
+            .app_locked
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "main", Method::GET).status(),
+            403
+        );
+        harness
+            .state
+            .app_locked
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        let replacement = Arc::new(tests::open(
+            &harness._fixture,
+            &harness._fixture.binding,
+            &[],
+        ));
+        tauri::async_runtime::block_on(async {
+            *harness.state.session.lock().await = Some(replacement);
+        });
+        assert_eq!(
+            respond(&format!("/{}", harness.token), "main", Method::GET).status(),
+            403
+        );
+    }
+
+    #[test]
+    fn a_contended_session_lock_waits_instead_of_returning_busy_503() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let state = harness.state.clone();
+        let request = harness.request(Method::GET, None);
+        let admission = state.media_read_budget.try_acquire().unwrap();
+        let guard = tauri::async_runtime::block_on(state.session.lock());
+        let (sender, receiver) = mpsc::channel();
+        let request_state = state.clone();
+        std::thread::spawn(move || {
+            sender
+                .send(media_protocol_response_for_state(
+                    &request_state,
+                    "main",
+                    request,
+                    admission,
+                ))
+                .unwrap();
+        });
+        drop(guard);
+
+        let response = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("handler did not resume after the session lock was released");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn session_replacement_during_read_is_rejected_after_io() {
+        let harness = ProtocolHarness::new(b"0123456789");
+        let state = harness.state.clone();
+        let request = harness.request(Method::GET, None);
+        let admission = state.media_read_budget.try_acquire().unwrap();
+        let (read_started_sender, read_started_receiver) = mpsc::channel();
+        let (continue_sender, continue_receiver) = mpsc::channel();
+        let (response_sender, response_receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let response = media_protocol_response_with_reader(
+                &state,
+                "main",
+                request,
+                admission,
+                move |_path, _start, bytes| {
+                    read_started_sender.send(()).unwrap();
+                    continue_receiver.recv().unwrap();
+                    bytes.copy_from_slice(b"0123456789");
+                    Ok(())
+                },
+            );
+            response_sender.send(response).unwrap();
+        });
+        read_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("read hook was not reached");
+
+        let replacement = Arc::new(tests::open(
+            &harness._fixture,
+            &harness._fixture.binding,
+            &[],
+        ));
+        tauri::async_runtime::block_on(async {
+            *harness.state.session.lock().await = Some(replacement);
+        });
+        continue_sender.send(()).unwrap();
+
+        let response = response_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("post-read session validation did not complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.body().is_empty());
+    }
+
+    #[test]
+    fn capacity_eviction_and_window_teardown_release_core_leases() {
+        let harness = ProtocolHarness::new(b"first");
+        let (window_attachment, window_token, evicted) =
+            harness.add_capability("window.png", b"window", "composer-test");
+        assert!(evicted.is_empty());
+
+        let removed = take_window_media_capabilities(&harness.state, "composer-test");
+        assert_eq!(removed.len(), 1);
+        tauri::async_runtime::block_on(release_media_capabilities(&harness.state, removed));
+        assert!(!harness
+            .session
+            .client
+            .release_attachment_ciphertext(window_attachment)
+            .unwrap());
+        assert!(!harness
+            .state
+            .media_capabilities
+            .lock()
+            .unwrap()
+            .contains_key(&window_token));
+
+        let mut evicted = Vec::new();
+        let mut latest = harness.attachment;
+        for index in 1..=MAX_OPEN_MEDIA_CAPABILITIES {
+            let (attachment, _token, released) =
+                harness.add_capability(&format!("capacity-{index}.png"), &[index as u8], "main");
+            latest = attachment;
+            evicted.extend(released);
+        }
+        assert!(
+            !evicted.is_empty(),
+            "capacity must evict at least one token"
+        );
+        let evicted_ids: Vec<_> = evicted.iter().map(|(_, id)| *id).collect();
+        tauri::async_runtime::block_on(release_media_capabilities(&harness.state, evicted));
+        for attachment in evicted_ids {
+            assert!(!harness
+                .session
+                .client
+                .release_attachment_ciphertext(attachment)
+                .unwrap());
+        }
+        assert!(harness
+            .session
+            .client
+            .release_attachment_ciphertext(latest)
+            .unwrap());
+    }
+
+    #[test]
+    fn window_teardown_keeps_media_lease_while_update_restart_is_reserved() {
+        let harness = ProtocolHarness::new(b"reserved");
+        let reservation = harness.state.update_safety.reserve().unwrap();
+
+        tauri::async_runtime::block_on(release_media_capabilities(
+            &harness.state,
+            vec![(harness.session.clone(), harness.attachment)],
+        ));
+        assert!(harness
+            .session
+            .client
+            .release_attachment_ciphertext(harness.attachment)
+            .unwrap());
+
+        harness
+            .session
+            .client
+            .retain_attachment_ciphertext(harness.attachment)
+            .unwrap();
+        drop(reservation);
+        tauri::async_runtime::block_on(release_media_capabilities(
+            &harness.state,
+            vec![(harness.session.clone(), harness.attachment)],
+        ));
+        assert!(!harness
+            .session
+            .client
+            .release_attachment_ciphertext(harness.attachment)
+            .unwrap());
+    }
+
+    #[test]
+    fn accepts_video_ranges_and_rejects_ambiguous_or_invalid_ones() {
+        assert_eq!(media_range(None, 10).unwrap(), (0, 9));
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=2-5")), 10).unwrap(),
+            (2, 5)
+        );
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=7-")), 10).unwrap(),
+            (7, 9)
+        );
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=-3")), 10).unwrap(),
+            (7, 9)
+        );
+        assert_eq!(
+            media_range(Some(&HeaderValue::from_static("bytes=7-100")), 10).unwrap(),
+            (7, 9)
+        );
+        assert!(media_range(Some(&HeaderValue::from_static("bytes=0-1,3-4")), 10).is_err());
+        assert!(media_range(Some(&HeaderValue::from_static("bytes=10-11")), 10).is_err());
+        let oversized = format!("bytes=0-{}", MAX_MEDIA_RANGE_BYTES);
+        assert_eq!(
+            media_range(
+                Some(&HeaderValue::from_str(&oversized).unwrap()),
+                MAX_MEDIA_RANGE_BYTES + 1
+            )
+            .unwrap(),
+            (0, MAX_MEDIA_RANGE_BYTES - 1)
+        );
+    }
+
+    #[test]
+    fn protocol_admission_is_bounded_before_request_threads_are_created() {
+        let budget = Arc::new(MediaReadBudget::new(1));
+        let first = budget.try_acquire().expect("first request admitted");
+        assert!(budget.try_acquire().is_none());
+        drop(first);
+        assert!(budget.try_acquire().is_some());
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -921,6 +2645,7 @@ async fn publish_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<Option<PublicCopyView>> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let attachment = AttachmentId::from_str(&id)
@@ -1068,6 +2793,7 @@ async fn create_public_copy(
 }
 
 async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     let state = app.state::<AppState>();
     let conversation = match conversation {
@@ -1079,7 +2805,7 @@ async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> Br
             blocking(move || {
                 session
                     .client
-                    .create_compose_draft(None)
+                    .recipientless_compose_draft()
                     .map_err(core_error)
             })
             .await?
@@ -1096,6 +2822,7 @@ async fn open_composer(
     app: tauri::AppHandle,
     conversation_id: Option<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     new_composer(app, conversation_id).await
 }
@@ -1108,6 +2835,7 @@ async fn dismiss_notification(
     state: State<'_, AppState>,
     target: NotificationTarget,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
@@ -1122,6 +2850,7 @@ async fn dismiss_all_notifications(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
@@ -1153,6 +2882,7 @@ async fn set_app_muted(
     app_name: String,
     muted: bool,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
@@ -1172,6 +2902,7 @@ async fn mark_notifications_seen(
     state: State<'_, AppState>,
     targets: Vec<NotificationTarget>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let session = state.require_session().await?;
     blocking(move || {
@@ -1190,6 +2921,7 @@ fn set_notification_preferences(
     state: State<'_, AppState>,
     preferences: NotificationPreferences,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     state.notifications.set_preferences(preferences)?;
     (state.notifier)();
@@ -1205,6 +2937,7 @@ fn set_notification_context(
     view: NotificationView,
     conversation_id: Option<String>,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     state.notifications.set_context(view, conversation_id);
     Ok(())
@@ -1217,6 +2950,7 @@ fn request_notification_permission(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
 ) -> BridgeResult<String> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     let _plugin_state = app.notification().request_permission().map_err(|_| {
         BridgeError::new(
@@ -1235,6 +2969,7 @@ fn set_start_at_login(
     app: tauri::AppHandle,
     enabled: bool,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     let launcher = app.autolaunch();
     let result = if enabled {
@@ -1254,6 +2989,7 @@ async fn popout_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> BridgeResult<heads_runtime::PopoutResult> {
+    let _operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     let conversation = ConversationId::from_str(&conversation_id)
@@ -1268,6 +3004,7 @@ async fn hide_head(
     app: tauri::AppHandle,
     conversation_id: String,
 ) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
     let _conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-conversation", "The conversation ID is invalid."))?;
@@ -1305,6 +3042,7 @@ fn close_composer(window: tauri::WebviewWindow) -> BridgeResult<()> {
 /// panel ownership; callers never supply an ID.
 #[tauri::command]
 async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&app.state::<AppState>())?;
     let conversation = tray::composer_conversation(window.label()).ok_or_else(|| {
         BridgeError::new(
             "composer-context",
@@ -1323,10 +3061,420 @@ async fn close_head_panel(window: tauri::WebviewWindow, app: tauri::AppHandle) -
     heads_runtime::dismiss_generation(&app, &conversation.to_string(), generation).await
 }
 
+#[tauri::command]
+fn update_status(state: State<'_, AppState>) -> updates::types::UpdateStatus {
+    state.updates.status()
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    state.updates.check(&app).await
+}
+
+#[tauri::command]
+fn set_automatic_updates(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    state.updates.set_automatic(enabled)
+}
+
+#[tauri::command]
+fn defer_update(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    state.updates.defer()
+}
+
+#[tauri::command]
+fn report_update_activity(window: tauri::WebviewWindow, state: State<'_, AppState>, active: bool) {
+    state.updates.report_activity(window.label(), active);
+}
+
+#[tauri::command]
+async fn restart_for_update(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    require_main(window.label())?;
+    if let Some(version) = state.updates.installed_pending() {
+        state.updates.clear_attempted()?;
+        let never = restart_into_installed(
+            &app,
+            &state,
+            &version,
+            restart_in_background(main_window_visible(&app)),
+        )
+        .await?;
+        match never {}
+    }
+    install_staged_update(&app, &state, updates::install::InstallIntent::User).await
+}
+
+async fn install_staged_update(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    intent: updates::install::InstallIntent,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    // The updater plugin has no safe staged-payload handoff in the base build yet.
+    // Refuse before entering lifecycle exclusion rather than exit with an unchecked payload.
+    let status = state.updates.status();
+    if !status.can_restart {
+        return Err(BridgeError::new(
+            "update-not-ready",
+            "No verified update is ready to restart.",
+        ));
+    }
+    let Some(staged) = state.updates.staged() else {
+        return Err(BridgeError::new(
+            "update-not-ready",
+            "No verified update payload is staged.",
+        ));
+    };
+    if let Err(error) = updates::install::preflight(&status.package_kind, intent) {
+        if error.code == "update-authorization-required" {
+            state.updates.set_authorization_required();
+            state.updates.emit(app);
+        }
+        return Err(error);
+    }
+    let bytes = staged.verified_bytes()?;
+    let permit = lifecycle::prepare_update(app).await?;
+    state.updates.set_installing(&staged.update.version)?;
+    state.updates.emit(app);
+    if !sync::drain_all(std::time::Duration::from_secs(30)).await {
+        // Keep the reservation until every active and retired supervisor has completed.
+        // Releasing it earlier would permit a new session while old storage work remains live.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
+            let state = app.state::<AppState>();
+            state.updates.install_failed(
+                "Background work finished. Restart the verified update when ready.",
+            );
+            state.updates.emit(&app);
+            drop(permit);
+        });
+        return Err(BridgeError::new(
+            "update-busy",
+            "Peppy is still finishing background work.",
+        ));
+    }
+    if let Err(error) = updates::install::write_restart_marker(
+        &state.root,
+        &staged.update.version,
+        restart_in_background(main_window_visible(app)),
+    ) {
+        state
+            .updates
+            .install_failed("Could not record the update restart state.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    state
+        .updates
+        .record_install_attempt(&staged.update.version)?;
+    let install_guard = permit.commit();
+    #[cfg(target_os = "linux")]
+    if matches!(status.package_kind.as_str(), "deb" | "rpm") {
+        return install_linux_system_package(app, state, staged, install_guard, intent).await;
+    }
+    // `install` verifies the bytes again. On Windows it exits only after the updater launches;
+    // on other supported bundles it replaces the payload before the immediate relaunch.
+    if staged.update.install(bytes).is_err() {
+        updates::install::clear_restart_marker(&state.root);
+        state
+            .updates
+            .install_failed("Could not install the verified update.");
+        state.updates.emit(app);
+        return Err(BridgeError::new(
+            "update-install",
+            "Could not install the verified update.",
+        ));
+    }
+    // Do not release the update reservation or tell windows that draft editing is safe until the
+    // installer has completed its recoverable work. A failed installation drops `install_guard`,
+    // which restores the captured UI and admission gates.
+    install_guard.finish();
+    state.allow_exit.store(true, Ordering::Release);
+    app.restart();
+}
+
+#[cfg(target_os = "linux")]
+async fn install_linux_system_package(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    staged: updates::StagedUpdate,
+    install_guard: lifecycle::UpdateInstallGuard,
+    intent: updates::install::InstallIntent,
+) -> BridgeResult<updates::types::UpdateStatus> {
+    use update_linux::{InstallOutcome, LinuxPackageInstaller, ZbusPackageKit};
+
+    let expected_version = staged.update.version.clone();
+    let backend = match ZbusPackageKit::connect().await {
+        Ok(backend) => backend,
+        Err(_) => {
+            updates::install::clear_restart_marker(&state.root);
+            state
+                .updates
+                .install_failed("PackageKit is unavailable on this Linux installation.");
+            state.updates.emit(app);
+            return Err(BridgeError::new(
+                "update-packagekit",
+                "PackageKit is unavailable on this Linux installation.",
+            ));
+        }
+    };
+    let installer = LinuxPackageInstaller::new(backend);
+    match installer
+        .install_verified(
+            &staged.path,
+            &expected_version,
+            intent == updates::install::InstallIntent::User,
+        )
+        .await
+    {
+        InstallOutcome::Success { .. } => {
+            if let Err(error) = state.updates.finish_external_update(&expected_version) {
+                updates::install::clear_restart_marker(&state.root);
+                state
+                    .updates
+                    .install_failed("Could not finalize the installed system update.");
+                state.updates.emit(app);
+                return Err(error);
+            }
+            install_guard.finish();
+            state.allow_exit.store(true, Ordering::Release);
+            app.restart();
+        }
+        InstallOutcome::CompletionUnknown { message: _ } => {
+            let reconcile_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                // Keep this installer (and its private PackageKit transaction identity) alive.
+                // Installed-version metadata alone cannot release the lifecycle fence.
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    match installer.reconcile_pending(&expected_version).await {
+                        Some(InstallOutcome::Success { .. }) => {
+                            let state = reconcile_app.state::<AppState>();
+                            if state
+                                .updates
+                                .finish_external_update(&expected_version)
+                                .is_err()
+                            {
+                                updates::install::clear_restart_marker(&state.root);
+                                state.updates.install_failed(
+                                    "Could not finalize the installed system update.",
+                                );
+                                state.updates.emit(&reconcile_app);
+                            } else {
+                                install_guard.finish();
+                                state.allow_exit.store(true, Ordering::Release);
+                                reconcile_app.restart();
+                            }
+                            break;
+                        }
+                        Some(InstallOutcome::CompletionUnknown { .. }) | None => continue,
+                        Some(outcome) => {
+                            let state = reconcile_app.state::<AppState>();
+                            updates::install::clear_restart_marker(&state.root);
+                            state.updates.install_failed(&packagekit_message(outcome));
+                            state.updates.emit(&reconcile_app);
+                            break;
+                        }
+                    }
+                }
+            });
+            // The lifecycle guard and manager installation claim both remain held
+            // until this exact PackageKit transaction reaches a typed terminal state.
+            state.updates.emit(app);
+            Err(BridgeError::new(
+                "update-packagekit-pending",
+                "PackageKit completion is still being verified.",
+            ))
+        }
+        outcome => {
+            updates::install::clear_restart_marker(&state.root);
+            if matches!(outcome, InstallOutcome::AuthorizationRequired) {
+                state.updates.set_authorization_required();
+                state.updates.emit(app);
+                return Err(BridgeError::new(
+                    "update-packagekit",
+                    "PackageKit authorization is required.",
+                ));
+            }
+            let message = packagekit_message(outcome);
+            state.updates.install_failed(&message);
+            state.updates.emit(app);
+            Err(BridgeError::new("update-packagekit", message))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn packagekit_message(outcome: update_linux::InstallOutcome) -> String {
+    use update_linux::InstallOutcome;
+
+    match outcome {
+        InstallOutcome::Unsupported { message } | InstallOutcome::Failed { message } => message,
+        InstallOutcome::AuthorizationRequired => "PackageKit authorization is required.".into(),
+        InstallOutcome::Cancelled => "PackageKit authorization was cancelled.".into(),
+        InstallOutcome::Locked => "PackageKit is busy with another transaction.".into(),
+        InstallOutcome::CompletionUnknown { message } => message,
+        InstallOutcome::SettledUnknown { message } => message,
+        InstallOutcome::Success { .. } => "PackageKit completed unexpectedly.".into(),
+    }
+}
+
+async fn restart_into_installed(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    version: &str,
+    background: bool,
+) -> BridgeResult<std::convert::Infallible> {
+    let permit = lifecycle::prepare_update(app).await?;
+    if !sync::drain_all(std::time::Duration::from_secs(30)).await {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
+            let state = app.state::<AppState>();
+            state.updates.install_failed(
+                "Background work finished. Restart the installed update when ready.",
+            );
+            state.updates.emit(&app);
+            drop(permit);
+        });
+        return Err(BridgeError::new(
+            "update-busy",
+            "Peppy is still finishing background work.",
+        ));
+    }
+    if let Err(error) = updates::install::write_restart_marker(
+        &state.root,
+        version,
+        background,
+    ) {
+        state
+            .updates
+            .install_failed("Could not record the update restart state.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    let guard = permit.commit();
+    if let Err(error) = state.updates.finish_external_update(version) {
+        updates::install::clear_restart_marker(&state.root);
+        state
+            .updates
+            .install_failed("Could not finalize the installed update.");
+        state.updates.emit(app);
+        return Err(error);
+    }
+    guard.finish();
+    state.allow_exit.store(true, Ordering::Release);
+    app.restart();
+}
+
+#[cfg(target_os = "linux")]
+async fn restart_after_external_package_update(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> BridgeResult<()> {
+    use update_linux::{LinuxPackageInstaller, ZbusPackageKit};
+
+    let backend = ZbusPackageKit::connect()
+        .await
+        .map_err(|_| BridgeError::new("update-packagekit", "PackageKit is unavailable."))?;
+    let installer = LinuxPackageInstaller::new(backend);
+    let Some(installed) = installer.installed_version().await else {
+        return Ok(());
+    };
+    if !installer.daemon_is_idle().await || !state.updates.should_restart_external(app, &installed)
+    {
+        return Ok(());
+    }
+    restart_into_installed(
+        app,
+        state,
+        &installed,
+        restart_in_background(main_window_visible(app)),
+    )
+    .await
+    .map(|never| match never {})
+}
+
+fn activate_main(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        #[cfg(target_os = "macos")]
+        if let Some(state) = app.try_state::<AppState>() {
+            let current_version = state.updates.status().current_version;
+            if let updates::installed::Installed::Differs(version) = updates::installed::compare(
+                &current_version,
+                updates::installed::running_bundle_version(&app).as_deref(),
+            ) {
+                if state.updates.note_installed(&version) {
+                    state.updates.emit(&app);
+                }
+                if state.updates.activation_should_restart(&version) {
+                    match restart_into_installed(&app, &state, &version, false).await {
+                        Ok(never) => match never {},
+                        Err(error) => eprintln!(
+                            "peppy: installed-update restart failed: {}",
+                            error.code
+                        ),
+                    }
+                }
+            }
+        }
+        tray::show_main(&app);
+    });
+}
+
+fn main_window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window(tray::MAIN)
+        .and_then(|window| window.is_visible().ok())
+        // An unavailable visibility query must not turn a foreground restart
+        // into a hidden launch.
+        .unwrap_or(true)
+}
+
+fn restart_in_background(main_visible: bool) -> bool {
+    !main_visible
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let builder = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("peppy-media", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let label = context.webview_label().to_owned();
+            let state = app.state::<AppState>();
+            let Some(admission) = state.media_read_budget.try_acquire() else {
+                responder.respond(
+                    tauri::http::Response::builder()
+                        .status(503)
+                        .header(tauri::http::header::RETRY_AFTER, "1")
+                        .header(tauri::http::header::CACHE_CONTROL, "no-store")
+                        .body(Vec::new())
+                        .unwrap(),
+                );
+                return;
+            };
+            std::thread::spawn(move || {
+                responder.respond(media_protocol_response(app, label, request, admission))
+            });
+        })
         .on_page_load(|webview, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
@@ -1341,12 +3489,13 @@ pub fn run() {
                 .query_pairs()
                 .any(|(key, value)| key == "head" && value == "1");
             window_chrome::sync_webview(webview, head_panel);
+            window_chrome::page_loaded(webview);
         })
         // Must precede setup: a second manual launch activates the resident
         // main window before it can open another database/session.
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !startup::background_requested(args) {
-                tray::show_main(app);
+                activate_main(app);
             }
         }))
         .plugin(tauri_plugin_autostart::init(
@@ -1356,6 +3505,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let root = app
                 .path()
@@ -1381,9 +3531,115 @@ pub fn run() {
                 notifier.clone(),
             ));
             #[cfg(not(target_os = "macos"))]
-            app.manage(AppState::new(root, Arc::new(secure_store), notifier));
+            app.manage(AppState::new(
+                root.clone(),
+                Arc::new(secure_store),
+                notifier,
+            ));
+            let state = app.state::<AppState>();
+            state
+                .updates
+                .initialize(&app.handle(), &root)
+                .map_err(|error| error.message)?;
+            let restart_marker = updates::install::confirm_restart_marker(
+                &root,
+                &state.updates.status().current_version,
+            );
+            match app_lock::status(&*state.store) {
+                Ok(app_lock::Status::Disabled) => state.app_locked.store(false, Ordering::Release),
+                Ok(app_lock::Status::Enabled) => {}
+                Err(_) => {
+                    state
+                        .app_lock_storage_available
+                        .store(false, Ordering::Release);
+                }
+            }
             app.manage(hosted::HostedState::default());
-            app.manage(join::JoinState::default());
+            let updates = state.updates.clone();
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    updates::STARTUP_DELAY_SECS,
+                ))
+                .await;
+                loop {
+                    if updates.check_due() {
+                        let _ = updates.check_automatic(&update_handle).await;
+                    }
+                    tokio::time::sleep(updates.next_check_delay()).await;
+                }
+            });
+            let updates = state.updates.clone();
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let state = update_handle.state::<AppState>();
+                    if updates.should_auto_restart(&update_handle) {
+                        let _ = install_staged_update(
+                            &update_handle,
+                            &state,
+                            updates::install::InstallIntent::Automatic,
+                        )
+                        .await;
+                    }
+                }
+            });
+            #[cfg(target_os = "linux")]
+            {
+                let status = state.updates.status();
+                if status.channel != updates::types::UpdateChannel::Disabled
+                    && matches!(status.package_kind.as_str(), "deb" | "rpm")
+                {
+                    let update_handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            let state = update_handle.state::<AppState>();
+                            let _ =
+                                restart_after_external_package_update(&update_handle, &state).await;
+                        }
+                    });
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let update_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut poll = updates::installed::StablePoll::default();
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        let state = update_handle.state::<AppState>();
+                        let current_version = state.updates.status().current_version;
+                        let installed = updates::installed::compare(
+                            &current_version,
+                            updates::installed::running_bundle_version(&update_handle).as_deref(),
+                        );
+                        let Some(version) = poll.observe(installed) else {
+                            continue;
+                        };
+                        if state.updates.note_installed(&version) {
+                            state.updates.emit(&update_handle);
+                        }
+                        if state.updates.should_auto_restart_installed(&update_handle) {
+                            match restart_into_installed(
+                                &update_handle,
+                                &state,
+                                &version,
+                                restart_in_background(main_window_visible(&update_handle)),
+                            )
+                            .await
+                            {
+                                Err(error) => eprintln!(
+                                    "peppy: installed-update restart failed: {}",
+                                    error.code
+                                ),
+                                Ok(never) => match never {},
+                            }
+                        }
+                    }
+                });
+            }
             // The state hint is emitted after normal live applies and snapshot work alike. Core's
             // queue contains only live first-insert candidates, so this native drain cannot turn
             // history/snapshot replay into banners.
@@ -1392,6 +3648,9 @@ pub fn run() {
                 let handle = banner_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     let state = handle.state::<AppState>();
+                    let Ok(_operation) = admit_update_operation(&state) else {
+                        return;
+                    };
                     let Ok(Some(session)) = state.session().await else {
                         return;
                     };
@@ -1417,6 +3676,46 @@ pub fn run() {
                     });
                 },
                 |app| {
+                    if app.state::<AppState>().app_locked.load(Ordering::Acquire) {
+                        tray::show_main(app);
+                        return;
+                    }
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        let installed = state.updates.installed_pending();
+                        let result = if let Some(version) = installed.as_deref() {
+                            match state.updates.clear_attempted() {
+                                Ok(()) => {
+                                    restart_into_installed(
+                                        &app,
+                                        &state,
+                                        version,
+                                        restart_in_background(main_window_visible(&app)),
+                                    )
+                                    .await
+                                    .map(|never| match never {})
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            install_staged_update(
+                                &app,
+                                &state,
+                                updates::install::InstallIntent::User,
+                            )
+                            .await
+                            .map(|_| ())
+                        };
+                        if let Err(error) = result {
+                            tray::show_main(&app);
+                            if installed.is_none() || error.code != "update-busy" {
+                                dialogs::inform(&app, "Could not restart for update", &error.message);
+                            }
+                        }
+                    });
+                },
+                |app| {
                     if let Err(error) = lifecycle::request_quit(app) {
                         tray::show_main(app);
                         dialogs::inform(app, "Could not quit Peppy", &error.message);
@@ -1424,9 +3723,18 @@ pub fn run() {
                 },
             );
             TRAY_ACTIVE.store(installed, Ordering::Relaxed);
+            let _ = tray::set_update_status(app.handle(), &state.updates.status());
+            let tray_handle = app.handle().clone();
+            app.listen(updates::STATE_EVENT, move |_| {
+                let state = tray_handle.state::<AppState>();
+                let _ = tray::set_update_status(&tray_handle, &state.updates.status());
+            });
             heads_runtime::install(app.handle()).map_err(|e| e.message)?;
             if startup::hide_initial_main(
-                startup::background_requested(std::env::args()),
+                startup::restart_background(
+                    restart_marker,
+                    startup::background_requested(std::env::args()),
+                ),
                 installed,
             ) {
                 startup::background_main(app.handle()).map_err(|e| e.message)?;
@@ -1436,11 +3744,30 @@ pub fn run() {
             // Resume background sync for an already imported credential without any prompt.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let _ = handle.state::<AppState>().session().await;
+                let state = handle.state::<AppState>();
+                let Ok(_operation) = admit_update_operation(&state) else {
+                    return;
+                };
+                let _ = state.session().await;
             });
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                window_chrome::forget_material(window.label());
+                if let Some(state) = window.app_handle().try_state::<AppState>() {
+                    if let Ok(mut scopes) = state.composer_scopes.lock() {
+                        scopes.remove(window.label());
+                    }
+                    let released = take_window_media_capabilities(&state, window.label());
+                    if !released.is_empty() {
+                        let app = window.app_handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            release_media_capabilities(&app.state::<AppState>(), released).await;
+                        });
+                    }
+                }
+            }
             heads_runtime::panel_window_event(window, event);
             if matches!(
                 event,
@@ -1492,7 +3819,11 @@ pub fn run() {
                                 );
                             }
                         }
-                        lifecycle::Operation::Switch => unreachable!("close cannot switch account"),
+                        lifecycle::Operation::Switch | lifecycle::Operation::Update => {
+                            unreachable!(
+                                "close cannot initiate account switching or update restart"
+                            )
+                        }
                     }
                 }
             }
@@ -1500,18 +3831,26 @@ pub fn run() {
     macro_rules! command_handler {
         ($($extra:path,)*) => { tauri::generate_handler![
         load_state,
+        load_history,
         configure_server,
-        import_credentials,
         unlock_sync,
-        create_pairing_intent,
-        pairing_intent_status,
-        approve_pairing_intent,
+        get_app_lock_status,
+        unlock_app,
+        set_app_lock,
         save_draft,
+        discard_draft,
         send_draft,
         mark_seen,
         pick_attachments,
         retry_attachment,
         save_attachment,
+        request_attachment_download,
+        media_page,
+        media_page_around,
+        media_page_newer,
+        open_media,
+        load_media,
+        close_media,
         publish_attachment,
         open_composer,
         dismiss_notification,
@@ -1521,6 +3860,8 @@ pub fn run() {
         set_notification_preferences,
         set_notification_context,
         request_notification_permission,
+        list_devices,
+        revoke_device,
         list_contact_books,
         list_contacts,
         forget_contact_book,
@@ -1529,6 +3870,8 @@ pub fn run() {
         pick_contact_photo,
         search_contact_recipients,
         request_contact_repair,
+        request_contact_sync,
+        get_contact_sync_request,
         list_restorable_contacts,
         restore_contact,
         set_start_at_login,
@@ -1536,27 +3879,68 @@ pub fn run() {
         hide_head,
         close_composer,
         close_head_panel,
+        update_status,
+        check_for_updates,
+        restart_for_update,
+        defer_update,
+        set_automatic_updates,
+        report_update_activity,
         acknowledge_lifecycle,
         $($extra,)*
     ] };
     }
-    let builder = builder.invoke_handler(command_handler!(
-        hosted::hosted_account,
-        hosted::hosted_sign_in,
-        hosted::hosted_sign_out,
-        hosted::hosted_open_billing,
-        hosted::hosted_provision,
-        join::join_start,
-        join::join_status,
-        join::join_cancel,
-        join::join_confirm,
-    ));
+    let builder = builder.invoke_handler(move |invoke: tauri::ipc::Invoke| {
+        let command = invoke.message.command();
+        let webview = invoke.message.webview();
+        let state = webview.app_handle().state::<AppState>();
+        let allowed = matches!(
+            command,
+            "load_state"
+                | "load_history"
+                | "get_app_lock_status"
+                | "update_status"
+                | "report_update_activity"
+                | "unlock_app"
+                | "acknowledge_lifecycle"
+        );
+        if state.app_locked.load(Ordering::Acquire) && !allowed {
+            invoke
+                .resolver
+                .reject(BridgeError::new("app-locked", "Peppy is locked."));
+            return true;
+        }
+        let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
+            hosted::hosted_account,
+            hosted::hosted_origin_url,
+            hosted::hosted_sign_in,
+            hosted::hosted_sign_out,
+            hosted::hosted_open_billing,
+            hosted::hosted_provision,
+            enrollment::enrollment_discover,
+            enrollment::enrollment_start_over,
+            enrollment::enrollment_create_owner,
+            enrollment::enrollment_sign_in,
+            enrollment::enrollment_connect_shared_secret,
+            enrollment::enrollment_begin_vault_request,
+            enrollment::enrollment_vault_request_status,
+            enrollment::enrollment_create_vault,
+            enrollment::enrollment_add_phone,
+            enrollment::enrollment_rotate_phone,
+            enrollment::enrollment_cancel_phone,
+            enrollment::reveal_vault_secret,
+            enrollment::enrollment_approve,
+            enrollment::enrollment_status,
+            enrollment::enrollment_cancel,
+            enrollment::enrollment_sign_out,
+        );
+        handler(invoke)
+    });
     let app = builder
         .build(tauri::generate_context!())
         .expect("error while building Peppy desktop");
     app.run(|app, event| match event {
         #[cfg(target_os = "macos")]
-        RunEvent::Reopen { .. } => tray::show_main(app),
+        RunEvent::Reopen { .. } => activate_main(app),
         RunEvent::ExitRequested { api, .. } => {
             if let Some(state) = app.try_state::<AppState>() {
                 if !state.allow_exit.load(Ordering::Acquire) {

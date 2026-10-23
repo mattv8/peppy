@@ -237,4 +237,6 @@ mod tests {
         assert!(copy_new_atomic(&source, &dir.path().join("wrong"), 7).is_err());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
+
+
 }

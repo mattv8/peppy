@@ -74,13 +74,15 @@ object CredentialParser {
     fun canonicalOrigin(raw: String, allowDebugLoopback: Boolean = BuildConfig.DEBUG): String? = try {
         val uri = URI(raw.trimEnd('/'))
         val scheme = uri.scheme?.lowercase(Locale.ROOT)
-        val host = uri.host?.lowercase(Locale.ROOT)
+        val host = uri.host?.lowercase(Locale.ROOT)?.removeSurrounding("[", "]")
         val cleartextAllowed = allowDebugLoopback && host in DEBUG_LOOPBACK_HOSTS
         when {
             host.isNullOrEmpty() || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null -> null
             !uri.rawPath.isNullOrEmpty() -> null
-            scheme == "https" || (scheme == "http" && cleartextAllowed) ->
-                if (uri.port == -1) "$scheme://$host" else "$scheme://$host:${uri.port}"
+            scheme == "https" || (scheme == "http" && cleartextAllowed) -> {
+                val authorityHost = if (host.contains(':')) "[$host]" else host
+                if (uri.port == -1) "$scheme://$authorityHost" else "$scheme://$authorityHost:${uri.port}"
+            }
             else -> null
         }
     } catch (_: URISyntaxException) {
@@ -94,7 +96,7 @@ object CredentialParser {
         null
     }
 
-    private val DEBUG_LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "10.0.2.2")
+    private val DEBUG_LOOPBACK_HOSTS = setOf("127.0.0.1", "localhost", "::1", "10.0.2.2")
 }
 
 /** Public vault material returned by `GET /v1/vault` for this device's bearer token. */

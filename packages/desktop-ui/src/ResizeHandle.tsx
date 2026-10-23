@@ -142,7 +142,7 @@ export function ResizeHandle({
         <span className="resize-handle-grip-dot" />
         <span className="resize-handle-grip-dot" />
       </span>
-      {Icon && <Icon size={14} className="resize-handle-chevron" />}
+      {Icon && <Icon size={14} strokeWidth={1.75} className="resize-handle-chevron" />}
     </div>
   );
 }

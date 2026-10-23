@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{io::Cursor, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
@@ -6,6 +6,7 @@ use axum::{
 };
 use base64::Engine as _;
 use http_body_util::BodyExt;
+use peppy_hosted_api::{ApnsEnvironment, PushConfigAdvertisement, PushProvider};
 use peppy_server::{
     ServerBuilder,
     api::{AccessPolicy, AccessPrincipal, Operation, PolicyFuture, create_owner},
@@ -98,10 +99,23 @@ struct TestServer {
 
 impl TestServer {
     async fn start(policy: Arc<Policy>) -> Self {
-        Self::start_with_policy(policy, 5).await
+        Self::start_with_policy_and_push_config(policy, 5, PushConfigAdvertisement::default()).await
     }
 
     async fn start_with_policy(policy: Arc<dyn AccessPolicy>, max_connections: u32) -> Self {
+        Self::start_with_policy_and_push_config(
+            policy,
+            max_connections,
+            PushConfigAdvertisement::default(),
+        )
+        .await
+    }
+
+    async fn start_with_policy_and_push_config(
+        policy: Arc<dyn AccessPolicy>,
+        max_connections: u32,
+        push_config: PushConfigAdvertisement,
+    ) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("TEST_DATABASE_URL is required; integration tests never silently skip");
         let admin = PgPoolOptions::new()
@@ -132,6 +146,7 @@ impl TestServer {
         config.replay_retention = Duration::from_secs(86_400);
         let server = ServerBuilder::new(config, pool.clone())
             .access_policy(policy)
+            .push_config(push_config)
             .build()
             .await
             .unwrap();
@@ -251,6 +266,25 @@ fn event(vault: Uuid, device: Uuid, fingerprint: &str) -> Value {
     })
 }
 
+/// Reads the roster entry for this credential's device, not an arbitrary index.
+async fn device_roster(server: &TestServer, credential: &peppy_server::api::Credential) -> Value {
+    let (status, roster) = server
+        .request("GET", "/v1/devices", &credential.device_token, json!(null))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device roster must accept the credential"
+    );
+    roster["devices"]
+        .as_array()
+        .expect("roster devices array")
+        .iter()
+        .find(|device| device["device_id"] == json!(credential.device_id))
+        .cloned()
+        .expect("roster contains the credential's device")
+}
+
 fn assert_called_by(
     calls: &[(AccessPrincipal, Operation)],
     credential: &peppy_server::api::Credential,
@@ -262,6 +296,52 @@ fn assert_called_by(
             && principal.device_id == credential.device_id
             && principal.role == credential.role
     }));
+}
+
+#[tokio::test]
+async fn attachment_usage_uses_policy_quota_and_requires_read_permission() {
+    let _guard = TEST_LOCK.lock().await;
+    let policy = Arc::new(Policy {
+        allowed: vec![Operation::Read],
+        quota: Some(123_456),
+        ..Policy::default()
+    });
+    let server = TestServer::start(policy.clone()).await;
+    let owner = server.owner().await;
+    let (status, usage) = server
+        .request(
+            "GET",
+            "/v1/attachments/usage",
+            &owner.device_token,
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(usage, json!({"used_bytes": 0, "limit_bytes": 123_456}));
+    let calls = policy.calls().await;
+    assert_called_by(&calls, &owner, Operation::Read);
+    assert_called_by(&calls, &owner, Operation::Upload);
+    server.shutdown().await;
+
+    let denied = Arc::new(Policy {
+        quota: Some(123_456),
+        ..Policy::default()
+    });
+    let server = TestServer::start(denied).await;
+    let owner = server.owner().await;
+    assert_eq!(
+        server
+            .request(
+                "GET",
+                "/v1/attachments/usage",
+                &owner.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -277,7 +357,6 @@ async fn policy_receives_verified_principals_and_cannot_be_tricked_by_foreign_en
         Operation::Send,
         Operation::Upload,
         Operation::Publish,
-        Operation::Pair,
     ]));
     let server = TestServer::start(policy.clone()).await;
     let first = server.owner().await;
@@ -377,18 +456,13 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
         ),
         (
             "POST",
-            "/v1/pairing".to_owned(),
-            json!({"device_id": Uuid::new_v4(), "public_key": {}, "profile_fingerprint": "invalid", "key_epoch": 1, "requested_role": "invalid"}),
-        ),
-        (
-            "POST",
             format!("/v1/attachments/{}/public-copies", Uuid::new_v4()),
             json!({"not": "an image"}),
         ),
         (
             "POST",
             "/v1/vault/key-profiles".to_owned(),
-            json!({"key_epoch": 2, "public_key_profile": {}, "encrypted_vault_check_header": "", "profile_fingerprint": "invalid"}),
+            json!({"key_epoch": 2, "public_key_profile": {}, "encrypted_vault_check_header": "", "profile_fingerprint": "invalid", "admission_public_key": "not-a-key"}),
         ),
     ];
     for (method, path, body) in denied {
@@ -433,13 +507,271 @@ async fn readonly_policy_denies_mutations_before_semantic_validation_but_permits
         Operation::Sync,
         Operation::Send,
         Operation::Upload,
-        Operation::Pair,
         Operation::Publish,
         Operation::Revoke,
     ] {
         assert_called_by(&calls, &owner, operation);
     }
     assert_called_by(&calls, &deletable, Operation::DeleteVault);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn wake_routes_use_sync_and_revoke_policy_and_delete_matching_jobs() {
+    let _guard = TEST_LOCK.lock().await;
+    let policy = Arc::new(Policy::allowing([Operation::Sync, Operation::Revoke]));
+    let server = TestServer::start(policy.clone()).await;
+    let owner = server.owner().await;
+    let route_id = Uuid::new_v4();
+
+    assert_eq!(
+        server
+            .request(
+                "PUT",
+                "/v1/devices/self/wake-route",
+                &owner.device_token,
+                json!({"route_id": route_id, "wake_credential": "a".repeat(64)}),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    sqlx::query("INSERT INTO device_wake_jobs(vault_id,device_id,cursor,job_id,opaque_nonce) VALUES($1,$2,1,$3,'opaque')")
+        .bind(owner.vault_id)
+        .bind(owner.device_id)
+        .bind(Uuid::new_v4())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        server
+            .request(
+                "DELETE",
+                &format!("/v1/devices/self/wake-route?route_id={route_id}"),
+                &owner.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM device_wake_jobs WHERE vault_id=$1 AND device_id=$2",
+        )
+        .bind(owner.vault_id)
+        .bind(owner.device_id)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        server
+            .request(
+                "DELETE",
+                &format!("/v1/devices/self/wake-route?route_id={route_id}"),
+                &owner.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let calls = policy.calls().await;
+    assert_called_by(&calls, &owner, Operation::Sync);
+    assert_called_by(&calls, &owner, Operation::Revoke);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn push_config_and_wake_routes_require_device_auth_and_honor_route_fences() {
+    let _guard = TEST_LOCK.lock().await;
+    let policy = Arc::new(Policy::allowing([
+        Operation::Read,
+        Operation::Sync,
+        Operation::Revoke,
+    ]));
+    let server = TestServer::start_with_policy_and_push_config(
+        policy.clone(),
+        5,
+        PushConfigAdvertisement {
+            available: true,
+            providers: vec![PushProvider::Fcm, PushProvider::Apns],
+            apns_environment: Some(ApnsEnvironment::Production),
+        },
+    )
+    .await;
+    let first = server.owner().await;
+    let second = server.owner().await;
+    let route_id = Uuid::new_v4();
+
+    let (status, config) = server
+        .request(
+            "GET",
+            "/v1/devices/self/push-config",
+            &first.device_token,
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        config,
+        json!({"version": 1, "available": true, "providers": ["fcm", "apns"], "apns_environment": "production"})
+    );
+    assert_eq!(
+        server
+            .raw_request(
+                "GET",
+                "/v1/devices/self/push-config",
+                "not-a-device-token",
+                Body::empty(),
+                &[("peppy-account-session", "account-only")],
+            )
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        server
+            .request(
+                "PUT",
+                "/v1/devices/self/wake-route",
+                &first.device_token,
+                json!({"route_id": route_id, "wake_credential": "a".repeat(64)}),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    sqlx::query("INSERT INTO device_wake_jobs(vault_id,device_id,cursor,job_id,opaque_nonce) VALUES($1,$2,1,$3,'opaque')")
+        .bind(first.vault_id)
+        .bind(first.device_id)
+        .bind(Uuid::new_v4())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO device_sockets(connection_id,vault_id,device_id,lease_until,responsive) VALUES($1,$2,$3,now() + interval '60 seconds',TRUE)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(first.vault_id)
+    .bind(first.device_id)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        server
+            .request(
+                "DELETE",
+                &format!("/v1/devices/self/wake-route?route_id={}", Uuid::new_v4()),
+                &first.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM device_wake_jobs WHERE vault_id=$1 AND device_id=$2"
+        )
+        .bind(first.vault_id)
+        .bind(first.device_id)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let roster = device_roster(&server, &first).await;
+    assert_eq!(roster["wake_route"], true);
+    assert_eq!(roster["presence"]["state"], "connected");
+    assert_eq!(
+        server
+            .request(
+                "DELETE",
+                &format!("/v1/devices/self/wake-route?route_id={route_id}"),
+                &second.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(!sqlx::query_scalar::<_, bool>("SELECT revoked_at IS NOT NULL FROM device_wake_routes WHERE vault_id=$1 AND device_id=$2")
+        .bind(first.vault_id).bind(first.device_id).fetch_one(&server.pool).await.unwrap());
+    assert_eq!(
+        server
+            .request(
+                "DELETE",
+                &format!("/v1/devices/self/wake-route?route_id={route_id}"),
+                &first.device_token,
+                json!(null),
+            )
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(sqlx::query_scalar::<_, bool>("SELECT revoked_at IS NOT NULL FROM device_wake_routes WHERE vault_id=$1 AND device_id=$2")
+        .bind(first.vault_id).bind(first.device_id).fetch_one(&server.pool).await.unwrap());
+    let roster = device_roster(&server, &first).await;
+    assert_eq!(
+        roster["revoked"], false,
+        "wake-route deletion must not revoke the device"
+    );
+    assert_eq!(roster["wake_route"], false);
+    assert_eq!(roster["presence"]["state"], "connected");
+    sqlx::query(
+        "UPDATE device_credentials SET revoked_at=now() WHERE vault_id=$1 AND device_id=$2",
+    )
+    .bind(first.vault_id)
+    .bind(first.device_id)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    for method in ["PUT", "DELETE"] {
+        assert_eq!(
+            server
+                .request(
+                    method,
+                    "/v1/devices/self/wake-route",
+                    &first.device_token,
+                    json!({"route_id": Uuid::new_v4(), "wake_credential": "a".repeat(64)})
+                )
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+        );
+    }
+    let calls = policy.calls().await;
+    assert_called_by(&calls, &first, Operation::Read);
+    assert_called_by(&calls, &first, Operation::Sync);
+    assert_called_by(&calls, &first, Operation::Revoke);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn default_push_config_is_unavailable_and_uses_sync_policy() {
+    let _guard = TEST_LOCK.lock().await;
+    let policy = Arc::new(Policy::allowing([Operation::Sync]));
+    let server = TestServer::start(policy.clone()).await;
+    let owner = server.owner().await;
+
+    let (status, config) = server
+        .request(
+            "GET",
+            "/v1/devices/self/push-config",
+            &owner.device_token,
+            json!(null),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        config,
+        json!({"version": 1, "available": false, "providers": [], "apns_environment": null})
+    );
+    assert_called_by(&policy.calls().await, &owner, Operation::Sync);
     server.shutdown().await;
 }
 
@@ -507,9 +839,13 @@ async fn quota_policy_callback_does_not_reacquire_a_one_connection_pool_inside_t
 #[tokio::test]
 async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
     let _guard = TEST_LOCK.lock().await;
+    let key = peppy_crypto::FileKey::generate().unwrap();
+    let mut ciphertext = Vec::new();
+    peppy_crypto::encrypt_stream(Cursor::new(b"x"), &mut ciphertext, &key, b"attachment").unwrap();
+    let png = b"\x89PNG\r\n\x1a\n";
     let policy = Arc::new(Policy {
         allowed: vec![Operation::Upload, Operation::Publish],
-        quota: Some(8),
+        quota: Some(ciphertext.len() as i64 + png.len() as i64 - 1),
         ..Policy::default()
     });
     let server = TestServer::start(policy).await;
@@ -520,8 +856,8 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
             "/v1/attachments/reserve",
             &owner.device_token,
             json!({
-                "declared_ciphertext_bytes": 1,
-                "declared_ciphertext_sha256": hex::encode(Sha256::digest(b"x")),
+                "declared_ciphertext_bytes": ciphertext.len(),
+                "declared_ciphertext_sha256": hex::encode(Sha256::digest(&ciphertext)),
             }),
         )
         .await;
@@ -532,7 +868,7 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
                 "PUT",
                 &format!("/v1/attachments/{attachment}/upload"),
                 &owner.device_token,
-                Body::from("x"),
+                Body::from(ciphertext),
                 &[],
             )
             .await
@@ -552,7 +888,6 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
             .0,
         StatusCode::OK
     );
-    let png = b"\x89PNG\r\n\x1a\n";
     let response = server
         .raw_request(
             "POST",
@@ -563,48 +898,5 @@ async fn public_copy_uses_the_policy_quota_instead_of_the_community_default() {
         )
         .await;
     assert_eq!(response.0, StatusCode::PAYLOAD_TOO_LARGE, "{}", response.1);
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn pairing_policy_callback_does_not_reacquire_a_one_connection_pool_inside_the_transaction() {
-    let _guard = TEST_LOCK.lock().await;
-    let policy = Arc::new(DatabasePolicy {
-        pool: tokio::sync::OnceCell::new(),
-        quota: 64 * 1024 * 1024,
-    });
-    let server = TestServer::start_with_policy(policy.clone(), 1).await;
-    policy.pool.set(server.pool.clone()).unwrap();
-    let owner = server.owner().await;
-    let (status, intent) = server
-        .request(
-            "POST",
-            "/v1/pairing/intents",
-            &owner.device_token,
-            json!({"https_origin": "https://example.test/"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{intent}");
-    let intent_token = intent["intent_token"].as_str().unwrap();
-    let signing = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
-    let public_key =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().as_bytes());
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        server.request(
-            "POST",
-            &format!("/v1/pairing/intents/{intent_token}/claim"),
-            &owner.device_token,
-            json!({
-                "device_id": Uuid::new_v4(),
-                "public_key": {"ed25519_public_key": public_key},
-                "requested_role": "device",
-            }),
-        ),
-    )
-    .await
-    .expect("pairing policy deadlocked by reacquiring its one-connection runtime pool");
-    assert_eq!(result.0, StatusCode::OK, "{}", result.1);
     server.shutdown().await;
 }

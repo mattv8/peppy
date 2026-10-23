@@ -8,7 +8,8 @@ set -euo pipefail
 [[ "$IMAGE" =~ ^hub\.docker\.visnovsky\.us/library/[a-z0-9][a-z0-9._/-]*$ ]] || { echo "Invalid public image name: must be hub.docker.visnovsky.us/library/*" >&2; exit 1; }
 
 inspect_error=$(mktemp)
-trap 'rm -f "$inspect_error"' EXIT
+tag_error=$(mktemp)
+trap 'rm -f "$inspect_error" "$tag_error"' EXIT
 immutable="$IMAGE:sha-$SHA"
 digest=
 digest_format='{{json .Manifest.Digest}}'
@@ -50,7 +51,42 @@ else
     cosign sign --yes --key env://COSIGN_PRIVATE_KEY "$IMAGE@$digest"
 fi
 
-promote() { docker buildx imagetools create --tag "$IMAGE:$1" "$IMAGE@$digest"; }
+if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if tagged=$(docker buildx imagetools inspect --format "$digest_format" "$IMAGE:$TAG" 2>"$tag_error"); then
+        tagged_digest=$(decode_digest "$tagged") || report_invalid_digest
+        if [[ "$tagged_digest" != "$digest" ]]; then
+            echo "Stable image tag $IMAGE:$TAG already points at a different digest; refusing to overwrite it" >&2
+            exit 1
+        fi
+    else
+        tag_inspect_message=$(tr '[:upper:]' '[:lower:]' < "$tag_error")
+        if [[ "$tag_inspect_message" != *"manifest unknown"* && "$tag_inspect_message" != *": not found"* && "$tag_inspect_message" != *"not found:"* ]]; then
+            echo "Unable to determine whether stable image tag exists; refusing to promote: $IMAGE:$TAG" >&2
+            head -c 4096 "$tag_error" >&2
+            echo >&2
+            exit 1
+        fi
+    fi
+fi
+
+promote() {
+    local alias=$1 promoted promoted_digest
+    docker buildx imagetools create --prefer-index=false --tag "$IMAGE:$alias" "$IMAGE@$digest"
+    if ! promoted=$(docker buildx imagetools inspect --format "$digest_format" "$IMAGE:$alias" 2>"$inspect_error"); then
+        echo "Unable to verify promoted image digest: $IMAGE:$alias" >&2
+        head -c 4096 "$inspect_error" >&2
+        echo >&2
+        exit 1
+    fi
+    promoted_digest=$(decode_digest "$promoted") || {
+        echo "Registry returned an invalid promoted image digest for $IMAGE:$alias" >&2
+        exit 1
+    }
+    if [[ "$promoted_digest" != "$digest" ]]; then
+        echo "Promoted image digest does not match verified source digest: $IMAGE:$alias" >&2
+        exit 1
+    fi
+}
 promote "$TAG"
 if [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     IFS=. read -r major minor _ <<<"$TAG"

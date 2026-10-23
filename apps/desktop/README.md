@@ -4,11 +4,50 @@ Follow the canonical [contributing workflow](../../CONTRIBUTING.md) for first ru
 
 The desktop client uses Tauri with native Rust code and a web UI. It supports native development on macOS and native Windows development from WSL. The helper does not provide Linux native development; Linux packaging remains CI-only.
 
+## Server setup and phone connections
+
+Enter your server address to discover its setup state. A fresh community instance
+shows whether first claim is open or token-protected. An open instance lets the
+first device that completes setup become owner; a token-protected instance also
+requires the operator setup code. The setup code authorizes initial claim only,
+the admin password authorizes server management, and the generated vault shared
+secret protects vault data. Existing instances support admin sign-in and
+shared-secret enrollment. Passwords and shared secrets are handled by native
+dialogs rather than React fields or Tauri command arguments.
+
+Operators configure token-protected first claim with a nonempty
+`PEPPY_SETUP_TOKEN` of at least 32 UTF-8 bytes, using the same token on every
+replica. An absent or empty value is open first claim; no token is generated or
+available in logs. Unclaimed deployments upgraded without the setting become
+open. If an unwanted stranger first claim occurs, follow the root
+[recovery procedure](../../README.md#recover-from-an-unwanted-first-claim): it
+destroys only the affected deployment's Peppy database and attachment state and
+is not password recovery.
+
+An enrolled owner uses **Add phone** from the main workbench. Scan the single
+**Connect your phone** QR, compare the verification codes, and approve the phone.
+The selected mode transfers keys securely or requires the phone to enter the
+shared secret. QR codes are not shown in Settings. The old reversed computer QR,
+credential-file setup and Save QR action have been removed.
+
+The local **App lock** setting is off by default. Enabling it requires a native
+password confirmation and applies on the next start. It does not change the
+server's admin password or the vault shared secret.
+
 ## MMS messages
 
 MMS requires an enabled, permission-ready Android gateway advertising MMS content version 2 or later. Upgrade paired clients together. Groups and attachments select MMS; replies in an MMS conversation retain that transport. A missing capability blocks sending while preserving the editable draft. Incoming group replies may require own-number confirmation on the phone.
 
 Attachment removal preserves draft revisions. Retry controls retry the encrypted file transfer, not the carrier message. Save uses a native file dialog and never exposes filesystem paths or encryption keys to the webview. Creating a public image link remains a separate, explicitly confirmed plaintext-sharing action.
+
+Version-3 MMS capture adds separately encrypted previews. Previews download for
+browsing; opening or saving an original requests that media on demand. Legacy
+originals up to 2 MiB retain automatic downloading. The shared desktop/browser
+conversation view groups consecutive images from the same known sender within
+three minutes, preserves each message's status, and provides a paged **Media**
+view and keyboard-navigable viewer. Video and audio playback starts only after a
+user action; unsupported formats retain the Save fallback. Viewing private media
+never creates a public link.
 
 The displayed byte estimate is a lower bound: carrier limits apply to the complete encoded MMS, including headers. A fallback limit is labeled as an application limit. Gateway validation can still reject a message that passed this estimate. An unknown carrier outcome is not automatically retried.
 
@@ -52,7 +91,7 @@ Heads are included in normal macOS and Windows builds. Browser fixtures demonstr
 
 ## macOS
 
-Install Node at the version in `../../.node-version`, pnpm 12.8.1, and Rust from `../../rust-toolchain.toml`. From the repository root:
+Install a stable Node 26 release (the major version in `../../.node-version`), pnpm 12.8.1, and Rust from `../../rust-toolchain.toml`. Minor and patch updates within Node 26 are supported. From the repository root:
 
 ```sh
 just desktop-dev
@@ -61,7 +100,9 @@ just desktop-run
 just desktop-open
 ```
 
-`desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory. `desktop-dev` and `desktop-bundle` run `pnpm install --frozen-lockfile`.
+`desktop-dev` runs Tauri's hot-reload development server using the `tauri.dev.conf.json` overlay with dev identity `org.peppy.desktop.dev`. `desktop-bundle` and `desktop-run` build release bundles with the same dev overlay; they generate only the `.app` bundle at `apps/desktop/src-tauri/target/release/bundle/macos/Peppy_dev.app` with no DMG installer created locally. `desktop-bundle` builds without opening; `desktop-run` builds then opens the app in place. `desktop-open` opens an existing `Peppy_dev.app` in place without installing it to `/Applications`. Set `CARGO_TARGET_DIR` to choose a different target directory.
+
+`desktop-dev`, `desktop-bundle`, and `desktop-run` run `pnpm install --frozen-lockfile` before building to synchronize dependencies with the selected source tree's lockfile. An install failure stops the build; `desktop-run` does not open an older bundle. These commands do not upgrade packages beyond the lockfile.
 
 On macOS, development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
 
@@ -69,11 +110,11 @@ Development uses a separate Keychain namespace. The first dev launch creates an 
 
 Each ad-hoc rebuild has a new code identity, so macOS asks again before the dev app can read its Keychain record. To stop the prompts across rebuilds, set `PEPPY_MACOS_SIGNING_IDENTITY` to the exact name or SHA-1 of an Apple Development identity (Xcode, signed in with your Apple ID) or a Developer ID identity, then choose **Always Allow** once. This applies when `just desktop-bundle` or `just desktop-run` builds the bundle; `just desktop-open` only opens the existing bundle, and `just desktop-dev` does not use it. Switching identities asks once more, and Apple Development certificates expire after a year.
 
-Production installers use the `tauri.conf.json` configuration (`productName: Peppy`, identifier: `org.peppy.desktop`) and are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
+The base `tauri.conf.json` defaults to the development identity (`productName: Peppy_dev`, identifier: `org.peppy.desktop.dev`) so direct Tauri commands do not collide with an installed release. The supported macOS commands retain the explicit `tauri.dev.conf.json` overlay for compatibility. Trusted production installers override that base configuration to `productName: Peppy` and identifier `org.peppy.desktop`; they are downloaded from [GitHub releases](https://github.com/mattv8/peppy/releases).
 
 ## Windows from WSL
 
-Keep the current checkout and any `CARGO_TARGET_DIR` on a drive-letter NTFS path. The helper rejects ext4 and UNC paths. Install Node at the pinned version, pnpm 12.8.1, Rust at the pinned version, Visual Studio C++ tools with the Windows SDK, WebView2, and native Windows Perl with `IPC::Cmd`. Do not use Git/MSYS Perl.
+Keep the current checkout and any `CARGO_TARGET_DIR` on a drive-letter NTFS path. The helper rejects ext4 and UNC paths. Install a stable Node 26 release, pnpm 12.8.1, Rust at the pinned version, Visual Studio C++ tools with the Windows SDK, WebView2, and native Windows Perl with `IPC::Cmd`. Do not use Git/MSYS Perl.
 
 ```sh
 just desktop-dev

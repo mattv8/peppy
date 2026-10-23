@@ -1,0 +1,13 @@
+#settings-devices ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+#settings-devices li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-sm, 4px); }
+#settings-devices [data-device-details] { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+#settings-devices [data-device-metadata] { display: flex; flex-wrap: wrap; gap: 4px; }
+#settings-devices [data-device-badge] { padding: 2px 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-pill); color: var(--peppy-text-secondary); font-size: 12px; }
+#settings-devices [data-device-badge="current"] { border-color: var(--peppy-accent); color: var(--peppy-accent); }
+#settings-devices [data-device-badge="presence"][data-presence-state="connected"] { color: var(--peppy-success); }
+#settings-devices [data-device-badge="presence"][data-presence-state="delayed"] { color: var(--peppy-warning-text); }
+#settings-devices [data-device-badge="presence"][data-presence-state="never"], #settings-devices [data-device-badge="presence"][data-presence-state="unknown"] { color: var(--peppy-text-muted); }
+#settings-devices li small { color: var(--peppy-text-secondary); font-size: 12px; }
+#devices-removed { display: grid; gap: 8px; }
+@media (forced-colors: active) { #settings-devices [data-device-badge] { border-color: CanvasText; } }
+@media (max-width: 480px) { #settings-devices li { align-items: flex-start; flex-wrap: wrap; } #settings-devices li button { margin-left: auto; } }

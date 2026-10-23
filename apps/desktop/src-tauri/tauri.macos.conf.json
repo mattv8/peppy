@@ -1,0 +1,19 @@
+{
+  "app": {
+    "windows": [{
+      "label": "main", "title": "Peppy", "width": 1100, "height": 760,
+      "minWidth": 760, "minHeight": 560, "decorations": false,
+      "transparent": true, "resizable": true, "visible": false
+    }]
+  },
+  "bundle": {
+    "macOS": {
+      "dmg": {
+        "background": "../../../packaging/macos/dmg/background.tiff",
+        "windowSize": { "width": 700, "height": 442 },
+        "appPosition": { "x": 326, "y": 218 },
+        "applicationFolderPosition": { "x": 558, "y": 222 }
+      }
+    }
+  }
+}

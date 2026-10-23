@@ -19,6 +19,7 @@
 //!   merged monotonically; commands learned from a snapshot are historical and never permitted.
 //!   A durable restore guard blocks all new carrier permits on a restored gateway; there is no
 //!   clear. Rolling a database back behind the application is not detectable.
+mod compose_create;
 mod contact_media;
 mod contact_photos;
 mod contact_queries;
@@ -26,12 +27,19 @@ mod contact_resolution;
 mod contact_search;
 mod contact_source;
 mod contact_state;
+mod contact_sync_requests;
 mod contacts;
+mod conversation_match;
 mod gateway_settings;
 mod media;
+mod media_cache;
+mod media_paging;
 mod mms;
+mod mms_backfill;
 mod mms_identity;
 mod notifications;
+mod sms_acquisition;
+mod sms_reconciliation;
 mod snapshot_projection;
 pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
@@ -40,14 +48,25 @@ use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
 };
+pub use media_paging::MediaPageAround;
 pub use mms::{
     MAX_MMS_ACQUISITIONS, MAX_PENDING_MMS_MEDIA_BYTES, MmsAcquisition, MmsAcquisitionInput,
-    MmsAcquisitionPart, MmsAcquisitionState, MmsContext, MmsReplyContext, MmsSource,
+    MmsAcquisitionPart, MmsAcquisitionState, MmsBeginOutcome, MmsContext, MmsPreviewState,
+    MmsProviderIdentityQuarantine, MmsReplyContext, MmsSource,
+};
+pub use mms_backfill::{
+    MAX_MMS_BACKFILL_RECHECK, MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck,
+    MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBackfillStatus, MmsLegacyBackfillState,
 };
 use peppy_crypto::FileKey;
+use peppy_crypto::enrollment::{
+    EncryptedHandoff, EnrollmentContext, EnrollmentRole, HandoffRootPackage, TransferKeypair,
+    VerifiedHandoff,
+};
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyPurpose, PurposeKey, compaction_hmac, decrypt,
-    derive_purpose_key, derive_root_key, encrypt, verify_vault_check_header,
+    derive_purpose_key, derive_root_key, encrypt, profile_fingerprint_bytes,
+    verify_vault_check_header,
 };
 pub use peppy_crypto::{KeyProfile, VaultCheckHeader};
 pub use peppy_domain::{
@@ -63,7 +82,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 pub use snapshot_projection::{SnapshotProjectionState, SnapshotProjectionStatus};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
@@ -71,9 +90,9 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 31;
 /// Shared encrypted MMS content format understood by upgraded gateways.
-pub const MMS_CONTENT_VERSION: u32 = 2;
+pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
 pub const MAX_SNAPSHOT_PAGE: usize = 500;
 /// Records per staged snapshot generation.
@@ -88,6 +107,10 @@ const SNAPSHOT_GC_BATCH: i64 = 2_000;
 pub const MAX_APPLY_BATCH: usize = 1_000;
 /// Outbox rows sealed implicitly by enqueue/unlock/import/upload; use `seal_pending_batch` for more.
 pub const MAX_SEAL_BATCH: usize = 256;
+/// Maximum messages returned by one bounded history query.
+pub const MAX_HISTORY_PAGE: usize = 500;
+/// Legacy originals at or below this plaintext size remain eager downloads.
+pub const EAGER_MEDIA_PLAINTEXT_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Read-only scheduler readiness. Hosts use this before a checkpointed work mutation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -118,6 +141,8 @@ const LEGACY_KEY_CACHE_BYTES: usize = KEY_CACHE_BYTES - 32;
 const KEY_CACHE_CHECK_DOMAIN: &[u8] = b"peppy-native-key-cache-check-v1\0";
 
 type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Store>>>>;
+type MediaMetaColumns = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
+type ResolvedMedia = (Vec<MediaDescriptor>, Vec<MmsMediaMeta>);
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,6 +191,20 @@ pub enum Error {
     NotFound,
     #[error("stale draft; current revision is {current_revision}")]
     StaleDraft { current_revision: u64 },
+    #[error(
+        "draft moved to conversation {conversation_id}; current revision is {current_revision}"
+    )]
+    DraftMoved {
+        draft_id: DraftId,
+        conversation_id: ConversationId,
+        current_revision: u64,
+    },
+    #[error("draft is not discardable")]
+    DraftNotDiscardable,
+    #[error("a recipientless draft already exists")]
+    RecipientlessDraftExists,
+    #[error("moving this draft would exceed a compose limit")]
+    DraftMergeOverflow,
     #[error("no send attempt was recorded for this command")]
     NoAttempt,
     #[error("illegal send-state transition {from:?} -> {to:?}")]
@@ -184,6 +223,10 @@ pub enum Error {
     MmsAcquisitionLimit,
     #[error("MMS pending media quota exceeded")]
     MmsMediaQuota,
+    /// SMS provider capture is backpressured: the bounded pending queue is full, or imported
+    /// history would exceed recovery capacity (then durably paused in the imported scan scope).
+    #[error("SMS acquisition capacity reached")]
+    SmsCapacity,
 }
 impl From<rusqlite::Error> for Error {
     fn from(_: rusqlite::Error) -> Self {
@@ -208,6 +251,14 @@ pub struct MessagePayload {
     pub direction: Direction,
     /// Imported provider history starts read; live captures start unread.
     pub imported: bool,
+    /// Provider timestamp when known. It is deliberately distinct from local ordering.
+    #[serde(default)]
+    pub sent_at_ms: Option<i64>,
+    /// Origin ordering time, set once by the device that created the record (queue or capture)
+    /// when no actual provider time is known. Every client sorts by `sent_at_ms`, then this, so
+    /// synced and snapshot-restored histories agree. Never displayed as a sent time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordered_at_ms: Option<i64>,
     /// Provider/SIM provenance for immutable MMS identity; absent on pre-MMS records.
     #[serde(default)]
     pub mms_context: Option<MmsContext>,
@@ -237,6 +288,9 @@ pub enum PrivatePayload {
     MmsMessage {
         message: MessagePayload,
         media: Vec<MediaDescriptor>,
+        /// v3 capture metadata. Thumbnails are independent encrypted objects, never attachments.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media_meta: Vec<MmsMediaMeta>,
     },
     SendMmsCommand {
         message: MessagePayload,
@@ -245,6 +299,8 @@ pub enum PrivatePayload {
     SendStatus {
         command_id: CommandId,
         state: SendState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<i64>,
     },
     ReadState {
         message_id: MessageId,
@@ -288,6 +344,26 @@ pub enum PrivatePayload {
     ContactEditResult {
         result: serde_json::Value,
     },
+    ContactScanRequest {
+        request: serde_json::Value,
+    },
+    ContactScanResult {
+        result: serde_json::Value,
+    },
+}
+
+/// Additive v3 MMS capture metadata. `attachment_id` identifies a visible original.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MmsMediaMeta {
+    pub attachment_id: AttachmentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<MediaDescriptor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -387,6 +463,12 @@ pub struct IncomingSms {
     pub provider_message_id: Option<String>,
     pub imported: bool,
 }
+pub use sms_acquisition::{
+    MAX_PENDING_SMS_ACQUISITION_BYTES, MAX_PENDING_SMS_ACQUISITIONS, SMS_REASON_AMBIGUOUS,
+    SMS_REASON_DRAFT, SMS_REASON_FAILED, SMS_REASON_INVALID, SMS_RECONCILIATION_INTERVAL_MS,
+    SmsAcquisition, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
+    SmsReconciliationPlan, SmsScanPlan, SmsScanStatus, SmsSource,
+};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Captured {
     pub message_id: MessageId,
@@ -436,6 +518,41 @@ pub struct Message {
     pub seen: bool,
     /// `None` for messages that are not send commands.
     pub send_state: Option<SendState>,
+    /// Gateway-recorded time of the displayed status, when supplied by an updated gateway.
+    pub status_at_ms: Option<i64>,
+}
+/// A chronological, bounded conversation-history window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessagePage {
+    pub messages: Vec<Message>,
+    pub has_more: bool,
+}
+/// Exclusive, durable newest-first media-page anchor. Attachment position disambiguates a MMS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaCursor {
+    pub sort_at_ms: i64,
+    pub local_order: i64,
+    pub message_id: MessageId,
+    pub attachment_position: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaPageItem {
+    pub message: MessagePayload,
+    pub attachment: AttachmentInfo,
+    pub media_meta: Option<MediaMetadata>,
+    pub cursor: MediaCursor,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaMetadata {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub thumbnail: Option<AttachmentInfo>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaPage {
+    pub items: Vec<MediaPageItem>,
+    pub next_cursor: Option<MediaCursor>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
@@ -675,14 +792,18 @@ struct EpochKeys {
     /// V1 native caches did not carry this derived key. They remain decrypt-compatible,
     /// but must not produce compactable events until a V2 cache or passphrase unlock.
     compaction: Option<PurposeKey>,
+    /// Present only after a passphrase unlock or authenticated handoff import; native caches
+    /// intentionally carry purpose keys alone and cannot recreate it.
+    handoff: Option<HandoffRootPackage>,
 }
-struct Store {
-    conn: Connection,
+pub(crate) struct Store {
+    pub(crate) conn: Connection,
     config: ClientConfig,
     db_key: Zeroizing<[u8; 32]>,
     keys: BTreeMap<u32, EpochKeys>,
     active_epoch: Option<u32>,
-    media_dir: PathBuf,
+    pub(crate) media_dir: PathBuf,
+    pub(crate) media_cache: media_cache::MediaCacheState,
 }
 struct Ctx<'a> {
     vault_id: VaultId,
@@ -739,11 +860,14 @@ impl Client {
             keys: BTreeMap::new(),
             active_epoch: None,
             media_dir,
+            media_cache: media_cache::MediaCacheState::default(),
         };
         initialize(&mut store)?;
         let store = Arc::new(Mutex::new(store));
-        registry.insert(path, Arc::downgrade(&store));
-        Ok(Self(store))
+        let client = Self(store);
+        client.cleanup_terminal_mms_parts()?;
+        registry.insert(path, Arc::downgrade(&client.0));
+        Ok(client)
     }
 
     /// Rust-owned, versioned contact DTO entry points for native platform adapters.
@@ -789,6 +913,35 @@ impl Client {
         let mut store = self.lock()?;
         let (conn, ctx) = store.parts();
         contacts::finish_scan(conn, &ctx, input)
+    }
+    /// Enqueues an encrypted request for a phone to run a fresh authoritative book scan.
+    pub fn request_contact_sync(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::request(conn, &ctx, input)
+    }
+    /// Returns this caller's durable status for a requested book scan.
+    pub fn contact_sync_request_status(&self, input: &str) -> Result<String, Error> {
+        let store = self.lock()?;
+        contact_sync_requests::status(&store.conn, &store.config.device_id.to_string(), input)
+    }
+    /// Returns durable owner-local scan work. Hosts must query this before scheduling a full scan.
+    pub fn pending_contact_sync_scans(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::pending(conn, &ctx, input)
+    }
+    /// Publishes truthful blocked outcomes for pending owner work (permission, limited access, etc.).
+    pub fn report_contact_sync_blocked(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::report_blocked(conn, &ctx, input)
+    }
+    /// Records an owner phone's encrypted scan-request capability without changing book generation.
+    pub fn set_contact_scan_request_capability(&self, input: &str) -> Result<String, Error> {
+        let mut store = self.lock()?;
+        let (conn, ctx) = store.parts();
+        contact_sync_requests::set_capability(conn, &ctx, input)
     }
     pub fn contact_book_view(&self, input: &str) -> Result<String, Error> {
         let store = self.lock()?;
@@ -898,6 +1051,10 @@ impl Client {
             command: derive(KeyPurpose::Command)?,
             event: derive(KeyPurpose::Event)?,
             compaction: Some(derive(KeyPurpose::Compaction)?),
+            handoff: Some(
+                HandoffRootPackage::new(root, profile.clone(), header.clone())
+                    .map_err(|_| Error::Crypto)?,
+            ),
         };
         let mut guard = self.lock()?;
         let s = &mut *guard;
@@ -929,6 +1086,90 @@ impl Client {
         )?;
         tx.commit()?;
         s.active_epoch = Some(active);
+        s.keys.insert(profile.key_epoch, keys);
+        recover_decoder_revision(
+            &s.conn,
+            &Ctx {
+                vault_id: s.config.vault_id,
+                device_id: s.config.device_id,
+                keys: &s.keys,
+                active_epoch: s.active_epoch,
+            },
+            profile.key_epoch,
+        )?;
+        seal_with_store(s)
+    }
+
+    /// Installs a context-anchored authenticated handoff. It deliberately does not accept
+    /// `NativeKeyCache`, which cannot establish enrollment bindings.
+    pub fn import_verified_handoff(&self, handoff: VerifiedHandoff) -> Result<(), Error> {
+        let (package, context) = handoff.into_parts();
+        let (root, profile, header) = package.into_parts();
+        if profile.vault_id != context.vault_id
+            || profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+            || header.profile != profile
+        {
+            return Err(Error::InvalidProfile);
+        }
+        verify_vault_check_header(&root, &profile, &header).map_err(|error| match error {
+            CryptoError::AuthenticationFailed => Error::WrongPassphrase,
+            CryptoError::InvalidProfile => Error::InvalidProfile,
+            _ => Error::Crypto,
+        })?;
+        let derive =
+            |purpose| derive_purpose_key(&root, &profile, purpose).map_err(|_| Error::Crypto);
+        let command = derive(KeyPurpose::Command)?;
+        let event = derive(KeyPurpose::Event)?;
+        let compaction = derive(KeyPurpose::Compaction)?;
+        let handoff = if context.role == EnrollmentRole::Owner {
+            Some(
+                HandoffRootPackage::new(root, profile.clone(), header.clone())
+                    .map_err(|_| Error::Crypto)?,
+            )
+        } else {
+            None
+        };
+        let keys = EpochKeys {
+            fingerprint: profile.fingerprint().map_err(|_| Error::Crypto)?,
+            command,
+            event,
+            compaction: Some(compaction),
+            profile: profile.clone(),
+            handoff,
+        };
+        let mut guard = self.lock()?;
+        let s = &mut *guard;
+        if profile.vault_id != s.config.vault_id.0 {
+            return Err(Error::InvalidProfile);
+        }
+        if context.device_id != s.config.device_id.0 {
+            return Err(Error::IdentityMismatch);
+        }
+        let tx = s
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        match pinned_profile(&tx, profile.key_epoch)? {
+            Some(pinned) if pinned != profile => return Err(Error::InvalidProfile),
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT INTO key_epoch_profiles(epoch,profile) VALUES(?,?)",
+                    params![profile.key_epoch, json(&profile)?],
+                )?;
+            }
+        }
+        let check = key_cache_check(&key_cache_bytes(&s.config, profile.key_epoch, &keys)?);
+        tx.execute(
+            "INSERT INTO key_cache_checks(epoch,check_value) VALUES(?,?) ON CONFLICT(epoch) DO UPDATE SET check_value=excluded.check_value",
+            params![profile.key_epoch, check.as_slice()],
+        )?;
+        if s.active_epoch.is_none() {
+            set_meta(&tx, "active_epoch", &profile.key_epoch.to_string())?;
+        }
+        tx.commit()?;
+        s.active_epoch.get_or_insert(profile.key_epoch);
         s.keys.insert(profile.key_epoch, keys);
         recover_decoder_revision(
             &s.conn,
@@ -1059,15 +1300,24 @@ impl Client {
         let import = |bytes: &[u8; 32], purpose| {
             PurposeKey::import_native_cache(*bytes, &profile, purpose).map_err(|_| Error::Crypto)
         };
+        let command = import(&command, KeyPurpose::Command)?;
+        let event = import(&event, KeyPurpose::Event)?;
+        let compaction = compaction
+            .as_ref()
+            .map(|key| import(key, KeyPurpose::Compaction))
+            .transpose()?;
+        let handoff = s.keys.get_mut(&epoch).and_then(|existing| {
+            (existing.profile == profile)
+                .then(|| existing.handoff.take())
+                .flatten()
+        });
         let keys = EpochKeys {
             fingerprint: fingerprint.to_owned(),
-            command: import(&command, KeyPurpose::Command)?,
-            event: import(&event, KeyPurpose::Event)?,
-            compaction: compaction
-                .as_ref()
-                .map(|key| import(key, KeyPurpose::Compaction))
-                .transpose()?,
+            command,
+            event,
+            compaction,
             profile: profile.clone(),
+            handoff,
         };
         s.keys.insert(epoch, keys);
         recover_decoder_revision(
@@ -1089,6 +1339,34 @@ impl Client {
             active_epoch: s.active_epoch,
             unlocked_epochs: s.keys.keys().copied().collect(),
         })
+    }
+
+    /// Seals a phone enrollment handoff only from the active epoch's verified root capability.
+    /// Callers must pass a context produced by authenticated local enrollment validation, never
+    /// renderer or server input directly.
+    pub fn seal_phone_handoff(
+        &self,
+        sender: &TransferKeypair,
+        context: &EnrollmentContext,
+    ) -> Result<EncryptedHandoff, Error> {
+        let s = self.lock()?;
+        let epoch = s.active_epoch.ok_or(Error::KeysUnavailable)?;
+        if context.vault_id != s.config.vault_id.0 || context.key_epoch != epoch {
+            return Err(Error::InvalidProfile);
+        }
+        let keys = s.keys.get(&epoch).ok_or(Error::KeysUnavailable)?;
+        if keys.profile.vault_id != context.vault_id
+            || keys.profile.key_epoch != context.key_epoch
+            || profile_fingerprint_bytes(&keys.profile).map_err(|_| Error::Crypto)?
+                != context.fingerprint
+        {
+            return Err(Error::InvalidProfile);
+        }
+        keys.handoff
+            .as_ref()
+            .ok_or(Error::KeysUnavailable)?
+            .seal(sender, &context.recipient_transfer_public_key, context)
+            .map_err(|_| Error::Crypto)
     }
 
     /// Records the server capability advertised by a trusted snapshot response. Compactable
@@ -1167,6 +1445,59 @@ impl Client {
         self.capture(sms, &[], Transport::Sms, Vec::new(), None)
     }
 
+    /// Durably captures an `SMS_RECEIVED` broadcast with its timestamps. `smsc_at_ms` is the
+    /// carrier timestamp the provider later stores as `date_sent`; it is retained only as
+    /// reconciliation evidence. `received_at_ms` is the local receipt time shown to users.
+    /// A provider row captured first for the same message is reused rather than duplicated.
+    pub fn capture_incoming_broadcast(
+        &self,
+        sms: IncomingSms,
+        smsc_at_ms: Option<i64>,
+        received_at_ms: Option<i64>,
+    ) -> Result<Captured, Error> {
+        validate_capture(&sms)?;
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let smsc_at_ms = smsc_at_ms.filter(|time| *time > 0);
+        if let Some(broadcast_id) = sms.provider_message_id.as_deref()
+            && let Some(existing) = sms_acquisition::broadcast_duplicate(
+                &tx,
+                &ctx.device_id,
+                broadcast_id,
+                &sms,
+                smsc_at_ms,
+            )?
+        {
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let broadcast_id = sms.provider_message_id.clone();
+        let sent_at_ms = received_at_ms.filter(|time| *time > 0).or(smsc_at_ms);
+        let captured = capture_in(
+            &tx,
+            &ctx,
+            sms,
+            &[],
+            Transport::Sms,
+            Vec::new(),
+            None,
+            sent_at_ms,
+        )?;
+        if let Some(broadcast_id) = broadcast_id
+            && !captured.duplicate
+        {
+            sms_acquisition::record_broadcast_alias(
+                &tx,
+                &broadcast_id,
+                captured.message_id,
+                smsc_at_ms,
+            )?;
+        }
+        tx.commit()?;
+        Ok(captured)
+    }
+
     /// Durably captures a carrier MMS whose parts were already passed to `prepare_attachment`.
     /// The event stays unsealed until every attachment is uploaded.
     pub fn capture_incoming_mms(&self, mms: IncomingMms) -> Result<Captured, Error> {
@@ -1214,84 +1545,110 @@ impl Client {
         recipients: Vec<String>,
         subject: Option<String>,
     ) -> Result<Captured, Error> {
-        require_address(&sms.sender_address)?;
-        require_body(&sms.body, true)?;
-        if let Some(id) = &sms.provider_message_id
-            && (id.is_empty() || id.len() > MAX_PROVIDER_ID_BYTES)
-        {
-            return Err(Error::InvalidRequest("provider message id"));
-        }
+        validate_capture(&sms)?;
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(provider_id) = &sms.provider_message_id {
-            let existing: Option<(String, String)> = tx
+        let captured = capture_in(
+            &tx,
+            &ctx,
+            sms,
+            attachments,
+            transport,
+            recipients,
+            subject,
+            None,
+        )?;
+        tx.commit()?;
+        Ok(captured)
+    }
+}
+
+fn validate_capture(sms: &IncomingSms) -> Result<(), Error> {
+    require_address(&sms.sender_address)?;
+    require_body(&sms.body, true)?;
+    if let Some(id) = &sms.provider_message_id
+        && (id.is_empty() || id.len() > MAX_PROVIDER_ID_BYTES)
+    {
+        return Err(Error::InvalidRequest("provider message id"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_in(
+    tx: &Connection,
+    ctx: &Ctx<'_>,
+    sms: IncomingSms,
+    attachments: &[AttachmentId],
+    transport: Transport,
+    recipients: Vec<String>,
+    subject: Option<String>,
+    sent_at_ms: Option<i64>,
+) -> Result<Captured, Error> {
+    if let Some(provider_id) = &sms.provider_message_id {
+        let existing: Option<(String, String)> = tx
                 .query_row(
                     "SELECT id,conversation_id FROM messages WHERE source_device_id=? AND provider_message_id=?",
                     params![ctx.device_id.to_string(), provider_id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            if let Some((message_id, conversation_id)) = existing {
-                return Ok(Captured {
-                    message_id: parse(&message_id)?,
-                    conversation_id: parse(&conversation_id)?,
-                    duplicate: true,
-                });
-            }
+        if let Some((message_id, conversation_id)) = existing {
+            return Ok(Captured {
+                message_id: parse(&message_id)?,
+                conversation_id: parse(&conversation_id)?,
+                duplicate: true,
+            });
         }
-        let conversation_id = match sms.conversation_id {
-            Some(id) => id,
-            None => tx
-                .query_row(
-                    "SELECT conversation_id FROM addresses WHERE address=?",
-                    params![sms.sender_address],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?
-                .map(|id| parse(&id))
-                .transpose()?
-                .unwrap_or_else(ConversationId::new),
-        };
-        let payload = MessagePayload {
-            record: MessageRecord {
-                message_id: MessageId::new(),
-                conversation_id,
-                source_sequence: next_source_sequence(&tx, conversation_id, ctx.device_id)?,
-                attachments: local_references(&tx, attachments)?,
-            },
-            source_device_id: ctx.device_id,
-            provider_message_id: sms.provider_message_id,
-            sender_address: Some(sms.sender_address),
-            recipients,
-            body: sms.body,
-            transport,
-            direction: Direction::Incoming,
-            imported: sms.imported,
-            subject,
-            mms_context: None,
-        };
-        if insert_message(&tx, &payload)? != Inserted::New {
-            return Err(Error::Database);
-        }
-        let message_id = payload.record.message_id;
-        let private = if transport == Transport::Sms {
-            PrivatePayload::Message(payload)
-        } else {
-            PrivatePayload::MmsMessage {
-                message: payload,
-                media: Vec::new(),
-            }
-        };
-        enqueue(&tx, &ctx, EnvelopePurpose::Event, None, None, &private)?;
-        tx.commit()?;
-        Ok(Captured {
-            message_id,
-            conversation_id,
-            duplicate: false,
-        })
     }
+    let conversation_id = match sms.conversation_id {
+        Some(id) => id,
+        None => conversation_match::address_conversation(tx, &sms.sender_address)?
+            .unwrap_or_else(ConversationId::new),
+    };
+    let payload = MessagePayload {
+        record: MessageRecord {
+            message_id: MessageId::new(),
+            conversation_id,
+            source_sequence: next_source_sequence(tx, conversation_id, ctx.device_id)?,
+            attachments: local_references(tx, attachments)?,
+        },
+        source_device_id: ctx.device_id,
+        provider_message_id: sms.provider_message_id,
+        sender_address: Some(sms.sender_address),
+        recipients,
+        body: sms.body,
+        transport,
+        direction: Direction::Incoming,
+        imported: sms.imported,
+        ordered_at_ms: sent_at_ms.is_none().then(notifications::now_ms),
+        sent_at_ms,
+        subject,
+        mms_context: None,
+    };
+    if insert_message(tx, &payload)? != Inserted::New {
+        return Err(Error::Database);
+    }
+    let message_id = payload.record.message_id;
+    let private = if transport == Transport::Sms {
+        PrivatePayload::Message(payload)
+    } else {
+        PrivatePayload::MmsMessage {
+            message: payload,
+            media: Vec::new(),
+            media_meta: Vec::new(),
+        }
+    };
+    enqueue(tx, ctx, EnvelopePurpose::Event, None, None, &private)?;
+    Ok(Captured {
+        message_id,
+        conversation_id,
+        duplicate: false,
+    })
+}
 
+impl Client {
     /// Queues an encrypted send command pinned to one gateway and subscription.
     pub fn queue_send(&self, sms: OutgoingSms, route: GatewayRoute) -> Result<QueuedSend, Error> {
         validate_outgoing(&sms, &route)?;
@@ -1346,6 +1703,19 @@ impl Client {
         {
             return Ok(existing);
         }
+        if let Some(conversation_id) = conversation_id {
+            let has_history: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+                params![conversation_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !has_history {
+                if redirect_target(&s.conn, conversation_id.to_string(), false)?.is_some() {
+                    return Err(Error::NotFound);
+                }
+                return Err(Error::NotFound);
+            }
+        }
         let draft = ComposeDraft {
             draft_id: DraftId::new(),
             conversation_id: conversation_id.unwrap_or_else(ConversationId::new),
@@ -1356,14 +1726,61 @@ impl Client {
             revision: 0,
         };
         s.conn.execute(
-            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision) VALUES(?,?,'','[]','[]',NULL,0)",
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,'','[]','[]',NULL,0,?)",
+            params![draft.draft_id.to_string(), draft.conversation_id.to_string(), conversation_id.is_none()],
+        )?;
+        Ok(draft)
+    }
+
+    /// Returns the single reusable recipientless compose draft, creating it atomically when none
+    /// exists. Established conversations are never eligible, even if their reply draft happens
+    /// to have an empty recipient list.
+    pub fn recipientless_compose_draft(&self) -> Result<ComposeDraft, Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = recipientless_draft(&tx, None)? {
+            tx.execute(
+                "UPDATE compose_drafts SET draft_only=1 WHERE draft_id=?",
+                params![existing.draft_id.to_string()],
+            )?;
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let draft = ComposeDraft {
+            draft_id: DraftId::new(),
+            conversation_id: ConversationId::new(),
+            text: String::new(),
+            recipients: Vec::new(),
+            attachment_ids: Vec::new(),
+            route: None,
+            revision: 0,
+        };
+        tx.execute(
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,'','[]','[]',NULL,0,1)",
             params![draft.draft_id.to_string(), draft.conversation_id.to_string()],
         )?;
+        tx.commit()?;
         Ok(draft)
     }
 
     pub fn compose_draft(&self, draft_id: DraftId) -> Result<Option<ComposeDraft>, Error> {
         load_compose_draft(&self.lock()?.conn, "draft_id", &draft_id.to_string())
+    }
+
+    /// Returns the original conversation for a live draft or a redirected draft ID.
+    pub fn compose_draft_source_conversation(
+        &self,
+        draft_id: DraftId,
+    ) -> Result<Option<ConversationId>, Error> {
+        let guard = self.lock()?;
+        let conversation: Option<String> = guard.conn.query_row(
+            "SELECT conversation_id FROM compose_drafts WHERE draft_id=? UNION ALL SELECT conversation_id FROM compose_draft_redirects WHERE draft_id=? ORDER BY 1 LIMIT 1",
+            params![draft_id.to_string(), draft_id.to_string()],
+            |row| row.get(0),
+        ).optional()?;
+        conversation.map(|id| parse(&id)).transpose()
     }
 
     /// All compose drafts, including draft-only conversations, in creation order.
@@ -1376,6 +1793,73 @@ impl Client {
             .query_map([], compose_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(decode_compose_row).collect()
+    }
+
+    /// Whether this draft originated in new-compose flow. This intent remains true when it adopts
+    /// existing history, allowing a later recipient edit to resolve a different conversation.
+    pub fn compose_draft_is_new(&self, draft_id: DraftId) -> Result<bool, Error> {
+        let guard = self.lock()?;
+        load_compose_draft(&guard.conn, "draft_id", &draft_id.to_string())?
+            .map(|_| is_draft_only(&guard.conn, draft_id))
+            .transpose()
+            .map(|value| value.unwrap_or(false))
+    }
+
+    pub fn compose_draft_redirect(&self, draft_id: DraftId) -> Result<Option<ComposeDraft>, Error> {
+        let guard = self.lock()?;
+        let target = redirect_target(&guard.conn, draft_id.to_string(), true)?;
+        target
+            .map(|target| load_compose_draft(&guard.conn, "draft_id", &target))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn conversation_redirect(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ConversationId>, Error> {
+        let guard = self.lock()?;
+        let target = redirect_target(&guard.conn, conversation_id.to_string(), false)?;
+        target.map(|target| parse(&target)).transpose()
+    }
+
+    /// Deletes only an empty, recipientless draft-only conversation. Missing non-forwarded drafts
+    /// are already gone and therefore succeed; a forwarded ID remains actionable as DraftMoved.
+    pub fn discard_compose_draft(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+    ) -> Result<(), Error> {
+        let mut guard = self.lock()?;
+        let tx = guard
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(draft) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
+            if let Some(moved) = moved_draft(&tx, draft_id)? {
+                return Err(moved);
+            }
+            tx.commit()?;
+            return Ok(());
+        };
+        if draft.revision != expected_revision {
+            return Err(Error::StaleDraft {
+                current_revision: draft.revision,
+            });
+        }
+        if !is_discardable(&tx, &draft)? {
+            return Err(Error::DraftNotDiscardable);
+        }
+        let attachments = draft.attachment_ids.clone();
+        tx.execute(
+            "DELETE FROM compose_drafts WHERE draft_id=?",
+            params![draft_id.to_string()],
+        )?;
+        tx.commit()?;
+        drop(guard);
+        for attachment in attachments {
+            let _ = self.discard_unreferenced_attachment(attachment);
+        }
+        Ok(())
     }
 
     /// Compare-and-swap save; a stale revision leaves stored content untouched.
@@ -1403,12 +1887,45 @@ impl Client {
         let tx = s
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current =
-            load_compose_draft(&tx, "draft_id", &draft_id.to_string())?.ok_or(Error::NotFound)?;
+        let Some(current) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
+            return Err(moved_draft(&tx, draft_id)?.unwrap_or(Error::NotFound));
+        };
         if current.revision != expected_revision {
             return Err(Error::StaleDraft {
                 current_revision: current.revision,
             });
+        }
+        let source_has_messages: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+            params![current.conversation_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let new_compose = is_draft_only(&tx, draft_id)? || !source_has_messages;
+        if new_compose
+            && update.recipients.is_empty()
+            && !current.recipients.is_empty()
+            && recipientless_draft(&tx, Some(draft_id))?.is_some()
+        {
+            return Err(Error::RecipientlessDraftExists);
+        }
+        let region = conversation_match::identity_region(&tx)?;
+        if new_compose
+            && !update.recipients.is_empty()
+            && conversation_match::recipient_set(&current.recipients, Some(&region))
+                != conversation_match::recipient_set(&update.recipients, Some(&region))
+        {
+            let target = conversation_for_compose_recipients(
+                &tx,
+                &update.recipients,
+                current.conversation_id,
+                &region,
+            )?;
+            if let Some(conversation_id) = target.or(source_has_messages.then(ConversationId::new))
+            {
+                let moved = move_compose_draft(&tx, current, update, conversation_id)?;
+                tx.commit()?;
+                return Ok(moved);
+            }
         }
         let next = current.revision.checked_add(1).ok_or(Error::Database)?;
         tx.execute(
@@ -1432,6 +1949,26 @@ impl Client {
             route: update.route,
             revision: next,
         })
+    }
+
+    /// Rechecks a draft immediately before a host send. A late request against an old ID is never
+    /// redirected silently because the user must review the authoritative destination first.
+    pub fn resolve_compose_draft_for_send(
+        &self,
+        draft_id: DraftId,
+        expected_revision: u64,
+    ) -> Result<ComposeDraft, Error> {
+        let guard = self.lock()?;
+        let Some(draft) = load_compose_draft(&guard.conn, "draft_id", &draft_id.to_string())?
+        else {
+            return Err(moved_draft(&guard.conn, draft_id)?.unwrap_or(Error::NotFound));
+        };
+        if draft.revision != expected_revision {
+            return Err(Error::StaleDraft {
+                current_revision: draft.revision,
+            });
+        }
+        Ok(draft)
     }
 
     /// Sends the stored draft at `expected_revision`: queues exactly one command, then clears
@@ -1465,8 +2002,9 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let draft =
-            load_compose_draft(&tx, "draft_id", &draft_id.to_string())?.ok_or(Error::NotFound)?;
+        let Some(draft) = load_compose_draft(&tx, "draft_id", &draft_id.to_string())? else {
+            return Err(moved_draft(&tx, draft_id)?.unwrap_or(Error::NotFound));
+        };
         if draft.revision != expected_revision {
             return Err(Error::StaleDraft {
                 current_revision: draft.revision,
@@ -1477,7 +2015,7 @@ impl Client {
         // an old legacy picture MMS must not permanently convert a later SMS thread to MMS.
         let latest_transport: Option<Transport> = tx
             .query_row(
-                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY local_order DESC LIMIT 1",
+                "SELECT payload FROM messages WHERE conversation_id=? ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
                 params![draft.conversation_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
@@ -1526,7 +2064,7 @@ impl Client {
         )?;
         let next = draft.revision.checked_add(1).ok_or(Error::Database)?;
         tx.execute(
-            "UPDATE compose_drafts SET text='',attachment_ids='[]',revision=? WHERE draft_id=?",
+            "UPDATE compose_drafts SET text='',attachment_ids='[]',revision=?,draft_only=0 WHERE draft_id=?",
             params![to_i64(next)?, draft_id.to_string()],
         )?;
         tx.commit()?;
@@ -1619,6 +2157,8 @@ fn queue_message(
         transport,
         direction: Direction::Outgoing,
         imported: false,
+        sent_at_ms: None,
+        ordered_at_ms: Some(notifications::now_ms()),
         subject,
         mms_context: None,
     };
@@ -1941,11 +2481,14 @@ impl Client {
         if !media_ready {
             return Ok(PermitDecision::Blocked(PermitBlock::MediaUnavailable));
         }
+        // The attempt time is the gateway's best evidence for the provider row the platform
+        // writes when it submits this text; queue time on another device is not.
         tx.execute(
-            "INSERT INTO attempts(command_id,state) VALUES(?,?)",
+            "INSERT INTO attempts(command_id,state,attempted_at_ms) VALUES(?,?,?)",
             params![
                 command_id.to_string(),
-                state_code(SendState::AttemptRecorded)
+                state_code(SendState::AttemptRecorded),
+                notifications::now_ms()
             ],
         )?;
         tx.commit()?;
@@ -1986,11 +2529,11 @@ impl Client {
         Ok(next)
     }
 
-    /// Conversations ordered by most recent local arrival.
+    /// Conversations ordered by their most recent deterministic chronological message.
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            "SELECT conversation_id,SUM(seen=0) FROM messages GROUP BY conversation_id ORDER BY MAX(local_order) DESC",
+            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread FROM newest c ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
         )?;
         let rows = query
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
@@ -2007,42 +2550,168 @@ impl Client {
 
     pub fn messages(&self, conversation_id: ConversationId) -> Result<Vec<Message>, Error> {
         let s = self.lock()?;
-        let mut query = s.conn.prepare(
-            "SELECT m.payload, m.seen,
-                (SELECT st.state FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id),
-                (SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id),
-                EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id)
-             FROM messages m WHERE m.conversation_id=? ORDER BY m.local_order",
-        )?;
+        let mut query = s.conn.prepare(MESSAGE_FULL_SELECT)?;
         let rows = query
-            .query_map(params![conversation_id.to_string()], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, bool>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, bool>(4)?,
-                ))
-            })?
+            .query_map(params![conversation_id.to_string()], message_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(payload, seen, status, outbox, is_command)| {
-                let send_state = if !is_command {
-                    None
-                } else if let Some(status) = status {
-                    Some(decode_state(&status)?)
-                } else {
-                    Some(match outbox.as_deref() {
-                        Some("unsealed" | "queued") => SendState::QueuedLocal,
-                        _ => SendState::AcceptedServer,
+            .map(|row| message_from_row(&s.conn, row))
+            .collect()
+    }
+
+    /// The newest deterministic chronological message in a conversation, if it has one.
+    pub fn latest_message(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<Message>, Error> {
+        let s = self.lock()?;
+        let mut query = s.conn.prepare(LATEST_MESSAGE_SELECT)?;
+        query
+            .query_row(params![conversation_id.to_string()], message_row)
+            .optional()?
+            .map(|row| message_from_row(&s.conn, row))
+            .transpose()
+    }
+
+    /// Returns up to `limit` newest messages, chronologically, before an optional durable anchor.
+    pub fn messages_page(
+        &self,
+        conversation_id: ConversationId,
+        before: Option<MessageId>,
+        limit: usize,
+    ) -> Result<MessagePage, Error> {
+        let s = self.lock()?;
+        if limit == 0 {
+            return Err(Error::InvalidRequest("history page size"));
+        }
+        let before_order = before
+            .map(|id| history_anchor_order(&s.conn, conversation_id, id))
+            .transpose()?;
+        let limit = limit.min(MAX_HISTORY_PAGE);
+        let mut query = s.conn.prepare(MESSAGE_PAGE_SELECT)?;
+        let rows = query
+            .query_map(
+                params![
+                    conversation_id.to_string(),
+                    before_order.as_ref().map(|anchor| anchor.sort_at_ms),
+                    before_order.as_ref().map(|anchor| anchor.local_order),
+                    to_i64((limit + 1) as u64)?
+                ],
+                message_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        let messages = rows
+            .into_iter()
+            .take(limit)
+            .map(|row| message_from_row(&s.conn, row))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .rev()
+            .collect();
+        Ok(MessagePage { messages, has_more })
+    }
+
+    /// Newest-first visible media with a chronological composite cursor; never uses SQL offsets.
+    pub fn media_page(
+        &self,
+        conversation_id: ConversationId,
+        cursor: Option<&MediaCursor>,
+        limit: usize,
+    ) -> Result<MediaPage, Error> {
+        if !(1..=MAX_HISTORY_PAGE).contains(&limit) {
+            return Err(Error::InvalidRequest("media page size"));
+        }
+        let store = self.lock()?;
+        let mut query = store.conn.prepare(
+            "SELECT m.payload,m.sort_at_ms,m.local_order,m.id,ma.position,ma.attachment_id FROM messages m JOIN message_attachments ma ON ma.message_id=m.id WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms=?2 AND (m.local_order < ?3 OR (m.local_order=?3 AND (m.id < ?4 OR (m.id=?4 AND ma.position < ?5)))))) ORDER BY m.sort_at_ms DESC,m.local_order DESC,m.id DESC,ma.position DESC LIMIT ?6",
+        )?;
+        let rows = query
+            .query_map(
+                params![
+                    conversation_id.to_string(),
+                    cursor.map(|value| value.sort_at_ms),
+                    cursor.map(|value| value.local_order),
+                    cursor.map(|value| value.message_id.to_string()),
+                    cursor.map(|value| i64::from(value.attachment_position)),
+                    i64::try_from(limit + 1)
+                        .map_err(|_| Error::InvalidRequest("media page size"))?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        let items = rows
+            .into_iter()
+            .take(limit)
+            .map(
+                |(payload, sort_at_ms, local_order, message_id, position, attachment_id)| {
+                    let attachment_id = parse(&attachment_id)?;
+                    let media_meta =
+                        media_metadata_for(&store.conn, parse(&message_id)?, attachment_id)?;
+                    Ok(MediaPageItem {
+                        message: decode(payload.as_bytes())?,
+                        attachment: attachment_row(&store.conn, attachment_id)?
+                            .ok_or(Error::Database)?
+                            .info(attachment_id),
+                        media_meta,
+                        cursor: MediaCursor {
+                            sort_at_ms,
+                            local_order,
+                            message_id: parse(&message_id)?,
+                            attachment_position: u32::try_from(position)
+                                .map_err(|_| Error::Database)?,
+                        },
                     })
-                };
-                Ok(Message {
-                    payload: localize(&s.conn, decode(payload.as_bytes())?)?.0,
-                    seen,
-                    send_state,
-                })
-            })
+                },
+            )
+            .collect::<Result<Vec<_>, Error>>()?;
+        let next_cursor = has_more
+            .then(|| items.last().map(|item| item.cursor.clone()))
+            .flatten();
+        Ok(MediaPage { items, next_cursor })
+    }
+
+    /// Sanitized v3 metadata for one visible message attachment, if the message supplied it.
+    pub fn message_attachment_media_metadata(
+        &self,
+        message_id: MessageId,
+        attachment_id: AttachmentId,
+    ) -> Result<Option<MediaMetadata>, Error> {
+        let store = self.lock()?;
+        media_metadata_for(&store.conn, message_id, attachment_id)
+    }
+
+    /// Returns the scoped anchor and every newer message in chronological order.
+    pub fn messages_since(
+        &self,
+        conversation_id: ConversationId,
+        from: MessageId,
+    ) -> Result<Vec<Message>, Error> {
+        let s = self.lock()?;
+        let from_order = history_anchor_order(&s.conn, conversation_id, from)?;
+        let mut query = s.conn.prepare(MESSAGE_SINCE_SELECT)?;
+        let rows = query
+            .query_map(
+                params![
+                    conversation_id.to_string(),
+                    from_order.sort_at_ms,
+                    from_order.local_order
+                ],
+                message_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| message_from_row(&s.conn, row))
             .collect()
     }
 
@@ -2282,8 +2951,8 @@ impl Client {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let id = attachment_id.to_string();
         let referenced: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=? UNION SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?) > 0)",
-            params![id, id, id], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=? UNION SELECT 1 FROM message_media_meta WHERE thumbnail_attachment_id=? UNION SELECT 1 FROM mms_acquisition_parts WHERE attachment_id=? OR thumbnail_attachment_id=? UNION SELECT 1 FROM compose_drafts WHERE instr(attachment_ids, ?) > 0)",
+            params![id, id, id, id, id], |row| row.get(0),
         )?;
         if referenced || contact_media::blocks_discard(&tx, attachment_id)? {
             return Ok(false);
@@ -2304,7 +2973,7 @@ impl Client {
     /// (see `contact_photo_transfer_state_json`).
     pub fn pending_uploads(&self) -> Result<Vec<CipherObject>, Error> {
         let sql = format!(
-            "SELECT attachment_id FROM attachments WHERE attachment_id IN (SELECT m.attachment_id FROM attachments a JOIN message_attachments m ON m.attachment_id=a.attachment_id WHERE a.state='pending_upload' UNION {}) ORDER BY rowid",
+            "SELECT attachment_id FROM attachments WHERE attachment_id IN (SELECT m.attachment_id FROM attachments a JOIN message_attachments m ON m.attachment_id=a.attachment_id WHERE a.state='pending_upload' UNION SELECT thumbnail_attachment_id FROM message_media_meta JOIN attachments a ON a.attachment_id=thumbnail_attachment_id WHERE a.state='pending_upload' UNION {}) ORDER BY rowid",
             contact_media::UPLOAD_IDS_SQL
         );
         self.cipher_objects(&sql)
@@ -2356,10 +3025,51 @@ impl Client {
     pub fn pending_downloads(&self) -> Result<Vec<CipherObject>, Error> {
         self.cipher_objects(
             &format!(
-                "SELECT attachment_id FROM attachments WHERE state='pending_download' AND attachment_id NOT IN ({}) ORDER BY rowid",
-                contact_media::REJECTED_DOWNLOADS_SQL
+                "SELECT attachment_id FROM attachments WHERE state='pending_download' AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))) ORDER BY rowid",
+                contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ),
         )
+    }
+
+    /// Reports whether a remote original has durable download demand.
+    pub fn attachment_download_requested(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<bool, Error> {
+        let guard = self.lock()?;
+        if attachment_row(&guard.conn, attachment_id)?.is_none() {
+            return Err(Error::NotFound);
+        }
+        guard
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM attachment_demand WHERE attachment_id=?)",
+                params![attachment_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(Error::from)
+    }
+
+    /// Durably opts a remote original into the core-owned download queue.
+    pub fn request_attachment_download(&self, attachment_id: AttachmentId) -> Result<(), Error> {
+        let guard = self.lock()?;
+        if attachment_row(&guard.conn, attachment_id)?.is_none() {
+            return Err(Error::NotFound);
+        }
+        guard.conn.execute(
+            "INSERT INTO attachment_demand(attachment_id,requested_at) VALUES(?,CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(attachment_id) DO NOTHING",
+            params![attachment_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Evicts a verified remote download; local uploads are never eligible.
+    ///
+    /// The durable state transition happens before deleting ciphertext. If file removal fails, the
+    /// object remains pending download and the orphaned ciphertext may be cleaned by a later
+    /// filesystem retry; this method returns `Storage` and never claims successful reclamation.
+    pub fn evict_attachment_ciphertext(&self, attachment_id: AttachmentId) -> Result<bool, Error> {
+        media_cache::evict_attachment_ciphertext(self, attachment_id)
     }
 
     /// Native-only path to verified local ciphertext (for upload). Never hand it to a web view.
@@ -2456,7 +3166,8 @@ impl Client {
                 AttachmentState::PendingDownload.code()
             ],
         )?;
-        Ok(())
+        let mut store = self.lock()?;
+        media_cache::record_installed_attachment(&mut store, attachment_id)
     }
 
     /// Decrypts a locally verified attachment to a native-only temporary plaintext file for
@@ -2715,24 +3426,23 @@ impl Client {
         let mut overlap = 0;
         let mut valid = current.received + page.len() as i64 <= current.expected
             && current.received_bytes + page_bytes <= MAX_SNAPSHOT_BYTES as i64;
-        for (cursor, wire) in &page {
-            let cursor = i64::try_from(cursor.0).unwrap_or(i64::MAX);
-            if !valid || cursor <= last || cursor > current.high_water {
-                valid = false;
-                break;
-            }
-            last = cursor;
-            let journaled: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT wire FROM journal WHERE cursor=?",
-                    params![cursor],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match journaled {
-                Some(existing) if existing != *wire => valid = false, // hard committed conflict
-                Some(_) => overlap += 1,
-                None => {}
+        {
+            let mut journal_wire = tx.prepare("SELECT wire FROM journal WHERE cursor=?")?;
+            for (cursor, wire) in &page {
+                let cursor = i64::try_from(cursor.0).unwrap_or(i64::MAX);
+                if !valid || cursor <= last || cursor > current.high_water {
+                    valid = false;
+                    break;
+                }
+                last = cursor;
+                let journaled: Option<Vec<u8>> = journal_wire
+                    .query_row(params![cursor], |row| row.get(0))
+                    .optional()?;
+                match journaled {
+                    Some(existing) if existing != *wire => valid = false, // hard committed conflict
+                    Some(_) => overlap += 1,
+                    None => {}
+                }
             }
         }
         if !valid {
@@ -2743,11 +3453,12 @@ impl Client {
             tx.commit()?;
             return Err(Error::SnapshotMismatch);
         }
-        for (cursor, wire) in &page {
-            tx.execute(
-                "INSERT INTO snapshot_records(generation,cursor,wire) VALUES(?,?,?)",
-                params![current.number, to_i64(cursor.0)?, wire],
-            )?;
+        {
+            let mut insert =
+                tx.prepare("INSERT INTO snapshot_records(generation,cursor,wire) VALUES(?,?,?)")?;
+            for (cursor, wire) in &page {
+                insert.execute(params![current.number, to_i64(cursor.0)?, wire])?;
+            }
         }
         current.received += page.len() as i64;
         current.received_bytes += page_bytes;
@@ -2829,7 +3540,7 @@ impl Client {
             .collect()
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Store>, Error> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Store>, Error> {
         self.0.lock().map_err(|_| Error::Database)
     }
 
@@ -2911,25 +3622,152 @@ impl Client {
     }
 }
 
+pub(crate) fn media_metadata_for(
+    conn: &Connection,
+    message_id: MessageId,
+    attachment_id: AttachmentId,
+) -> Result<Option<MediaMetadata>, Error> {
+    let row: Option<MediaMetaColumns> = conn.query_row(
+        "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
+        params![message_id.to_string(), attachment_id.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional()?;
+    let Some((width, height, duration_ms, thumbnail)) = row else {
+        return Ok(None);
+    };
+    let thumbnail = thumbnail
+        .map(|id| {
+            let id = parse(&id)?;
+            attachment_row(conn, id)?
+                .ok_or(Error::Database)
+                .map(|row| row.info(id))
+        })
+        .transpose()?;
+    Ok(Some(MediaMetadata {
+        width: width
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| Error::Database)?,
+        height: height
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| Error::Database)?,
+        duration_ms: duration_ms
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| Error::Database)?,
+        thumbnail,
+    }))
+}
+
 /// Raises the receive cursor to at least `floor`, then over any contiguous journaled cursors.
 fn advance_frontier(conn: &Connection, floor: u64) -> Result<u64, Error> {
     let start = receive_cursor(conn)?;
     let mut frontier = start.max(floor);
-    while conn
-        .query_row(
-            "SELECT 1 FROM journal WHERE cursor=?",
-            params![to_i64(frontier + 1)?],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some()
-    {
-        frontier += 1;
+    let mut expected = to_i64(frontier.checked_add(1).ok_or(Error::Database)?)?;
+    let mut query = conn.prepare("SELECT cursor FROM journal WHERE cursor>? ORDER BY cursor")?;
+    let mut cursors = query.query(params![to_i64(frontier)?])?;
+    while let Some(row) = cursors.next()? {
+        let cursor: i64 = row.get(0)?;
+        if cursor != expected {
+            break;
+        }
+        frontier = u64::try_from(cursor).map_err(|_| Error::Database)?;
+        expected = to_i64(frontier.checked_add(1).ok_or(Error::Database)?)?;
     }
     if frontier != start {
         set_meta(conn, "receive_cursor", &frontier.to_string())?;
     }
     Ok(frontier)
+}
+
+macro_rules! message_select {
+    ($suffix:literal) => {
+        concat!(
+            "SELECT m.payload, m.seen, selected_status.state, selected_status.status_at_ms, ",
+            "(SELECT o.state FROM commands c JOIN outbox o ON o.command_id=c.command_id WHERE c.message_id=m.id), ",
+            "EXISTS(SELECT 1 FROM commands c WHERE c.message_id=m.id) ",
+            "FROM messages m LEFT JOIN send_status selected_status ON selected_status.rowid=(SELECT st.rowid FROM commands c JOIN send_status st ON st.command_id=c.command_id AND st.producer_device_id=c.gateway_device_id WHERE c.message_id=m.id ORDER BY c.rowid LIMIT 1) ",
+            $suffix,
+        )
+    };
+}
+// Every history read uses one total order: the non-null `sort_at_ms` key (actual provider time
+// when known, otherwise local insertion time), then `local_order` as a deterministic tiebreak.
+const MESSAGE_FULL_SELECT: &str =
+    message_select!("WHERE m.conversation_id=? ORDER BY m.sort_at_ms,m.local_order");
+const LATEST_MESSAGE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=? ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
+);
+const MESSAGE_PAGE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
+);
+const MESSAGE_SINCE_SELECT: &str = message_select!(
+    "WHERE m.conversation_id=?1 AND (m.sort_at_ms > ?2 OR (m.sort_at_ms = ?2 AND m.local_order >= ?3)) ORDER BY m.sort_at_ms,m.local_order"
+);
+
+type StoredMessage = (
+    String,
+    bool,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    bool,
+);
+
+fn message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn message_from_row(conn: &Connection, row: StoredMessage) -> Result<Message, Error> {
+    let (payload, seen, status, status_at_ms, outbox, is_command) = row;
+    let send_state = if !is_command {
+        None
+    } else if let Some(status) = status {
+        Some(decode_state(&status)?)
+    } else {
+        Some(match outbox.as_deref() {
+            Some("unsealed" | "queued") => SendState::QueuedLocal,
+            _ => SendState::AcceptedServer,
+        })
+    };
+    Ok(Message {
+        payload: localize(conn, decode(payload.as_bytes())?)?.0,
+        seen,
+        send_state,
+        status_at_ms,
+    })
+}
+
+struct HistoryAnchor {
+    sort_at_ms: i64,
+    local_order: i64,
+}
+
+fn history_anchor_order(
+    conn: &Connection,
+    conversation_id: ConversationId,
+    message_id: MessageId,
+) -> Result<HistoryAnchor, Error> {
+    conn.query_row(
+        "SELECT sort_at_ms,local_order FROM messages WHERE id=? AND conversation_id=?",
+        params![message_id.to_string(), conversation_id.to_string()],
+        |row| {
+            Ok(HistoryAnchor {
+                sort_at_ms: row.get(0)?,
+                local_order: row.get(1)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or(Error::InvalidRequest("history anchor"))
 }
 
 fn restore_guarded(conn: &Connection) -> Result<bool, Error> {
@@ -3009,16 +3847,18 @@ fn drain_snapshot(
         MAX_SNAPSHOT_PAGE_BYTES,
         |r| Ok((r.get(1)?, r.get(2)?)),
     )?;
+    let mut journal_exists = conn.prepare("SELECT 1 FROM journal WHERE cursor=?")?;
+    let mut insert_journal = conn.prepare(
+        "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason,historical) VALUES(?,?,?,?,?,?,1)",
+    )?;
+    let mut delete_record =
+        conn.prepare("DELETE FROM snapshot_records WHERE generation=? AND cursor=?")?;
     let mut drained = 0i64;
     // Compaction generations record every retained compactable cursor, journaled or not.
     let projected = snapshot_projection::is_draining(conn, generation.number)?;
     for (cursor, wire) in rows {
-        let journaled = conn
-            .query_row(
-                "SELECT 1 FROM journal WHERE cursor=?",
-                params![cursor],
-                |_| Ok(()),
-            )
+        let journaled = journal_exists
+            .query_row(params![cursor], |_| Ok(()))
             .optional()?
             .is_some();
         // A journaled cursor was verified equal at append, and live ingest never inserts a
@@ -3030,25 +3870,19 @@ fn drain_snapshot(
                 IngestResult::Duplicate => ("duplicate", None),
                 IngestResult::Quarantined(reason) => ("quarantined", Some(reason.code())),
             };
-            conn.execute(
-                "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason,historical) VALUES(?,?,?,?,?,?,1)",
-                params![
-                    cursor,
-                    envelope.as_ref().map(|e| e.envelope_id.to_string()),
-                    envelope.as_ref().map(|e| e.key_epoch),
-                    wire,
-                    status,
-                    reason
-                ],
-            )?;
+            insert_journal.execute(params![
+                cursor,
+                envelope.as_ref().map(|e| e.envelope_id.to_string()),
+                envelope.as_ref().map(|e| e.key_epoch),
+                wire,
+                status,
+                reason
+            ])?;
         }
         if projected {
             snapshot_projection::retain(conn, generation.number, cursor, &wire)?;
         }
-        conn.execute(
-            "DELETE FROM snapshot_records WHERE generation=? AND cursor=?",
-            params![generation.number, cursor],
-        )?;
+        delete_record.execute(params![generation.number, cursor])?;
         drained += 1;
         report.drained += 1;
     }
@@ -3144,8 +3978,8 @@ CREATE TABLE outbox(seq INTEGER PRIMARY KEY, envelope_id TEXT NOT NULL UNIQUE, c
    purpose TEXT NOT NULL CHECK(purpose IN ('command','event')), route TEXT, plain BLOB, wire BLOB,
    state TEXT NOT NULL CHECK(state IN ('unsealed','queued','acknowledged')));
 CREATE TABLE messages(local_order INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
-  conversation_id TEXT NOT NULL, source_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL,
-  provider_message_id TEXT, payload TEXT NOT NULL, seen INTEGER NOT NULL,
+   conversation_id TEXT NOT NULL, source_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL,
+   provider_message_id TEXT, payload TEXT NOT NULL, seen INTEGER NOT NULL,
   UNIQUE(conversation_id, source_device_id, source_sequence));
 CREATE UNIQUE INDEX messages_provider ON messages(source_device_id, provider_message_id) WHERE provider_message_id IS NOT NULL;
 CREATE INDEX messages_conversation ON messages(conversation_id, local_order);
@@ -3278,9 +4112,155 @@ const MIGRATION_19: &str = "
 CREATE TABLE IF NOT EXISTS outbox_attachments(envelope_id TEXT NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(envelope_id,attachment_id));
 CREATE INDEX IF NOT EXISTS outbox_attachments_attachment ON outbox_attachments(attachment_id);
 ";
+/// Version 19 -> 20: local-only draft forwarding and compose intent. Existing rows deliberately
+/// remain `draft_only=0`; no history or identifier is rewritten.
+const MIGRATION_20: &str = "
+ALTER TABLE compose_drafts ADD COLUMN draft_only INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE compose_draft_redirects(
+  draft_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  target_draft_id TEXT NOT NULL,
+  target_conversation_id TEXT NOT NULL
+);
+";
+const MIGRATION_21: &str = "
+ALTER TABLE compose_draft_redirects ADD COLUMN forward_conversation INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX compose_draft_redirects_conversation ON compose_draft_redirects(conversation_id, forward_conversation);
+";
+/// Version 21 -> 22: durable SMS provider acquisition and resumable provider scans.
+const MIGRATION_22: &str = "
+CREATE TABLE sms_acquisitions(acquisition_id TEXT PRIMARY KEY, source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, provider_message_id TEXT NOT NULL, source_row_fingerprint TEXT NOT NULL, direction TEXT NOT NULL, conversation_id TEXT NOT NULL, input TEXT NOT NULL, state TEXT NOT NULL, reason TEXT, message_id TEXT NOT NULL, source_sequence INTEGER NOT NULL, local_order INTEGER NOT NULL UNIQUE, UNIQUE(source_generation,subscription_id,source_row_fingerprint,direction));
+CREATE TABLE sms_provider_aliases(source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, alias TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(source_generation,subscription_id,alias));
+CREATE TABLE sms_scan_checkpoints(source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, imported INTEGER NOT NULL, provider_message_id TEXT NOT NULL, history_upper_bound TEXT, history_complete INTEGER NOT NULL DEFAULT 0, pending_recheck_cursor TEXT, paused_reason TEXT, provider_error INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source_generation,subscription_id,imported));
+CREATE INDEX sms_acquisitions_pending ON sms_acquisitions(state) WHERE state!='complete';
+";
+const MIGRATION_23: &str = "
+ALTER TABLE messages ADD COLUMN actual_sent_at_ms INTEGER;
+UPDATE messages SET actual_sent_at_ms=json_extract(payload, '$.sent_at_ms');
+CREATE INDEX messages_chronological ON messages(conversation_id, actual_sent_at_ms, local_order);
+";
+/// Version 23 -> 24: durable bounded full-provider sweeps for reused/decreased SMS IDs.
+const MIGRATION_24: &str = "
+CREATE TABLE sms_reconciliation_scans(source_generation TEXT NOT NULL, subscription_id TEXT NOT NULL, scan_cursor TEXT, upper_bound TEXT NOT NULL, PRIMARY KEY(source_generation,subscription_id));
+";
+/// Version 24 -> 25: one non-null chronological sort key (actual provider time when known,
+/// otherwise local insertion time; legacy undated rows take the migration time and keep their
+/// arrival order), gateway attempt times, broadcast aliases, and indexed SMS reconciliation.
+const MIGRATION_25: &str = "
+UPDATE messages SET actual_sent_at_ms=NULL WHERE actual_sent_at_ms<=0;
+ALTER TABLE messages ADD COLUMN sort_at_ms INTEGER NOT NULL DEFAULT 0;
+UPDATE messages SET sort_at_ms=COALESCE(actual_sent_at_ms, CAST(strftime('%s','now') AS INTEGER)*1000);
+DROP INDEX IF EXISTS messages_chronological;
+CREATE INDEX messages_sort ON messages(conversation_id, sort_at_ms, local_order);
+ALTER TABLE attempts ADD COLUMN attempted_at_ms INTEGER;
+CREATE INDEX attempts_time ON attempts(attempted_at_ms);
+ALTER TABLE sms_acquisitions ADD COLUMN evidence_time_ms INTEGER;
+CREATE INDEX sms_acquisitions_message ON sms_acquisitions(message_id);
+CREATE INDEX sms_acquisitions_provider ON sms_acquisitions(source_generation, provider_message_id);
+CREATE INDEX sms_acquisitions_sequence ON sms_acquisitions(conversation_id, source_sequence);
+CREATE INDEX sms_acquisitions_incoming_evidence ON sms_acquisitions(evidence_time_ms) WHERE direction='incoming' AND state='complete';
+CREATE TABLE sms_broadcast_aliases(broadcast_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, smsc_at_ms INTEGER);
+CREATE INDEX sms_broadcast_aliases_message ON sms_broadcast_aliases(message_id);
+CREATE INDEX sms_broadcast_aliases_time ON sms_broadcast_aliases(smsc_at_ms);
+ALTER TABLE sms_reconciliation_scans ADD COLUMN completed_at_ms INTEGER;
+";
+/// Version 25 -> 26: optional gateway-recorded timestamp for each durable send status.
+const MIGRATION_26: &str = "
+ALTER TABLE send_status ADD COLUMN status_at_ms INTEGER;
+";
+/// Version 26 -> 27: v3 MMS metadata and separate thumbnail linkage.
+const MIGRATION_27: &str = "
+CREATE TABLE message_media_meta(message_id TEXT NOT NULL, attachment_id TEXT NOT NULL,
+  width INTEGER, height INTEGER, duration_ms INTEGER, thumbnail_attachment_id TEXT,
+  PRIMARY KEY(message_id, attachment_id));
+CREATE INDEX message_media_meta_thumbnail ON message_media_meta(thumbnail_attachment_id)
+  WHERE thumbnail_attachment_id IS NOT NULL;
+CREATE TABLE attachment_demand(attachment_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL);
+ALTER TABLE mms_acquisition_parts ADD COLUMN width INTEGER;
+ALTER TABLE mms_acquisition_parts ADD COLUMN height INTEGER;
+ALTER TABLE mms_acquisition_parts ADD COLUMN duration_ms INTEGER;
+ALTER TABLE mms_acquisition_parts ADD COLUMN thumbnail_attachment_id TEXT;
+";
+/// Version 27 -> 28: source-instance identity and terminal provider-ID quarantine.
+const MIGRATION_28: &str = "
+ALTER TABLE mms_acquisitions RENAME TO mms_acquisitions_27;
+CREATE TABLE mms_acquisitions(
+  acquisition_id TEXT PRIMARY KEY,
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  source_instance_id TEXT NOT NULL DEFAULT '',
+  direction TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  input TEXT NOT NULL,
+  state TEXT NOT NULL,
+  reason TEXT,
+  message_id TEXT NOT NULL,
+  source_sequence INTEGER NOT NULL,
+  local_order INTEGER NOT NULL UNIQUE,
+  UNIQUE(source_generation,subscription_id,provider_message_id,source_instance_id,direction)
+);
+INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_instance_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order)
+SELECT acquisition_id,source_generation,subscription_id,provider_message_id,'',direction,conversation_id,input,state,reason,message_id,source_sequence,local_order FROM mms_acquisitions_27;
+DROP TABLE mms_acquisitions_27;
+CREATE INDEX mms_acquisitions_pending ON mms_acquisitions(state) WHERE state!='complete';
+CREATE INDEX mms_acquisitions_reserved_sequence ON mms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
+CREATE TABLE IF NOT EXISTS mms_provider_identity_quarantines(
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  recorded_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(source_generation,subscription_id,provider_message_id,direction)
+);
+";
+/// Version 28 -> 29: durable LRU inventory for retained downloaded ciphertext.
+const MIGRATION_29: &str = "
+CREATE TABLE media_cache_entries(attachment_id TEXT PRIMARY KEY,last_access INTEGER NOT NULL);
+CREATE INDEX media_cache_entries_lru ON media_cache_entries(last_access, attachment_id);
+";
+/// Version 29 -> 30: durable MMS preview production state.
+const MIGRATION_30: &str = "
+ALTER TABLE mms_acquisition_parts ADD COLUMN preview_state TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE mms_acquisition_parts ADD COLUMN metadata_recorded INTEGER NOT NULL DEFAULT 0;
+";
+/// Version 30 -> 31: remote capacity is independent from local/recovery pressure, and legacy
+/// provider conflicts become visible bounded quarantine evidence.
+const MIGRATION_31: &str = "
+CREATE TABLE mms_backfill_remote_capacity(
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  storage_full INTEGER NOT NULL,
+  PRIMARY KEY(source_generation,subscription_id)
+);
+INSERT INTO mms_backfill_remote_capacity(source_generation,subscription_id,storage_full)
+SELECT source_generation,subscription_id,1
+FROM mms_backfill_scopes
+WHERE pause_reason='remote_storage'
+ON CONFLICT(source_generation,subscription_id)
+DO UPDATE SET storage_full=1;
+CREATE TABLE IF NOT EXISTS mms_provider_identity_conflicts(
+  source_generation TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  provider_message_id TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  PRIMARY KEY(source_generation,subscription_id,provider_message_id,direction)
+);
+INSERT INTO mms_provider_identity_quarantines(source_generation,subscription_id,provider_message_id,direction,evidence_json,recorded_at_ms)
+SELECT source_generation,subscription_id,provider_message_id,direction,
+       json_object('reason',reason,'legacy',1),
+       CAST(strftime('%s','now') AS INTEGER)*1000
+FROM mms_provider_identity_conflicts
+WHERE 1
+ON CONFLICT(source_generation,subscription_id,provider_message_id,direction)
+DO UPDATE SET evidence_json=excluded.evidence_json,recorded_at_ms=excluded.recorded_at_ms;
+DROP TABLE mms_provider_identity_conflicts;
+";
 /// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
 /// identity/context. Only retained, authenticated event rows are reconsidered.
-const DECODER_REVISION: &str = "3";
+const DECODER_REVISION: &str = "4";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -3339,6 +4319,19 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_17)?;
             tx.execute_batch(MIGRATION_18)?;
             tx.execute_batch(MIGRATION_19)?;
+            tx.execute_batch(MIGRATION_20)?;
+            tx.execute_batch(MIGRATION_21)?;
+            tx.execute_batch(MIGRATION_22)?;
+            tx.execute_batch(MIGRATION_23)?;
+            tx.execute_batch(MIGRATION_24)?;
+            tx.execute_batch(MIGRATION_25)?;
+            tx.execute_batch(MIGRATION_26)?;
+            tx.execute_batch(MIGRATION_27)?;
+            tx.execute_batch(MIGRATION_28)?;
+            tx.execute_batch(MIGRATION_29)?;
+            tx.execute_batch(MIGRATION_30)?;
+            mms_backfill::initialize(&tx)?;
+            tx.execute_batch(MIGRATION_31)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -3347,7 +4340,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=18)) => {
+        Some(version @ (4..=30)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -3392,12 +4385,51 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 18 {
                 tx.execute_batch(MIGRATION_19)?;
             }
+            if version <= 19 {
+                tx.execute_batch(MIGRATION_20)?;
+            }
+            if version <= 20 {
+                tx.execute_batch(MIGRATION_21)?;
+            }
+            if version <= 21 {
+                tx.execute_batch(MIGRATION_22)?;
+            }
+            if version <= 22 {
+                tx.execute_batch(MIGRATION_23)?;
+            }
+            if version <= 23 {
+                tx.execute_batch(MIGRATION_24)?;
+            }
+            if version <= 24 {
+                tx.execute_batch(MIGRATION_25)?;
+            }
+            if version <= 25 {
+                tx.execute_batch(MIGRATION_26)?;
+            }
+            if version <= 26 {
+                tx.execute_batch(MIGRATION_27)?;
+            }
+            if version <= 27 {
+                tx.execute_batch(MIGRATION_28)?;
+            }
+            if version <= 28 {
+                tx.execute_batch(MIGRATION_29)?;
+            }
+            if version <= 29 {
+                tx.execute_batch(MIGRATION_30)?;
+            }
+            if version <= 30 {
+                mms_backfill::initialize(&tx)?;
+                tx.execute_batch(MIGRATION_31)?;
+            }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
         Some(SCHEMA_VERSION) => {}
         Some(_) => return Err(Error::UnsupportedSchema),
     }
+    mms_backfill::initialize(conn)?;
+    media_cache::initialize(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -3488,7 +4520,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                 continue;
             };
             match (status.as_str(), payload) {
-                ("quarantined", PrivatePayload::MmsMessage { message, media })
+                ("quarantined", PrivatePayload::MmsMessage { message, media, .. })
                     if valid_message(&message, envelope.producer_device_id)
                         && media_matches(&message, &media) =>
                 {
@@ -3527,7 +4559,7 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         revision,
                     )?;
                 }
-                ("applied", PrivatePayload::MmsMessage { message, media })
+                ("applied", PrivatePayload::MmsMessage { message, media, .. })
                     if valid_message(&message, envelope.producer_device_id)
                         && media_matches(&message, &media) =>
                 {
@@ -3616,13 +4648,14 @@ fn classify(
         )?;
         return Ok(IngestResult::Duplicate);
     }
-    let mut query = conn.prepare("SELECT wire FROM journal WHERE envelope_id=?")?;
-    let earlier = query
-        .query_map(params![id], |r| r.get::<_, Vec<u8>>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if earlier.iter().any(|earlier| earlier == wire) {
+    let (same, any): (bool, bool) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM journal WHERE envelope_id=?1 AND wire=?2), EXISTS(SELECT 1 FROM journal WHERE envelope_id=?1)",
+        params![id, wire],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if same {
         Ok(IngestResult::Duplicate)
-    } else if earlier.is_empty() {
+    } else if !any {
         Ok(IngestResult::Journaled)
     } else {
         Ok(IngestResult::Quarantined(Q::EnvelopeConflict))
@@ -3678,26 +4711,10 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
                         .and_then(|kind| kind.as_str())
                         .map(str::to_owned)
                 });
-            let known = [
-                "message",
-                "send_command",
-                "mms_message",
-                "send_mms_command",
-                "send_status",
-                "read_state",
-                "notification_posted",
-                "notification_removed",
-                "notification_dismiss",
-                "app_filter",
-                "mms_own_address",
-                "contact_book_state",
-                "contact_upserted",
-                "contact_removed",
-                "contact_edit_request",
-                "contact_edit_result",
-            ];
             if envelope.purpose == EnvelopePurpose::Event
-                && kind.as_deref().is_some_and(|kind| !known.contains(&kind))
+                && kind
+                    .as_deref()
+                    .is_some_and(|kind| !is_known_private_payload_kind(kind))
             {
                 return Ok(Opened::UnknownEvent);
             }
@@ -3705,6 +4722,30 @@ fn open_payload(ctx: &Ctx, envelope: &Envelope) -> Result<Opened, QuarantineReas
         }
     };
     Ok(Opened::Payload(payload))
+}
+
+fn is_known_private_payload_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "message"
+            | "send_command"
+            | "mms_message"
+            | "send_mms_command"
+            | "send_status"
+            | "read_state"
+            | "notification_posted"
+            | "notification_removed"
+            | "notification_dismiss"
+            | "app_filter"
+            | "mms_own_address"
+            | "contact_book_state"
+            | "contact_upserted"
+            | "contact_removed"
+            | "contact_edit_request"
+            | "contact_edit_result"
+            | "contact_scan_request"
+            | "contact_scan_result"
+    )
 }
 
 /// Applies one decrypted record. `Ok(Some(reason))` means quarantine; the caller rolls back.
@@ -3728,23 +4769,35 @@ fn apply_record(
     // An authenticated checkpoint repeats current state only to fold a frontier: history.
     let historical = historical || envelope.compaction.as_ref().is_some_and(|c| c.checkpoint);
     // MMS variants share the SMS rules plus private media metadata.
-    let (payload, media) = match payload {
-        PrivatePayload::MmsMessage { message, media } => (PrivatePayload::Message(message), media),
+    let (payload, media, media_meta) = match payload {
+        PrivatePayload::MmsMessage {
+            message,
+            media,
+            media_meta,
+        } => (PrivatePayload::Message(message), media, media_meta),
         PrivatePayload::SendMmsCommand { message, media } => {
-            (PrivatePayload::SendCommand { message }, media)
+            (PrivatePayload::SendCommand { message }, media, Vec::new())
         }
-        other => (other, Vec::new()),
+        other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
         (EnvelopePurpose::Event, PrivatePayload::Message(message)) => {
-            if !valid_message(&message, producer) || !media_matches(&message, &media) {
+            if !valid_message(&message, producer)
+                || !media_matches(&message, &media)
+                || !media_meta_matches(&message, &media_meta)
+            {
                 return Ok(Some(Q::InvalidPayload));
             }
-            if !store_remote_media(conn, &media)? {
+            if !store_remote_media(conn, &media)?
+                || !store_remote_media(conn, &thumbnail_descriptors(&media_meta))?
+            {
                 return Ok(Some(Q::PayloadConflict));
             }
             let inserted = insert_message(conn, &message)?;
             if inserted == Inserted::Conflict {
+                return Ok(Some(Q::PayloadConflict));
+            }
+            if !store_message_media_meta(conn, message.record.message_id, &media_meta)? {
                 return Ok(Some(Q::PayloadConflict));
             }
             if inserted == Inserted::New
@@ -3783,6 +4836,15 @@ fn apply_record(
                 let retired = ctx
                     .active_epoch
                     .is_some_and(|active| envelope.key_epoch < active);
+                // Only a currently eligible, live gateway needs original media to execute.
+                if !historical && !retired {
+                    for descriptor in &media {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO attachment_demand(attachment_id,requested_at) VALUES(?,0)",
+                            params![descriptor.attachment_id.to_string()],
+                        )?;
+                    }
+                }
                 let inserted = conn.execute(
                     "INSERT INTO command_ledger(command_id,key_epoch,subscription_id,payload,retired,historical) VALUES(?,?,?,?,?,?) ON CONFLICT(command_id) DO NOTHING",
                     params![command_id.to_string(), envelope.key_epoch, route.subscription_id, encoded, retired, historical],
@@ -3798,7 +4860,14 @@ fn apply_record(
                 }
             }
         }
-        (EnvelopePurpose::Event, PrivatePayload::SendStatus { command_id, state }) => {
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::SendStatus {
+                command_id,
+                state,
+                at_ms,
+            },
+        ) => {
             // Statuses are ordered by producer sequence, stored as SQLite INTEGER.
             if !gateway_reportable(state) || i64::try_from(envelope.producer_sequence.0).is_err() {
                 return Ok(Some(Q::InvalidPayload));
@@ -3809,6 +4878,7 @@ fn apply_record(
                 producer,
                 envelope.producer_sequence.0,
                 state,
+                valid_status_timestamp(at_ms),
             )?;
         }
         (EnvelopePurpose::Event, PrivatePayload::ReadState { message_id }) => {
@@ -3862,7 +4932,9 @@ fn apply_record(
             | PrivatePayload::ContactUpserted { .. }
             | PrivatePayload::ContactRemoved { .. }
             | PrivatePayload::ContactEditRequest { .. }
-            | PrivatePayload::ContactEditResult { .. }),
+            | PrivatePayload::ContactEditResult { .. }
+            | PrivatePayload::ContactScanRequest { .. }
+            | PrivatePayload::ContactScanResult { .. }),
         ) => {
             let Some(payload) = contact_media::ingest(conn, payload)? else {
                 return Ok(Some(Q::InvalidPayload));
@@ -3923,8 +4995,15 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         .optional()?
         .is_some();
     let seen = read_elsewhere || message.imported || message.direction == Direction::Outgoing;
+    // Provider timestamps of zero or less mean "unknown"; unknown rows sort at local insertion.
+    let actual_sent_at_ms = message.sent_at_ms.filter(|time| *time > 0);
+    // Actual time, else the origin's ordering time (identical on every client), else local
+    // insertion time for legacy records that predate origin ordering.
+    let sort_at_ms = actual_sent_at_ms
+        .or(message.ordered_at_ms.filter(|time| *time > 0))
+        .unwrap_or_else(notifications::now_ms);
     let inserted = conn.execute(
-        "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,provider_message_id,payload,seen) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,provider_message_id,payload,actual_sent_at_ms,sort_at_ms,seen) VALUES(?,?,?,?,?,?,?,?,?)",
         params![
             id,
             message.record.conversation_id.to_string(),
@@ -3932,6 +5011,8 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
             to_i64(message.record.source_sequence.0)?,
             message.provider_message_id,
             encoded,
+            actual_sent_at_ms,
+            sort_at_ms,
             seen
         ],
     );
@@ -3944,15 +5025,17 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
         }
         Err(error) => return Err(error.into()),
     }
-    for (position, reference) in message.record.attachments.iter().enumerate() {
-        conn.execute(
+    if !message.record.attachments.is_empty() {
+        let mut insert_attachment = conn.prepare(
             "INSERT INTO message_attachments(message_id,position,attachment_id) VALUES(?,?,?)",
-            params![
+        )?;
+        for (position, reference) in message.record.attachments.iter().enumerate() {
+            insert_attachment.execute(params![
                 id,
                 to_i64(position as u64)?,
                 reference.attachment_id.to_string()
-            ],
-        )?;
+            ])?;
+        }
     }
     let address = match message.direction {
         Direction::Incoming => message.sender_address.as_ref(),
@@ -3964,10 +5047,18 @@ fn insert_message(conn: &Connection, message: &MessagePayload) -> Result<Inserte
     if message.mms_context.is_none()
         && let Some(address) = address
     {
-        conn.execute(
-            "INSERT OR IGNORE INTO addresses(address,conversation_id) VALUES(?,?)",
-            params![address, message.record.conversation_id.to_string()],
-        )?;
+        for address in [
+            address.to_owned(),
+            conversation_match::canonical_address(
+                address,
+                Some(&conversation_match::identity_region(conn)?),
+            ),
+        ] {
+            conn.execute(
+                "INSERT OR IGNORE INTO addresses(address,conversation_id) VALUES(?,?)",
+                params![address, message.record.conversation_id.to_string()],
+            )?;
+        }
     }
     Ok(Inserted::New)
 }
@@ -4025,6 +5116,11 @@ fn record_seen(conn: &Connection, message_id: MessageId) -> Result<(), Error> {
     Ok(())
 }
 
+/// Rejects absent, zero, and pre-epoch wire timestamps.
+fn valid_status_timestamp(value: Option<i64>) -> Option<i64> {
+    value.filter(|value| *value > 0)
+}
+
 /// Later statuses from the same producer win, ordered by its durable producer sequence.
 fn upsert_status(
     conn: &Connection,
@@ -4032,16 +5128,18 @@ fn upsert_status(
     producer: DeviceId,
     producer_sequence: u64,
     state: SendState,
+    status_at_ms: Option<i64>,
 ) -> Result<(), Error> {
     conn.execute(
-        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state) VALUES(?,?,?,?)
-         ON CONFLICT(command_id,producer_device_id) DO UPDATE SET producer_sequence=excluded.producer_sequence, state=excluded.state
+        "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state,status_at_ms) VALUES(?,?,?,?,?)
+         ON CONFLICT(command_id,producer_device_id) DO UPDATE SET producer_sequence=excluded.producer_sequence, state=excluded.state, status_at_ms=excluded.status_at_ms
          WHERE excluded.producer_sequence > send_status.producer_sequence",
         params![
             command_id.to_string(),
             producer.to_string(),
             to_i64(producer_sequence)?,
-            state_code(state)
+            state_code(state),
+            status_at_ms,
         ],
     )?;
     Ok(())
@@ -4053,15 +5151,27 @@ fn emit_status(
     command_id: CommandId,
     state: SendState,
 ) -> Result<(), Error> {
+    let status_at_ms = valid_status_timestamp(Some(notifications::now_ms()));
     let (_, sequence) = enqueue(
         conn,
         ctx,
         EnvelopePurpose::Event,
         None,
         None,
-        &PrivatePayload::SendStatus { command_id, state },
+        &PrivatePayload::SendStatus {
+            command_id,
+            state,
+            at_ms: status_at_ms,
+        },
     )?;
-    upsert_status(conn, command_id, ctx.device_id, sequence, state)
+    upsert_status(
+        conn,
+        command_id,
+        ctx.device_id,
+        sequence,
+        state,
+        status_at_ms,
+    )
 }
 
 /// Allocates the durable producer sequence and envelope ID, stores the private payload, and seals
@@ -4150,17 +5260,34 @@ fn enqueue(
 }
 
 fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
-    let message = match payload {
-        PrivatePayload::MmsMessage { message, .. }
-        | PrivatePayload::SendMmsCommand { message, .. } => message,
+    let (message, thumbnails) = match payload {
+        PrivatePayload::MmsMessage {
+            message,
+            media_meta,
+            ..
+        } => (message, media_meta),
+        PrivatePayload::SendMmsCommand { message, .. } => {
+            return message
+                .record
+                .attachments
+                .iter()
+                .map(|item| item.attachment_id)
+                .collect();
+        }
         _ => return Vec::new(),
     };
-    message
+    let mut ids: Vec<_> = message
         .record
         .attachments
         .iter()
         .map(|item| item.attachment_id)
-        .collect()
+        .collect();
+    ids.extend(thumbnails.iter().filter_map(|meta| {
+        meta.thumbnail
+            .as_ref()
+            .map(|thumbnail| thumbnail.attachment_id)
+    }));
+    ids
 }
 
 /// Allocates the next producer sequence and stores one unsealed outbox row.
@@ -4518,6 +5645,8 @@ fn is_contact_payload(payload: &PrivatePayload) -> bool {
             | PrivatePayload::ContactRemoved { .. }
             | PrivatePayload::ContactEditRequest { .. }
             | PrivatePayload::ContactEditResult { .. }
+            | PrivatePayload::ContactScanRequest { .. }
+            | PrivatePayload::ContactScanResult { .. }
     )
 }
 
@@ -4654,6 +5783,19 @@ fn compaction_group(
                 terminal,
             )
         }
+        PrivatePayload::ContactScanRequest { request } => (
+            b"contact-scan-request",
+            vec![text(request, "request_id")?],
+            true,
+        ),
+        PrivatePayload::ContactScanResult { result } => (
+            b"contact-scan-result",
+            vec![text(result, "request_id")?],
+            matches!(
+                result.get("state").and_then(serde_json::Value::as_str),
+                Some("completed" | "blocked" | "failed" | "expired")
+            ),
+        ),
         _ => return Ok(None),
     }))
 }
@@ -4698,6 +5840,14 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             .get("request_id")
             .and_then(serde_json::Value::as_str)
             .map(|id| format!("contact-edit:{id}")),
+        PrivatePayload::ContactScanRequest { request } => request
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("contact-scan:{id}")),
+        PrivatePayload::ContactScanResult { result } => result
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| format!("contact-scan:{id}")),
         _ => None,
     }
 }
@@ -4752,6 +5902,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         return Ok(0);
     };
     let mut count = 0;
+    let mut after = 0_i64;
     type Row = (
         i64,
         String,
@@ -4761,107 +5912,164 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         Vec<u8>,
         Option<String>,
     );
-    let rows: Vec<Row> = {
-        let mut query = conn.prepare(
-            "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) ORDER BY seq",
-        )?;
-        query
-            .query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows {
-        if count >= limit {
+    while count < limit {
+        let rows: Vec<Row> = {
+            let mut query = conn.prepare(
+                "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND seq>? ORDER BY seq LIMIT 256",
+            )?;
+            query
+                .query_map(params![after], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if rows.is_empty() {
             break;
         }
-        // MMS rows are held until every object has a remote ID, then media metadata is resolved
-        // from SQLCipher at seal time. Contact photo rows are held the same way, per row.
-        let mut photo_registrations = contact_media::Registrations::new();
-        let plain = match decode::<PrivatePayload>(&plain)? {
-            PrivatePayload::MmsMessage { message, .. } => match resolve_media(conn, &message)? {
-                Some(media) => serde_json::to_vec(&PrivatePayload::MmsMessage { message, media }),
-                None => continue,
-            },
-            PrivatePayload::SendMmsCommand { message, .. } => {
-                match resolve_media(conn, &message)? {
-                    Some(media) => {
-                        serde_json::to_vec(&PrivatePayload::SendMmsCommand { message, media })
-                    }
-                    None => continue,
-                }
+        for (sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows {
+            after = sequence;
+            if count >= limit {
+                break;
             }
-            payload @ (PrivatePayload::ContactUpserted { .. }
-            | PrivatePayload::ContactRemoved { .. }
-            | PrivatePayload::ContactEditRequest { .. }) => {
-                match contact_media::resolve_for_seal(conn, sequence, payload)? {
-                    Some((payload, refs)) => {
-                        photo_registrations = refs;
-                        serde_json::to_vec(&payload)
+            // MMS rows are held until every object has a remote ID, then media metadata is resolved
+            // from SQLCipher at seal time. Contact photo rows are held the same way, per row.
+            let mut photo_registrations = contact_media::Registrations::new();
+            let plain = match decode::<PrivatePayload>(&plain)? {
+                PrivatePayload::MmsMessage { message, .. } => {
+                    match resolve_media(conn, &message)? {
+                        Some((media, media_meta)) => {
+                            serde_json::to_vec(&PrivatePayload::MmsMessage {
+                                message,
+                                media,
+                                media_meta,
+                            })
+                        }
+                        None => continue,
                     }
-                    None => continue,
                 }
+                PrivatePayload::SendMmsCommand { message, .. } => {
+                    match resolve_media(conn, &message)? {
+                        Some((media, _)) => {
+                            serde_json::to_vec(&PrivatePayload::SendMmsCommand { message, media })
+                        }
+                        None => continue,
+                    }
+                }
+                payload @ (PrivatePayload::ContactUpserted { .. }
+                | PrivatePayload::ContactRemoved { .. }
+                | PrivatePayload::ContactEditRequest { .. }) => {
+                    match contact_media::resolve_for_seal(conn, sequence, payload)? {
+                        Some((payload, refs)) => {
+                            photo_registrations = refs;
+                            serde_json::to_vec(&payload)
+                        }
+                        None => continue,
+                    }
+                }
+                _ => Ok(plain),
             }
-            _ => Ok(plain),
+            .map_err(|_| Error::Database)?;
+            let purpose = match purpose.as_str() {
+                "command" => EnvelopePurpose::Command,
+                "event" => EnvelopePurpose::Event,
+                _ => return Err(Error::Database),
+            };
+            let mut envelope = Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                envelope_id: parse(&envelope_id)?,
+                command_id: command_id.map(|id| parse(&id)).transpose()?,
+                vault_id: ctx.vault_id,
+                producer_device_id: ctx.device_id,
+                producer_sequence: SourceSequence(
+                    u64::try_from(sequence).map_err(|_| Error::Database)?,
+                ),
+                key_epoch: epoch,
+                crypto_suite: keys.profile.crypto_suite,
+                profile_fingerprint: keys.fingerprint.clone(),
+                purpose,
+                route: route.map(|route| decode(route.as_bytes())).transpose()?,
+                compaction: None,
+                ciphertext: Vec::new(),
+            };
+            let payload: PrivatePayload = decode(&plain)?;
+            if let PrivatePayload::ContactScanResult { result } = &payload
+                && contact_scan_result_has_earlier_book_event(conn, sequence, result)?
+            {
+                continue;
+            }
+            envelope.compaction = compaction
+                .map(|value| decode(value.as_bytes()))
+                .transpose()?;
+            let plain = Zeroizing::new(serialize_authenticated_payload(
+                &payload,
+                envelope.compaction.as_ref(),
+            )?);
+            let aad = envelope.aad_bytes().map_err(|_| Error::Database)?;
+            let key = match purpose {
+                EnvelopePurpose::Command => &keys.command,
+                EnvelopePurpose::Event => &keys.event,
+            };
+            let sealed = encrypt(key, &aad, &plain).map_err(|_| Error::Crypto)?;
+            envelope.ciphertext = seal_frame(&sealed);
+            envelope.validate().map_err(|_| Error::Database)?;
+            conn.execute(
+                "UPDATE outbox SET wire=?, plain=NULL, state='queued' WHERE seq=?",
+                params![
+                    serde_json::to_vec(&envelope).map_err(|_| Error::Database)?,
+                    sequence
+                ],
+            )?;
+            contact_media::record_registrations(
+                conn,
+                &envelope_id,
+                sequence,
+                &photo_registrations,
+            )?;
+            count += 1;
         }
-        .map_err(|_| Error::Database)?;
-        let purpose = match purpose.as_str() {
-            "command" => EnvelopePurpose::Command,
-            "event" => EnvelopePurpose::Event,
-            _ => return Err(Error::Database),
-        };
-        let mut envelope = Envelope {
-            protocol_version: PROTOCOL_VERSION,
-            envelope_id: parse(&envelope_id)?,
-            command_id: command_id.map(|id| parse(&id)).transpose()?,
-            vault_id: ctx.vault_id,
-            producer_device_id: ctx.device_id,
-            producer_sequence: SourceSequence(
-                u64::try_from(sequence).map_err(|_| Error::Database)?,
-            ),
-            key_epoch: epoch,
-            crypto_suite: keys.profile.crypto_suite,
-            profile_fingerprint: keys.fingerprint.clone(),
-            purpose,
-            route: route.map(|route| decode(route.as_bytes())).transpose()?,
-            compaction: None,
-            ciphertext: Vec::new(),
-        };
-        let payload: PrivatePayload = decode(&plain)?;
-        envelope.compaction = compaction
-            .map(|value| decode(value.as_bytes()))
-            .transpose()?;
-        let plain = Zeroizing::new(serialize_authenticated_payload(
-            &payload,
-            envelope.compaction.as_ref(),
-        )?);
-        let aad = envelope.aad_bytes().map_err(|_| Error::Database)?;
-        let key = match purpose {
-            EnvelopePurpose::Command => &keys.command,
-            EnvelopePurpose::Event => &keys.event,
-        };
-        let sealed = encrypt(key, &aad, &plain).map_err(|_| Error::Crypto)?;
-        envelope.ciphertext = seal_frame(&sealed);
-        envelope.validate().map_err(|_| Error::Database)?;
-        conn.execute(
-            "UPDATE outbox SET wire=?, plain=NULL, state='queued' WHERE seq=?",
-            params![
-                serde_json::to_vec(&envelope).map_err(|_| Error::Database)?,
-                sequence
-            ],
-        )?;
-        contact_media::record_registrations(conn, &envelope_id, sequence, &photo_registrations)?;
-        count += 1;
     }
     Ok(count)
+}
+
+/// A scan result is a book-level completion barrier. It must not overtake an earlier contact
+/// update whose photo is still held and therefore cannot yet be sealed.
+fn contact_scan_result_has_earlier_book_event(
+    conn: &Connection,
+    sequence: i64,
+    result: &serde_json::Value,
+) -> Result<bool, Error> {
+    let Some(book_id) = result.get("book_id").and_then(serde_json::Value::as_str) else {
+        return Ok(false);
+    };
+    let rows: Vec<Vec<u8>> = conn
+        .prepare("SELECT plain FROM outbox WHERE state='unsealed' AND seq<? AND plain IS NOT NULL")?
+        .query_map([sequence], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for plain in rows {
+        match decode::<PrivatePayload>(&plain)? {
+            PrivatePayload::ContactUpserted { book, .. }
+                if book.get("id").and_then(serde_json::Value::as_str) == Some(book_id) =>
+            {
+                return Ok(true);
+            }
+            PrivatePayload::ContactRemoved {
+                book_id: pending_book,
+                ..
+            } if pending_book == book_id => {
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn next_source_sequence(
@@ -4870,8 +6078,9 @@ fn next_source_sequence(
     device_id: DeviceId,
 ) -> Result<SourceSequence, Error> {
     let last: i64 = conn.query_row(
-        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=? AND source_device_id=? UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=? AND state!='complete')",
-        params![conversation_id.to_string(), device_id.to_string(), conversation_id.to_string()], |r| r.get(0),
+        // Pending MMS/SMS provider acquisitions reserve their sequence before publication.
+        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')",
+        params![conversation_id.to_string(), device_id.to_string()], |r| r.get(0),
     )?;
     let last = u64::try_from(last).map_err(|_| Error::Database)?;
     Ok(SourceSequence(last.checked_add(1).ok_or(Error::Database)?))
@@ -4986,6 +6195,100 @@ fn media_matches(message: &MessagePayload, media: &[MediaDescriptor]) -> bool {
             .zip(&ids)
             .all(|(descriptor, id)| descriptor.attachment_id == *id && descriptor.is_valid())
 }
+
+fn media_meta_matches(message: &MessagePayload, media_meta: &[MmsMediaMeta]) -> bool {
+    let visible: HashSet<_> = message
+        .record
+        .attachments
+        .iter()
+        .map(|attachment| attachment.attachment_id)
+        .collect();
+    let mut represented = HashSet::new();
+    let mut thumbnails = HashSet::new();
+    media_meta.iter().all(|meta| {
+        visible.contains(&meta.attachment_id)
+            && represented.insert(meta.attachment_id)
+            && meta.width.is_none_or(|value| value > 0)
+            && meta.height.is_none_or(|value| value > 0)
+            && meta
+                .duration_ms
+                .is_none_or(|value| value > 0 && value <= i64::MAX as u64)
+            && meta.thumbnail.as_ref().is_none_or(|thumbnail| {
+                !visible.contains(&thumbnail.attachment_id)
+                    && thumbnail.attachment_id != meta.attachment_id
+                    && thumbnails.insert(thumbnail.attachment_id)
+                    && thumbnail.is_valid()
+            })
+    })
+}
+
+fn thumbnail_descriptors(media_meta: &[MmsMediaMeta]) -> Vec<MediaDescriptor> {
+    media_meta
+        .iter()
+        .filter_map(|meta| meta.thumbnail.clone())
+        .collect()
+}
+
+fn store_message_media_meta(
+    conn: &Connection,
+    message_id: MessageId,
+    media_meta: &[MmsMediaMeta],
+) -> Result<bool, Error> {
+    for meta in media_meta {
+        let thumbnail = meta
+            .thumbnail
+            .as_ref()
+            .map(|value| value.attachment_id.to_string());
+        let values = (
+            meta.width.map(i64::from),
+            meta.height.map(i64::from),
+            meta.duration_ms.map(to_i64).transpose()?,
+            thumbnail,
+        );
+        let existing: Option<MediaMetaColumns> = conn
+            .query_row(
+                "SELECT width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? AND attachment_id=?",
+                params![message_id.to_string(), meta.attachment_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing != values {
+                return Ok(false);
+            }
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO message_media_meta(message_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,?)",
+            params![message_id.to_string(), meta.attachment_id.to_string(), values.0, values.1, values.2, values.3],
+        )?;
+    }
+    Ok(true)
+}
+
+fn store_local_message_media_meta(
+    conn: &Connection,
+    message_id: MessageId,
+    media_meta: &[MmsMediaMeta],
+    acquisition_id: &str,
+) -> Result<(), Error> {
+    for meta in media_meta {
+        let thumbnail: Option<String> = conn.query_row(
+            "SELECT thumbnail_attachment_id FROM mms_acquisition_parts WHERE acquisition_id=? AND attachment_id=?",
+            params![acquisition_id, meta.attachment_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if let Some(ref thumbnail) = thumbnail {
+            let thumbnail_id: AttachmentId = parse(thumbnail)?;
+            local_references(conn, &[thumbnail_id])?;
+        }
+        conn.execute(
+            "INSERT INTO message_media_meta(message_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,?)",
+            params![message_id.to_string(), meta.attachment_id.to_string(), meta.width.map(i64::from), meta.height.map(i64::from), meta.duration_ms.map(to_i64).transpose()?, thumbnail],
+        )?;
+    }
+    Ok(())
+}
 fn require_address(address: &str) -> Result<(), Error> {
     if address.is_empty() || address.len() > MAX_ADDRESS_BYTES {
         return Err(Error::InvalidRequest("address"));
@@ -5070,7 +6373,7 @@ fn open_frame(value: &[u8]) -> Option<EncryptedEnvelope> {
     })
 }
 
-struct AttachmentRow {
+pub(crate) struct AttachmentRow {
     state: AttachmentState,
     media_type: String,
     display_name: String,
@@ -5081,7 +6384,7 @@ struct AttachmentRow {
     remote_object_id: Option<String>,
 }
 impl AttachmentRow {
-    fn info(&self, attachment_id: AttachmentId) -> AttachmentInfo {
+    pub(crate) fn info(&self, attachment_id: AttachmentId) -> AttachmentInfo {
         AttachmentInfo {
             attachment_id,
             media_type: self.media_type.clone(),
@@ -5096,7 +6399,10 @@ impl AttachmentRow {
         FileKey::import_encrypted_reference(*self.file_key).map_err(|_| Error::Crypto)
     }
 }
-fn attachment_row(conn: &Connection, id: AttachmentId) -> Result<Option<AttachmentRow>, Error> {
+pub(crate) fn attachment_row(
+    conn: &Connection,
+    id: AttachmentId,
+) -> Result<Option<AttachmentRow>, Error> {
     type Raw = (
         String,
         String,
@@ -5107,12 +6413,22 @@ fn attachment_row(conn: &Connection, id: AttachmentId) -> Result<Option<Attachme
         Vec<u8>,
         Option<String>,
     );
-    let row: Option<Raw> = conn
-        .query_row(
-            "SELECT state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,file_key,remote_object_id FROM attachments WHERE attachment_id=?",
-            params![id.to_string()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
-        )
+    let mut statement = conn.prepare_cached(
+        "SELECT state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,file_key,remote_object_id FROM attachments WHERE attachment_id=?",
+    )?;
+    let row: Option<Raw> = statement
+        .query_row(params![id.to_string()], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })
         .optional()?;
     let Some((state, media_type, display_name, plain, cipher, sha, key, remote)) = row else {
         return Ok(None);
@@ -5134,7 +6450,7 @@ fn local_references(
     conn: &Connection,
     ids: &[AttachmentId],
 ) -> Result<Vec<AttachmentReference>, Error> {
-    let mut seen = Vec::with_capacity(ids.len());
+    let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
         let prepared_here = attachment_row(conn, *id)?.is_some_and(|row| {
             matches!(
@@ -5142,45 +6458,92 @@ fn local_references(
                 AttachmentState::PendingUpload | AttachmentState::Uploaded
             )
         });
-        if !prepared_here || seen.contains(id) {
+        if !prepared_here || !seen.insert(*id) {
             return Err(Error::InvalidRequest(
                 "attachment not prepared on this device",
             ));
         }
-        seen.push(*id);
     }
-    Ok(seen
-        .into_iter()
+    Ok(ids
+        .iter()
         .map(|attachment_id| AttachmentReference {
-            attachment_id,
+            attachment_id: *attachment_id,
             pending: false,
         })
         .collect())
 }
 /// Private descriptors for a message, or `None` while any object still lacks a remote ID.
+fn descriptor_for_attachment(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<Option<MediaDescriptor>, Error> {
+    let row = attachment_row(conn, attachment_id)?.ok_or(Error::Database)?;
+    let Some(remote_object_id) = row.remote_object_id.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(MediaDescriptor {
+        attachment_id,
+        remote_object_id,
+        media_type: row.media_type.clone(),
+        display_name: row.display_name.clone(),
+        plaintext_bytes: row.plaintext_bytes,
+        ciphertext_bytes: row.ciphertext_bytes,
+        ciphertext_sha256: row.ciphertext_sha256.clone(),
+        stream_version: STREAM_VERSION,
+        file_key: *row.file_key,
+    }))
+}
+
+/// Private descriptors for a message, or `None` while any original or thumbnail lacks a remote ID.
 fn resolve_media(
     conn: &Connection,
     message: &MessagePayload,
-) -> Result<Option<Vec<MediaDescriptor>>, Error> {
+) -> Result<Option<ResolvedMedia>, Error> {
     let mut media = Vec::with_capacity(message.record.attachments.len());
     for reference in &message.record.attachments {
-        let row = attachment_row(conn, reference.attachment_id)?.ok_or(Error::Database)?;
-        let Some(remote_object_id) = row.remote_object_id.clone() else {
+        let Some(descriptor) = descriptor_for_attachment(conn, reference.attachment_id)? else {
             return Ok(None);
         };
-        media.push(MediaDescriptor {
-            attachment_id: reference.attachment_id,
-            remote_object_id,
-            media_type: row.media_type.clone(),
-            display_name: row.display_name.clone(),
-            plaintext_bytes: row.plaintext_bytes,
-            ciphertext_bytes: row.ciphertext_bytes,
-            ciphertext_sha256: row.ciphertext_sha256.clone(),
-            stream_version: STREAM_VERSION,
-            file_key: *row.file_key,
+        media.push(descriptor);
+    }
+    let mut statement = conn.prepare("SELECT attachment_id,width,height,duration_ms,thumbnail_attachment_id FROM message_media_meta WHERE message_id=? ORDER BY rowid")?;
+    let rows = statement.query_map(params![message.record.message_id.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    let mut metadata = Vec::new();
+    for row in rows {
+        let (attachment_id, width, height, duration_ms, thumbnail) = row?;
+        let thumbnail = match thumbnail {
+            Some(id) => match descriptor_for_attachment(conn, parse(&id)?)? {
+                Some(value) => Some(value),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        metadata.push(MmsMediaMeta {
+            attachment_id: parse(&attachment_id)?,
+            width: width
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| Error::Database)?,
+            height: height
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| Error::Database)?,
+            duration_ms: duration_ms
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| Error::Database)?,
+            thumbnail,
         });
     }
-    Ok(Some(media))
+    Ok(Some((media, metadata)))
 }
 /// Records received metadata as `pending_download`; false if an ID is bound to other metadata.
 fn store_remote_media(conn: &Connection, media: &[MediaDescriptor]) -> Result<bool, Error> {
@@ -5324,6 +6687,225 @@ fn load_compose_draft(
     .map(decode_compose_row)
     .transpose()
 }
+
+fn is_draft_only(conn: &Connection, draft_id: DraftId) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT draft_only FROM compose_drafts WHERE draft_id=?",
+        params![draft_id.to_string()],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(Into::into)
+}
+
+fn is_discardable(conn: &Connection, draft: &ComposeDraft) -> Result<bool, Error> {
+    if !draft.recipients.is_empty() {
+        return Ok(false);
+    }
+    let has_messages: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+        params![draft.conversation_id.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(!has_messages)
+}
+
+fn recipientless_draft(
+    conn: &Connection,
+    excluding: Option<DraftId>,
+) -> Result<Option<ComposeDraft>, Error> {
+    let excluded = excluding.map(|id| id.to_string()).unwrap_or_default();
+    conn.query_row(
+        &format!("SELECT {COMPOSE_COLUMNS} FROM compose_drafts d WHERE d.recipients='[]' AND d.draft_id != ? AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=d.conversation_id) ORDER BY d.local_order LIMIT 1"),
+        params![excluded], compose_row,
+    ).optional()?.map(decode_compose_row).transpose()
+}
+
+fn moved_draft(conn: &Connection, draft_id: DraftId) -> Result<Option<Error>, Error> {
+    let Some(target_draft) = redirect_target(conn, draft_id.to_string(), true)? else {
+        return Ok(None);
+    };
+    let moved: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT conversation_id,revision FROM compose_drafts WHERE draft_id=?",
+            params![target_draft],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    moved
+        .map(|(conversation, revision)| {
+            Ok(Error::DraftMoved {
+                draft_id: parse(&target_draft)?,
+                conversation_id: parse(&conversation)?,
+                current_revision: u64::try_from(revision).map_err(|_| Error::Database)?,
+            })
+        })
+        .transpose()
+}
+
+fn redirect_target(
+    conn: &Connection,
+    start: String,
+    by_draft: bool,
+) -> Result<Option<String>, Error> {
+    let (source, target) = if by_draft {
+        ("draft_id", "target_draft_id")
+    } else {
+        ("conversation_id", "target_conversation_id")
+    };
+    let mut current = start;
+    let mut found = false;
+    for _ in 0..8 {
+        let scope = if by_draft {
+            ""
+        } else {
+            " AND forward_conversation=1"
+        };
+        let next: Option<String> = conn.query_row(
+            &format!("SELECT {target} FROM compose_draft_redirects WHERE {source}=?{scope} ORDER BY rowid DESC LIMIT 1"),
+            params![current], |row| row.get(0),
+        ).optional()?;
+        let Some(next) = next else {
+            return Ok(found.then_some(current));
+        };
+        if next == current {
+            return Err(Error::Database);
+        }
+        found = true;
+        current = next;
+    }
+    Err(Error::Database)
+}
+
+fn conversation_for_compose_recipients(
+    conn: &Connection,
+    recipients: &[String],
+    source_conversation: ConversationId,
+    region: &str,
+) -> Result<Option<ConversationId>, Error> {
+    if let Some(conversation) = conversation_match::conversation_for_recipients(conn, recipients)?
+        && conversation != source_conversation
+    {
+        return Ok(Some(conversation));
+    }
+    let expected = conversation_match::recipient_set(recipients, Some(region));
+    let mut statement = conn.prepare(&format!(
+        "SELECT {COMPOSE_COLUMNS} FROM compose_drafts WHERE conversation_id != ? ORDER BY local_order DESC"
+    ))?;
+    let drafts = statement.query_map(params![source_conversation.to_string()], compose_row)?;
+    for draft in drafts {
+        let draft = decode_compose_row(draft?)?;
+        if conversation_match::recipient_set(&draft.recipients, Some(region)) == expected {
+            return Ok(Some(draft.conversation_id));
+        }
+    }
+    Ok(None)
+}
+
+fn move_compose_draft(
+    conn: &Connection,
+    source: ComposeDraft,
+    update: ComposeDraftUpdate,
+    destination_conversation: ConversationId,
+) -> Result<ComposeDraft, Error> {
+    let destination = load_compose_draft(
+        conn,
+        "conversation_id",
+        &destination_conversation.to_string(),
+    )?;
+    let (destination_id, text, attachment_ids, route, revision) = if let Some(destination) =
+        destination
+    {
+        let text = merge_draft_text(&destination.text, &update.text)?;
+        let attachment_ids =
+            merge_attachment_ids(&destination.attachment_ids, &update.attachment_ids)?;
+        let route = update.route.clone().or(destination.route);
+        let revision = destination.revision.checked_add(1).ok_or(Error::Database)?;
+        conn.execute(
+            "UPDATE compose_drafts SET text=?,recipients=?,attachment_ids=?,route=?,revision=?,draft_only=1 WHERE draft_id=?",
+            params![text, json(&update.recipients)?, json(&attachment_ids)?, route.as_ref().map(json).transpose()?, to_i64(revision)?, destination.draft_id.to_string()],
+        )?;
+        (destination.draft_id, text, attachment_ids, route, revision)
+    } else {
+        let destination_id = DraftId::new();
+        let revision = source.revision.checked_add(1).ok_or(Error::Database)?;
+        conn.execute(
+            "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision,draft_only) VALUES(?,?,?,?,?,?,?,1)",
+            params![destination_id.to_string(), destination_conversation.to_string(), update.text, json(&update.recipients)?, json(&update.attachment_ids)?, update.route.as_ref().map(json).transpose()?, to_i64(revision)?],
+        )?;
+        (
+            destination_id,
+            update.text,
+            update.attachment_ids,
+            update.route,
+            revision,
+        )
+    };
+    let source_has_messages: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)",
+        params![source.conversation_id.to_string()],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "DELETE FROM compose_drafts WHERE draft_id=?",
+        params![source.draft_id.to_string()],
+    )?;
+    conn.execute(
+        "INSERT INTO compose_draft_redirects(draft_id,conversation_id,target_draft_id,target_conversation_id,forward_conversation) VALUES(?,?,?,?,?)",
+        params![source.draft_id.to_string(), source.conversation_id.to_string(), destination_id.to_string(), destination_conversation.to_string(), !source_has_messages],
+    )?;
+    conn.execute(
+        "UPDATE compose_draft_redirects SET target_draft_id=?,target_conversation_id=? WHERE target_draft_id=?",
+        params![destination_id.to_string(), destination_conversation.to_string(), source.draft_id.to_string()],
+    )?;
+    conn.execute(
+        "DELETE FROM compose_draft_redirects WHERE rowid IN (SELECT rowid FROM compose_draft_redirects ORDER BY rowid DESC LIMIT -1 OFFSET 256)",
+        [],
+    )?;
+    Ok(ComposeDraft {
+        draft_id: destination_id,
+        conversation_id: destination_conversation,
+        text,
+        recipients: update.recipients,
+        attachment_ids,
+        route,
+        revision,
+    })
+}
+
+fn merge_draft_text(destination: &str, source: &str) -> Result<String, Error> {
+    let text = if destination.is_empty() || source.is_empty() {
+        format!("{destination}{source}")
+    } else {
+        format!("{destination}\n\n{source}")
+    };
+    if text.len() > MAX_BODY_BYTES {
+        return Err(Error::DraftMergeOverflow);
+    }
+    Ok(text)
+}
+
+fn merge_attachment_ids(
+    destination: &[AttachmentId],
+    source: &[AttachmentId],
+) -> Result<Vec<AttachmentId>, Error> {
+    let mut merged = destination.to_vec();
+    let mut seen: HashSet<_> = destination.iter().copied().collect();
+    for attachment in source {
+        if seen.insert(*attachment) {
+            merged.push(*attachment);
+        }
+    }
+    if merged.len() > MAX_DRAFT_ATTACHMENTS {
+        return Err(Error::DraftMergeOverflow);
+    }
+    Ok(merged)
+}
+
+/// Normalizes a phone identity for local conversation matching. Invalid and short-code values
+/// remain exact, while parseable numbers use E.164 and a caller-supplied region.
+pub fn canonical_address(address: &str, region: Option<&str>) -> String {
+    conversation_match::canonical_address(address, region)
+}
 fn canonical(path: &Path) -> Result<PathBuf, Error> {
     let parent = path.parent().ok_or(Error::Database)?;
     std::fs::create_dir_all(parent).map_err(|_| Error::Database)?;
@@ -5333,10 +6915,10 @@ fn canonical(path: &Path) -> Result<PathBuf, Error> {
 fn json<T: Serialize>(value: &T) -> Result<String, Error> {
     serde_json::to_string(value).map_err(|_| Error::Database)
 }
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|_| Error::Database)
 }
-fn parse<T: FromStr>(value: &str) -> Result<T, Error> {
+pub(crate) fn parse<T: FromStr>(value: &str) -> Result<T, Error> {
     value.parse().map_err(|_| Error::Database)
 }
 fn to_i64(value: u64) -> Result<i64, Error> {
@@ -5346,6 +6928,157 @@ fn to_i64(value: u64) -> Result<i64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peppy_crypto::enrollment::EnrollmentContext;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn malformed_scan_payload_kinds_remain_strict_known_events() {
+        assert!(is_known_private_payload_kind("contact_scan_request"));
+        assert!(is_known_private_payload_kind("contact_scan_result"));
+        assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn send_status_timestamp_is_optional_on_the_private_wire() {
+        let command_id = CommandId::new();
+        let legacy: PrivatePayload = serde_json::from_value(json!({
+            "kind": "send_status",
+            "command_id": command_id,
+            "state": "sent",
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            PrivatePayload::SendStatus { at_ms: None, .. }
+        ));
+
+        let encoded = serde_json::to_value(PrivatePayload::SendStatus {
+            command_id,
+            state: SendState::Sent,
+            at_ms: Some(1_725_363_180_000),
+        })
+        .unwrap();
+        assert_eq!(encoded["at_ms"], 1_725_363_180_000_i64);
+
+        let encoded = serde_json::to_value(PrivatePayload::SendStatus {
+            command_id,
+            state: SendState::Sent,
+            at_ms: None,
+        })
+        .unwrap();
+        assert!(encoded.get("at_ms").is_none());
+    }
+
+    #[test]
+    fn status_timestamp_accepts_only_positive_values() {
+        assert_eq!(valid_status_timestamp(Some(1)), Some(1));
+        assert_eq!(valid_status_timestamp(Some(0)), None);
+        assert_eq!(valid_status_timestamp(Some(-1)), None);
+        assert_eq!(valid_status_timestamp(None), None);
+    }
+
+    #[test]
+    fn newer_status_without_time_clears_while_duplicate_and_older_events_preserve_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, PRIMARY KEY(command_id, producer_device_id));",
+        )
+        .unwrap();
+        let command_id = CommandId::new();
+        let producer = DeviceId::new();
+
+        upsert_status(&conn, command_id, producer, 2, SendState::Sent, Some(20)).unwrap();
+        upsert_status(&conn, command_id, producer, 2, SendState::Delivered, None).unwrap();
+        upsert_status(
+            &conn,
+            command_id,
+            producer,
+            1,
+            SendState::FailedBeforeSubmission,
+            Some(10),
+        )
+        .unwrap();
+        let stored: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT state,status_at_ms FROM send_status WHERE command_id=? AND producer_device_id=?",
+                params![command_id.to_string(), producer.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (state_code(SendState::Sent).into(), Some(20)));
+
+        upsert_status(&conn, command_id, producer, 3, SendState::Delivered, None).unwrap();
+        let stored: (String, Option<i64>) = conn
+            .query_row(
+                "SELECT state,status_at_ms FROM send_status WHERE command_id=? AND producer_device_id=?",
+                params![command_id.to_string(), producer.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (state_code(SendState::Delivered).into(), None));
+    }
+
+    #[test]
+    fn message_status_select_pairs_earliest_command_state_and_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages(local_order INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, conversation_id TEXT NOT NULL, payload TEXT NOT NULL, seen INTEGER NOT NULL, sort_at_ms INTEGER NOT NULL); \
+             CREATE TABLE commands(command_id TEXT PRIMARY KEY, message_id TEXT NOT NULL, gateway_device_id TEXT NOT NULL); \
+             CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, status_at_ms INTEGER, PRIMARY KEY(command_id, producer_device_id)); \
+             CREATE TABLE outbox(command_id TEXT UNIQUE, state TEXT NOT NULL);",
+        )
+        .unwrap();
+        let conversation_id = ConversationId::new();
+        let message_id = MessageId::new();
+        let gateway_id = DeviceId::new();
+        conn.execute(
+            "INSERT INTO messages(local_order,id,conversation_id,payload,seen,sort_at_ms) VALUES(1,?,?, '{}',1,1)",
+            params![message_id.to_string(), conversation_id.to_string()],
+        )
+        .unwrap();
+        for (command_id, state, status_at_ms) in [
+            ("first", state_code(SendState::Sent), 10_i64),
+            ("second", state_code(SendState::Delivered), 20_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO commands(command_id,message_id,gateway_device_id) VALUES(?,?,?)",
+                params![command_id, message_id.to_string(), gateway_id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO send_status(command_id,producer_device_id,producer_sequence,state,status_at_ms) VALUES(?,?,1,?,?)",
+                params![command_id, gateway_id.to_string(), state, status_at_ms],
+            )
+            .unwrap();
+        }
+
+        let selected = conn
+            .query_row(
+                MESSAGE_FULL_SELECT,
+                params![conversation_id.to_string()],
+                message_row,
+            )
+            .unwrap();
+        assert_eq!(selected.2.as_deref(), Some(state_code(SendState::Sent)));
+        assert_eq!(selected.3, Some(10));
+    }
+
+    #[test]
+    fn v25_migration_adds_null_status_timestamps_without_backfill() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE send_status(command_id TEXT NOT NULL, producer_device_id TEXT NOT NULL, producer_sequence INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(command_id, producer_device_id)); \
+             INSERT INTO send_status VALUES('command','device',1,'sent');",
+        )
+        .unwrap();
+
+        conn.execute_batch(MIGRATION_26).unwrap();
+        let timestamp: Option<i64> = conn
+            .query_row("SELECT status_at_ms FROM send_status", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timestamp, None);
+    }
 
     #[test]
     fn database_key_must_be_exactly_32_bytes() {
@@ -5354,6 +7087,382 @@ mod tests {
             Err(Error::InvalidDatabaseKey)
         ));
         assert!(DatabaseKey::new(&[7; 32]).is_ok());
+    }
+
+    #[test]
+    fn eviction_keeps_available_ciphertext_when_metadata_transaction_fails() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[8; 32]).unwrap(),
+        )
+        .unwrap();
+        let attachment_id = AttachmentId::new();
+        let message_id = MessageId::new();
+        let path;
+        {
+            let guard = client.lock().unwrap();
+            guard.conn.execute(
+                "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params![attachment_id.to_string(), AttachmentState::Available.code(), "image/jpeg", "received.jpg", 1_i64, 1_i64, "hash", STREAM_VERSION, vec![0_u8; 32], uuid::Uuid::new_v4().to_string()],
+            ).unwrap();
+            path = media::cipher_path(&guard.media_dir, attachment_id);
+            std::fs::write(&path, b"ciphertext").unwrap();
+            guard
+                .conn
+                .execute(
+                    "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,?)",
+                    params![message_id.to_string(), ConversationId::new().to_string(), DeviceId::new().to_string(), 1_i64, "{}", 0_i64],
+                )
+                .unwrap();
+            guard
+                .conn
+                .execute(
+                    "INSERT INTO message_media_meta(message_id,attachment_id,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,NULL)",
+                    params![message_id.to_string(), attachment_id.to_string(), 1_i64, 1_i64, Option::<i64>::None],
+                )
+                .unwrap();
+            guard
+                .conn
+                .execute_batch("DROP TABLE attachment_demand")
+                .unwrap();
+        }
+
+        assert!(matches!(
+            client.evict_attachment_ciphertext(attachment_id),
+            Err(Error::Database)
+        ));
+        assert!(path.exists());
+        assert_eq!(
+            client.attachment_info(attachment_id).unwrap().state,
+            AttachmentState::Available
+        );
+    }
+
+    #[test]
+    fn version_27_database_upgrades_mms_rows_and_cache_inventory_idempotently() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v27.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = [27; 32];
+        let acquisition_id = "acquisition";
+        let attachment_id = AttachmentId::new();
+        let conversation_id = ConversationId::new();
+        let message_id = MessageId::new();
+        {
+            let conn = Connection::open(&config.database_path).unwrap();
+            apply_database_key(&conn, &DatabaseKey::new(&key).unwrap()).unwrap();
+            conn.execute_batch("CREATE TABLE schema_meta(version INTEGER NOT NULL); INSERT INTO schema_meta VALUES(27);")
+                .unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            for migration in [
+                MIGRATION_5,
+                MIGRATION_6,
+                MIGRATION_7,
+                MIGRATION_8,
+                MIGRATION_9,
+                MIGRATION_10,
+                MIGRATION_11,
+                MIGRATION_13,
+                MIGRATION_14,
+                MIGRATION_15,
+                MIGRATION_16,
+                MIGRATION_17,
+                MIGRATION_18,
+                MIGRATION_19,
+                MIGRATION_20,
+                MIGRATION_21,
+                MIGRATION_22,
+                MIGRATION_23,
+                MIGRATION_24,
+                MIGRATION_25,
+                MIGRATION_26,
+                MIGRATION_27,
+            ] {
+                conn.execute_batch(migration).unwrap();
+            }
+            mms_backfill::initialize(&conn).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE mms_provider_identity_conflicts(
+                   source_generation TEXT NOT NULL,
+                   subscription_id TEXT NOT NULL,
+                   provider_message_id TEXT NOT NULL,
+                   direction TEXT NOT NULL,
+                   reason TEXT NOT NULL,
+                   PRIMARY KEY(source_generation,subscription_id,provider_message_id,direction)
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,actual_sent_at_ms,sort_at_ms) VALUES(?,?,?,?,?,?,?,?)",
+                params![message_id.to_string(), conversation_id.to_string(), DeviceId::new().to_string(), 42_i64, "{}", 0_i64, 1_i64, 1_i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key,remote_object_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params![attachment_id.to_string(), AttachmentState::Available.code(), "image/jpeg", "received.jpg", 10_i64, 10_i64, "hash", STREAM_VERSION, vec![0_u8; 32], "remote"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,direction,conversation_id,input,state,reason,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![acquisition_id, "generation", "subscription", "provider", "incoming", conversation_id.to_string(), "{}", "pending", Option::<String>::None, message_id.to_string(), 42_i64, 1_i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mms_acquisition_parts(acquisition_id,provider_part_id,attachment_id,position,width,height,duration_ms,thumbnail_attachment_id) VALUES(?,?,?,?,?,?,?,NULL)",
+                params![acquisition_id, "part", attachment_id.to_string(), 0_i64, 640_i64, 480_i64, 1_000_i64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mms_provider_identity_conflicts(source_generation,subscription_id,provider_message_id,direction,reason) VALUES(?,?,?,?,?)",
+                params!["generation", "subscription", "legacy-conflict", "incoming", "legacy"],
+            )
+            .unwrap();
+        }
+
+        let client = Client::open(config.clone(), DatabaseKey::new(&key).unwrap()).unwrap();
+        assert_eq!(
+            client
+                .mms_backfill_status("generation", "subscription")
+                .unwrap()
+                .quarantined_count,
+            1
+        );
+        {
+            let store = client.lock().unwrap();
+            let preserved: (String, String, String, i64, i64, i64, i64, String, i64) = store
+                .conn
+                .query_row(
+                    "SELECT source_instance_id,message_id,conversation_id,source_sequence,local_order,width,height,preview_state,metadata_recorded FROM mms_acquisitions JOIN mms_acquisition_parts USING(acquisition_id) WHERE acquisition_id=?",
+                    [acquisition_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                preserved,
+                (
+                    "".into(),
+                    message_id.to_string(),
+                    conversation_id.to_string(),
+                    42,
+                    1,
+                    640,
+                    480,
+                    "pending".into(),
+                    0
+                )
+            );
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM media_cache_entries WHERE attachment_id=?",
+                        [attachment_id.to_string()],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store.conn.query_row("SELECT COUNT(*) FROM mms_provider_identity_quarantines WHERE provider_message_id='legacy-conflict'", [], |row| row.get::<_, i64>(0)).unwrap(),
+                1
+            );
+            assert_eq!(
+                store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mms_provider_identity_conflicts'", [], |row| row.get::<_, i64>(0)).unwrap(),
+                0
+            );
+            assert_eq!(
+                store
+                    .conn
+                    .query_row("SELECT version FROM schema_meta", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+        }
+        drop(client);
+
+        let reopened = Client::open(config, DatabaseKey::new(&key).unwrap()).unwrap();
+        let store = reopened.lock().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT source_instance_id FROM mms_acquisitions WHERE acquisition_id=?",
+                    [acquisition_id],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            ""
+        );
+        assert_eq!(
+            store.conn.query_row("SELECT preview_state,metadata_recorded FROM mms_acquisition_parts WHERE acquisition_id=?", [acquisition_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).unwrap(),
+            ("pending".into(), 0)
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM media_cache_entries WHERE attachment_id=?",
+                    [attachment_id.to_string()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn version_30_remote_pause_seeds_independent_capacity_and_survives_reopen() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v30-remote.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[30; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        client
+            .plan_mms_backfill_scans("generation", "subscription", "1")
+            .unwrap();
+        client
+            .report_mms_backfill_vault_quota_exceeded("generation", "subscription")
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP TABLE mms_backfill_remote_capacity;
+                     UPDATE schema_meta SET version=30;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        for _ in 0..2 {
+            let reopened = Client::open(config.clone(), key()).unwrap();
+            let plans = reopened
+                .plan_mms_backfill_scans("generation", "subscription", "1")
+                .unwrap();
+            let live = plans
+                .iter()
+                .find(|plan| plan.phase == MmsBackfillPhase::Live)
+                .unwrap();
+            let history = plans
+                .iter()
+                .find(|plan| plan.phase == MmsBackfillPhase::History)
+                .unwrap();
+            assert_eq!(live.pause, Some(MmsBackfillPause::RemoteStorage));
+            assert!(!live.paused);
+            assert_eq!(history.pause, Some(MmsBackfillPause::RemoteStorage));
+            assert!(history.paused);
+            drop(reopened);
+        }
+    }
+
+    #[test]
+    fn reopen_cleans_legacy_blocked_parts_and_preserves_draft_reference() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("blocked-parts.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[31; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        let input = MmsAcquisitionInput {
+            source: MmsSource {
+                source_generation: "generation".into(),
+                subscription_id: "subscription".into(),
+                provider_message_id: "1".into(),
+                provider_thread_id: None,
+            },
+            direction: Direction::Incoming,
+            sender_address: Some("+15555550100".into()),
+            recipients: Vec::new(),
+            subject: None,
+            body: "blocked".into(),
+            imported: false,
+            observed_at_ms: 1,
+            transaction_id: None,
+        };
+        let acquisition = client.begin_mms_acquisition(input).unwrap();
+        let original_path = directory.path().join("original.png");
+        let thumbnail_path = directory.path().join("thumbnail.png");
+        std::fs::write(&original_path, b"original").unwrap();
+        std::fs::write(&thumbnail_path, b"thumbnail").unwrap();
+        let original = client
+            .prepare_attachment(&original_path, "image/png", "original.png")
+            .unwrap()
+            .attachment_id;
+        let thumbnail = client
+            .prepare_attachment(&thumbnail_path, "image/png", "thumbnail.png")
+            .unwrap()
+            .attachment_id;
+        client
+            .set_mms_acquisition_part(&acquisition.acquisition_id, "part", original)
+            .unwrap();
+        client
+            .set_mms_acquisition_part_metadata(
+                &acquisition.acquisition_id,
+                "part",
+                None,
+                None,
+                None,
+                Some(thumbnail),
+            )
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE mms_acquisitions SET state='blocked',reason='legacy blocked' WHERE acquisition_id=?",
+                    [&acquisition.acquisition_id],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO compose_drafts(draft_id,conversation_id,text,recipients,attachment_ids,route,revision) VALUES(?,?,?,?,?,NULL,0)",
+                    params![
+                        DraftId::new().to_string(),
+                        ConversationId::new().to_string(),
+                        "",
+                        "[]",
+                        json(&vec![original]).unwrap(),
+                    ],
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let reopened = Client::open(config, key()).unwrap();
+        assert!(
+            reopened
+                .mms_acquisition_parts(&acquisition.acquisition_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(reopened.mms_pending_media_bytes().unwrap(), 0);
+        assert!(reopened.attachment_info(original).is_ok());
+        assert_eq!(reopened.attachment_info(thumbnail), Err(Error::NotFound));
+        let blocked = reopened
+            .mms_acquisitions(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.acquisition_id == acquisition.acquisition_id)
+            .unwrap();
+        assert_eq!(blocked.state, MmsAcquisitionState::Blocked);
+        assert_eq!(blocked.reason.as_deref(), Some("legacy blocked"));
     }
 
     #[test]
@@ -5396,6 +7505,220 @@ mod tests {
             assert_eq!(decode_state(state_code(state)), Ok(state));
         }
         assert_eq!(decode_state("attempted"), Err(Error::Database));
+    }
+
+    #[test]
+    fn recipientless_draft_is_atomic_and_discard_is_cas_safe() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[42; 32]).unwrap(),
+        )
+        .unwrap();
+        let first = client.recipientless_compose_draft().unwrap();
+        assert_eq!(
+            client.recipientless_compose_draft().unwrap().draft_id,
+            first.draft_id
+        );
+        let recipient_edit = client
+            .save_compose_draft(
+                first.draft_id,
+                0,
+                ComposeDraftUpdate {
+                    recipients: vec!["(415) 555-2671".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(recipient_edit.draft_id, first.draft_id);
+        assert_eq!(recipient_edit.conversation_id, first.conversation_id);
+        let cleared = client
+            .save_compose_draft(
+                first.draft_id,
+                recipient_edit.revision,
+                ComposeDraftUpdate::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            client.discard_compose_draft(first.draft_id, 1),
+            Err(Error::StaleDraft { .. })
+        ));
+        client
+            .discard_compose_draft(first.draft_id, cleared.revision)
+            .unwrap();
+        client
+            .discard_compose_draft(first.draft_id, cleared.revision)
+            .unwrap();
+        assert!(client.compose_draft(first.draft_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn recipient_commit_moves_to_known_history_and_late_save_cannot_append() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[43; 32]).unwrap(),
+        )
+        .unwrap();
+        let captured = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+14155552671".into(),
+                body: "history".into(),
+                provider_message_id: Some("one".into()),
+                imported: false,
+            })
+            .unwrap();
+        let source = client.recipientless_compose_draft().unwrap();
+        // Rows created before the intent column was introduced have this default.
+        client
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "UPDATE compose_drafts SET draft_only=0 WHERE draft_id=?",
+                params![source.draft_id.to_string()],
+            )
+            .unwrap();
+        let moved = client
+            .save_compose_draft(
+                source.draft_id,
+                0,
+                ComposeDraftUpdate {
+                    text: "new text".into(),
+                    recipients: vec!["(415) 555-2671".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(moved.conversation_id, captured.conversation_id);
+        assert_eq!(moved.text, "new text");
+        assert!(client.compose_draft_is_new(moved.draft_id).unwrap());
+        let reply_conversation = ConversationId::new();
+        client
+            .capture_incoming(IncomingSms {
+                conversation_id: Some(reply_conversation),
+                sender_address: "+15555550101".into(),
+                body: "reply".into(),
+                provider_message_id: Some("two".into()),
+                imported: false,
+            })
+            .unwrap();
+        let reply = client
+            .create_compose_draft(Some(reply_conversation))
+            .unwrap();
+        assert!(!client.compose_draft_is_new(reply.draft_id).unwrap());
+        let forked = client
+            .save_compose_draft(
+                moved.draft_id,
+                moved.revision,
+                ComposeDraftUpdate {
+                    text: "group text".into(),
+                    recipients: vec!["(415) 555-2671".into(), "+14155552672".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_ne!(forked.conversation_id, captured.conversation_id);
+        assert_eq!(client.messages(captured.conversation_id).unwrap().len(), 1);
+        assert!(matches!(
+            client.save_compose_draft(source.draft_id, 0, ComposeDraftUpdate::default()),
+            Err(Error::DraftMoved { conversation_id, .. }) if conversation_id == forked.conversation_id
+        ));
+        assert_eq!(
+            client
+                .compose_draft_source_conversation(source.draft_id)
+                .unwrap(),
+            Some(source.conversation_id)
+        );
+        assert_eq!(
+            client
+                .compose_draft_redirect(source.draft_id)
+                .unwrap()
+                .unwrap()
+                .draft_id,
+            forked.draft_id
+        );
+    }
+
+    #[test]
+    fn canonical_address_keeps_short_codes_exact() {
+        assert_eq!(
+            canonical_address("(415) 555-2671", Some("US")),
+            "+14155552671"
+        );
+        assert_eq!(canonical_address("40404", Some("US")), "40404");
+    }
+
+    #[test]
+    fn repeated_history_moves_flatten_old_draft_redirects() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[44; 32]).unwrap(),
+        )
+        .unwrap();
+        let addresses = [
+            "+14155552671",
+            "+14155552672",
+            "+14155552673",
+            "+14155552674",
+            "+14155552675",
+            "+14155552676",
+            "+14155552677",
+            "+14155552678",
+            "+14155552679",
+            "+14155552680",
+        ];
+        let mut histories = Vec::new();
+        for (index, address) in addresses.iter().enumerate() {
+            let conversation = ConversationId::new();
+            client
+                .capture_incoming(IncomingSms {
+                    conversation_id: Some(conversation),
+                    sender_address: (*address).into(),
+                    body: "history".into(),
+                    provider_message_id: Some(format!("history-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+            histories.push(conversation);
+        }
+        let original = client.recipientless_compose_draft().unwrap();
+        let mut current = original.clone();
+        for (address, conversation) in addresses.iter().zip(histories.iter()) {
+            current = client
+                .save_compose_draft(
+                    current.draft_id,
+                    current.revision,
+                    ComposeDraftUpdate {
+                        recipients: vec![(*address).into()],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(current.conversation_id, *conversation);
+        }
+        assert_eq!(
+            client
+                .compose_draft_redirect(original.draft_id)
+                .unwrap()
+                .unwrap()
+                .draft_id,
+            current.draft_id
+        );
     }
 
     #[test]
@@ -5663,6 +7986,8 @@ mod tests {
                 transport: Transport::Mms,
                 direction: Direction::Incoming,
                 imported: false,
+                sent_at_ms: None,
+                ordered_at_ms: None,
                 mms_context: None,
             }
         };
@@ -5710,31 +8035,37 @@ mod tests {
             seal(PrivatePayload::MmsMessage {
                 message: message(&[a]),
                 media: vec![descriptor(a, &r1, &sha)],
+                media_meta: vec![],
             }),
             // Rebinding an existing attachment ID to different metadata.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[a]),
                 media: vec![descriptor(a, &r2, &other_sha)],
+                media_meta: vec![],
             }),
             // Descriptor count mismatch.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[b, c]),
                 media: vec![descriptor(b, &r1, &sha)],
+                media_meta: vec![],
             }),
             // Descriptor order mismatch.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[b, c]),
                 media: vec![descriptor(c, &r1, &sha), descriptor(b, &r2, &sha)],
+                media_meta: vec![],
             }),
             // Invalid descriptor (digest not 64 lowercase hex).
             seal(PrivatePayload::MmsMessage {
                 message: message(&[d]),
                 media: vec![descriptor(d, &r1, "zz")],
+                media_meta: vec![],
             }),
             // MMS payload missing media.
             seal(PrivatePayload::MmsMessage {
                 message: message(&[e]),
                 media: vec![],
+                media_meta: vec![],
             }),
             // MMS transport smuggled through the SMS variant.
             seal(PrivatePayload::Message(message(&[e]))),
@@ -5927,6 +8258,8 @@ mod tests {
             transport: Transport::Mms,
             direction: Direction::Incoming,
             imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
             mms_context: Some(MmsContext {
                 source_generation: "generation".into(),
                 subscription_id: "sim-1".into(),
@@ -6951,6 +9284,375 @@ mod tests {
         assert!(matches!(
             client.import_native_key_cache(&NativeKeyCache::from_native_storage(malformed)),
             Err(Error::InvalidKeyCache)
+        ));
+    }
+
+    const HANDOFF_PASSPHRASE: &str = "correct horse battery staple";
+
+    /// A handoff produced by real seal and open, with its root derived from `HANDOFF_PASSPHRASE`.
+    struct HandoffFixture {
+        context: EnrollmentContext,
+        handoff: VerifiedHandoff,
+        profile: KeyProfile,
+        header: VaultCheckHeader,
+    }
+
+    fn sealed_handoff_fixture(vault_id: Uuid, device_id: Uuid, key_epoch: u32) -> HandoffFixture {
+        sealed_handoff_fixture_with_role(vault_id, device_id, key_epoch, EnrollmentRole::Gateway)
+    }
+
+    fn sealed_handoff_fixture_with_role(
+        vault_id: Uuid,
+        device_id: Uuid,
+        key_epoch: u32,
+        role: EnrollmentRole,
+    ) -> HandoffFixture {
+        use peppy_crypto::enrollment::{
+            EnrollmentPurpose, HandoffRootPackage, TransferKeypair, open_handoff, seal_handoff,
+        };
+        use peppy_crypto::{create_vault_check_header, derive_root_key, profile_fingerprint_bytes};
+
+        let profile = KeyProfile::new(vault_id, key_epoch).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Phone,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id,
+            credential_digest: [4; 32],
+            role,
+        };
+        let package = HandoffRootPackage::new(root, profile.clone(), header.clone()).unwrap();
+        let encrypted = seal_handoff(&sender, &recipient.public_key(), &context, package).unwrap();
+        let handoff = open_handoff(&recipient, &sender.public_key(), &context, &encrypted).unwrap();
+        HandoffFixture {
+            context,
+            handoff,
+            profile,
+            header,
+        }
+    }
+
+    fn handoff_test_client(
+        directory: &tempfile::TempDir,
+        name: &str,
+        vault_id: VaultId,
+        device_id: DeviceId,
+    ) -> Client {
+        Client::open(
+            ClientConfig {
+                database_path: directory.path().join(name),
+                vault_id,
+                device_id,
+            },
+            DatabaseKey::new(&[42; 32]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Everything a failed handoff import must leave untouched: the durable key rows and
+    /// metadata, the in-memory key status, and whether the epoch's cache is exportable.
+    #[derive(Debug, PartialEq, Eq)]
+    struct KeyState {
+        profiles: Vec<(u32, String)>,
+        checks: Vec<(u32, Vec<u8>)>,
+        metadata: Vec<(String, String)>,
+        status: KeyStatus,
+        cache: Option<Vec<u8>>,
+    }
+
+    fn key_state(client: &Client, epoch: u32) -> KeyState {
+        let rows = {
+            let s = client.lock().unwrap();
+            let profiles = s
+                .conn
+                .prepare("SELECT epoch,profile FROM key_epoch_profiles ORDER BY epoch")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let checks = s
+                .conn
+                .prepare("SELECT epoch,check_value FROM key_cache_checks ORDER BY epoch")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let metadata = s
+                .conn
+                .prepare("SELECT k,v FROM metadata ORDER BY k")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (profiles, checks, metadata)
+        };
+        KeyState {
+            profiles: rows.0,
+            checks: rows.1,
+            metadata: rows.2,
+            status: client.key_status().unwrap(),
+            cache: client
+                .export_native_key_cache(epoch)
+                .ok()
+                .map(|cache| cache.native_storage_bytes().to_vec()),
+        }
+    }
+
+    #[test]
+    fn verified_handoff_requires_the_matching_header_profile_and_epoch() {
+        use peppy_crypto::derive_root_key;
+        use peppy_crypto::enrollment::verify_admission_signature;
+        use peppy_crypto::enrollment::{derive_admission_keypair, open_handoff};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "handoff.db", vault_id, device_id);
+        let HandoffFixture {
+            context,
+            handoff,
+            profile,
+            ..
+        } = sealed_handoff_fixture_with_role(vault_id.0, device_id.0, 4, EnrollmentRole::Owner);
+        let verification_root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let admission_public_key = derive_admission_keypair(&verification_root)
+            .unwrap()
+            .public_key();
+        let signature = handoff.sign_admission_context(&context).unwrap();
+        assert!(verify_admission_signature(&admission_public_key, &context, &signature).unwrap());
+        let mut tampered_context = context.clone();
+        tampered_context.credential_digest[0] ^= 1;
+        assert!(handoff.sign_admission_context(&tampered_context).is_err());
+        client.import_verified_handoff(handoff).unwrap();
+        assert_eq!(client.key_status().unwrap().unlocked_epochs, vec![4]);
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let imported_context = EnrollmentContext {
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            ..context
+        };
+        let encrypted = client
+            .seal_phone_handoff(&sender, &imported_context)
+            .unwrap();
+        assert!(
+            open_handoff(
+                &recipient,
+                &sender.public_key(),
+                &imported_context,
+                &encrypted
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn gateway_verified_handoff_does_not_retain_a_sealing_capability() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "gateway-handoff.db", vault_id, device_id);
+        let fixture = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        client.import_verified_handoff(fixture.handoff).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            ..fixture.context
+        };
+
+        assert!(matches!(
+            client.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
+    }
+
+    #[test]
+    fn verified_handoff_for_a_foreign_vault_is_rejected_without_changing_key_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "foreign.db", VaultId::new(), device_id);
+        let before = key_state(&client, 4);
+        let foreign = sealed_handoff_fixture(Uuid::new_v4(), device_id.0, 4);
+
+        assert!(matches!(
+            client.import_verified_handoff(foreign.handoff),
+            Err(Error::InvalidProfile)
+        ));
+
+        assert_eq!(key_state(&client, 4), before);
+        assert!(client.key_status().unwrap().unlocked_epochs.is_empty());
+        assert!(matches!(
+            client.unlock(&foreign.profile, &foreign.header, HANDOFF_PASSPHRASE),
+            Err(Error::InvalidProfile)
+        ));
+        assert_eq!(key_state(&client, 4), before);
+    }
+
+    #[test]
+    fn verified_handoff_conflicting_with_the_pinned_profile_leaves_no_trace() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "pinned.db", vault_id, device_id);
+        let pinned = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        client.import_verified_handoff(pinned.handoff).unwrap();
+        let before = key_state(&client, 4);
+        assert_eq!(before.status.unlocked_epochs, vec![4]);
+        assert!(before.cache.is_some());
+
+        // A new salt gives a different profile for the same vault and epoch.
+        let conflicting = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        assert_ne!(conflicting.profile, pinned.profile);
+
+        assert!(matches!(
+            client.import_verified_handoff(conflicting.handoff),
+            Err(Error::InvalidProfile)
+        ));
+
+        assert_eq!(key_state(&client, 4), before);
+        assert!(matches!(
+            client.unlock(
+                &conflicting.profile,
+                &conflicting.header,
+                HANDOFF_PASSPHRASE
+            ),
+            Err(Error::InvalidProfile)
+        ));
+        assert_eq!(key_state(&client, 4), before);
+    }
+
+    #[test]
+    fn verified_handoff_for_another_device_is_rejected_without_changing_key_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let client = handoff_test_client(&directory, "device.db", vault_id, DeviceId::new());
+        let before = key_state(&client, 4);
+        let other_device = sealed_handoff_fixture(vault_id.0, Uuid::new_v4(), 4);
+
+        assert!(matches!(
+            client.import_verified_handoff(other_device.handoff),
+            Err(Error::IdentityMismatch)
+        ));
+
+        assert_eq!(key_state(&client, 4), before);
+        assert!(client.key_status().unwrap().unlocked_epochs.is_empty());
+    }
+
+    #[test]
+    fn verified_unlock_seals_only_matching_phone_contexts_not_cached_keys() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole, open_handoff};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "seal.db", vault_id, device_id);
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Phone,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Gateway,
+        };
+
+        let sealed = client.seal_phone_handoff(&sender, &context).unwrap();
+        assert!(open_handoff(&recipient, &sender.public_key(), &context, &sealed).is_ok());
+        let mut wrong_epoch = context.clone();
+        wrong_epoch.key_epoch += 1;
+        assert!(matches!(
+            client.seal_phone_handoff(&sender, &wrong_epoch),
+            Err(Error::InvalidProfile)
+        ));
+        let mut manual = context.clone();
+        manual.purpose = EnrollmentPurpose::Manual;
+        assert!(client.seal_phone_handoff(&sender, &manual).is_err());
+
+        let cache = client.export_native_key_cache(4).unwrap();
+        client.import_native_key_cache(&cache).unwrap();
+        assert!(client.seal_phone_handoff(&sender, &context).is_ok());
+        client.lock().unwrap().keys.clear();
+        client.import_native_key_cache(&cache).unwrap();
+        assert!(matches!(
+            client.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
+        ));
+    }
+
+    #[test]
+    fn reopened_cache_only_client_cannot_seal_a_phone_handoff() {
+        use peppy_crypto::create_vault_check_header;
+        use peppy_crypto::enrollment::{EnrollmentPurpose, EnrollmentRole};
+        use peppy_crypto::profile_fingerprint_bytes;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let profile = KeyProfile::new(vault_id.0, 4).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let source = handoff_test_client(&directory, "reopened-cache.db", vault_id, device_id);
+        source
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let cache = source.export_native_key_cache(4).unwrap();
+        drop(source);
+
+        let cache_only = handoff_test_client(&directory, "reopened-cache.db", vault_id, device_id);
+        cache_only.import_native_key_cache(&cache).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Phone,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id: vault_id.0,
+            fingerprint: profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: 4,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id: DeviceId::new().0,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Gateway,
+        };
+
+        assert!(matches!(
+            cache_only.seal_phone_handoff(&sender, &context),
+            Err(Error::KeysUnavailable)
         ));
     }
 }

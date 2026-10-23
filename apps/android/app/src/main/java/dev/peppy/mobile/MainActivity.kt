@@ -2,6 +2,7 @@ package dev.peppy.mobile
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -25,7 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -40,6 +40,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sms
@@ -47,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -58,8 +60,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -67,55 +69,66 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.theme.PeppyTheme
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
-import java.io.IOException
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val systemBars = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = systemBars, navigationBarStyle = systemBars)
-        setContent { PeppyTheme { Surface { CompanionScreen() } } }
+        setContent { PeppyTheme { Surface { CompanionScreen(this@MainActivity) } } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // A challenge can expire while the process remains alive; foreground re-enters the
+        // serialized relay reconciliation path without doing network work on the activity.
+        RelayWakeRuntime.enrollmentChanged(applicationContext)
+        SmsCaptureLifecycle.onPermissionOrForeground(applicationContext)
     }
 }
 
-private val SMS_PERMISSIONS = arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS)
+private val SMS_PERMISSIONS = arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS, Manifest.permission.READ_SMS)
 private val MMS_PERMISSIONS = arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_MMS)
 
 private fun granted(context: Context, permission: String) =
     context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
-/** Reads at most [CredentialParser.MAX_BYTES] + 1 bytes so oversized files are rejected unread. */
-private fun readBounded(context: Context, uri: Uri): ByteArray? = try {
-    context.contentResolver.openInputStream(uri)?.use { input ->
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(4096)
-        while (out.size() <= CredentialParser.MAX_BYTES) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            out.write(buffer, 0, read)
-        }
-        out.toByteArray()
-    }
-} catch (_: IOException) {
-    null
-} catch (_: SecurityException) {
-    null
-}
-
 internal fun importMessage(result: ImportResult): String = when (result) {
-    ImportResult.IMPORTED -> "Credential verified for this gateway device. Unlock with the vault passphrase next."
+    ImportResult.IMPORTED -> "Credential verified for this phone. Unlock with the vault passphrase next."
     ImportResult.UPDATED -> "Credential refreshed for the same device. Local data and its protected key were kept."
     ImportResult.INVALID_CREDENTIAL -> "This file is not a valid Peppy v1 device credential (16 KiB maximum)."
     ImportResult.SERVER_REJECTED -> "The server did not accept this credential for its vault and device."
-    ImportResult.NOT_A_GATEWAY -> "This credential belongs to a viewing device. Pair this phone as an SMS gateway instead."
+    ImportResult.SETUP_TOKEN_REJECTED -> "The setup code is incorrect. Check the code configured with PEPPY_SETUP_TOKEN and try again."
+    ImportResult.INSTANCE_ALREADY_CLAIMED -> "This server has already been set up. Connect with your admin password or vault shared secret instead."
+    ImportResult.NOT_A_GATEWAY -> "This credential belongs to a viewing device. Pair this phone to send SMS instead."
     ImportResult.NETWORK_ERROR -> "Could not reach the Peppy server. Check the connection and try again."
     ImportResult.IDENTITY_MISMATCH -> "This phone is already bound to a different server, vault, or device. Import refused to protect existing data."
     ImportResult.EXISTING_DATA_WITHOUT_KEY -> "Local Peppy data exists without its protected key. Import refused so that data is not overwritten."
     ImportResult.STORAGE_ERROR -> "Secure storage on this phone is unavailable. Nothing was saved."
+}
+
+internal fun enrollmentErrorMessage(code: String?): Int? = when (code) {
+    "admin_required" -> R.string.peppy_enrollment_error_admin_required
+    "foreign_vault" -> R.string.peppy_enrollment_error_foreign_vault
+    "vault_owner_required" -> R.string.peppy_enrollment_error_vault_owner_required
+    "request_not_approved" -> R.string.peppy_enrollment_error_request_not_approved
+    "username_taken" -> R.string.peppy_enrollment_error_username_taken
+    "operation_conflict" -> R.string.peppy_enrollment_error_operation_conflict
+    "invite_invalid" -> R.string.peppy_enrollment_error_invite_invalid
+    "request_not_found" -> R.string.peppy_enrollment_error_request_not_found
+    "vault_not_found" -> R.string.peppy_enrollment_error_vault_not_found
+    "invalid_username" -> R.string.peppy_enrollment_error_invalid_username
+    "invalid_display_name" -> R.string.peppy_enrollment_error_invalid_display_name
+    "vault_request_limited" -> R.string.peppy_enrollment_error_vault_request_limited
+    "create_vault_limited" -> R.string.peppy_enrollment_error_create_vault_limited
+    "manual_owner_limited" -> R.string.peppy_enrollment_error_manual_owner_limited
+    else -> null
 }
 
 internal fun unlockMessage(result: UnlockResult): String = when (result) {
@@ -130,9 +143,9 @@ internal fun unlockMessage(result: UnlockResult): String = when (result) {
 @Composable
 internal fun syncMessage(status: GatewayStatus): String = when {
     status.syncPhase == SyncPhase.RECOVERY_REQUIRED -> when (status.recoveryReason) {
-        RecoveryReason.PRODUCER_CONFLICT -> "Stopped: the server reports this device's updates conflict with an earlier install. Pair this phone again as a new gateway device."
-        RecoveryReason.DATABASE_MISSING -> "Stopped: this phone's encrypted message database is missing, so it cannot safely continue. Nothing will be sent. Pair this phone again as a new gateway device."
-        else -> "Stopped: this credential was already used by an earlier install. Pair this phone again as a new gateway device."
+        RecoveryReason.PRODUCER_CONFLICT -> "Stopped: the server reports this device's updates conflict with an earlier install. Pair this phone again as a new device."
+        RecoveryReason.DATABASE_MISSING -> "Stopped: this phone's encrypted message database is missing, so it cannot safely continue. Nothing will be sent. Pair this phone again as a new device."
+        else -> "Stopped: this credential was already used by an earlier install. Pair this phone again as a new device."
     }
     status.outboxRejection != null -> "Stopped: the server permanently rejected a queued update (${status.outboxRejection}). Sending and uploads are paused; pair this phone again."
     !status.sharedKeysReady -> stringResource(R.string.peppy_not_unlocked)
@@ -142,46 +155,102 @@ internal fun syncMessage(status: GatewayStatus): String = when {
 
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun CompanionScreen() {
+private fun CompanionScreen(activity: ComponentActivity) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<GatewayStatus?>(null) }
+    var smsHistory by remember { mutableStateOf(SmsHistoryState.WAITING_FOR_VAULT) }
     var refresh by remember { mutableIntStateOf(0) }
-    var importBusy by remember { mutableStateOf(false) }
-    var importResult by remember { mutableStateOf<ImportResult?>(null) }
+    var permissionRefresh by remember { mutableIntStateOf(0) }
     var unlockBusy by remember { mutableStateOf(false) }
     var unlockResult by remember { mutableStateOf<UnlockResult?>(null) }
     var passphrase by remember { mutableStateOf("") }
-    var smsCaptureEnabled by remember { mutableStateOf(GatewayPolicyHost(context).smsCaptureEnabled) }
+    // Null until the core-backed policy is read off the main thread; the switch stays disabled.
+    var smsCaptureEnabled by remember { mutableStateOf<Boolean?>(null) }
     var destination by remember { mutableStateOf("sms") }
     var settingsOpen by remember { mutableStateOf(false) }
-    var pairingOpen by remember { mutableStateOf(false) }
-    var hostedOpen by rememberSaveable { mutableStateOf(false) }
-
-    LaunchedEffect(refresh) {
-        val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
-        if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
-        if (MmsPreferences(context).enabled) MmsCaptureWork.ensurePeriodic(context)
-        status = current
-    }
-
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        importBusy = true
-        scope.launch {
-            importResult = withContext(Dispatchers.IO) {
-                readBounded(context, uri)?.let { NativeGateway.importCredential(context, it) } ?: ImportResult.INVALID_CREDENTIAL
+    var appFiltersOpen by remember { mutableStateOf(false) }
+    var welcomeDestination by rememberSaveable { mutableStateOf(WelcomeDestination.HOSTED) }
+    var ownerPhoneHost by remember { mutableStateOf<OwnerPhoneApprovalHost?>(null) }
+    // Plain remember: the owner flow is transient, so it must not outlive its live host (no saved state).
+    var addPhoneOpen by remember { mutableStateOf(false) }
+    var ownerPhoneAvailable by remember { mutableStateOf(false) }
+    val ownerDeviceAuth = rememberDeviceAuthenticator(
+        title = stringResource(R.string.peppy_owner_phone_secret_reveal_cta),
+        description = stringResource(R.string.peppy_owner_phone_secret_saved_hint),
+    )
+    val ownerPhoneActions = remember(ownerPhoneHost) { ownerPhoneHost?.actions() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val leavingOwnerPhoneHost = ownerPhoneHost
+    // Leaving the flow (done, cancel, back, or recreation) closes the client and cancels any waiting invitation.
+    DisposableEffect(leavingOwnerPhoneHost) {
+        onDispose {
+            leavingOwnerPhoneHost?.let { host ->
+                CoroutineScope(Dispatchers.IO).launch {
+                    host.cancel()
+                    host.close()
+                }
             }
-            importBusy = false
-            refresh++
         }
     }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionRefresh++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(refresh, permissionRefresh) {
+        val current = withContext(Dispatchers.IO) { NativeGateway.status(context) }
+        if (current.sharedKeysReady) GatewayWork.ensurePeriodic(context)
+        if (current.sharedKeysReady) RemoteMessagingService.resumeOrEnqueue(context)
+        MmsCaptureWork.onPermissionOrForeground(context)
+        status = current
+        smsCaptureEnabled = withContext(Dispatchers.IO) { GatewayPolicyHost(context).smsCaptureEnabled }
+        ownerPhoneAvailable = current.sharedKeysReady &&
+            GatewayAccountHost.load(context)?.self?.let { it.role == "owner" && !it.revoked } == true
+        smsHistory = withContext(Dispatchers.IO) {
+            val fallback = smsHistoryState(
+                readGranted = smsReadGranted(context),
+                capturePermitted = GatewayPolicyHost(context).permitsSmsCapture(),
+                databaseOpen = current.databaseOpen,
+            )
+            readSmsHistoryState(context, fallback)
+        }
+    }
+
+    LaunchedEffect(status?.enrolled) {
+        if (status?.enrolled != true) appFiltersOpen = false
+    }
+
+    if (addPhoneOpen && ownerPhoneActions != null) {
+        // System back behaves like the screen's Cancel: close only once the invitation is cancelled.
+        BackHandler {
+            scope.launch {
+                if (ownerPhoneActions.cancel() is OwnerPhoneApprovalHost.Result.Cancelled) {
+                    ownerPhoneHost = null
+                    addPhoneOpen = false
+                }
+            }
+        }
+        OwnerPhoneApprovalScreen(
+            host = ownerPhoneActions,
+            onDone = { ownerPhoneHost = null; addPhoneOpen = false },
+            revealSecret = { revealOwnerVaultSecret(context, ownerDeviceAuth) },
+        )
+        return
+    }
+
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        SmsReadPermissionRecovery.recordResult(context, granted(context, Manifest.permission.READ_SMS))
         refresh++
+        SmsCaptureLifecycle.onPermissionOrForeground(context)
         if (status?.sharedKeysReady == true) GatewayWork.enqueue(context)
     }
     val mmsPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (MmsPreferences(context).enabled && mmsReceiveGranted(context)) MmsCaptureWork.enqueue(context)
+        MmsCaptureWork.onPermissionOrForeground(context)
         refresh++
     }
     val contactsPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -190,11 +259,12 @@ private fun CompanionScreen() {
         refresh++
     }
 
-    if (pairingOpen) {
-        PairingScreen(
-            onDismiss = { pairingOpen = false },
-            onFinished = {
-                pairingOpen = false
+    if (welcomeDestination == WelcomeDestination.HOSTED_PAIRING && status?.enrolled == false) {
+        EnrollmentScreen(
+            initialOrigin = HostedAccountClient.ORIGIN,
+            onDismiss = { welcomeDestination = WelcomeDestination.HOSTED_ENROLLMENT },
+            onEnrolled = {
+                welcomeDestination = WelcomeDestination.HOSTED
                 refresh++
             },
         )
@@ -205,12 +275,31 @@ private fun CompanionScreen() {
         CircularProgressIndicator(Modifier.padding(24.dp))
         return
     }
-    if (hostedOpen && status?.enrolled == false) {
+    ObserveServerReachability(status?.enrolled == true, refresh)
+    if (welcomeDestination == WelcomeDestination.HOSTED_ENROLLMENT && status?.enrolled == false) {
         HostedEnrollmentScreen(
-            onDismiss = { hostedOpen = false },
-            onEnrolled = { hostedOpen = false; refresh++ },
-            onPairExisting = { hostedOpen = false; pairingOpen = true },
+            onDismiss = { welcomeDestination = WelcomeDestination.HOSTED },
+            onEnrolled = { welcomeDestination = WelcomeDestination.HOSTED; refresh++ },
+            onEnrollExisting = { welcomeDestination = WelcomeDestination.HOSTED_PAIRING },
         )
+        return
+    }
+    if (welcomeDestination == WelcomeDestination.SELF_HOSTED_ENROLLMENT && status?.enrolled == false) {
+        EnrollmentScreen(
+            onDismiss = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
+            onEnrolled = { welcomeDestination = WelcomeDestination.HOSTED; refresh++ },
+        )
+        return
+    }
+
+    if (appFiltersOpen && !settingsOpen && status?.enrolled == true) {
+        Column(Modifier.fillMaxSize()) {
+            if (status?.sharedKeysReady == true) ServerOfflineBanner()
+            NotificationAppFiltersScreen(onBack = {
+                appFiltersOpen = false
+                refresh++
+            })
+        }
         return
     }
 
@@ -231,44 +320,44 @@ private fun CompanionScreen() {
         },
         bottomBar = {
             if (status?.enrolled == true && status?.sharedKeysReady == true && !settingsOpen) NavigationBar {
-                listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
+                listOf("mirroring" to R.string.peppy_mirroring, "sms" to R.string.peppy_sms, "contacts" to R.string.peppy_permissions_contacts, "account" to R.string.peppy_account).forEach { (route, labelRes) ->
                     val label = stringResource(labelRes)
-                    val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; else -> Icons.Default.Settings }
+                    val icon = when (route) { "mirroring" -> Icons.Default.Notifications; "sms" -> Icons.Default.Sms; "contacts" -> Icons.Default.Contacts; else -> Icons.Default.Settings }
                     NavigationBarItem(selected = destination == route, onClick = { destination = route }, icon = { Icon(icon, contentDescription = label) }, label = { Text(label) }, modifier = Modifier.testTag("tab-$route"))
                 }
             }
         },
-    ) { innerPadding -> Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(innerPadding).padding(24.dp)
-            .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        if (status?.enrolled != true && !settingsOpen) Column(
-            Modifier.fillMaxWidth().testTag("welcome-screen"),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Column(Modifier.fillMaxWidth().testTag("self-hosted-screen"), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Image(
-                painter = painterResource(R.drawable.peppy_logo),
-                contentDescription = null,
-                modifier = Modifier.size(88.dp).testTag("pairing-hero"),
-            )
-            Button(onClick = { hostedOpen = true }, modifier = Modifier.fillMaxWidth().testTag("hosted-signup-button")) {
-                Text(stringResource(R.string.peppy_production_hosted_cta))
-            }
-            Text(stringResource(R.string.peppy_self_hosted_headline), style = MaterialTheme.typography.headlineSmall)
-            Text(stringResource(R.string.peppy_self_hosted_body), style = MaterialTheme.typography.bodyMedium)
-            OutlinedButton(onClick = { pairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("self-hosted-button")) { Text(stringResource(R.string.peppy_production_join_cta)) }
-            Button(onClick = { pairingOpen = true }, modifier = Modifier.fillMaxWidth().testTag("pair-qr-button")) { Text("Scan QR code") }
-            BusyButton("import-credential-button", "Import credential file", importBusy, enabled = !importBusy && !unlockBusy, modifier = Modifier.fillMaxWidth()) {
-                filePicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
-            }
-            importResult?.let { Text(importMessage(it), Modifier.testTag("enroll-error"), style = MaterialTheme.typography.bodySmall) }
-            OutlinedButton({ context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse("https://github.com/mattv8/peppy#readme"))) }, Modifier.testTag("self-hosted-docs-link")) { Text(stringResource(R.string.peppy_self_hosted_docs_link)) }
+    ) { innerPadding ->
+        Column(Modifier.fillMaxSize().padding(innerPadding)) {
+            if (status?.enrolled == true && status?.sharedKeysReady == true) ServerOfflineBanner()
+            Column(
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)
+                    .semantics { testTagsAsResourceId = true }.testTag("companion-screen"),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+        if (status?.enrolled != true && !settingsOpen) {
+            when (welcomeDestination) {
+                WelcomeDestination.HOSTED -> WelcomeScreen(
+                    onGetStarted = { welcomeDestination = WelcomeDestination.HOSTED_ENROLLMENT },
+                    onSelectSelfHosted = { welcomeDestination = WelcomeDestination.SELF_HOSTED },
+                )
+                WelcomeDestination.SELF_HOSTED -> SelfHostedSetupScreen(
+                    onBack = { welcomeDestination = WelcomeDestination.HOSTED },
+                    onEnroll = { welcomeDestination = WelcomeDestination.SELF_HOSTED_ENROLLMENT },
+                    onOpenGuide = {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/mattv8/peppy#readme"),
+                            ),
+                        )
+                    },
+                )
+                else -> Unit
             }
         }
 
-        if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked)) {
+        if (status?.enrolled == true && !status!!.sharedKeysReady && !settingsOpen) Section("lock-screen", stringResource(R.string.peppy_locked), showDivider = false) {
             Text(
                 "Enter the existing encryption passphrase you already use on your other devices. This phone does not create a new passphrase.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -285,7 +374,7 @@ private fun CompanionScreen() {
             )
             BusyButton(
                 "unlock-button", "Unlock", unlockBusy,
-                enabled = !unlockBusy && !importBusy && status?.enrolled == true && passphrase.isNotEmpty(),
+                enabled = !unlockBusy && status?.enrolled == true && passphrase.isNotEmpty(),
             ) {
                 val attempt = passphrase
                 passphrase = ""
@@ -301,8 +390,8 @@ private fun CompanionScreen() {
             unlockResult?.let { Text(unlockMessage(it), Modifier.testTag("unlock-error"), style = MaterialTheme.typography.bodySmall) }
         }
 
-        if (!settingsOpen && status?.enrolled == true && destination == "sms") Section("sms-tab-screen", stringResource(R.string.peppy_sms)) {
-        Section("status-section", "Gateway status") {
+        if (!settingsOpen && status?.enrolled == true && destination == "sms") Section("sms-tab-screen", stringResource(R.string.peppy_sms), showDivider = false) {
+        Section("status-section", "Phone status", showDivider = false) {
             val current = status
             if (current == null) {
                 CircularProgressIndicator(Modifier.size(20.dp).testTag("status-loading"), strokeWidth = 2.dp)
@@ -321,8 +410,8 @@ private fun CompanionScreen() {
 
         Section("permissions-section", "SMS permissions") {
             Text(
-                "Receive SMS lets this phone save incoming texts, encrypted, to your Peppy server. Send SMS lets it send texts you queue from " +
-                    "your other devices, only after this phone's vault confirms each one. The SMS inbox, contacts, and calls are not read, " +
+                "Receive SMS lets this phone save incoming texts, encrypted, to your Peppy vault. Read phone messages lets it capture sent and received SMS available in Android's message storage. Send SMS lets it send texts you queue from " +
+                    "your other devices, only after this phone's vault confirms each one. Contacts and calls are not read, " +
                     "and Peppy never becomes the default SMS app.",
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -341,18 +430,37 @@ private fun CompanionScreen() {
             ) { Text("Open battery settings") }
         }
 
-        Section("gateway-settings-section", "Gateway settings") {
+        Section("gateway-settings-section", "Phone settings") {
             Row(Modifier.fillMaxWidth().testTag("settings-sms-capture-toggle"), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f)) {
                     Text("Enable SMS capture")
                     Text("Stops new incoming carrier captures without changing pending or unknown send permits.", style = MaterialTheme.typography.bodySmall)
                 }
-                Switch(smsCaptureEnabled, { value ->
-                    GatewayPolicyHost(context).smsCaptureEnabled = value
-                    smsCaptureEnabled = value
+                Switch(smsCaptureEnabled == true, enabled = smsCaptureEnabled != null, onCheckedChange = { value ->
+                    scope.launch {
+                        val enabled = withContext(Dispatchers.IO) {
+                            GatewayPolicyHost(context).smsCaptureEnabled = value
+                            GatewayPolicyHost(context).smsCaptureEnabled
+                        }
+                        smsCaptureEnabled = enabled
+                        refresh++
+                    }
                 })
             }
         }
+
+        SmsSettings(
+            context = context,
+            historyState = smsHistory,
+            needsPermissionSettings = SmsReadPermissionRecovery.needsSettingsRecovery(
+                context,
+                activity.shouldShowRequestPermissionRationale(Manifest.permission.READ_SMS),
+            ),
+            requestPermission = { permissionRequest.launch(arrayOf(Manifest.permission.READ_SMS)) },
+            openPermissionSettings = {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+            },
+        )
 
         MmsSettings(
             context = context,
@@ -361,6 +469,18 @@ private fun CompanionScreen() {
             requestPermissions = { mmsPermissionRequest.launch(MMS_PERMISSIONS) },
             onChanged = { refresh++ },
         )
+
+        if (ownerPhoneAvailable) Section("owner-phone-section", stringResource(R.string.peppy_owner_phone_section_title)) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }
+                        addPhoneOpen = ownerPhoneHost != null
+                    }
+                },
+                modifier = Modifier.testTag("add-phone-button"),
+            ) { Text(stringResource(R.string.peppy_owner_phone_add_cta)) }
+        }
 
         Section("limitations-section", "Messaging limits") {
             Bullet("limitation-mms", "MMS messages sync after the phone finishes downloading them and uploading encrypted copies.")
@@ -373,33 +493,37 @@ private fun CompanionScreen() {
             Bullet("limitation-carrier", stringResource(R.string.peppy_carrier_not_encrypted))
         }
         }
-        if (!settingsOpen && status?.enrolled == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ })
+        if (!settingsOpen && status?.enrolled == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
+        if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
+            ContactSyncSettings(context = context, refresh = refresh, requestPermissions = { contactsPermissionRequest.launch(CONTACT_PERMISSIONS) }, onChanged = { refresh++ })
+        }
         if (!settingsOpen && status?.enrolled == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ })
         if (settingsOpen) {
-            Section("settings-screen", "Contacts") {
-                ContactSyncSettings(context = context, refresh = refresh, requestPermissions = { contactsPermissionRequest.launch(CONTACT_PERMISSIONS) }, onChanged = { refresh++ })
-            }
-            Section("about-section", "About") {
-                Text(stringResource(R.string.peppy_encrypted))
-                StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
+            Column(Modifier.fillMaxWidth().testTag("settings-screen")) {
+                Section("about-section", "About") {
+                    Text(stringResource(R.string.peppy_encrypted))
+                    StatusRow("settings-server", "Server", status?.origin ?: "Not enrolled")
+                }
             }
         }
-    } }
+            }
+        }
+    }
 }
 
 
 
 @Composable
-internal fun Section(tag: String, title: String, content: @Composable () -> Unit) {
+internal fun Section(tag: String, title: String, showDivider: Boolean = true, content: @Composable () -> Unit) {
     Column(Modifier.fillMaxWidth().testTag(tag), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        HorizontalDivider()
+        if (showDivider) HorizontalDivider()
         Text(title, style = MaterialTheme.typography.titleMedium)
         content()
     }
 }
 
 @Composable
-private fun BusyButton(tag: String, label: String, busy: Boolean, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun BusyButton(tag: String, label: String, busy: Boolean, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Button(onClick = onClick, enabled = enabled, modifier = modifier.testTag(tag)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)

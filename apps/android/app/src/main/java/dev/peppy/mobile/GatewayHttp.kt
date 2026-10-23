@@ -8,6 +8,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import okhttp3.Request
 
 /** One HTTP response. For non-2xx, [body] is the bounded error body (if any). */
 class HttpResult(val code: Int, val body: String?) {
@@ -25,25 +26,50 @@ class HttpResult(val code: Int, val body: String?) {
 /** Thrown for transport failures and over-budget responses; the worker retries with backoff. */
 class GatewayTransportException(message: String) : IOException(message)
 
+internal enum class GatewayHttpMethod(val code: Long) { GET(1), POST(2), PUT(3), DELETE(4), OTHER(5) }
+internal enum class GatewayHttpRoute(val code: Long) { CAPABILITIES(1), COMPACTION_CAPABILITY(2), EVENTS(3), SNAPSHOT(4), SNAPSHOT_RECORDS(5), VAULT(6), ATTACHMENTS(7), OTHER(8) }
+
 /**
  * Authenticated HTTP to the credential's canonical origin. Redirects are disabled so the bearer
  * token can never be forwarded elsewhere; response bodies are bounded like the Rust simulator's.
  */
-class GatewayHttp(private val origin: String, private val bearerToken: String) {
+class GatewayHttp(
+    private val origin: String,
+    private val bearerToken: String,
+    private val observeResponse: ((HttpResult) -> Unit)? = null,
+) {
     fun get(path: String): HttpResult = request("GET", path, null)
 
     fun postJson(path: String, body: String): HttpResult = request("POST", path, body)
 
     fun deleteJson(path: String, body: String): HttpResult = request("DELETE", path, body)
 
+    /** The websocket uses the same credential origin and never accepts a caller-supplied URL. */
+    fun webSocketRequest(): Request {
+        val uri = java.net.URI(origin)
+        val scheme = when (uri.scheme) {
+            "https" -> "wss"
+            "http" -> "ws"
+            else -> throw IllegalArgumentException("unsupported canonical origin")
+        }
+        require(uri.rawPath.isNullOrEmpty() || uri.rawPath == "/")
+        require(uri.rawQuery == null && uri.rawFragment == null && uri.userInfo == null)
+        return Request.Builder()
+            .url("$scheme://${uri.authority}/v1/ws")
+            .header("Authorization", "Bearer $bearerToken")
+            .header("Accept", "application/json")
+            .build()
+    }
+
     fun putFile(path: String, file: File, expectedBytes: Long): HttpResult {
         requireV1ResourcePath(path)
         if (!file.isFile || file.length() != expectedBytes) throw GatewayTransportException("cipher file size changed")
-        return binaryConnection("PUT", path) { connection ->
+        return binaryConnection("PUT", path, expectedBytes) { connection ->
             connection.doOutput = true
             connection.setFixedLengthStreamingMode(expectedBytes)
             FileInputStream(file).use { input -> connection.outputStream.use { output -> input.copyTo(output, 16 * 1024) } }
             if (file.length() != expectedBytes) throw GatewayTransportException("cipher file size changed")
+            0L
         }
     }
 
@@ -66,6 +92,7 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
                         output.write(buffer, 0, read)
                     }
                 } }
+                total
             }
             if (!result.ok) destination.delete()
             result
@@ -77,15 +104,12 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
 
     private fun request(method: String, path: String, body: String?): HttpResult {
         requireV1JsonPath(path)
+        val diagnosticsEnabled = SyncDiagnostics.enabled
+        val started = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
+        val requestBytes = if (diagnosticsEnabled) body?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L else 0L
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
-            connection.instanceFollowRedirects = false
-            connection.useCaches = false
-            connection.requestMethod = method
-            connection.connectTimeout = TIMEOUT_MS
-            connection.readTimeout = TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
-            connection.setRequestProperty("Accept", "application/json")
+            configureConnection(connection, method)
             if (body != null) {
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 connection.doOutput = true
@@ -97,51 +121,97 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
             if (code !in 200..299) {
                 // Small bounded error body so permanent rejections can be told apart by code.
                 val error = try {
-                    connection.errorStream?.use { readBounded(it, MAX_ERROR_BYTES) }
+                    connection.errorStream?.use { readBoundedWithCount(it, MAX_ERROR_BYTES) }
                 } catch (_: IOException) {
                     null
                 }
-                return HttpResult(code, error)
+                return observed(HttpResult(code, error?.body), method, path, requestBytes, started, error?.bytes ?: 0L)
             }
-            return HttpResult(code, connection.inputStream.use { readBounded(it) })
+            val response = connection.inputStream.use { readBoundedWithCount(it) }
+            return observed(HttpResult(code, response.body), method, path, requestBytes, started, response.bytes)
+        } catch (error: Exception) {
+            if (diagnosticsEnabled) recordRequest(method, path, -1, requestBytes, 0, started, false)
+            throw error
         } finally {
             connection.disconnect()
         }
     }
 
-    private fun binaryConnection(method: String, path: String, transfer: (HttpURLConnection) -> Unit): HttpResult {
+    private fun binaryConnection(method: String, path: String, requestBytes: Long = 0L, transfer: (HttpURLConnection) -> Long): HttpResult {
+        val diagnosticsEnabled = SyncDiagnostics.enabled
+        val started = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
         val connection = URL(origin + path).openConnection() as HttpURLConnection
         try {
-            connection.instanceFollowRedirects = false
-            connection.useCaches = false
-            connection.requestMethod = method
-            connection.connectTimeout = TIMEOUT_MS
-            connection.readTimeout = TIMEOUT_MS
-            connection.setRequestProperty("Authorization", "Bearer $bearerToken")
-            connection.setRequestProperty("Accept", "application/json")
+            configureConnection(connection, method)
             if (method == "PUT") {
                 connection.setRequestProperty("Content-Type", "application/octet-stream")
                 transfer(connection)
-                return result(connection, connection.responseCode)
+                val (result, responseBytes) = result(connection, connection.responseCode)
+                return observed(result, method, path, requestBytes, started, responseBytes)
             }
             val code = connection.responseCode
-            if (code !in 200..299) return result(connection, code)
-            transfer(connection)
-            return HttpResult(code, null)
+            if (code !in 200..299) {
+                val (result, responseBytes) = result(connection, code)
+                return observed(result, method, path, requestBytes, started, responseBytes)
+            }
+            val responseBytes = transfer(connection)
+            return observed(HttpResult(code, null), method, path, requestBytes, started, responseBytes)
         } catch (error: GatewayTransportException) {
+            if (diagnosticsEnabled) recordRequest(method, path, -1, requestBytes, 0L, started, false)
             throw error
         } catch (error: IOException) {
             // A server can reject before consuming a streaming body; only recover a real rejection.
             val code = try { connection.responseCode } catch (_: IOException) { -1 }
-            if (code > 0 && code !in 200..299) return result(connection, code)
+            if (code > 0 && code !in 200..299) {
+                val (result, responseBytes) = result(connection, code)
+                return observed(result, method, path, requestBytes, started, responseBytes)
+            }
+            if (diagnosticsEnabled) recordRequest(method, path, -1, requestBytes, 0L, started, false)
             throw GatewayTransportException("transport failure")
         } finally { connection.disconnect() }
     }
 
-    private fun result(connection: HttpURLConnection, code: Int): HttpResult =
-        if (code in 200..299) HttpResult(code, null) else HttpResult(code, try {
-            connection.errorStream?.use { readBounded(it, MAX_ERROR_BYTES) }
-        } catch (_: IOException) { null })
+    private fun configureConnection(connection: HttpURLConnection, method: String) {
+        connection.instanceFollowRedirects = false
+        connection.useCaches = false
+        connection.requestMethod = method
+        connection.connectTimeout = TIMEOUT_MS
+        connection.readTimeout = TIMEOUT_MS
+        connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+        connection.setRequestProperty("Accept", "application/json")
+    }
+
+    private fun result(connection: HttpURLConnection, code: Int): Pair<HttpResult, Long> {
+        if (code in 200..299) return HttpResult(code, null) to 0L
+        val error = try {
+            connection.errorStream?.use { readBoundedWithCount(it, MAX_ERROR_BYTES) }
+        } catch (_: IOException) {
+            null
+        }
+        return HttpResult(code, error?.body) to (error?.bytes ?: 0L)
+    }
+
+    private fun observed(result: HttpResult, method: String? = null, path: String? = null, requestBytes: Long = 0L, started: Long = 0L, responseBytes: Long? = null): HttpResult {
+        observeResponse?.invoke(result)
+        if (SyncDiagnostics.enabled && method != null && path != null) {
+            recordRequest(method, path, result.code, requestBytes, responseBytes ?: 0L, started, true)
+        }
+        return result
+    }
+
+    private fun recordRequest(method: String, path: String, status: Int, requestBytes: Long, responseBytes: Long, started: Long, success: Boolean) {
+        if (!SyncDiagnostics.enabled) return
+        SyncDiagnostics.record(
+            SyncTraceEvent.HTTP_REQUEST,
+            SyncTraceField.METHOD to methodCategory(method).code,
+            SyncTraceField.ROUTE to routeCategory(path).code,
+            SyncTraceField.STATUS to status.toLong(),
+            SyncTraceField.REQUEST_BYTES to requestBytes,
+            SyncTraceField.RESPONSE_BYTES to responseBytes,
+            SyncTraceField.DURATION_MS to (SyncDiagnostics.nowMs() - started),
+            SyncTraceField.SUCCESS to if (success) 1 else 0,
+        )
+    }
 
     private fun requireV1JsonPath(path: String) {
         require(!path.contains("#"))
@@ -160,6 +230,10 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
         const val MAX_MEDIA_BYTES = 33L * 1024 * 1024
 
         internal fun readBounded(input: InputStream, limit: Int = MAX_RESPONSE_BYTES): String {
+            return readBoundedWithCount(input, limit).body
+        }
+
+        private fun readBoundedWithCount(input: InputStream, limit: Int = MAX_RESPONSE_BYTES): BoundedBody {
             val out = ByteArrayOutputStream()
             val buffer = ByteArray(16 * 1024)
             while (true) {
@@ -168,9 +242,29 @@ class GatewayHttp(private val origin: String, private val bearerToken: String) {
                 if (out.size() + read > limit) throw GatewayTransportException("response exceeds budget")
                 out.write(buffer, 0, read)
             }
-            return out.toString(Charsets.UTF_8.name())
+            return BoundedBody(out.toString(Charsets.UTF_8.name()), out.size().toLong())
+        }
+
+        internal fun routeCategory(path: String): GatewayHttpRoute = when (path.substringBefore('?')) {
+            "/v1/capabilities" -> GatewayHttpRoute.CAPABILITIES
+            "/v1/compaction/capability" -> GatewayHttpRoute.COMPACTION_CAPABILITY
+            "/v1/events" -> GatewayHttpRoute.EVENTS
+            "/v1/snapshot" -> GatewayHttpRoute.SNAPSHOT
+            "/v1/snapshot/records" -> GatewayHttpRoute.SNAPSHOT_RECORDS
+            "/v1/vault" -> GatewayHttpRoute.VAULT
+            else -> if (path.substringBefore('?').startsWith("/v1/attachments/")) GatewayHttpRoute.ATTACHMENTS else GatewayHttpRoute.OTHER
+        }
+
+        private fun methodCategory(method: String): GatewayHttpMethod = when (method) {
+            "GET" -> GatewayHttpMethod.GET
+            "POST" -> GatewayHttpMethod.POST
+            "PUT" -> GatewayHttpMethod.PUT
+            "DELETE" -> GatewayHttpMethod.DELETE
+            else -> GatewayHttpMethod.OTHER
         }
     }
+
+    private data class BoundedBody(val body: String, val bytes: Long)
 }
 
 /** Hosted account transport has the same redirect, timeout, and response-budget boundary as sync. */

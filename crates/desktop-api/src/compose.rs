@@ -1,5 +1,5 @@
 //! Shared local draft composition policy for native and browser hosts.
-use crate::{DraftView, GatewayView, SendResultView, draft_view};
+use crate::{DraftView, GatewayAvailability, GatewayView, SendResultView, draft_view};
 use peppy_client_core::{
     AttachmentId, Client, ComposeDraft, ComposeDraftUpdate, ConversationId, DeviceId, Direction,
     DraftId, Error as CoreError, GatewayRoute, Message, Transport,
@@ -41,6 +41,14 @@ pub struct DraftInput {
     #[serde(default)]
     pub sim_id: Option<String>,
     #[serde(default)]
+    pub expected_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardDraftInput {
+    pub id: String,
+    pub conversation_id: String,
     pub expected_revision: String,
 }
 
@@ -93,9 +101,43 @@ pub fn normalize_recipient(value: &str) -> Result<String, ComposeError> {
 fn parse_route(gateway: &str, sim: &str) -> Result<GatewayRoute, ComposeError> {
     Ok(GatewayRoute {
         gateway_device_id: DeviceId::from_str(gateway)
-            .map_err(|_| ui("invalid-route", "The gateway ID is invalid."))?,
+            .map_err(|_| ui("invalid-route", "The phone ID is invalid."))?,
         subscription_id: sim.to_owned(),
     })
+}
+fn gateway_sendable(gateway: &GatewayView) -> Result<(), ComposeError> {
+    let (code, message) = match gateway.availability {
+        GatewayAvailability::Offline => (
+            "gateway-offline",
+            "The selected phone is offline; the draft was kept.",
+        ),
+        GatewayAvailability::NeverConnected => (
+            "gateway-not-connected",
+            "The selected phone has not connected yet; the draft was kept.",
+        ),
+        GatewayAvailability::NoSmsSim => (
+            "gateway-no-sms-sim",
+            "The selected phone has no SMS SIM; the draft was kept.",
+        ),
+        GatewayAvailability::SmsPermissionNeeded => (
+            "gateway-permission-needed",
+            "The selected phone needs SMS permission; the draft was kept.",
+        ),
+        GatewayAvailability::SmsUnavailable | GatewayAvailability::UnsupportedPlatform => (
+            "gateway-unsupported",
+            "The selected phone/SIM cannot send SMS; the draft was kept.",
+        ),
+        GatewayAvailability::CapabilitiesUnknown => (
+            "gateway-capabilities-unknown",
+            "The selected phone has not reported valid SMS capabilities; the draft was kept.",
+        ),
+        GatewayAvailability::Unknown
+        | GatewayAvailability::Connected
+        | GatewayAvailability::Delayed => {
+            return Ok(());
+        }
+    };
+    Err(ui(code, message))
 }
 fn other_party(message: &Message) -> Vec<String> {
     match message.payload.direction {
@@ -148,26 +190,73 @@ fn check_attachments(client: &Client, ids: &[String]) -> Result<Vec<AttachmentId
 
 pub fn save_draft(client: &Client, input: &DraftInput) -> Result<DraftView, ComposeError> {
     let expected = revision(&input.expected_revision)?;
+    let is_new = DraftId::from_str(&input.id).is_err();
+    let recipients = input
+        .recipient_ids
+        .iter()
+        .map(|value| normalize_recipient(value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attachment_ids = check_attachments(client, &input.attachment_ids)?;
+    let requested_route = match (
+        input.gateway_id.as_deref().unwrap_or(""),
+        input.sim_id.as_deref().unwrap_or(""),
+    ) {
+        ("", "") => None,
+        (gateway, sim) if !gateway.is_empty() && !sim.is_empty() => {
+            Some(parse_route(gateway, sim)?)
+        }
+        _ => return Err(ui("invalid-route", "Select a phone and SIM together.")),
+    };
+    let update = ComposeDraftUpdate {
+        text: input.text.clone(),
+        recipients,
+        attachment_ids,
+        route: requested_route,
+    };
+    if is_new && input.conversation_id.is_empty() {
+        if expected != 0 {
+            return Err(ui(
+                "invalid-draft",
+                "A new draft must start at revision zero.",
+            ));
+        }
+        return client
+            .save_new_compose_draft(update)
+            .map(|draft| draft_view(&draft))
+            .map_err(ComposeError::Core);
+    }
     let draft_id = match DraftId::from_str(&input.id) {
         Ok(id) => id,
         Err(_) => {
-            let conversation = match input.conversation_id.as_str() {
-                "" => None,
-                id => Some(
-                    ConversationId::from_str(id)
-                        .map_err(|_| ui("invalid-draft", "The conversation ID is invalid."))?,
-                ),
-            };
+            let conversation = ConversationId::from_str(&input.conversation_id)
+                .map_err(|_| ui("invalid-draft", "The conversation ID is invalid."))?;
             client
-                .create_compose_draft(conversation)
+                .create_compose_draft(Some(conversation))
                 .map_err(ComposeError::Core)?
                 .draft_id
         }
     };
-    let current = client
-        .compose_draft(draft_id)
-        .map_err(ComposeError::Core)?
-        .ok_or(ComposeError::Core(CoreError::NotFound))?;
+    let current = validate_draft_source(client, draft_id, &input.conversation_id)?;
+    let route = update
+        .route
+        .clone()
+        .or_else(|| current.as_ref().and_then(|draft| draft.route.clone()));
+    let Some(current) = current else {
+        // Let core report a redirect as `draft-moved` instead of masking it as not-found.
+        return client
+            .save_compose_draft(
+                draft_id,
+                expected,
+                ComposeDraftUpdate {
+                    text: update.text,
+                    recipients: update.recipients,
+                    attachment_ids: update.attachment_ids,
+                    route,
+                },
+            )
+            .map(|draft| draft_view(&draft))
+            .map_err(ComposeError::Core);
+    };
     if !input.conversation_id.is_empty()
         && input.conversation_id != current.conversation_id.to_string()
     {
@@ -176,34 +265,38 @@ pub fn save_draft(client: &Client, input: &DraftInput) -> Result<DraftView, Comp
             "The draft does not belong to this conversation.",
         ));
     }
-    let route = match (
-        input.gateway_id.as_deref().unwrap_or(""),
-        input.sim_id.as_deref().unwrap_or(""),
-    ) {
-        ("", "") => current.route.clone(),
-        (gateway, sim) if !gateway.is_empty() && !sim.is_empty() => {
-            Some(parse_route(gateway, sim)?)
-        }
-        _ => return Err(ui("invalid-route", "Select a gateway and SIM together.")),
-    };
-    let recipients = input
-        .recipient_ids
-        .iter()
-        .map(|value| normalize_recipient(value))
-        .collect::<Result<_, _>>()?;
     let saved = client
         .save_compose_draft(
             draft_id,
             expected,
             ComposeDraftUpdate {
-                text: input.text.clone(),
-                recipients,
-                attachment_ids: check_attachments(client, &input.attachment_ids)?,
+                text: update.text,
+                recipients: update.recipients,
+                attachment_ids: update.attachment_ids,
                 route,
             },
         )
         .map_err(ComposeError::Core)?;
     Ok(draft_view(&saved))
+}
+
+pub fn discard_draft(client: &Client, input: &DiscardDraftInput) -> Result<(), ComposeError> {
+    let draft_id = DraftId::from_str(&input.id)
+        .map_err(|_| ui("invalid-draft", "The draft ID is invalid."))?;
+    let conversation = ConversationId::from_str(&input.conversation_id)
+        .map_err(|_| ui("invalid-draft", "The conversation ID is invalid."))?;
+    let expected = revision(&input.expected_revision)?;
+    if let Some(draft) = client.compose_draft(draft_id).map_err(ComposeError::Core)?
+        && draft.conversation_id != conversation
+    {
+        return Err(ui(
+            "invalid-draft",
+            "The draft does not belong to this conversation.",
+        ));
+    }
+    client
+        .discard_compose_draft(draft_id, expected)
+        .map_err(ComposeError::Core)
 }
 
 pub fn send_draft(
@@ -219,14 +312,33 @@ pub fn send_draft(
         _ => {
             return Err(ui(
                 "invalid-route",
-                "Select a gateway and SIM before sending.",
+                "Select a phone and SIM before sending.",
             ));
         }
     };
+    let gateways = gateways.ok_or_else(|| {
+        ui(
+            "gateways-unknown",
+            "Phone capabilities have not been loaded from the server yet; the draft was kept.",
+        )
+    })?;
+    let gateway = find_route(gateways, gateway_id, sim_id).ok_or_else(|| {
+        ui(
+            "gateway-unavailable",
+            "The selected phone/SIM is not currently reported by the server; the draft was kept.",
+        )
+    })?;
+    if !gateway.supports_sms {
+        return Err(ui(
+            "gateway-unsupported",
+            "The selected phone/SIM cannot send SMS; the draft was kept.",
+        ));
+    }
+    gateway_sendable(gateway)?;
+    validate_draft_source(client, draft_id, &input.conversation_id)?;
     let stored: ComposeDraft = client
-        .compose_draft(draft_id)
-        .map_err(ComposeError::Core)?
-        .ok_or(ComposeError::Core(CoreError::NotFound))?;
+        .resolve_compose_draft_for_send(draft_id, expected)
+        .map_err(ComposeError::Core)?;
     if !input.conversation_id.is_empty()
         && input.conversation_id != stored.conversation_id.to_string()
     {
@@ -239,24 +351,6 @@ pub fn send_draft(
         return Err(ComposeError::Core(CoreError::StaleDraft {
             current_revision: stored.revision,
         }));
-    }
-    let gateways = gateways.ok_or_else(|| {
-        ui(
-            "gateways-unknown",
-            "Gateway capabilities have not been loaded from the server yet; the draft was kept.",
-        )
-    })?;
-    let gateway = find_route(gateways, gateway_id, sim_id).ok_or_else(|| {
-        ui(
-            "gateway-unavailable",
-            "The selected gateway/SIM is not currently reported by the server; the draft was kept.",
-        )
-    })?;
-    if !gateway.supports_sms {
-        return Err(ui(
-            "gateway-unsupported",
-            "The selected gateway/SIM cannot send SMS; the draft was kept.",
-        ));
     }
     let route = parse_route(gateway_id, sim_id)?;
     let (derived_recipients, latest_transport) =
@@ -309,13 +403,13 @@ pub fn send_draft(
         if !gateway.supports_mms || gateway.mms_content_version.unwrap_or(0) < 2 {
             return Err(ui(
                 "mms-unsupported",
-                "The selected gateway/SIM does not report MMS capability version 2; the draft was kept.",
+                "The selected phone/SIM does not report MMS capability version 2; the draft was kept.",
             ));
         }
         if recipients.len() > gateway.mms_max_recipients.unwrap_or(MAX_RECIPIENTS) {
             return Err(ui(
                 "mms-too-many-recipients",
-                "This MMS route does not support that many recipients; the draft was kept.",
+                "This MMS phone route does not support that many recipients; the draft was kept.",
             ));
         }
         let bytes = attachment_info
@@ -342,23 +436,35 @@ pub fn send_draft(
             ));
         }
     }
-    let revision = if stored.route.as_ref() != Some(&route) || recipients != stored.recipients {
-        client
-            .save_compose_draft(
-                draft_id,
-                expected,
-                ComposeDraftUpdate {
-                    text: stored.text.clone(),
-                    recipients,
-                    attachment_ids: stored.attachment_ids.clone(),
-                    route: Some(route),
-                },
-            )
-            .map_err(ComposeError::Core)?
-            .revision
-    } else {
-        expected
-    };
+    let (draft_id, revision) =
+        if stored.route.as_ref() != Some(&route) || recipients != stored.recipients {
+            let saved = client
+                .save_compose_draft(
+                    draft_id,
+                    expected,
+                    ComposeDraftUpdate {
+                        text: stored.text.clone(),
+                        recipients,
+                        attachment_ids: stored.attachment_ids.clone(),
+                        route: Some(route),
+                    },
+                )
+                .map_err(ComposeError::Core)?;
+            if saved.draft_id != draft_id || saved.conversation_id != stored.conversation_id {
+                return Err(ComposeError::Core(CoreError::DraftMoved {
+                    draft_id: saved.draft_id,
+                    conversation_id: saved.conversation_id,
+                    current_revision: saved.revision,
+                }));
+            }
+            (saved.draft_id, saved.revision)
+        } else {
+            (draft_id, expected)
+        };
+    // A route/recipient update can move a draft. Re-resolve immediately before enqueueing.
+    client
+        .resolve_compose_draft_for_send(draft_id, revision)
+        .map_err(ComposeError::Core)?;
     let transport = if requires_mms {
         Transport::Mms
     } else {
@@ -366,12 +472,17 @@ pub fn send_draft(
     };
     if let Err(source) = client.send_compose_draft_checked_transport(draft_id, revision, transport)
     {
-        let current_revision = client
-            .compose_draft(draft_id)
-            .ok()
-            .flatten()
-            .map(|draft| draft.revision)
-            .unwrap_or(revision);
+        let current_revision = match &source {
+            CoreError::DraftMoved {
+                current_revision, ..
+            } => *current_revision,
+            _ => client
+                .compose_draft(draft_id)
+                .ok()
+                .flatten()
+                .map(|draft| draft.revision)
+                .unwrap_or(revision),
+        };
         return Err(ComposeError::AfterRoute {
             source,
             current_revision,
@@ -383,4 +494,84 @@ pub fn send_draft(
         reason: None,
         revision: Some((revision + 1).to_string()),
     })
+}
+
+/// Ensures a draft's live or redirected source belongs to the caller before any operation that
+/// could expose a moved target or persist a route.
+fn validate_draft_source(
+    client: &Client,
+    draft_id: DraftId,
+    conversation_id: &str,
+) -> Result<Option<ComposeDraft>, ComposeError> {
+    let current = client.compose_draft(draft_id).map_err(ComposeError::Core)?;
+    if conversation_id.is_empty() {
+        return Ok(current);
+    }
+    let source = current
+        .as_ref()
+        .map(|draft| draft.conversation_id)
+        .or(client
+            .compose_draft_source_conversation(draft_id)
+            .map_err(ComposeError::Core)?);
+    if source.is_some_and(|source| source.to_string() != conversation_id) {
+        return Err(ui(
+            "invalid-draft",
+            "The draft does not belong to this conversation.",
+        ));
+    }
+    Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gateway(availability: GatewayAvailability) -> GatewayView {
+        GatewayView {
+            id: "gateway".into(),
+            name: "Gateway".into(),
+            sim_id: "sim".into(),
+            online: false,
+            simulated: false,
+            supports_sms: true,
+            supports_mms: true,
+            availability,
+            last_seen_age_seconds: None,
+            presence: None,
+            wake_route: false,
+            capability_note: None,
+            mms_content_version: Some(2),
+            mms_max_bytes: None,
+            mms_limit_source: None,
+            mms_max_recipients: None,
+        }
+    }
+
+    #[test]
+    fn send_guard_blocks_unavailable_states_and_keeps_unknown_sendable() {
+        for availability in [
+            GatewayAvailability::Offline,
+            GatewayAvailability::NeverConnected,
+            GatewayAvailability::NoSmsSim,
+            GatewayAvailability::SmsPermissionNeeded,
+            GatewayAvailability::SmsUnavailable,
+            GatewayAvailability::CapabilitiesUnknown,
+            GatewayAvailability::UnsupportedPlatform,
+        ] {
+            assert!(
+                gateway_sendable(&gateway(availability)).is_err(),
+                "{availability:?}"
+            );
+        }
+        for availability in [
+            GatewayAvailability::Unknown,
+            GatewayAvailability::Connected,
+            GatewayAvailability::Delayed,
+        ] {
+            assert!(
+                gateway_sendable(&gateway(availability)).is_ok(),
+                "{availability:?}"
+            );
+        }
+    }
 }

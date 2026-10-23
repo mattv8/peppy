@@ -1,125 +1,128 @@
 # Infrastructure and release boundaries
 
-This is an agent reference for Peppy-specific deployment and artifact constraints.
-Paths prefixed with `peppy-platform/` refer to the separate private repository,
-not a directory in this checkout. Live addresses, inventory, credentials, and
-operator procedures belong in that repository's `docs/operator-runbook.md`
-and its external inventory/env files.
+Agent reference for public Peppy build, release, and native-artifact constraints.
+Paths prefixed with `peppy-platform/` belong to a separate private repository
+that is not in this checkout. Its inventory, hosts, credentials, runbooks, and
+hosted deployment state are out of scope here; do not infer them from this
+checkout.
 
-## Public and hosted lanes
+## Ownership and signing authority
 
-- `mattv8/peppy` owns shared server/contracts and native clients. Its Harbor
-  images live under `hub.docker.visnovsky.us/library/`. Private identity,
-  billing, policy, and hosted web/deployment code belong to
-  `mattv8/peppy-platform`; the hosted image uses `private-library/peppy-hosted`.
-  Public images remain independently self-hostable without hosted credentials.
-- Public `production` pushes advance `:edge` and immutable `sha-<commit>` tags;
-  a stable version requires the separate Release workflow. A production branch
-  push alone is not a stable release. See [release channels](../README.md) and
-  [public image publication](../infra/release/publish-image.sh).
-- Hosted publication binds **two** commits: the private release SHA and the
-  exact public revision in `peppy-platform/docker/source-pins.json`. A matching
-  branch name or locally edited sibling checkout is insufficient. The workflow
-  checks publication/ancestry, uses the pinned public tree as a named build
-  context, and checks both OCI revision labels when reusing a hosted digest.
-- The private pipeline consumes the signed public relay at its pinned public
-  revision; it does not rebuild or sign the relay with the hosted key.
-  Public signing uses `COSIGN_PRIVATE_KEY`; the hosted publisher uses
-  `COSIGN_KEY`. Public-repository `COSIGN_PUBLIC_KEY` verifies public images;
-  private-repository `COSIGN_PUBLIC_KEY` verifies hosted images. The private
-  pipeline verifies the public relay with `PUBLIC_COSIGN_KEY`, and Community
-  staging uses `vars.COMMUNITY_COSIGN_PUBLIC_KEY`. Same-named secrets across
-  these repositories do not imply the same signing authority.
+- This repository owns shared server and contracts, native clients, and public
+  images. Public images stay self-hostable without hosted credentials.
+- The private platform repository owns identity, billing, policy, hosted web,
+  deployment, and hosted images. Hosted artifacts are not public library images.
+- Signing authority is per repository. Public `COSIGN_PRIVATE_KEY` and
+  `COSIGN_PUBLIC_KEY` cover public images; the private hosted publisher has its
+  own key and verifier. Same-named secrets or variables across repositories do
+  not imply the same signing authority. Do not move keys between them.
+- Hosted publication binds two commits: the private release SHA and the exact
+  public revision pinned in the private source-pin file. A matching branch name
+  or a locally edited sibling checkout is not enough. The private pipeline
+  consumes the signed public relay at that pinned revision; it does not rebuild
+  or re-sign the relay with the hosted key.
 
-Source: `peppy-platform/.github/workflows/build-publish.yml`,
-`docker/scripts/source_compatibility.py`, and `docs/operator-runbook.md`.
+## Public image lanes and release
 
-## Harbor's unsigned-image read trap
+- [`publish-community-image.yml`](../.github/workflows/publish-community-image.yml)
+  accepts only `edge` for a `production` branch push, `staging` for a `staging`
+  push, or a semver tag from protected stable dispatch. Publication also writes
+  immutable `sha-<commit>` tags.
+- A production push publishes `:edge` and its immutable SHA tag, not a stable
+  version. Stable publication through the separate Release workflow requires a
+  successful CI push run's `gate` job for the same commit. See
+  [release boundary](../README.md#release-boundary).
+- [`publish-image.sh`](../infra/release/publish-image.sh) keeps the library
+  namespace and checks `sha-<commit>` before building. If an existing immutable
+  tag inspects successfully, it verifies that digest's signature with the public
+  key and promotes it; it never rebuilds or overwrites that tag. It builds only
+  when inspection reports a missing manifest, then signs the digest produced by
+  its own push. Aliases are created from the digest with `imagetools create`.
+- The public script lacks the private publisher's metadata-file and error
+  classification flow; a live sign/verify cycle is still needed to claim
+  registry compatibility.
 
-- Harbor's Cosign-required project policy can reject **manifest reads** with
-  HTTP 412 after an image push has already succeeded. That failure does not
-  establish that the tag is absent or that Docker failed to build it.
-- The hosted publisher uses Buildx `--metadata-file` and reads the flat JSON
-  key `containerimage.digest`, not `containerimage.config.digest` or a nested
-  object. It signs that build-produced digest, verifies it with the expected
-  public key, then pulls and checks labels. Reading the unsigned manifest to
-  discover the digest before signing recreates the failure.
-- Existing unsigned or uncertain tags fail closed. Rerunning the same source
-  pair is not an automatic repair path. Signature policy must not be disabled
-  to turn a failed inspection into permission to overwrite an immutable tag.
-- For an inspected reference, the private publisher treats only the entire
-  `<requested-reference>: not found` response (optionally prefixed `ERROR: `)
-  as permission to build a missing tag. Other inspection errors, including
-  generic `manifest unknown`, fail closed. A generic `not found` can describe
-  a missing tool or resolver rather than a missing image.
+## Harbor's unsigned-manifest trap
 
-Source: `peppy-platform/docker/scripts/publish_hosted_image.py` and its tests.
-The public publisher is a separate implementation; do not assume it has the
-private metadata/classification behavior. A successful live sign/verify cycle
-is still required to establish compatibility with the configured registry.
+- Harbor project policy that requires Cosign can reject **manifest reads** with
+  HTTP 412 after a push already succeeded. That failure does not prove the tag
+  is absent or that the build failed.
+- The public publisher reads the new manifest before signing, so that policy
+  can block it at digest discovery. It does not use the private publisher's
+  build-metadata digest flow. A 412 is not a missing-manifest response; rerunning
+  or disabling signature policy does not establish safe immutable-tag repair.
 
-## Deployment authority and proof
+## Community setup, state, and proxies
 
-- Build and rehearsal jobs use the private `buildserver` runners. Production
-  deployment uses `[self-hosted, peppy-deploy, peppy1]`. Peppy1 is the sole
-  controller because its release journal and `flock` are host-local.
-  Peppy2 is a deployment target whose runner
-  is standby-only; two controllers would not share that lock or journal.
-- A hosted production deployment requires the **same build run's** manifest
-  and `full-web-sandbox` proof. The proof binds the manifest hash, image digest,
-  private/public revisions, mode, and run ID. Mock/preflight results and a
-  successful dirty local build are not substitute release proofs. The automatic
-  deploy job also rejects a workflow SHA that is no longer the production head.
-  Manual `production-deploy.yml` instead uses the named `build_run_id`'s
-  manifest and proof; it does not impose that head check.
-- The sandbox driver's seeded browser sessions do not prove Google or Apple
-  login. Stripe test-object billing, Stripe-originated webhook delivery, Test
-  Clock renewal/lapse, and real-device enrollment are separate evidence.
-- `push_relay_enabled=false` is a supported release state. The controller skips
-  relay startup/migration/readiness, sets the API relay URL empty, and serves an
-  empty-body 503 for the relay hostname. Do not infer relay availability from
-  the API's health or remove this per-release state during reconciliation.
-
-Source: `peppy-platform/docker/scripts/{release_controller,hosted_rehearsal,rehearsal_proof}.py`
-and the private operator runbook. Community staging is a separate public-image
-path; it does not consume hosted env files or run private migrations.
-
-## Database, storage, and billing boundaries
-
-- The hosted `migrate` command runs the public core `MIGRATOR` before private
-  migrations. In particular, core `0013_pairing_join_requests.sql` must exist
-  before private `0008_pairing_join_requests_rls.sql`. Advance the public source
-  pin before releasing private code that depends on that table.
-- API runtime, migration, and maintenance connections have distinct privileges;
-  relay connections are separate again. Runtime uses RLS, while maintenance
-  has deliberately bounded bypass access. A successful migration-role query
-  does not establish that a runtime-role request is authorized. See
-  `peppy-platform/src/{main,rls}.rs` and private migration tests.
-- Hosted production uses B2; disposable rehearsal storage uses SeaweedFS.
-  Credentials and endpoint/DSN checks apply to the **resolved Compose config**,
-  including env files. A reachable S3 endpoint alone does not prove that the
-  runtime can perform the required signed bucket/object operations.
-- Stripe's API pin is `STRIPE_API_VERSION` in private `src/billing.rs`; its
-  `dahlia_contract_tests` document the expected shapes. Invoice subscription
-  binding uses `parent.subscription_details.subscription`, and payment handling
-  uses invoice payment/confirmation-secret shapes. Old top-level invoice
-  examples are not compatible fixtures.
+- Community first claim is open when `PEPPY_SETUP_TOKEN` is absent or empty. A
+  nonempty value must contain at least 32 UTF-8 bytes and then protects first
+  claim. Configure the same value on every replica; never generate or log a
+  fallback. Unclaimed installs upgraded without the setting become open, so set
+  it before upgrading when protection is required. The setup code, admin
+  password, and vault shared secret remain distinct. Setup and recovery detail
+  is canonical in [first-run setup](../README.md#first-run-setup-and-device-connections),
+  [unwanted first claim](../README.md#recover-from-an-unwanted-first-claim), and
+  [hosted enrollment](AGENTS.md#hosted-enrollment-and-pairing).
+- Root Compose sets `name: peppy`, so Docker prefixes its named volumes
+  `postgres-data`, `seaweed-volume-data`, and `seaweed-filer-data`. Inspect the
+  exact prefixed names before removing any volume. Never delete a shared
+  database or object store. Integration fixtures are fail-fast and disposable;
+  they are not the persistent development volumes ([CONTRIBUTING](../CONTRIBUTING.md)).
+- Rate limits use the real socket peer. Forwarding headers count only when that
+  peer matches explicit `TRUSTED_PROXY_CIDRS`; parse the chain right to left and
+  fall back to the socket peer on malformed input. Never trust a bare forwarded
+  header or the whole container subnet. Without the setting, proxied clients
+  share the proxy's bucket. See [server assembly](../services/server/src/lib.rs)
+  and [request authorization](../services/server/src/api.rs).
+- Public core migrations live in [`services/server/migrations`](../services/server/migrations/).
+  They are not evidence of a hosted migration history, upgrade path, or deployed
+  schema; hosted role, source-pin, and ordering details are private.
 
 ## Native artifact traps
 
-- Regenerating UniFFI bindings does not update packaged JNI/static libraries.
-  Missing new Rust symbols at iOS link time can mean stale libraries rather
-  than an invalid Swift API. Rebuild the matching target libraries with the
-  maintained [Android](../infra/compose/verify-android-native.sh) and
-  [iOS](../infra/build/build-ios-artifacts.sh) scripts.
-- Android's script defaults to `PEPPY_ANDROID_NATIVE_PROFILE=debug`; the
-  [artifact workflow](../.github/workflows/build-artifacts.yml) explicitly uses
-  `release`. The host library used for bindgen remains debug in either case.
-  Gradle `assembleRelease` alone does not optimize prebuilt JNI libraries.
-- The iOS `.xcarchive` is intentionally unsigned, not an installable IPA.
-  Host Swift tests, simulator builds, and signed physical-device installation
-  establish different things; see [iOS guidance](AGENTS.md#ios-limits).
-- Google client IDs/callback schemes are public build configuration, not OAuth
-  client secrets. Changing them requires rebuilding the mobile app; changing
-  server audience allowlists does not rewrite its bundled configuration. See
+- Regenerating UniFFI bindings does not update packaged JNI or static libraries.
+  A missing new symbol at iOS link time can mean stale libraries rather than an
+  invalid Swift API. Use `just android-build` or `just android-test`, which run
+  [`verify-android-native.sh`](../infra/compose/verify-android-native.sh) before
+  Gradle. A bare `./gradlew` assemble packages whatever is in `src/main/jniLibs`,
+  which can fail at runtime with `UnsatisfiedLinkError` for new symbols.
+- The Android script defaults to `PEPPY_ANDROID_NATIVE_PROFILE=debug`; the
+  [artifact workflow](../.github/workflows/build-artifacts.yml) sets `release`.
+  Bindgen uses the host debug library in both cases. Gradle `assembleRelease`
+  does not optimize prebuilt JNI libraries.
+- The iOS build script [`build-ios-artifacts.sh`](../infra/build/build-ios-artifacts.sh)
+  checks Swift bindings against fresh UniFFI output and builds matching device
+  and simulator libraries.
+  Its `.xcarchive` is intentionally unsigned, not an installable IPA. Host Swift
+  tests, simulator builds, and signed device installation are separate evidence;
+  see [iOS limits](AGENTS.md#ios-limits).
+- The browser core must be built with [`build-browser-core.sh`](../infra/build/build-browser-core.sh)
+  for `wasm32-unknown-emscripten`. The script enforces a pinned Emscripten
+  version and the `rust-toolchain.toml` channel. Its output is a generated ES
+  module plus a normalized `.wasm` sidecar that the module references by name;
+  keep the pair together. A generic wasm build is not a substitute.
+- Google client IDs and callback schemes are public bundled configuration, not
+  OAuth secrets. Changing them requires rebuilding the mobile app. Changing the
+  server audience allowlist does not rewrite bundled configuration. See
   [Android setup](../apps/android/README.md) and [iOS setup](../apps/ios/README.md).
+- An installed desktop app and the checkout are separate evidence. Before
+  comparing them, record the executable path, bundle version, and available build
+  provenance of the installed binary. An equal version string does not prove that
+  a newer checkout is installed.
+- Desktop updater endpoint, channel, and public key are compiled into the artifact
+  by [`build-desktop-bundles.sh`](../infra/release/build-desktop-bundles.sh). A
+  checkout fix cannot repair an already-installed binary. It needs an update from a
+  build that contains the fix, or a manual replacement.
+- Peppy's update feed ([`feed.rs`](../apps/desktop/src-tauri/src/updates/feed.rs))
+  fetches the stable manifest itself. Tauri's updater builder also needs a
+  configured endpoint. If it has none, `build()` returns `EmptyEndpoints` before the
+  manifest is checked. [`updates/mod.rs`](../apps/desktop/src-tauri/src/updates/mod.rs)
+  reports that failure as the generic `update-feed` "could not be verified" message.
+  That message does not prove a bad signature or manifest. Check the builder error
+  first.
+- The endpoint and public-key overlay are asserted by
+  [`test-desktop-bundles.sh`](../infra/release/test-desktop-bundles.sh). Run it after
+  changing the overlay.
+- A build that lacks the endpoint cannot update itself. Recover it with a manual
+  install of a post-fix release over the existing app. Preserve user data; do not
+  reset application state.

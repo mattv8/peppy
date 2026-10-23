@@ -4,8 +4,11 @@ import { App } from "../../desktop/src/App";
 import { installBrowserBridge } from "./ui-bridge";
 import "../../desktop/src/app.css";
 import { BrowserBridge } from "./browser-bridge";
-import { fetchAccountUrl } from "./account-navigation";
+import { exchangeHostedCallback, fetchHostedWebConfig, retryHostedAuthorizationAfterSignIn } from "./newhosted-app-auth";
+import { InstanceManagement } from "./InstanceManagement";
 import "./web.css";
+import { startBrowserApplication } from "./browser-startup";
+import type { HostedWebConfig } from "./newhosted-app-auth";
 
 function unsupported(reasons: string[]): void {
   document.getElementById("root")!.innerHTML = `<main id="browser-unsupported" data-browser-screen="browser-unsupported" role="main" aria-label="Browser not supported"><section><h1 id="unsupported-heading" tabindex="-1">This browser isn't supported</h1><p>Peppy requires a recent desktop browser with SharedWorker, WebAssembly, IndexedDB, and Web Locks support.</p><ul data-unsupported-reasons>${reasons.map((reason) => `<li>${reason}</li>`).join("")}</ul></section></main>`;
@@ -45,20 +48,20 @@ function showStartupFailure(reason: string): void {
   document.getElementById("browser-startup-failure-heading")?.focus();
 }
 
-function BrowserApp({ bridge }: { bridge: BrowserBridge }) {
-  const [accountUrl, setAccountUrl] = useState<string>();
+function BrowserApp({ bridge, config }: { bridge: BrowserBridge; config: HostedWebConfig | undefined }) {
+  const accountUrl = config?.accountUrl;
+  const apiOrigin = config?.apiOrigin ?? location.origin;
+  const [enrollment, setEnrollment] = useState<{ mode: "community" | "hosted"; owner?: boolean }>();
+
+  useEffect(() => { bridge.setAccountUrl(accountUrl); }, [accountUrl, bridge]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void fetchAccountUrl(controller.signal).then((nextAccountUrl) => {
-      if (controller.signal.aborted) return;
-      bridge.setAccountUrl(nextAccountUrl);
-      setAccountUrl(nextAccountUrl);
-    });
-    return () => controller.abort();
+    void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined);
+    return bridge.subscribe(() => { void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined); });
   }, [bridge]);
 
-  return <App hostKind="browser" fixedOrigin={location.origin} accountUrl={accountUrl} />;
+  if (location.pathname === "/manage") return <InstanceManagement bridge={bridge} accountUrl={accountUrl} />;
+  return <div id="browser-app"><App hostKind="browser" fixedOrigin={apiOrigin} accountUrl={accountUrl} />{enrollment?.mode === "community" && enrollment.owner && <a id="browser-manage-server-link" href="/manage">Manage server</a>}</div>;
 }
 
 function boot(): void {
@@ -66,19 +69,28 @@ function boot(): void {
   if (reasons.length) return unsupported(reasons);
   showBooting();
   try {
-    const worker = new SharedWorker("/worker.js", { type: "module", name: "peppy-browser-v1" });
+    const worker = new SharedWorker("/worker.js", { type: "module", name: "peppy-browser-enrollment-v1" });
     const bridge = new BrowserBridge(worker.port);
     installBrowserBridge(bridge);
     const root = createRoot(document.getElementById("root")!);
     let ready = false;
+    let disposed = false;
     bridge.onReady(() => {
-      if (ready) return;
+      if (ready || disposed) return;
       ready = true;
-      root.render(<StrictMode><BrowserApp bridge={bridge} /></StrictMode>);
+      void startBrowserApplication({
+        fetchConfig: fetchHostedWebConfig,
+        exchangeCallback: exchangeHostedCallback,
+        setCsrf: csrf => bridge.enrollment_set_hosted_csrf(csrf),
+        retryAuthorization: retryHostedAuthorizationAfterSignIn,
+        mount: config => root.render(<StrictMode><BrowserApp bridge={bridge} config={config} /></StrictMode>),
+        isActive: () => !disposed,
+      });
     });
-    bridge.onStopped((reason) => { root.unmount(); if (ready) showStopped(reason); else showStartupFailure(reason); });
+    bridge.onStopped((reason) => { disposed = true; root.unmount(); if (ready) showStopped(reason); else showStartupFailure(reason); });
     worker.onerror = () => bridge.workerError();
     window.addEventListener("pagehide", () => {
+      disposed = true;
       bridge.dispose();
       root.unmount();
       document.getElementById("root")!.replaceChildren();

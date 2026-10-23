@@ -15,6 +15,7 @@ import uniffi.peppy_mobile_bindings.openNativeClient
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
@@ -29,6 +30,15 @@ fun credentialJson(
     token: String = TEST_TOKEN,
     extra: String = "",
 ) = """{"version":1,"origin":"$origin","vaultId":"$vaultId","deviceId":"$deviceId","deviceToken":"$token"$extra}"""
+
+private val testRecipientSequence = AtomicInteger()
+
+/**
+ * A recipient no earlier test has used. The desktop client is shared across the test JVM, and a
+ * recipient that already has an MMS conversation makes later text drafts resolve to that MMS
+ * conversation, so each helper-created command gets its own conversation by default.
+ */
+fun nextTestRecipient(): String = "+1555%07d".format(testRecipientSequence.incrementAndGet())
 
 /** Software stand-in for the Android Keystore key (Robolectric has no AndroidKeyStore provider). */
 class TestKeyHolder {
@@ -98,7 +108,7 @@ abstract class GatewayTestBase {
     fun deny(vararg permissions: String) = shadowOf(context as android.app.Application).denyPermissions(*permissions)
 
     /** A sealed command envelope from a second (desktop-role) core client of the same vault. */
-    fun desktopCommandEnvelope(route: String, body: String, recipients: List<String> = listOf("+15551234567")): Pair<String, String> {
+    fun desktopCommandEnvelope(route: String, body: String, recipients: List<String> = listOf(nextTestRecipient())): Pair<String, String> {
         val desktop = SharedVault.desktop
         val draft = desktop.createComposeDraft(null)
         val routeJson = JSONObject().put("gateway_device_id", deviceId).put("subscription_id", route).toString()
@@ -109,11 +119,15 @@ abstract class GatewayTestBase {
         return queued.commandId to wire
     }
 
-    /** Journals and applies the desktop envelope on the gateway core exactly as HTTP replay would. */
-    fun queueCommand(gateway: NativeClient, route: String, body: String, recipients: List<String> = listOf("+15551234567")): String {
-        val (commandId, wire) = desktopCommandEnvelope(route, body, recipients)
+    /** Journals and applies a desktop envelope on the gateway core exactly as HTTP replay would. */
+    fun applyEnvelope(gateway: NativeClient, wire: String) {
         gateway.ingestRaw(wire.toByteArray(), (++cursor).toString())
         gateway.applyPending(50uL)
+    }
+
+    fun queueCommand(gateway: NativeClient, route: String, body: String, recipients: List<String> = listOf(nextTestRecipient())): String {
+        val (commandId, wire) = desktopCommandEnvelope(route, body, recipients)
+        applyEnvelope(gateway, wire)
         return commandId
     }
 }

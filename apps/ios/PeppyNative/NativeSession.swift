@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 #if canImport(PeppyBindings)
 import PeppyBindings
 #endif
@@ -16,43 +17,62 @@ public struct SessionStatus: Equatable, Sendable {
     public var conversations: Int?
 }
 
-public struct EnrollmentClaim: Equatable, Sendable {
-    public let origin: String
-    public let intentToken: String
-    public let deviceId: String
-    public let keyDigest: String
-    public let sas: String
-}
-
-/// A QR-safe owner-created invitation. It deliberately contains no bearer, private key or passphrase.
-public struct OwnerPairingIntent: Equatable, Sendable, CustomStringConvertible {
-    public let origin: String
-    public let intentToken: String
-    public let vaultId: String
-    public let deviceId: String
-    public let keyEpoch: UInt32
-    public let profileFingerprint: String
-    public let qrPayload: Data
-    public let expiresAt: Date
-
-    public var description: String {
-        "OwnerPairingIntent(origin: \(origin), intentToken: [REDACTED], vaultId: \(vaultId), deviceId: \(deviceId), keyEpoch: \(keyEpoch), expiresAt: \(expiresAt))"
-    }
-}
-
-/// The claimant facts the owner must compare over the out-of-band SAS channel.
-public struct OwnerPairingClaim: Equatable, Sendable {
-    public let deviceId: String
-    public let keyDigest: String
-    public let requestedRole: String
-    public let sas: String
-}
-
 public struct DeviceRosterItem: Identifiable, Equatable, Sendable {
     public let id: String
     public let role: String
     public let revoked: Bool
     public let keyEpoch: UInt32
+}
+
+public struct PhoneEnrollmentStatus: Equatable, Sendable {
+    public let verificationCode: String?
+    public let awaitingOwner: Bool
+    public let requiresSharedSecret: Bool
+}
+
+public struct SelfHostedInstanceDiscovery: Equatable, Sendable {
+    public let origin: String
+    public let setupCodeRequired: Bool
+    public let claimed: Bool
+}
+
+public struct HostedWakeConfiguration: Equatable, Sendable {
+    public let relayOrigin: String
+    public let environment: String
+}
+
+/// Protected-only replay context for a retiring wake route. It is never presented to UI or
+/// defaults; its device credential is the exact value captured before enrollment changes.
+public struct RelayWakeCleanupContext: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public let identity: RelayWakeIdentity
+    public let relayOrigin: String
+    public let deviceCredential: String
+    public var retiring: Bool
+    public var description: String { "RelayWakeCleanupContext(identity: \(identity.origin), relay: \(relayOrigin), credential: <redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["identity": identity, "relayOrigin": relayOrigin, "deviceCredential": "<redacted>", "retiring": retiring]) }
+}
+
+public struct VaultRequestProgress: Equatable, Sendable {
+    public let origin: String
+    public let requestID: String
+    public let displayName: String
+    public let state: String
+    public let accepted: Bool
+    public let hasPreparedOwnerMaterial: Bool
+    /// True only when the protected pending copy of the prepared vault secret is present (a read error throws instead).
+    public var hasStoredVaultSecret = false
+}
+
+private struct InstanceDiscoveryResponse: Decodable {
+    let mode: String
+    let claimed: Bool
+    let setupRequired: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case mode, claimed
+        case setupRequired = "setup_required"
+    }
 }
 
 /// Owns the single process-wide `NativeClient`, its Keychain-held secrets and foreground sync.
@@ -68,8 +88,22 @@ public actor NativeSession {
     private var client: NativeClient?
     private var record: EnrollmentRecord?
     private var status = SessionStatus()
+    private var reachability = ServerReachability()
     private var syncing = false
     private var changingEnrollment = false
+    private struct PhoneClaimContext: Sendable {
+        let origin: String
+        let invitationID: String
+        let method: EnrollmentMethod
+        let host: EnrollmentHost
+    }
+
+    private var phoneProducer: NativeEnrollmentRequestProducer?
+    private var phoneClaimContext: PhoneClaimContext?
+    private var phoneConfirmationRequest: String?
+    private var vaultRequestProducer: NativeEnrollmentRequestProducer?
+    private var vaultRequestOrigin: String?
+    private var instanceSession: (origin: String, token: String, vaultID: String)?
 
     public init(
         secureStore: any SecureStore,
@@ -129,6 +163,435 @@ public actor NativeSession {
         }
     }
 
+    /// Claims an unowned community instance using Rust-generated request and
+    /// identity objects. The credential is stored only after the verified root
+    /// package has activated the native core.
+    public func claimInstance(origin: String, setupToken: String, username: String, adminPassword: String, passphrase: String, deviceName: String) async throws -> SessionStatus {
+        try await changeEnrollment {
+            let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
+            let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
+            let secrets = VaultSecretStore(secure: self.store.secure)
+            // A stored pending secret wins, so a retry after a rejected claim never switches to a new secret.
+            let secret = try secrets.candidatePendingSecret(origin: serverOrigin.serialized, entered: passphrase)
+            try secrets.savePending(secret, origin: serverOrigin.serialized)
+            let request = try producer.createOwnerRequest(setupToken: setupToken, username: username, adminPassword: adminPassword, passphrase: secret)
+            let response = try await EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin)).submitOwnerClaim(request)
+            let enrollment = try producer.finishOwnerAdmission(response, passphrase: secret)
+            return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
+        }
+    }
+
+    /// Discovers self-hosted first-claim policy before accepting policy-dependent credentials.
+    public func discoverSelfHostedInstance(origin: String) async throws -> SelfHostedInstanceDiscovery {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let response = try await EnrollmentHost(origin: serverOrigin, transport: transport).discoverInstance()
+        guard let instance = try? JSONDecoder().decode(InstanceDiscoveryResponse.self, from: Data(response.utf8)),
+              instance.mode == "community" else {
+            throw ClientError.invalidResponse("instance discovery")
+        }
+        return SelfHostedInstanceDiscovery(
+            origin: serverOrigin.serialized,
+            setupCodeRequired: instance.setupRequired != false,
+            claimed: instance.claimed
+        )
+    }
+
+    /// Completes direct manual shared-secret admission. The server never
+    /// receives the secret: the generated client creates the proof locally.
+    public func joinWithSharedSecret(origin: String, vaultID: String?, vaultOwner: String?, passphrase: String, deviceName: String) async throws -> SessionStatus {
+        try await changeEnrollment {
+            let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
+            let producer = try NativeEnrollmentRequestProducer(origin: serverOrigin.serialized, deviceName: deviceName)
+            let session = self.instanceSession?.origin == serverOrigin.serialized ? self.instanceSession?.token : nil
+            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin), instanceSession: session)
+            let secret = try VaultSecretStore(secure: self.store.secure).sharedSecretForJoin(origin: serverOrigin.serialized, entered: passphrase)
+            let request = try producer.manualChallengeRequest(vaultID: vaultID, vaultOwner: vaultOwner)
+            let challenge = try await host.requestManualChallenge(request)
+            guard let id = (try JSONSerialization.jsonObject(with: Data(challenge.utf8)) as? [String: Any])?["enrollment_id"] as? String else {
+                throw ClientError.invalidResponse("manual challenge")
+            }
+            let complete = try producer.completeManualChallengeRequest(challenge: challenge, passphrase: secret)
+            let response = try await host.completeManualChallenge(id: id, request: complete)
+            let enrollment = try producer.finishManualAdmission(response, passphrase: secret)
+            return try self.activateVerifiedEnrollment(enrollment, bindingSecret: secret)
+        }
+    }
+
+    /// A Keychain read failure is propagated so callers can fail closed rather than enabling an empty submission.
+    public func hasPendingVaultSecret(origin: String) throws -> Bool {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        return try VaultSecretStore(secure: store.secure).pendingSecret(origin: serverOrigin.serialized) != nil
+    }
+
+    /// Password login is scoped to one instance vault. It is kept in memory only and does not create a browser cookie.
+    public func signIn(origin: String, username: String, password: String) async throws {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let host = EnrollmentHost(origin: serverOrigin, transport: transport)
+        let response = try await host.signIn(username: username, password: password)
+        guard let session = try JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any],
+              let token = session["session_token"] as? String, !token.isEmpty else {
+            throw ClientError.invalidResponse("instance login")
+        }
+        let accountHost = EnrollmentHost(origin: serverOrigin, transport: transport, instanceSession: token)
+        let account = try await accountHost.instanceAccount()
+        guard let value = try JSONSerialization.jsonObject(with: Data(account.utf8)) as? [String: Any],
+              let vaultID = value["vault_id"] as? String else { throw ClientError.invalidResponse("instance account") }
+        instanceSession = (origin: serverOrigin.serialized, token: token, vaultID: vaultID)
+    }
+
+    /// Starts an invite request only after its opaque Rust checkpoint has been protected locally.
+    public func beginVaultRequest(inviteLink: String, displayName: String, expectedOrigin: String?, deviceName: String) async throws -> VaultRequestProgress {
+        let invite = try parseVaultInviteLink(link: inviteLink)
+        let origin = try ServerOrigin(canonical: invite.origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        if let expectedOrigin, !expectedOrigin.isEmpty,
+           try ServerOrigin(canonical: expectedOrigin, allowLoopbackHTTP: allowLoopbackHTTP).serialized != origin.serialized {
+            throw ClientError.originMismatch
+        }
+        let producer = try restoredVaultRequestProducer(for: origin.serialized)
+            ?? NativeEnrollmentRequestProducer(origin: origin.serialized, deviceName: deviceName)
+        let request = try producer.beginVaultRequest(origin: origin.serialized, inviteToken: invite.inviteToken, displayName: displayName)
+        try saveVaultRequestCheckpoint(producer, origin: origin.serialized)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+        do {
+            let response = try await host.submitVaultRequest(request)
+            try producer.acceptVaultRequestCreated(response)
+            try saveVaultRequestCheckpoint(producer, origin: origin.serialized)
+            return try vaultProgress(producer: producer, state: "pending")
+        } catch {
+            if isDefinitiveInviteSubmissionFailure(error) { try clearVaultRequest(origin: origin.serialized, producer: producer) }
+            throw error
+        }
+    }
+
+    public func vaultInviteOrigin(link: String) throws -> String {
+        try ServerOrigin(canonical: parseVaultInviteLink(link: link).origin, allowLoopbackHTTP: allowLoopbackHTTP).serialized
+    }
+
+    public func pendingVaultRequest(origin: String) throws -> VaultRequestProgress? {
+        let producer = try restoredVaultRequestProducer(for: origin)
+        guard let producer, try producer.pendingVaultRequest() != nil else { return nil }
+        return try vaultProgress(producer: producer, state: try producer.hasPreparedOwnerMaterial() ? "approved" : "pending")
+    }
+
+    /// Performs one foreground long-poll. The transport request timeout is 20 seconds while the server wait is 15.
+    public func vaultRequestStatus(origin: String, knownState: String? = "pending") async throws -> VaultRequestProgress {
+        let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        guard let producer = try restoredVaultRequestProducer(for: serverOrigin.serialized),
+              let pending = try producer.pendingVaultRequest() else { throw ClientError.notEnrolled }
+        let host = EnrollmentHost(origin: serverOrigin, transport: transport, accountSession: try await hostedSession(for: serverOrigin))
+        if try !producer.vaultRequestAccepted() {
+            let request = try producer.beginVaultRequest(origin: serverOrigin.serialized, inviteToken: "", displayName: "")
+            try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+            do {
+                try producer.acceptVaultRequestCreated(await host.submitVaultRequest(request))
+                try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+            } catch {
+                if isDefinitiveInviteSubmissionFailure(error) { try clearVaultRequest(origin: serverOrigin.serialized, producer: producer) }
+                throw error
+            }
+        }
+        let response: String
+        do {
+            response = try await host.vaultRequestStatus(id: pending.requestId, secret: try producer.vaultRequestHeader(), knownState: knownState)
+        } catch {
+            if case .server(404, "request_not_found") = ClientError.wrap(error) {
+                try clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+                return VaultRequestProgress(origin: pending.origin, requestID: pending.requestId, displayName: pending.displayName, state: "expired", accepted: false, hasPreparedOwnerMaterial: false)
+            }
+            throw error
+        }
+        let state = try producer.parseVaultRequestStatus(response)
+        if state == "denied" || state == "expired" {
+            try clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+        } else {
+            try saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+        }
+        return try vaultProgress(producer: producer, state: state)
+    }
+
+    /// The caller supplies the explicitly saved generated secret. Rust retains prepared material in the checkpoint,
+    /// so retrying after a dropped response never silently creates a replacement secret.
+    public func createVault(origin: String, username: String, adminPassword: String, passphrase: String) async throws -> SessionStatus {
+        try await changeEnrollment {
+            let serverOrigin = try ServerOrigin(canonical: origin, allowLoopbackHTTP: self.allowLoopbackHTTP)
+            guard let producer = try self.restoredVaultRequestProducer(for: serverOrigin.serialized) else { throw ClientError.notEnrolled }
+            let secrets = VaultSecretStore(secure: self.store.secure)
+            let vaultSecret = try secrets.candidatePendingSecret(origin: serverOrigin.serialized, entered: passphrase)
+            // The prepared owner material verifies the secret inside createVaultRequest, before any write or request.
+            let request = try producer.createVaultRequest(username: username, adminPassword: adminPassword, passphrase: vaultSecret)
+            try secrets.savePending(vaultSecret, origin: serverOrigin.serialized)
+            try self.saveVaultRequestCheckpoint(producer, origin: serverOrigin.serialized)
+            let host = EnrollmentHost(origin: serverOrigin, transport: self.transport, accountSession: try await self.hostedSession(for: serverOrigin))
+            let response = try await host.createVault(request)
+            let enrollment = try producer.finishOwnerAdmission(response, passphrase: vaultSecret)
+            let status = try self.activateVerifiedEnrollment(enrollment, bindingSecret: vaultSecret)
+            try self.clearVaultRequest(origin: serverOrigin.serialized, producer: producer)
+            return status
+        }
+    }
+
+    public func cancelVaultRequest(origin: String) throws {
+        guard let producer = try restoredVaultRequestProducer(for: origin) else { return }
+        guard try !producer.hasPreparedOwnerMaterial() else { return }
+        try clearVaultRequest(origin: origin, producer: producer)
+    }
+
+    private func restoredVaultRequestProducer(for origin: String) throws -> NativeEnrollmentRequestProducer? {
+        if vaultRequestOrigin == origin, let vaultRequestProducer { return vaultRequestProducer }
+        guard let checkpoint = try store.secure.read(vaultRequestAccount(origin)) else { return nil }
+        let producer = try NativeEnrollmentRequestProducer(checkpoint: checkpoint)
+        guard let pending = try producer.pendingVaultRequest(), pending.origin == origin else {
+            throw ClientError.invalidResponse("vault request checkpoint")
+        }
+        vaultRequestProducer = producer
+        vaultRequestOrigin = origin
+        return producer
+    }
+
+    private func saveVaultRequestCheckpoint(_ producer: NativeEnrollmentRequestProducer, origin: String) throws {
+        try store.secure.upsert(vaultRequestAccount(origin), producer.checkpoint())
+        vaultRequestProducer = producer
+        vaultRequestOrigin = origin
+    }
+
+    private func clearVaultRequest(origin: String, producer: NativeEnrollmentRequestProducer) throws {
+        try producer.clearVaultRequest()
+        try store.secure.delete(vaultRequestAccount(origin))
+        vaultRequestProducer = nil
+        vaultRequestOrigin = nil
+    }
+
+    private func vaultProgress(producer: NativeEnrollmentRequestProducer, state: String) throws -> VaultRequestProgress {
+        guard let pending = try producer.pendingVaultRequest() else { throw ClientError.notEnrolled }
+        return VaultRequestProgress(
+            origin: pending.origin,
+            requestID: pending.requestId,
+            displayName: pending.displayName,
+            state: state,
+            accepted: try producer.vaultRequestAccepted(),
+            hasPreparedOwnerMaterial: try producer.hasPreparedOwnerMaterial(),
+            hasStoredVaultSecret: try VaultSecretStore(secure: store.secure).pendingSecret(origin: pending.origin) != nil
+        )
+    }
+
+    private func isDefinitiveInviteSubmissionFailure(_ error: Error) -> Bool {
+        guard case let ClientError.server(status, _) = ClientError.wrap(error) else { return false }
+        return (400..<500).contains(status) && status != 408 && status != 429
+    }
+
+    private func vaultRequestAccount(_ origin: String) -> String {
+        let digest = SHA256.hash(data: Data(origin.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "vault-request:v1:\(digest)"
+    }
+
+    public func beginPhoneEnrollment(qrPayload: String, deviceName: String) async throws -> PhoneEnrollmentStatus {
+        clearPhoneEnrollment()
+        guard let payload = try? JSONSerialization.jsonObject(with: Data(qrPayload.utf8)) as? [String: Any],
+              Set(payload.keys) == ["version", "purpose", "origin", "invitation_token", "transfer_public_key"],
+              payload["version"] as? Int == 1, payload["purpose"] as? String == "connect_phone",
+              let rawOrigin = payload["origin"] as? String else {
+            throw ClientError.invalidCredential("phone enrollment QR")
+        }
+        let origin = try ServerOrigin(canonical: rawOrigin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let producer = try NativeEnrollmentRequestProducer(origin: origin.serialized, deviceName: deviceName)
+        phoneProducer = producer
+        do {
+            let host = EnrollmentHost(origin: origin, transport: transport, accountSession: try await hostedSession(for: origin))
+            try Task.checkCancellation()
+            guard phoneProducer === producer else { throw ClientError.canceled }
+            let request = try producer.claimPhoneInvitationRequest(qr: qrPayload)
+            let claim = try await host.claimPhoneInvitation(request)
+            try Task.checkCancellation()
+            guard phoneProducer === producer else { throw ClientError.canceled }
+            try producer.consumePhoneClaim(claim)
+            let context = try phoneContext(from: claim, expectedOrigin: origin.serialized, host: host)
+            phoneClaimContext = context
+            return try await phoneEnrollmentStatus()
+        } catch {
+            producer.cancelPhoneFlow()
+            clearPhoneEnrollment(cancelProducer: false, matching: producer)
+            throw error
+        }
+    }
+
+    public func phoneEnrollmentStatus() async throws -> PhoneEnrollmentStatus {
+        guard let producer = phoneProducer, let context = phoneClaimContext else {
+            throw ClientError.notEnrolled
+        }
+        let descriptor = try validatedPhoneStatusDescriptor(producer: producer, context: context)
+        let status = try await context.host.executePhoneStatusDescriptor(descriptor)
+        try Task.checkCancellation()
+        guard phoneProducer === producer,
+              phoneClaimContext?.invitationID == context.invitationID else {
+            throw ClientError.canceled
+        }
+        let state: String
+        do {
+            guard let object = try JSONSerialization.jsonObject(with: Data(status.utf8)) as? [String: Any],
+                  let parsedState = object["state"] as? String else {
+                throw ClientError.invalidResponse("phone invitation")
+            }
+            if ["expired", "denied", "consumed"].contains(parsedState) {
+                clearPhoneEnrollment()
+                throw ClientError.server(status: 410, code: parsedState)
+            }
+            state = parsedState
+        } catch {
+            clearPhoneEnrollment(matching: producer)
+            throw error
+        }
+        let code: String
+        do {
+            code = try producer.phoneSAS(status: status)
+        } catch {
+            clearPhoneEnrollment(matching: producer)
+            throw error
+        }
+        return PhoneEnrollmentStatus(
+            verificationCode: code,
+            awaitingOwner: state != "approved",
+            requiresSharedSecret: context.method == .sharedSecret
+        )
+    }
+
+    public func confirmPhoneEnrollment(sharedSecret: String?) async throws -> SessionStatus {
+        try await changeEnrollment {
+            guard let producer = self.phoneProducer,
+                  let context = self.phoneClaimContext else {
+                throw ClientError.notEnrolled
+            }
+            let request: String
+            if let pending = self.phoneConfirmationRequest {
+                request = pending
+            } else {
+                let descriptor = try self.validatedPhoneStatusDescriptor(producer: producer, context: context)
+                let status = try await context.host.executePhoneStatusDescriptor(descriptor)
+                try Task.checkCancellation()
+                guard self.phoneProducer === producer,
+                      self.phoneClaimContext?.invitationID == context.invitationID else {
+                    throw ClientError.canceled
+                }
+                do {
+                    request = try producer.confirmPhoneInvitationRequest(status: status, sharedSecret: sharedSecret)
+                    self.phoneConfirmationRequest = request
+                } catch {
+                    self.clearPhoneEnrollment(matching: producer)
+                    throw error
+                }
+            }
+            let response = try await context.host.confirmPhoneInvitation(id: context.invitationID, request: request)
+            defer { self.clearPhoneEnrollment(cancelProducer: false, matching: producer) }
+            try Task.checkCancellation()
+            guard self.phoneProducer === producer,
+                  self.phoneClaimContext?.invitationID == context.invitationID else {
+                throw ClientError.canceled
+            }
+            let enrollment = try producer.finishedPhoneAdmission(response)
+            return try self.activateVerifiedEnrollment(enrollment)
+        }
+    }
+
+    public func cancelPhoneEnrollment() {
+        clearPhoneEnrollment()
+    }
+
+    public func ownerPhoneApprovalHost(deviceName: String) async throws -> OwnerPhoneApprovalHost {
+        guard let record, record.role == "owner", status.keysUnlocked else { throw ClientError.notEnrolled }
+        let origin = try ServerOrigin(canonical: record.identity.origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let client = try newNativeExistingOwnerEnrollmentClient(
+            origin: origin.serialized,
+            kind: .ios,
+            deviceName: deviceName,
+            profileJson: record.profileJson,
+            headerJson: record.headerJson
+        )
+        let accountSession = try await hostedSession(for: origin)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession)
+        return OwnerPhoneApprovalHost(
+            producer: NativeOwnerPhoneProducer(client: client),
+            transport: EnrollmentOwnerPhoneTransport(host: host),
+            secrets: VaultSecretStore(secure: store.secure),
+            identity: record.identity,
+            credential: try store.token(record.identity),
+            isHosted: origin.serialized == "https://peppy.pro",
+            accountSession: accountSession,
+            shouldRotate: { stage, seconds, active, requested in
+                let nativeStage: NativeOwnerPhoneStage
+                switch stage {
+                case .waiting: nativeStage = .waiting
+                case .verify: nativeStage = .verify
+                case .approved: nativeStage = .approved
+                case .connected: nativeStage = .connected
+                case .expired: nativeStage = .expired
+                case .denied: nativeStage = .denied
+                }
+                return ownerPhoneShouldRotate(
+                    stage: nativeStage,
+                    expiresInSeconds: UInt32(clamping: seconds),
+                    active: active == .transfer ? .transfer : .sharedSecret,
+                    requested: requested == .transfer ? .transfer : .sharedSecret
+                )
+            }
+        )
+    }
+
+    public func ownerVaultSecret() throws -> String {
+        guard let record else { throw ClientError.notEnrolled }
+        guard let secret = try VaultSecretStore(secure: store.secure).read(record.identity) else {
+            throw ClientError.missingSecret("vault shared secret")
+        }
+        return secret
+    }
+
+    /// A network confirmation failure may retain Rust's prepared request for one deliberate retry.
+    public func phoneEnrollmentCanRetryConfirmation() -> Bool {
+        phoneProducer != nil && phoneClaimContext != nil && phoneConfirmationRequest != nil
+    }
+
+    private func phoneContext(
+        from claim: String,
+        expectedOrigin: String,
+        host: EnrollmentHost
+    ) throws -> PhoneClaimContext {
+        guard let object = try JSONSerialization.jsonObject(with: Data(claim.utf8)) as? [String: Any],
+              let invitationID = object["invitation_id"] as? String,
+              UUID(uuidString: invitationID)?.uuidString.lowercased() == invitationID,
+              object["origin"] as? String == expectedOrigin,
+              let rawMethod = object["method"] as? String else {
+            throw ClientError.invalidResponse("phone invitation claim")
+        }
+        let method: EnrollmentMethod
+        switch rawMethod {
+        case "transfer": method = .transfer
+        case "shared_secret": method = .sharedSecret
+        default: throw ClientError.invalidResponse("phone invitation claim")
+        }
+        return PhoneClaimContext(origin: expectedOrigin, invitationID: invitationID, method: method, host: host)
+    }
+
+    private func validatedPhoneStatusDescriptor(
+        producer: NativeEnrollmentRequestProducer,
+        context: PhoneClaimContext
+    ) throws -> String {
+        let descriptor = try producer.phoneStatusRequest()
+        guard let object = try JSONSerialization.jsonObject(with: Data(descriptor.utf8)) as? [String: Any],
+              object["method"] as? String == "GET",
+              object["path"] as? String == "/v1/enrollment/invitations/\(context.invitationID)",
+              context.origin == phoneClaimContext?.origin else {
+            clearPhoneEnrollment()
+            throw ClientError.invalidResponse("phone status descriptor")
+        }
+        return descriptor
+    }
+
+    private func clearPhoneEnrollment(cancelProducer: Bool = true, matching producer: NativeEnrollmentRequestProducer? = nil) {
+        guard producer == nil || phoneProducer === producer else { return }
+        if cancelProducer { phoneProducer?.cancelPhoneFlow() }
+        phoneProducer = nil
+        phoneClaimContext = nil
+        phoneConfirmationRequest = nil
+    }
+
     /// Revokes server access and deactivates the local enrollment. The encrypted database,
     /// keys and unacknowledged outbox remain archived, but the revoked credential cannot
     /// pass enrollment verification again. Rejoining requires pairing as a new device.
@@ -161,177 +624,6 @@ public actor NativeSession {
             try self.store.deactivate()
             return self.status
         }
-    }
-
-    /// Parses only the JSON QR contract. Unknown fields, non-HTTPS origins and malformed/short
-    /// intent tokens are refused before a key is generated or any request is made.
-    public func claimPairingIntent(qrData: Data) async throws -> EnrollmentClaim {
-        guard qrData.count <= 4096,
-              let value = try? JSONSerialization.jsonObject(with: qrData) as? [String: Any],
-              Set(value.keys) == ["https_origin", "intent_token"],
-              let rawOrigin = value["https_origin"] as? String,
-              let intent = value["intent_token"] as? String,
-              intent.utf8.count == 43,
-              intent.utf8.allSatisfy({ $0.isASCIIBase64URL }) else { throw ClientError.invalidCredential("pairing QR") }
-        let origin = try ServerOrigin(canonical: rawOrigin, allowLoopbackHTTP: allowLoopbackHTTP)
-        var keepPairingSecrets = false
-        defer {
-            if !keepPairingSecrets { try? store.clearPairingSecrets(origin: origin.serialized, intent: intent) }
-        }
-        let seed: Data
-        let key: NativeEnrollmentKey
-        if let existing = try store.pairingSecret("seed", origin: origin.serialized, intent: intent) {
-            seed = existing
-            key = try nativeEnrollmentKeyFromNativeSecureStorage(seed: seed)
-        } else {
-            key = try generateNativeEnrollmentKey()
-            seed = key.exportSeedForNativeSecureStorage()
-            guard seed.count == 32 else { throw ClientError.invalidCredential("pairing key") }
-            try store.savePairingSecret(seed, purpose: "seed", origin: origin.serialized, intent: intent)
-        }
-        let deviceId: String
-        if let persisted = try store.pairingSecret("device-id", origin: origin.serialized, intent: intent),
-           let value = String(data: persisted, encoding: .utf8), UUID(uuidString: value) != nil {
-            deviceId = value
-        } else {
-            deviceId = UUID().uuidString.lowercased()
-            try store.savePairingSecret(Data(deviceId.utf8), purpose: "device-id", origin: origin.serialized, intent: intent)
-        }
-        let publicKey = try key.publicKeyBase64url()
-        let response = try await anonymousJSON(origin: origin, method: "POST", path: "/v1/pairing/intents/\(intent)/claim", object: [
-            "device_id": deviceId, "public_key": ["ed25519_public_key": publicKey], "requested_role": "gateway",
-        ])
-        let serverDigest = try response.string("key_digest")
-        // This generated API first compares the server digest with this phone's public key, then
-        // computes the SAS locally. Do not trust a server-provided display code.
-        let sas = try key.pairingSas(intentToken: intent, deviceId: deviceId, serverKeyDigest: serverDigest)
-        if let serverSas = response["sas"] as? String, serverSas != sas { throw ClientError.invalidResponse("pairing SAS") }
-        let secret = try response.string("claim_secret")
-        try store.savePairingSecret(Data(secret.utf8), purpose: "claim-secret", origin: origin.serialized, intent: intent)
-        keepPairingSecrets = true
-        return EnrollmentClaim(origin: origin.serialized, intentToken: intent, deviceId: deviceId, keyDigest: serverDigest, sas: sas)
-    }
-
-    /// Retrieves an owner-approved challenge, signs canonical Rust-owned proof bytes and consumes
-    /// it. The signing seed and claim secret never leave the Keychain/native process.
-    public func completePairing(_ claim: EnrollmentClaim) async throws -> SessionStatus {
-        do {
-            return try await completePairingAfterApproval(claim)
-        } catch ClientError.pairingAwaitingApproval {
-            throw ClientError.pairingAwaitingApproval
-        } catch {
-            try? store.clearPairingSecrets(origin: claim.origin, intent: claim.intentToken)
-            throw error
-        }
-    }
-
-    public func cancelPairing(_ claim: EnrollmentClaim) {
-        try? store.clearPairingSecrets(origin: claim.origin, intent: claim.intentToken)
-    }
-
-    /// Creates the server's short-lived pairing intent only for this unlocked owner identity.
-    public func createOwnerPairingIntent() async throws -> OwnerPairingIntent {
-        try Task.checkCancellation()
-        let (record, fingerprint) = try ownerPairingState()
-        let server = try authenticatedServer(record.identity)
-        var meter = RequestMeter(limit: 2)
-        let vault = try await server.get("/v1/vault", limit: ServerClient.maxVaultBytes, meter: &meter)
-        try Task.checkCancellation()
-        try validateOwnerVault(vault, record: record, fingerprint: fingerprint)
-        try requireCurrentOwnerPairingState(record, fingerprint: fingerprint)
-        let result = try await server.post("/v1/pairing/intents", json: try JSONSerialization.data(withJSONObject: [
-            "https_origin": record.identity.origin,
-        ], options: [.withoutEscapingSlashes]), meter: &meter)
-        try Task.checkCancellation()
-        guard try result.string("https_origin") == record.identity.origin,
-              let expires = UInt64(exactly: try result.integer("expires_in_seconds")), expires > 0,
-              let token = result["intent_token"] as? String, Self.validPairingToken(token)
-        else { throw ClientError.invalidResponse("pairing intent") }
-        let qrPayload = try JSONSerialization.data(withJSONObject: ["https_origin": record.identity.origin, "intent_token": token], options: [.withoutEscapingSlashes])
-        return OwnerPairingIntent(origin: record.identity.origin, intentToken: token, vaultId: record.identity.vaultId,
-                                  deviceId: record.identity.deviceId, keyEpoch: record.keyEpoch,
-                                  profileFingerprint: fingerprint, qrPayload: qrPayload,
-                                   expiresAt: Date().addingTimeInterval(TimeInterval(expires)))
-    }
-
-    /// Reads a current claim and derives its SAS locally. A pending intent has no claimant.
-    public func ownerPairingClaim(_ intent: OwnerPairingIntent) async throws -> OwnerPairingClaim? {
-        try Task.checkCancellation()
-        let (record, fingerprint) = try ownerPairingState()
-        try validate(intent, for: record, fingerprint: fingerprint)
-        var meter = RequestMeter(limit: 1)
-        let result = try await authenticatedServer(record.identity).get("/v1/pairing/intents/\(intent.intentToken)", limit: ServerClient.maxSmallBytes, meter: &meter)
-        try Task.checkCancellation()
-        try requireCurrentOwnerPairingState(record, fingerprint: fingerprint)
-        guard let expires = UInt64(exactly: try result.integer("expires_in_seconds")), expires > 0,
-              let claimed = result["claimed"] as? Bool, let approved = result["approved"] as? Bool else {
-            throw ClientError.invalidResponse("pairing intent status")
-        }
-        guard claimed else { return nil }
-        guard !approved,
-              let deviceId = result["device_id"] as? String,
-              UUID(uuidString: deviceId)?.uuidString.lowercased() == deviceId,
-              let digest = result["key_digest"] as? String, Self.validKeyDigest(digest),
-              let role = result["requested_role"] as? String, role == "device" || role == "gateway",
-              let serverSas = result["sas"] as? String
-        else { throw ClientError.invalidResponse("pairing intent claim") }
-        let sas = try pairingIntentSas(intentToken: intent.intentToken, keyDigest: digest, deviceId: deviceId)
-        guard sas == serverSas else { throw ClientError.invalidResponse("pairing SAS") }
-        return OwnerPairingClaim(deviceId: deviceId, keyDigest: digest, requestedRole: role, sas: sas)
-    }
-
-    /// Sends approval only after an explicit matching-code confirmation and a fresh claim/vault check.
-    public func approveOwnerPairing(_ intent: OwnerPairingIntent, claim: OwnerPairingClaim, codesMatch: Bool) async throws {
-        guard codesMatch else { throw ClientError.forbidden }
-        try Task.checkCancellation()
-        let (record, fingerprint) = try ownerPairingState()
-        try validate(intent, for: record, fingerprint: fingerprint)
-        var meter = RequestMeter(limit: 3)
-        let server = try authenticatedServer(record.identity)
-        let current = try await server.get("/v1/pairing/intents/\(intent.intentToken)", limit: ServerClient.maxSmallBytes, meter: &meter)
-        try Task.checkCancellation()
-        let actual = try pairingClaim(from: current, token: intent.intentToken)
-        guard actual == claim else { throw ClientError.identityMismatch }
-        let vault = try await server.get("/v1/vault", limit: ServerClient.maxVaultBytes, meter: &meter)
-        try Task.checkCancellation()
-        try validateOwnerVault(vault, record: record, fingerprint: fingerprint)
-        try requireCurrentOwnerPairingState(record, fingerprint: fingerprint)
-        _ = try await server.post("/v1/pairing/intents/\(intent.intentToken)/approve", json: try JSONSerialization.data(withJSONObject: [
-            "key_digest": claim.keyDigest, "profile_fingerprint": fingerprint, "key_epoch": Int(record.keyEpoch),
-        ], options: [.withoutEscapingSlashes]), meter: &meter)
-    }
-
-    private func completePairingAfterApproval(_ claim: EnrollmentClaim) async throws -> SessionStatus {
-        let origin = try ServerOrigin(canonical: claim.origin, allowLoopbackHTTP: allowLoopbackHTTP)
-        guard let seed = try store.pairingSecret("seed", origin: claim.origin, intent: claim.intentToken),
-              let secretData = try store.pairingSecret("claim-secret", origin: claim.origin, intent: claim.intentToken),
-              let secret = String(data: secretData, encoding: .utf8) else { throw ClientError.missingSecret("pairing claim") }
-        let key = try nativeEnrollmentKeyFromNativeSecureStorage(seed: seed)
-        let publicKey = try key.publicKeyBase64url()
-        let challenge = try await anonymousJSON(origin: origin, method: "POST", path: "/v1/pairing/intents/\(claim.intentToken)/challenge", object: [
-            "device_id": claim.deviceId, "key_digest": claim.keyDigest, "claim_secret": secret,
-        ])
-        let token = try challenge.string("challenge_token")
-        let vault = try challenge.string("vault_id")
-        let fingerprint = try challenge.string("profile_fingerprint")
-        guard let epoch = UInt32(exactly: try challenge.integer("key_epoch")) else { throw ClientError.invalidResponse("key_epoch") }
-        let role = try challenge.string("requested_role")
-        let proof = try pairingProofBytes(challengeToken: token, vaultId: vault, deviceId: claim.deviceId, profileFingerprint: fingerprint, keyEpoch: epoch, approvedRole: role)
-        let signature = try key.signPairingProof(proof: proof)
-        let credential = try await anonymousJSON(origin: origin, method: "POST", path: "/v1/pairing/consume", object: [
-            "challenge_token": token, "device_id": claim.deviceId, "public_key": ["ed25519_public_key": publicKey],
-            "profile_fingerprint": fingerprint, "key_epoch": Int(epoch), "signature": signature,
-        ])
-        let credentialData = try JSONSerialization.data(withJSONObject: [
-            "version": 1, "origin": claim.origin, "vaultId": credential.string("vault_id"),
-            "deviceId": credential.string("device_id"), "deviceToken": credential.string("device_token"),
-        ])
-        let parsed = try DeviceCredential.parse(credentialData, allowLoopbackHTTP: allowLoopbackHTTP)
-        guard parsed.identity.deviceId == claim.deviceId else { throw ClientError.identityMismatch }
-        try store.saveSigningKey(seed, for: parsed.identity)
-        let result = try await importCredential(credentialData)
-        try store.clearPairingSecrets(origin: claim.origin, intent: claim.intentToken)
-        return result
     }
 
     public func devices() async throws -> [DeviceRosterItem] {
@@ -394,11 +686,156 @@ public actor NativeSession {
         guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
     }
 
+    /// Hosted-only policy and push-config parsing live in the generated Rust facade. Native code
+    /// supplies device authentication and rejects a relay/APNs environment mismatch.
+    public func hostedWakeConfiguration(environment: String) async throws -> HostedWakeConfiguration? {
+        guard let record, let relay = hostedWakeRelayUrl(origin: record.identity.origin) else { return nil }
+        var meter = RequestMeter(limit: 2)
+        let server = try authenticatedServer(record.identity)
+        let response = try await server.exchange("GET", "/v1/devices/self/push-config", limit: ServerClient.maxSmallBytes, meter: &meter)
+        // An old server is an unavailable capability; every other non-success is a transient
+        // transport/server failure that callers must surface as retryable rather than silently
+        // treating it as an unsupported app.
+        guard response.status != 404 else { return nil }
+        guard (200..<300).contains(response.status) else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+        guard let json = String(data: response.body, encoding: .utf8) else {
+            throw ClientError.invalidResponse("push config")
+        }
+        let config = try parsePushConfig(json: json)
+        guard config.available, config.providers.contains("apns"), config.apnsEnvironment == environment else { return nil }
+        return HostedWakeConfiguration(relayOrigin: relay, environment: environment)
+    }
+
+    public func isHostedWakeEligible(origin: String) -> Bool {
+        hostedWakeRelayUrl(origin: origin) != nil
+    }
+
+    /// Probes only the pinned relay origin. Relay capability requests deliberately carry no
+    /// device credential: a relay must never receive server authentication.
+    public func relayWakeSupportsCandidates(origin: ServerOrigin) async throws -> Bool {
+        let response = try await transport.send(HTTPRequest(
+            method: "GET", url: origin.url("/v1/capabilities"), headers: ["Accept": "application/json"],
+            body: nil, maxResponseBytes: ServerClient.maxSmallBytes
+        ))
+        guard origin.contains(response.url) else { throw ClientError.originMismatch }
+        guard response.status != 404 else { return false }
+        guard (200..<300).contains(response.status) else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+        guard let value = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              let supported = value["confirm_candidates"] as? Bool else {
+            return false
+        }
+        return supported
+    }
+
+    /// Captures the current identity's authenticated server transport before an asynchronous
+    /// relay operation starts. The publisher remains valid for cleanup after this session closes.
+    public func capturedRelayWakeRoutePublisher() throws -> CapturedRelayWakeRoutePublisher {
+        guard let record else { throw ClientError.notEnrolled }
+        return CapturedRelayWakeRoutePublisher(server: try authenticatedServer(record.identity))
+    }
+
+    public func registerRelayWakeContext(identity: RelayWakeIdentity, relayOrigin: String) throws {
+        guard let record, record.identity.origin == identity.origin, record.identity.vaultId == identity.vaultId,
+              record.identity.deviceId == identity.deviceId else { throw ClientError.identityMismatch }
+        var contexts = try relayWakeContexts()
+        let context = RelayWakeCleanupContext(identity: identity, relayOrigin: relayOrigin,
+                                              deviceCredential: try store.token(record.identity), retiring: false)
+        // Replacing this bound context also retires its own retiring duplicate: the actor's durable
+        // cleanup queue for this namespace is now owned by the live client's retryCleanup. Other
+        // identities or relays keep their retiring contexts until their own drain completes.
+        contexts.removeAll { $0.identity == identity && $0.relayOrigin == relayOrigin }
+        contexts.append(context)
+        try saveRelayWakeContexts(contexts)
+    }
+
+    public func retireRelayWakeContexts() throws {
+        var contexts = try relayWakeContexts()
+        let activeIdentity = try store.activeIdentity()
+        guard let identity = record?.identity ?? activeIdentity else { return }
+        for index in contexts.indices where contexts[index].identity.origin == identity.origin &&
+            contexts[index].identity.vaultId == identity.vaultId && contexts[index].identity.deviceId == identity.deviceId {
+            contexts[index].retiring = true
+        }
+        try saveRelayWakeContexts(contexts)
+    }
+
+    public func retiringRelayWakeContexts() throws -> [RelayWakeCleanupContext] {
+        try relayWakeContexts().filter(\.retiring)
+    }
+
+    public func completeRetiringRelayWakeContext(_ context: RelayWakeCleanupContext) throws {
+        var contexts = try relayWakeContexts()
+        contexts.removeAll { $0 == context && $0.retiring }
+        try saveRelayWakeContexts(contexts)
+    }
+
+    /// Drains protected retiring routes without requiring an active enrollment or enabled
+    /// preference. Calling `revoke` first captures active/pending route proofs into the actor's
+    /// durable queue; only an empty queue authorizes removal of this credential context.
+    public func drainRetiringRelayWakeContexts(
+        relayTransport: any HTTPTransport, secure: any SecureStore
+    ) async {
+        guard let contexts = try? retiringRelayWakeContexts() else { return }
+        for context in contexts {
+            guard let relayOrigin = try? ServerOrigin(canonical: context.relayOrigin, allowLoopbackHTTP: false),
+                  let publisher = try? capturedRelayWakeRoutePublisher(context: context) else { continue }
+            let client = RelayWakeClient(origin: relayOrigin, transport: relayTransport, secure: secure,
+                                         publisher: publisher, identity: context.identity)
+            await client.revoke()
+            if (try? await client.hasPendingCleanup()) == false {
+                try? completeRetiringRelayWakeContext(context)
+            }
+        }
+    }
+
+    public func capturedRelayWakeRoutePublisher(context: RelayWakeCleanupContext) throws -> CapturedRelayWakeRoutePublisher {
+        CapturedRelayWakeRoutePublisher(server: ServerClient(
+            origin: try ServerOrigin(canonical: context.identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
+            token: context.deviceCredential, transport: transport
+        ))
+    }
+
+    private func relayWakeContexts() throws -> [RelayWakeCleanupContext] {
+        guard let data = try store.secure.read("relay-wake-cleanup-contexts-v1") else { return [] }
+        return try JSONDecoder().decode([RelayWakeCleanupContext].self, from: data)
+    }
+
+    private func saveRelayWakeContexts(_ contexts: [RelayWakeCleanupContext]) throws {
+        try store.secure.upsert("relay-wake-cleanup-contexts-v1", try JSONEncoder().encode(contexts))
+    }
+
+    /// A route ID fences delayed cleanup so it cannot remove a later enrollment for this device.
+    public func removeWakeRoute(routeId: String) async throws {
+        guard let record else { throw ClientError.notEnrolled }
+        var meter = RequestMeter(limit: 2)
+        let server = try authenticatedServer(record.identity)
+        let response = try await server.exchange(
+            "DELETE", "/v1/devices/self/wake-route",
+            query: [URLQueryItem(name: "route_id", value: routeId)],
+            limit: ServerClient.maxSmallBytes,
+            meter: &meter
+        )
+        // Older self-hosted servers predate route deletion. Their unsupported response must not
+        // prevent independent relay revocation.
+        guard (200..<300).contains(response.status) || response.status == 404 || response.status == 405 else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
+    }
+
     private func changeEnrollment(_ body: () async throws -> SessionStatus) async throws -> SessionStatus {
         guard !changingEnrollment else { throw ClientError.enrollmentChangeInProgress }
         changingEnrollment = true
         defer { changingEnrollment = false }
         do { return try await body() } catch { throw ClientError.wrap(error) }
+    }
+
+    private func hostedSession(for origin: ServerOrigin) async throws -> String? {
+        guard origin.serialized == "https://peppy.pro" else { return nil }
+        return try await HostedAccountClient(transport: transport).enrollmentSessionBearer()
     }
 
     /// The identity may become (or stay) active: nothing else is active and its database, if one
@@ -407,6 +844,39 @@ public actor NativeSession {
         if let active = try store.activeIdentity(), active != identity { throw ClientError.alreadyEnrolled }
         if let open = record?.identity, open != identity { throw ClientError.alreadyEnrolled }
         if try store.databaseWasCreated(identity), !databaseExists(identity) { throw ClientError.localDatabaseMissing }
+    }
+
+    /// `bindingSecret` is set only by owner claim, vault creation, and manual admission, where the secret was just verified.
+    private func activateVerifiedEnrollment(_ enrollment: NativeEnrollmentIdentity, bindingSecret: String? = nil) throws -> SessionStatus {
+        let metadata = enrollment.metadata()
+        let identity = EnrollmentIdentity(origin: metadata.origin, vaultId: metadata.vaultId, deviceId: metadata.deviceId)
+        guard UUID(uuidString: identity.vaultId)?.uuidString.lowercased() == identity.vaultId,
+              UUID(uuidString: identity.deviceId)?.uuidString.lowercased() == identity.deviceId,
+              try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP).serialized == identity.origin,
+              let profile = try JSONSerialization.jsonObject(with: Data(metadata.profileJson.utf8)) as? [String: Any],
+              let epoch = UInt32(exactly: profile["key_epoch"] as? Int ?? 0), epoch > 0
+        else { throw ClientError.invalidResponse("verified enrollment metadata") }
+        try requireAdoptable(identity)
+        let nativeClient = try openClient(identity)
+        do {
+            try enrollment.activateInto(nativeClient: nativeClient)
+            let credential = try enrollment.credentialForNativeSecureStore()
+            let record = EnrollmentRecord(identity: identity, role: metadata.role, keyEpoch: epoch, profileJson: metadata.profileJson, headerJson: metadata.headerJson)
+            try store.activate(record, token: credential)
+            try store.saveKeyCache(nativeClient.exportNativeKeyCacheForNativeStorage(epoch: epoch), epoch: epoch, for: identity)
+            client = nativeClient
+            self.record = record
+            reachability.bind(identity)
+            status = SessionStatus(identity: identity, role: record.role, keyEpoch: epoch, databaseOpen: true, keysUnlocked: true)
+            refreshCount()
+            if let bindingSecret {
+                VaultSecretStore(secure: store.secure).storeBinding(bindingSecret, for: identity, origin: identity.origin)
+            }
+            return status
+        } catch {
+            try? nativeClient.dispose()
+            throw error
+        }
     }
 
     /// Applies a verified record to the open client, or opens it.
@@ -452,6 +922,7 @@ public actor NativeSession {
                 }
             }
             self.record = record
+            reachability.bind(identity)
             status.role = record.role
             status.keyEpoch = record.keyEpoch
             refreshCount()
@@ -491,11 +962,7 @@ public actor NativeSession {
         defer { syncing = false }
         let identity = record.identity
         do {
-            let server = ServerClient(
-                origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
-                token: try store.token(identity),
-                transport: transport
-            )
+            let server = try observedServer(identity)
             let report = try await ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget).run()
             refreshCount()
             return report
@@ -503,6 +970,19 @@ public actor NativeSession {
             throw ClientError.wrap(error)
         }
     }
+
+    /// Observes the enrolled server even while vault keys are locked. It does not open a socket or
+    /// mutate local state, and shares the sync guard with full foreground passes.
+    public func probeServerReachability() async throws {
+        guard let record else { throw ClientError.notEnrolled }
+        guard !syncing else { throw ClientError.syncInProgress }
+        syncing = true
+        defer { syncing = false }
+        var meter = RequestMeter(limit: 1)
+        try await observedServer(record.identity).probe(meter: &meter)
+    }
+
+    public func serverReachability() -> ServerReachabilityState { reachability.state }
 
     // MARK: Contacts
 
@@ -517,21 +997,22 @@ public actor NativeSession {
         budget: SyncBudget = SyncBudget(),
         isCancelled: @escaping @Sendable () -> Bool
     ) async throws -> ContactsSyncReport {
-        guard preferences.load().enabled else { return ContactsSyncReport(outcome: .disabled) }
-        if client == nil { _ = try open() }
-        guard let client, let record else { throw ClientError.notEnrolled }
-        guard status.keysUnlocked else { return ContactsSyncReport(outcome: .needsUnlock) }
+        let contactsEnabled = preferences.load().enabled
+        if client == nil {
+            if contactsEnabled { _ = try open() } else { _ = try? open() }
+        }
+        guard let client, let record else {
+            return ContactsSyncReport(outcome: contactsEnabled ? .needsUnlock : .disabled)
+        }
+        guard status.keysUnlocked else {
+            return ContactsSyncReport(outcome: contactsEnabled ? .needsUnlock : .disabled)
+        }
         guard !syncing else { return ContactsSyncReport(outcome: .busy) }
         syncing = true
         defer { syncing = false }
         let identity = record.identity
         do {
-            let server = ServerClient(
-                origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
-                token: try store.token(identity),
-                transport: transport
-            )
-            let sync = ForegroundSync(client: client, server: server, vaultId: identity.vaultId, budget: budget)
+            let sync = ForegroundSync(client: client, server: try observedServer(identity), vaultId: identity.vaultId, budget: budget)
             var syncError: ClientError?
             // Incoming records (requests, approvals, a repair snapshot) are applied before any permit.
             do {
@@ -542,11 +1023,23 @@ public actor NativeSession {
                 if wrapped == .canceled { throw wrapped }
                 syncError = wrapped // Offline is not fatal: capture stays local and uploads next time.
             }
+            if !contactsEnabled {
+                let coordinator = NativeContactsCoordinator(
+                    client: client, deviceId: identity.deviceId, provider: provider, preferences: preferences
+                )
+                var report = try await coordinator.run(reason: reason, isCancelled: isCancelled)
+                if syncError == nil, !isCancelled(), !Task.isCancelled {
+                    do { _ = try await sync.run() } catch { syncError = ClientError.wrap(error) }
+                }
+                report.syncError = syncError?.userMessage
+                refreshCount()
+                return report
+            }
             let scratch = databaseDirectory.appendingPathComponent("contact-media-tmp", isDirectory: true)
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
             try Self.protectUntilFirstUnlock(scratch)
             let media = syncError == nil ? ContactsMediaSession(
-                transfer: ContactMediaTransfer(client: client, server: server, scratch: scratch),
+                transfer: ContactMediaTransfer(client: client, server: try authenticatedServer(identity), scratch: scratch),
                 meter: RequestMeter(limit: budget.maxRequests)
             ) : nil
             var coordinator = NativeContactsCoordinator(
@@ -569,6 +1062,9 @@ public actor NativeSession {
             }
             if syncError == nil, !isCancelled(), !Task.isCancelled {
                 do { _ = try await sync.run() } catch { syncError = ClientError.wrap(error) }
+            }
+            if let bookId = report.bookId {
+                report.remoteScanPending = (try? coordinator.hasPendingRemoteScan(bookId: bookId)) ?? report.remoteScanPending
             }
             report.syncError = syncError?.userMessage
             refreshCount()
@@ -669,73 +1165,17 @@ public actor NativeSession {
         )
     }
 
-    private func ownerPairingState() throws -> (EnrollmentRecord, String) {
-        guard let record, record.role == "owner", status.keysUnlocked, client != nil else { throw ClientError.forbidden }
-        let fingerprint = try vaultProfileFingerprint(profileJson: record.profileJson)
-        guard Self.validKeyDigest(fingerprint), record.keyEpoch > 0 else { throw ClientError.invalidResponse("local vault profile") }
-        return (record, fingerprint)
-    }
-
-    private func requireCurrentOwnerPairingState(_ expected: EnrollmentRecord, fingerprint: String) throws {
-        let (current, currentFingerprint) = try ownerPairingState()
-        guard current.identity == expected.identity, current.keyEpoch == expected.keyEpoch,
-              current.profileJson == expected.profileJson, currentFingerprint == fingerprint,
-              try store.activeIdentity() == expected.identity else { throw ClientError.identityMismatch }
-    }
-
-    private func validateOwnerVault(_ vault: [String: Any], record: EnrollmentRecord, fingerprint: String) throws {
-        guard try vault.string("vault_id") == record.identity.vaultId,
-              try vault.string("device_id") == record.identity.deviceId,
-              try vault.string("role") == "owner",
-              UInt32(exactly: try vault.integer("key_epoch")) == record.keyEpoch,
-              try vault.string("profile_fingerprint") == fingerprint
-        else { throw ClientError.identityMismatch }
-    }
-
-    private func validate(_ intent: OwnerPairingIntent, for record: EnrollmentRecord, fingerprint: String) throws {
-        guard intent.origin == record.identity.origin, intent.vaultId == record.identity.vaultId,
-              intent.deviceId == record.identity.deviceId, intent.keyEpoch == record.keyEpoch,
-              intent.profileFingerprint == fingerprint, Self.validPairingToken(intent.intentToken),
-              let qr = try? JSONSerialization.jsonObject(with: intent.qrPayload) as? [String: Any],
-              Set(qr.keys) == Set(["https_origin", "intent_token"]), qr["https_origin"] as? String == intent.origin,
-              qr["intent_token"] as? String == intent.intentToken
-        else { throw ClientError.identityMismatch }
-    }
-
-    private func pairingClaim(from result: [String: Any], token: String) throws -> OwnerPairingClaim {
-        guard let expires = UInt64(exactly: try result.integer("expires_in_seconds")), expires > 0,
-              result["claimed"] as? Bool == true, result["approved"] as? Bool == false,
-              let deviceId = result["device_id"] as? String,
-              UUID(uuidString: deviceId)?.uuidString.lowercased() == deviceId,
-              let digest = result["key_digest"] as? String, Self.validKeyDigest(digest),
-              let role = result["requested_role"] as? String, role == "device" || role == "gateway",
-              let serverSas = result["sas"] as? String
-        else { throw ClientError.invalidResponse("pairing intent claim") }
-        let sas = try pairingIntentSas(intentToken: token, keyDigest: digest, deviceId: deviceId)
-        guard sas == serverSas else { throw ClientError.invalidResponse("pairing SAS") }
-        return OwnerPairingClaim(deviceId: deviceId, keyDigest: digest, requestedRole: role, sas: sas)
-    }
-
-    private static func validPairingToken(_ token: String) -> Bool {
-        token.utf8.count == 43 && token.utf8.allSatisfy(\.isASCIIBase64URL)
-    }
-
-    private static func validKeyDigest(_ digest: String) -> Bool {
-        digest.utf8.count == 64 && digest.utf8.allSatisfy { $0.isASCIIHexDigit }
-    }
-
-    private func anonymousJSON(origin: ServerOrigin, method: String, path: String, object: [String: Any]) async throws -> [String: Any] {
-        let body = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
-        let response = try await transport.send(HTTPRequest(method: method, url: origin.url(path), headers: ["Accept": "application/json", "Content-Type": "application/json"], body: body, maxResponseBytes: ServerClient.maxSmallBytes))
-        guard origin.contains(response.url) else { throw ClientError.originMismatch }
-        guard let result = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any] else { throw ClientError.invalidResponse(path) }
-        guard (200..<300).contains(response.status) else {
-            if path.hasSuffix("/challenge"), response.status == 401, result["code"] as? String == "pairing_challenge_unavailable" {
-                throw ClientError.pairingAwaitingApproval
+    private func observedServer(_ identity: EnrollmentIdentity) throws -> ServerClient {
+        let binding = ServerReachabilityBinding(identity: identity)
+        let generation = reachability.generation
+        let reachability = reachability
+        return ServerClient(
+            origin: try ServerOrigin(canonical: identity.origin, allowLoopbackHTTP: allowLoopbackHTTP),
+            token: try store.token(identity), transport: transport,
+            observeResponse: { state in
+                reachability.record(state, binding: binding, generation: generation)
             }
-            throw ClientError.server(status: response.status, code: result["code"] as? String)
-        }
-        return result
+        )
     }
 
     /// Releases the client. Nothing on disk or in the Keychain changes.
@@ -744,6 +1184,7 @@ public actor NativeSession {
         client = nil
         record = nil
         status = SessionStatus()
+        reachability.bind(nil)
     }
 
     private func refreshCount() {
@@ -801,43 +1242,43 @@ public actor NativeSession {
     }
 }
 
-public extension NativeSession {
-    /// Creates a normal owner pairing intent and offers it to a desktop's one-time join request.
-    /// The join key and both token forms stay opaque to callers and diagnostics.
-    func ownerOfferJoinRequest(qrData: Data) async throws -> OwnerPairingIntent {
-        try Task.checkCancellation()
-        guard qrData.count <= 4096, let payload = String(data: qrData, encoding: .utf8) else {
-            throw ClientError.invalidCredential("join request QR")
-        }
-        let join = try parseJoinRequestQr(payload: payload, allowLoopbackHttp: allowLoopbackHTTP)
-        let origin = try ServerOrigin(canonical: join.httpsOrigin, allowLoopbackHTTP: allowLoopbackHTTP)
-        guard let record, origin.serialized == record.identity.origin else { throw ClientError.originMismatch }
+public struct CapturedRelayWakeRoutePublisher: RelayWakeRoutePublisher {
+    private let server: ServerClient
 
-        let intent = try await createOwnerPairingIntent()
-        try Task.checkCancellation()
-        let (current, fingerprint) = try ownerPairingState()
-        try validate(intent, for: current, fingerprint: fingerprint)
-        let sealedToken = try sealIntentToken(joinKeyB64url: join.joinKey, intentToken: intent.intentToken)
-        let digest = intentDigestHex(intentToken: intent.intentToken)
-        var meter = RequestMeter(limit: 1)
-        _ = try await authenticatedServer(current.identity).post(
-            "/v1/pairing/join-requests/\(join.joinRequestId)/offer",
-            json: try JSONSerialization.data(withJSONObject: [
-                "intent_digest": digest,
-                "sealed_intent_token": sealedToken,
-            ], options: [.withoutEscapingSlashes]),
-            meter: &meter
+    init(server: ServerClient) { self.server = server }
+
+    public func publish(routeId: String, wakeCredential: String) async throws {
+        var meter = RequestMeter(limit: 2)
+        let response = try await server.exchange(
+            "PUT", "/v1/devices/self/wake-route",
+            body: try JSONSerialization.data(withJSONObject: ["route_id": routeId, "wake_credential": wakeCredential]),
+            contentType: "application/json", limit: ServerClient.maxSmallBytes, meter: &meter
         )
-        try Task.checkCancellation()
-        return intent
+        guard (200..<300).contains(response.status) else { throw ClientError.server(status: response.status, code: nil) }
+    }
+
+    public func remove(routeId: String) async throws {
+        var meter = RequestMeter(limit: 2)
+        let response = try await server.exchange(
+            "DELETE", "/v1/devices/self/wake-route", query: [URLQueryItem(name: "route_id", value: routeId)],
+            limit: ServerClient.maxSmallBytes, meter: &meter
+        )
+        // 404/405: the route is gone or the server predates route deletion; relay cleanup must proceed.
+        guard (200..<300).contains(response.status) || response.status == 404 || response.status == 405 else {
+            throw ClientError.server(status: response.status, code: nil)
+        }
     }
 }
 
+/// Compatibility publisher for callers that cannot capture a transport context yet.
 public struct SessionRelayWakeRoutePublisher: RelayWakeRoutePublisher {
     private let session: NativeSession
     public init(session: NativeSession) { self.session = session }
     public func publish(routeId: String, wakeCredential: String) async throws {
         try await session.publishWakeRoute(routeId: routeId, wakeCredential: wakeCredential)
+    }
+    public func remove(routeId: String) async throws {
+        try await session.removeWakeRoute(routeId: routeId)
     }
 }
 

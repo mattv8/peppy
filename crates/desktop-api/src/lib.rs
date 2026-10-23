@@ -1,11 +1,13 @@
 //! Sanitized UI view models (the Rust side of `src/bridge.ts`). Only display data is
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
-    AppFilter, AttachmentInfo, AttachmentState, ComposeDraft, Direction, Message,
-    MirroredNotification, SendState, Transport,
+    AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft, Direction,
+    Error, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
+    Transport,
 };
 use serde::{Deserialize, Serialize};
 
+pub mod avatar;
 pub mod compose;
 pub mod gateways;
 pub mod images;
@@ -121,6 +123,15 @@ pub struct GatewayView {
     pub simulated: bool,
     pub supports_sms: bool,
     pub supports_mms: bool,
+    /// A truthful presence/capability projection. Missing from legacy cached views means unknown.
+    #[serde(default)]
+    pub availability: GatewayAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence: Option<GatewayPresence>,
+    #[serde(default)]
+    pub wake_route: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mms_content_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +144,37 @@ pub struct GatewayView {
     pub capability_note: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayAvailability {
+    #[default]
+    Unknown,
+    Connected,
+    Delayed,
+    Offline,
+    NeverConnected,
+    NoSmsSim,
+    SmsPermissionNeeded,
+    SmsUnavailable,
+    CapabilitiesUnknown,
+    UnsupportedPlatform,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GatewayPresence {
+    pub state: GatewayPresenceState,
+    pub last_seen_age_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPresenceState {
+    Connected,
+    Seen,
+    Never,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationView {
@@ -142,9 +184,25 @@ pub struct ConversationView {
     pub unread: u64,
     pub messages: Vec<MessageView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_older_messages: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_blocked_reason: Option<String>,
+    /// This row is the reusable recipientless composition, not an empty history.
+    #[serde(default)]
+    pub recipientless_draft: bool,
+    /// This row exists only for local compose state and has no established history.
+    #[serde(default)]
+    pub draft_only: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub conversation_id: String,
+    pub messages: Vec<MessageView>,
+    pub has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -153,11 +211,17 @@ pub struct MessageView {
     pub id: String,
     pub revision: String,
     pub sender: &'static str,
+    /// Actual incoming sender, retained separately from the self/other display category.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
     pub body: String,
-    /// Core records carry no wall-clock time; an empty string is shown rather than a fake time.
+    /// Empty only when the provider did not supply a timestamp; never synthesized from arrival.
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<&'static str>,
+    /// Gateway-recorded time of `status`, as positive decimal epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_at: Option<String>,
     pub attachments: Vec<AttachmentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<&'static str>,
@@ -184,6 +248,87 @@ pub struct AttachmentView {
     pub transfer: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// Producer metadata links a ready thumbnail independently from the original's transfer state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_meta: Option<Box<MediaMetadataView>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCursorView {
+    pub sort_at_ms: String,
+    pub local_order: String,
+    pub message_id: String,
+    pub attachment_position: u32,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPageItemView {
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_address: Option<String>,
+    pub timestamp: String,
+    pub attachment: AttachmentView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_meta: Option<MediaMetadataView>,
+    pub cursor: MediaCursorView,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMetadataView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<AttachmentView>,
+    /// `thumbnail_unavailable` is producer-authenticated v3 completion evidence, not a host guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_unavailable: Option<&'static str>,
+}
+
+pub fn media_metadata_view(meta: peppy_client_core::MediaMetadata) -> MediaMetadataView {
+    MediaMetadataView {
+        width: meta.width,
+        height: meta.height,
+        duration_ms: meta.duration_ms.map(|value| value.to_string()),
+        thumbnail: meta
+            .thumbnail
+            .as_ref()
+            .map(|item| attachment_view(item, None, None)),
+        preview_unavailable: meta.thumbnail.is_none().then_some("thumbnail_unavailable"),
+    }
+}
+
+/// Snapshot/history callers can enrich each visible attachment without relying on attachment order.
+pub fn message_attachment_media_metadata_view(
+    client: &Client,
+    message_id: MessageId,
+    attachment_id: AttachmentId,
+) -> Result<Option<MediaMetadataView>, Error> {
+    client
+        .message_attachment_media_metadata(message_id, attachment_id)
+        .map(|metadata| metadata.map(media_metadata_view))
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPageView {
+    pub items: Vec<MediaPageItemView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<MediaCursorView>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPageAroundView {
+    pub target: MediaPageItemView,
+    pub newer: Vec<MediaPageItemView>,
+    pub older: Vec<MediaPageItemView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newer_cursor: Option<MediaCursorView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub older_cursor: Option<MediaCursorView>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -268,6 +413,59 @@ pub fn attachment_view(
             AttachmentState::Uploaded | AttachmentState::Available => None,
         },
         retryable,
+        media_meta: None,
+    }
+}
+
+pub fn media_page_view(page: MediaPage) -> MediaPageView {
+    MediaPageView {
+        items: page
+            .items
+            .into_iter()
+            .map(|item| MediaPageItemView {
+                message_id: item.message.record.message_id.to_string(),
+                sender_address: (item.message.direction == Direction::Incoming)
+                    .then_some(item.message.sender_address)
+                    .flatten(),
+                timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+                attachment: attachment_view(&item.attachment, None, None),
+                media_meta: item.media_meta.map(media_metadata_view),
+                cursor: cursor_view(item.cursor),
+            })
+            .collect(),
+        next_cursor: page.next_cursor.map(cursor_view),
+    }
+}
+
+pub fn media_page_around_view(page: MediaPageAround) -> MediaPageAroundView {
+    MediaPageAroundView {
+        target: media_page_item_view(page.target),
+        newer: page.newer.into_iter().map(media_page_item_view).collect(),
+        older: page.older.into_iter().map(media_page_item_view).collect(),
+        newer_cursor: page.newer_cursor.map(cursor_view),
+        older_cursor: page.older_cursor.map(cursor_view),
+    }
+}
+
+fn cursor_view(cursor: peppy_client_core::MediaCursor) -> MediaCursorView {
+    MediaCursorView {
+        sort_at_ms: cursor.sort_at_ms.to_string(),
+        local_order: cursor.local_order.to_string(),
+        message_id: cursor.message_id.to_string(),
+        attachment_position: cursor.attachment_position,
+    }
+}
+
+fn media_page_item_view(item: peppy_client_core::MediaPageItem) -> MediaPageItemView {
+    MediaPageItemView {
+        message_id: item.message.record.message_id.to_string(),
+        sender_address: (item.message.direction == Direction::Incoming)
+            .then_some(item.message.sender_address)
+            .flatten(),
+        timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+        attachment: attachment_view(&item.attachment, None, None),
+        media_meta: item.media_meta.map(media_metadata_view),
+        cursor: cursor_view(item.cursor),
     }
 }
 
@@ -293,9 +491,13 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
         } else {
             "other"
         },
+        sender_address: (message.payload.direction == Direction::Incoming)
+            .then(|| message.payload.sender_address.clone())
+            .flatten(),
         body: message.payload.body.clone(),
-        timestamp: String::new(),
+        timestamp: positive_ms_to_decimal(message.payload.sent_at_ms).unwrap_or_default(),
         status: message.send_state.map(send_state_label),
+        status_at: positive_ms_to_decimal(message.status_at_ms),
         attachments,
         transport: match message.payload.transport {
             Transport::Sms => Some("sms"),
@@ -313,6 +515,12 @@ pub fn message_view(message: &Message, attachments: Vec<AttachmentView>) -> Mess
             (!values.is_empty()).then_some(values)
         },
     }
+}
+
+fn positive_ms_to_decimal(value: Option<i64>) -> Option<String> {
+    value
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
 }
 
 pub fn draft_view(draft: &ComposeDraft) -> DraftView {
@@ -341,7 +549,10 @@ pub fn draft_view(draft: &ComposeDraft) -> DraftView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peppy_client_core::{AttachmentId, ConversationId, DraftId};
+    use peppy_client_core::{
+        AttachmentId, ConversationId, DeviceId, DraftId, MessageId, MessagePayload, MessageRecord,
+        SourceSequence,
+    };
     use serde_json::json;
 
     #[test]
@@ -402,6 +613,50 @@ mod tests {
     }
 
     #[test]
+    fn message_status_time_serializes_as_optional_decimal_milliseconds() {
+        let message = Message {
+            payload: MessagePayload {
+                record: MessageRecord {
+                    message_id: MessageId::new(),
+                    conversation_id: ConversationId::new(),
+                    source_sequence: SourceSequence(1),
+                    attachments: vec![],
+                },
+                source_device_id: DeviceId::new(),
+                provider_message_id: None,
+                sender_address: None,
+                recipients: vec![],
+                subject: None,
+                body: "Hello".into(),
+                transport: Transport::Sms,
+                direction: Direction::Outgoing,
+                imported: false,
+                sent_at_ms: Some(2),
+                ordered_at_ms: None,
+                mms_context: None,
+            },
+            seen: true,
+            send_state: Some(SendState::Sent),
+            status_at_ms: Some(1_725_363_180_000),
+        };
+
+        let view = message_view(&message, vec![]);
+        let with_status_time = serde_json::to_value(&view).unwrap();
+        assert_eq!(with_status_time["statusAt"], "1725363180000");
+
+        let without_status_time = MessageView {
+            status_at: None,
+            ..view
+        };
+        assert!(
+            serde_json::to_value(without_status_time)
+                .unwrap()
+                .get("statusAt")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn notification_preferences_match_the_existing_json_contract() {
         assert_eq!(
             serde_json::to_value(NotificationPreferences::default()).unwrap(),
@@ -410,6 +665,27 @@ mod tests {
                 "mirroredBanners": true,
                 "preview": "full",
             })
+        );
+    }
+
+    #[test]
+    fn legacy_gateway_cache_defaults_new_presence_fields_to_unknown() {
+        let gateway: GatewayView = serde_json::from_value(json!({
+            "id": "gateway", "name": "Phone", "simId": "sim", "online": true,
+            "simulated": false, "supportsSms": true, "supportsMms": false,
+        }))
+        .unwrap();
+
+        assert_eq!(gateway.availability, GatewayAvailability::Unknown);
+        assert!(!gateway.wake_route);
+        assert!(gateway.presence.is_none());
+        assert_eq!(
+            serde_json::to_value(GatewayPresence {
+                state: GatewayPresenceState::Seen,
+                last_seen_age_seconds: None,
+            })
+            .unwrap(),
+            json!({"state": "seen", "last_seen_age_seconds": null})
         );
     }
 }

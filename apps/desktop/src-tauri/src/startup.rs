@@ -8,6 +8,12 @@ pub fn background_requested(arguments: impl IntoIterator<Item = String>) -> bool
         .any(|argument| argument == BACKGROUND_ARGUMENT)
 }
 
+/// A restart marker is a durable statement about the prior process's actual
+/// main-window state, and therefore takes precedence over a stale launch arg.
+pub fn restart_background(marker: Option<bool>, argument_requested: bool) -> bool {
+    marker.unwrap_or(argument_requested)
+}
+
 /// A failed tray must never create an unreachable hidden launch.
 pub fn hide_initial_main(background: bool, tray_available: bool) -> bool {
     background && tray_available
@@ -38,5 +44,12 @@ mod tests {
         assert!(!background_requested(["--other".into()]));
         assert!(hide_initial_main(true, true));
         assert!(!hide_initial_main(true, false));
+    }
+
+    #[test]
+    fn restart_marker_overrides_the_launch_argument_when_present() {
+        assert!(!restart_background(Some(false), true));
+        assert!(restart_background(Some(true), false));
+        assert!(restart_background(None, true));
     }
 }

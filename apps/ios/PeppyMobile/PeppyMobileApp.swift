@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 #if canImport(PeppyNative)
 import PeppyNative
 #endif
@@ -33,17 +32,17 @@ struct DeviceView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @State private var passphrase = ""
-    @State private var choosingFile = false
-    @State private var showingPairing = false
     @State private var showingSettings = false
     @State private var confirmingDisconnect = false
     @State private var devicePendingRemoval: DeviceRosterItem?
     @State private var vaultDeleteText = ""
     @State private var showingVaultDelete = false
     @State private var showingSelfHosted = false
+    @State private var showingSelfHostedEnrollment = false
+    @State private var showingPhoneEnrollment = false
+    @State private var showingOwnerPhoneApproval = false
+    @State private var ownerPhoneApprovalHost: OwnerPhoneApprovalHost?
     @State private var showingHostedEnrollment = false
-    @State private var presentPairingAfterHostedEnrollment = false
-    @State private var showingOwnerPairing = false
     @State private var enrollmentLoaded = false
 
     var body: some View {
@@ -51,7 +50,11 @@ struct DeviceView: View {
             if !enrollmentLoaded {
                 ProgressView().accessibilityIdentifier("enrollment-loading")
             } else if model.status.identity == nil {
-                welcome
+                if showingSelfHosted {
+                    selfHostedSetup
+                } else {
+                    welcome
+                }
             } else if model.status.databaseOpen && !model.status.keysUnlocked {
                 lockScreen
             } else {
@@ -60,56 +63,125 @@ struct DeviceView: View {
         }
         .tint(colors.Accent)
         .task { await model.load(); enrollmentLoaded = true }
-        .task(id: scenePhase == .active && model.status.keysUnlocked) {
-            if scenePhase == .active { await model.syncInForeground() }
+        .task(id: "\(scenePhase == .active)-\(model.status.identity != nil)-\(model.status.keysUnlocked)") {
+            let active = scenePhase == .active
+            model.setForegroundActive(active)
+            guard active, !Task.isCancelled else { return }
+            await model.reconcileWakeRegistration()
+            guard !Task.isCancelled else { return }
+            await model.syncInForeground()
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             model.observeContactChanges(phase == .active)
+            model.setForegroundActive(phase == .active)
             if phase == .background { model.scheduleContactsBackgroundWork() }
         }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.json]) { result in
-            Task { await model.importCredential(from: result) }
+        .fullScreenCover(isPresented: $showingHostedEnrollment) {
+            HostedEnrollmentView(model: model) {}
         }
-        .sheet(isPresented: $showingPairing) { PairingView(model: model, isPresented: $showingPairing) }
-        .sheet(isPresented: $showingOwnerPairing) { OwnerPairingView(model: model, isPresented: $showingOwnerPairing) }
-        .fullScreenCover(isPresented: $showingHostedEnrollment, onDismiss: {
-            if presentPairingAfterHostedEnrollment {
-                presentPairingAfterHostedEnrollment = false
-                showingPairing = true
+        .fullScreenCover(isPresented: $showingSelfHostedEnrollment) {
+            SelfHostedEnrollmentView(model: model, isPresented: $showingSelfHostedEnrollment)
+        }
+        .sheet(isPresented: $showingPhoneEnrollment) {
+            PhoneEnrollmentView(model: model, isPresented: $showingPhoneEnrollment)
+        }
+        .sheet(isPresented: $showingOwnerPhoneApproval) {
+            if let ownerPhoneApprovalHost {
+                OwnerPhoneApprovalView(
+                    host: ownerPhoneApprovalHost,
+                    isPresented: $showingOwnerPhoneApproval,
+                    revealSecret: { await model.revealOwnerVaultSecret() }
+                )
             }
-        }) {
-            HostedEnrollmentView(model: model) { presentPairingAfterHostedEnrollment = true }
         }
     }
 
     private var colors: PeppyColorScheme { PeppyTokens.colors(for: colorScheme) }
 
     @ViewBuilder private var welcome: some View {
-        PeppyGlassSurface(colors: colors) {
-            VStack(spacing: 16) {
-                Image(decorative: "PeppyLogo").resizable().scaledToFit().frame(width: 72, height: 72)
-                    .font(.system(size: 48)).foregroundStyle(colors.Accent)
-                Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
-                Text("peppy.onboarding_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+        ScrollView {
+            PeppyGlassSurface(colors: colors) {
+                VStack(spacing: 16) {
+                    Image(decorative: "PeppyLogo").resizable().scaledToFit().frame(width: 72, height: 72)
+                        .font(.system(size: 48)).foregroundStyle(colors.Accent)
+                    Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
+                    Text("peppy.onboarding_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
 
-                Button { showingHostedEnrollment = true } label: { Text("peppy.production_hosted_cta", tableName: "Peppy") }
-                    .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText).accessibilityIdentifier("welcome-hosted-button")
+                    Picker(selection: Binding(
+                        get: { showingSelfHosted },
+                        set: { showingSelfHosted = $0 }
+                    )) {
+                        Text("peppy.onboarding_mode_hosted", tableName: "Peppy").tag(false)
+                            .accessibilityIdentifier("welcome-server-mode-hosted")
+                        Text("peppy.onboarding_mode_self_hosted", tableName: "Peppy").tag(true)
+                            .accessibilityIdentifier("welcome-server-mode-self-hosted")
+                    } label: {
+                        Text("peppy.onboarding_mode_selector", tableName: "Peppy")
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("welcome-server-mode-selector")
 
-                Button { showingPairing = true } label: { Text("peppy.scan_qr", tableName: "Peppy") }
-                    .accessibilityIdentifier("welcome-pair-qr-button")
+                    Text("peppy.onboarding_hosted_sub", tableName: "Peppy")
+                        .font(.subheadline)
+                        .foregroundStyle(colors.TextSecondary)
 
-                Button { choosingFile = true } label: { Text("peppy.use_credential_file", tableName: "Peppy") }
-                    .accessibilityIdentifier("welcome-import-credential-button")
+                    Button { showingHostedEnrollment = true } label: {
+                        Text("peppy.onboarding_hosted_cta", tableName: "Peppy")
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText).accessibilityIdentifier("welcome-get-started-button")
 
-                Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) { Text("peppy.self_hosted_docs_link", tableName: "Peppy") }
-                    .accessibilityIdentifier("welcome-self-hosted-docs-link")
-
-                activityAndError
+                    activityAndError
+                }
+                .padding(24)
             }
-            .padding(24)
+            .frame(maxWidth: 460)
+            .padding(.vertical, 24)
         }
-        .frame(maxWidth: 460)
         .accessibilityIdentifier("welcome-screen")
+    }
+
+    @ViewBuilder private var selfHostedSetup: some View {
+        ScrollView {
+            PeppyGlassSurface(colors: colors) {
+                VStack(spacing: 16) {
+                    Text("peppy.self_hosted_headline", tableName: "Peppy").font(.title2).bold()
+                    Text("peppy.self_hosted_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+
+                    Button("Set up or connect to a server") { showingSelfHostedEnrollment = true }
+                        .buttonStyle(.borderedProminent)
+                        .tint(colors.Accent)
+                        .foregroundStyle(colors.AccentText)
+                        .accessibilityIdentifier("self-hosted-enrollment-button")
+                    Button("Scan phone enrollment QR") { showingPhoneEnrollment = true }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("phone-enrollment-button")
+
+                    Link(destination: URL(string: "https://github.com/mattv8/peppy#readme")!) {
+                        Text("peppy.self_hosted_docs_link", tableName: "Peppy")
+                            .frame(minHeight: 44)
+                    }
+                    .accessibilityIdentifier("self-hosted-docs-link")
+
+                    Button { returnToHostedWelcome() } label: {
+                        Text("peppy.back", tableName: "Peppy")
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("self-hosted-back-button")
+
+                    activityAndError
+                }
+                .padding(24)
+            }
+            .frame(maxWidth: 460)
+            .padding(.vertical, 24)
+        }
+        .accessibilityIdentifier("self-hosted-screen")
+    }
+
+    private func returnToHostedWelcome() {
+        showingSelfHosted = false
     }
 
 
@@ -132,10 +204,6 @@ struct DeviceView: View {
                 } label: { Text("peppy.hosted_unlock_cta", tableName: "Peppy") }.disabled(passphrase.isEmpty || model.activity != .idle)
                     .buttonStyle(.borderedProminent).tint(colors.Accent).foregroundStyle(colors.AccentText)
                     .accessibilityIdentifier("unlock-button")
-                if model.enrollmentBlocked {
-                    Button("Replace credential file…") { choosingFile = true }
-                        .accessibilityIdentifier("replace-credential-button")
-                }
                 activityAndError
             }
             .padding(24)
@@ -154,6 +222,11 @@ struct DeviceView: View {
                 .accessibilityIdentifier("tab-account")
         }
         .sheet(isPresented: $showingSettings) { SettingsView(model: model) }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.serverReachability == .unavailable {
+                ServerOfflineBanner(colors: colors)
+            }
+        }
     }
 
     private var mirroringTab: some View {
@@ -163,7 +236,7 @@ struct DeviceView: View {
                     LabeledContent("Notification mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable")
                         .accessibilityIdentifier("mirroring-ios-unavailable-row")
-                    Text("iOS does not provide a system-wide notification listener API. Mirroring is available on an Android gateway.")
+                    Text("iOS does not provide a system-wide notification listener API. Mirroring is available on an Android phone.")
                         .foregroundStyle(.secondary)
                 }.accessibilityIdentifier("mirroring-ios-section")
             }.formStyle(.grouped).navigationTitle(Text("peppy.mirroring", tableName: "Peppy")).toolbar { settingsButton }
@@ -187,12 +260,12 @@ struct DeviceView: View {
                 } header: {
                     Text("Carrier messaging")
                 } footer: {
-                    Text("iOS cannot capture or send carrier SMS/MMS. Use an Android gateway for carrier messaging. RCS is unavailable.")
+                    Text("iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. RCS is unavailable.")
                 }.accessibilityIdentifier("carrier-section")
                 Section("SMS and MMS") {
                     LabeledContent("SMS mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("sms-mirroring-unavailable-row")
-                    Text("iOS does not provide an SMS inbox listener. An Android gateway receives and sends SMS.")
+                    Text("iOS does not provide an SMS inbox listener. An Android phone receives and sends SMS.")
                     LabeledContent("MMS capture", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("mms-unavailable-row")
                     Text("MMS capture requires a carrier listener not available in this iOS build.")
@@ -232,21 +305,28 @@ struct DeviceView: View {
                 Section("Session") {
                     Button("Refresh from server") { Task { await model.refresh() } }
                         .disabled(model.activity != .idle).accessibilityIdentifier("refresh-enrollment-button")
-                    Button("Replace credential file…") { choosingFile = true }.accessibilityIdentifier("replace-credential-button")
                     Button("Disconnect this device…", role: .destructive) { confirmingDisconnect = true }
                         .disabled(model.activity != .idle).accessibilityIdentifier("disconnect-button")
                 }
                 devicesSection
-                relaySection
-                if model.status.role == "owner" {
+                if model.status.role == "owner", model.status.keysUnlocked {
                     Section {
-                        Button { showingOwnerPairing = true } label: {
-                            Text("peppy.production_add_device", tableName: "Peppy")
+                        Button {
+                            Task {
+                                ownerPhoneApprovalHost = await model.ownerPhoneApprovalHost()
+                                showingOwnerPhoneApproval = ownerPhoneApprovalHost != nil
+                            }
+                        } label: {
+                            Text("peppy.owner_phone_add_cta", tableName: "Peppy").bold().frame(minHeight: 44)
                         }
-                        .disabled(!model.status.keysUnlocked || model.activity != .idle).accessibilityIdentifier("add-device-button")
+                        .accessibilityIdentifier("add-phone-button")
+                    } header: {
+                        Text("peppy.owner_phone_section_title", tableName: "Peppy")
                     }
-                    vaultSection
+                    .accessibilityIdentifier("owner-phone-section")
                 }
+                if model.status.identity?.origin == "https://peppy.pro" { relaySection }
+                if model.status.role == "owner" { vaultSection }
                 if let identity = model.status.identity, identity.origin == "https://peppy.pro" {
                     Section {
                         Link(destination: URL(string: "https://peppy.pro/account")!) {
@@ -313,14 +393,43 @@ struct DeviceView: View {
     }
 
     private var relaySection: some View {
-        Section("Wake relay") {
-            LabeledContent("APNs", value: model.relay == nil ? "Not configured" : "Ready to register")
-                .accessibilityIdentifier("relay-apns-row")
-            Text(model.relay == nil ? "No relay configured. Sync runs while the app is open." : "Enable APNs registration from Settings. Delivery is not guaranteed.")
-                .accessibilityIdentifier("relay-not-configured")
-            Text("Wake hints are optional. Missing a hint delays sync briefly; no messages are lost.")
+        Section {
+            Toggle(isOn: Binding(get: { model.backgroundUpdatesEnabled }, set: { model.setBackgroundUpdatesEnabled($0) })) {
+                Text("peppy.wake_updates_toggle_label", tableName: "Peppy")
+            }
+            .accessibilityIdentifier("relay-wake-toggle")
+            HStack {
+                Text("peppy.wake_status_label", tableName: "Peppy")
+                Spacer()
+                Text(wakeStatusCopy)
+            }
+            .accessibilityIdentifier("relay-wake-status")
+            Text(wakeFooterCopy)
                 .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("relay-wake-footer")
+        } header: {
+            Text("peppy.wake_section_title", tableName: "Peppy")
         }.accessibilityIdentifier("relay-health-section")
+    }
+
+    private var wakeStatusCopy: LocalizedStringKey {
+        switch model.wakeStatus {
+        case .registered: "peppy.wake_status_registered"
+        case .settingUp: "peppy.wake_status_pending"
+        case .retrying: "peppy.wake_status_retrying"
+        case .paused: "peppy.wake_status_paused"
+        case .unavailable: "peppy.wake_status_unavailable"
+        }
+    }
+
+    private var wakeFooterCopy: LocalizedStringKey {
+        switch model.wakeStatus {
+        case .registered: "peppy.wake_footer_registered"
+        case .settingUp: "peppy.wake_footer_pending"
+        case .retrying: "peppy.wake_footer_retrying"
+        case .paused: "peppy.wake_footer_paused"
+        case .unavailable: "peppy.wake_footer_unavailable_server"
+        }
     }
 
     private var vaultSection: some View {
@@ -350,11 +459,12 @@ struct DeviceView: View {
 struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Gateway settings") {
+                Section("Phone settings") {
                     LabeledContent("SMS capture", value: "Unavailable on iOS").accessibilityValue("Unavailable")
                         .accessibilityIdentifier("settings-sms-capture-toggle")
                     LabeledContent("MMS capture", value: "Unavailable on iOS").accessibilityValue("Unavailable")
@@ -364,16 +474,16 @@ struct SettingsView: View {
                     LabeledContent("Notification mirroring", value: "Unavailable on iOS").accessibilityValue("Unavailable")
                         .accessibilityIdentifier("settings-mirroring-toggle")
                 }
-                Section("Wake relay") {
-                    TextField("Operator relay HTTPS origin", text: $model.relayOrigin)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .accessibilityIdentifier("relay-origin-field")
-                    Button("Enable APNs wake relay") { model.configureRelay() }
-                        .disabled(model.relayOrigin.isEmpty || model.status.identity == nil)
-                        .accessibilityIdentifier("relay-enable-button")
-                    Text("Peppy registers with the operator relay only after you enable this option. Wake hints contain no message content and may be delayed or missing.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }.accessibilityIdentifier("relay-settings-section")
+                if model.status.identity?.origin != "https://peppy.pro" {
+                    Section("Wake relay") {
+                        TextField("Operator relay HTTPS origin", text: $model.relayOrigin)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityIdentifier("relay-origin-field")
+                        Button("Enable APNs wake relay") { model.configureRelay() }
+                            .disabled(model.relayOrigin.isEmpty || model.status.identity == nil)
+                            .accessibilityIdentifier("relay-enable-button")
+                    }.accessibilityIdentifier("relay-settings-section")
+                }
                 ContactsSection(model: model)
                 Section("About") {
                     LabeledContent("App version", value: "0.1")
@@ -382,5 +492,41 @@ struct SettingsView: View {
             }.formStyle(.grouped).navigationTitle(Text("peppy.settings", tableName: "Peppy"))
                 .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } } }
         }.accessibilityIdentifier("settings-screen")
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.serverReachability == .unavailable {
+                    ServerOfflineBanner(colors: PeppyTokens.colors(for: colorScheme), announcesTransition: false)
+                }
+            }
+    }
+}
+
+struct ServerOfflineBanner: View {
+    let colors: PeppyColorScheme
+    var announcesTransition = true
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(colors.WarningText)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("peppy.server_offline_title", tableName: "Peppy").font(.subheadline.weight(.semibold))
+                Text("peppy.server_offline_body", tableName: "Peppy").font(.footnote)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(colors.WarningSurface)
+        .overlay(alignment: .bottom) { colors.WarningBorder.frame(height: 1) }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("server-offline-banner")
+        .onAppear {
+            guard announcesTransition else { return }
+            #if canImport(UIKit)
+            let title = String(localized: "peppy.server_offline_title", table: "Peppy")
+            let body = String(localized: "peppy.server_offline_body", table: "Peppy")
+            UIAccessibility.post(notification: .announcement, argument: "\(title). \(body)")
+            #endif
+        }
     }
 }

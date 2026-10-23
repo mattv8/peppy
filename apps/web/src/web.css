@@ -1,3 +1,8 @@
+#browser-app {
+  height: 100%;
+  min-height: 0;
+}
+
 #browser-booting,
 #browser-unsupported,
 #browser-stopped,
@@ -5,7 +10,7 @@
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background: var(--peppy-surface-editor, #1f1f1f);
+  background: radial-gradient(circle at top, var(--peppy-surface-widget, #202020), var(--peppy-surface-desk, #252526) 58%);
   color: var(--peppy-text-primary, #ccc);
 }
 
@@ -13,7 +18,13 @@
 #browser-stopped > section,
 #browser-startup-failure > section {
   max-width: 520px;
-  padding: 20px 16px;
+  padding: 24px;
+  border: 1px solid var(--peppy-border, #555);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius, 4px));
+  background: var(--peppy-glass-surface);
+  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
+  backdrop-filter: var(--peppy-glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
 }
 
 #browser-stopped > section,
@@ -21,10 +32,6 @@
   display: grid;
   gap: 16px;
   padding: 28px;
-  border: 1px solid var(--peppy-border, #555);
-  border-radius: var(--peppy-control-radius, 4px);
-  box-shadow: var(--peppy-shadow-floating);
-  background: var(--peppy-surface-panel, #292929);
 }
 
 #browser-stopped h1,
@@ -45,10 +52,12 @@
 dialog[data-browser-screen] {
   width: min(100% - 32px, 420px);
   color: var(--peppy-text-primary, #ccc);
-  background: var(--peppy-surface-editor, #1f1f1f);
+  background: var(--peppy-glass-surface);
   border: 1px solid var(--peppy-border, #555);
-  border-radius: var(--peppy-control-radius, 4px);
-  box-shadow: var(--peppy-shadow-floating);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius, 4px));
+  box-shadow: var(--peppy-shadow-3, var(--peppy-shadow-floating));
+  backdrop-filter: var(--peppy-glass-backdrop-filter);
+  -webkit-backdrop-filter: var(--peppy-glass-backdrop-filter);
 }
 
 dialog[data-browser-screen] form,
@@ -58,5 +67,66 @@ dialog[data-browser-screen] label {
 }
 
 dialog[data-browser-screen] form { gap: 16px; }
+
+#instance-management,
+#instance-management-loading,
+#instance-management-sign-in,
+#instance-management-hosted,
+#instance-management-error {
+  height: 100vh;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 32px;
+  color: var(--peppy-text-primary, #ccc);
+  background: var(--peppy-surface-desk, #252526);
+}
+
+#instance-management { max-width: 960px; margin: 0 auto; }
+#instance-management-header,
+#instance-management-status,
+#instance-management-devices,
+#instance-management-identity,
+#family-vaults,
+#instance-management-sign-in-card,
+#instance-management-hosted-card,
+#instance-management-error-card { display: grid; gap: 16px; }
+#instance-management-status,
+#instance-management-devices,
+#instance-management-identity,
+#instance-management-sign-in-card,
+#instance-management-hosted-card,
+#instance-management-error-card { margin-top: 24px; padding: 24px; border: 1px solid var(--peppy-border, #555); border-radius: var(--peppy-radius-md, 4px); background: var(--peppy-glass-surface, #303030); }
+#instance-management-status dl { display: flex; gap: 32px; flex-wrap: wrap; margin: 0; }
+#instance-management-status dt { color: var(--peppy-text-secondary, #aaa); }
+#instance-management-status dd { margin: 4px 0 0; }
+#instance-management-devices-table { width: 100%; border-collapse: collapse; text-align: left; }
+#instance-management-devices-table th,
+#instance-management-devices-table td { padding: 12px 8px; border-top: 1px solid var(--peppy-border, #555); }
+.instance-management-kind { display: block; color: var(--peppy-text-secondary, #aaa); font-size: 0.85em; }
+#instance-management-devices-heading:focus { outline: none; }
+#browser-manage-server-link { position: fixed; right: 16px; bottom: 16px; z-index: 10; color: var(--peppy-text-primary, #ccc); }
+
+#family-vaults { display: grid; gap: 16px; margin-top: 24px; }
+.family-vaults-card { display: grid; gap: 16px; padding: 24px; border: 1px solid var(--peppy-border, #555); border-radius: var(--peppy-radius-md, 4px); background: var(--peppy-glass-surface, #303030); }
+#family-vaults-invite-link-display { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#family-vaults-invite-link-text { overflow-wrap: anywhere; }
+#family-vaults-invite-qr-image { width: clamp(120px, 20vw, 200px); height: auto; }
+#family-vaults-invite-list { display: grid; gap: 12px; padding: 0; margin: 0; list-style: none; }
+#family-vaults-invite-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.family-vaults-invite-meta { flex: 1; color: var(--peppy-text-secondary, #aaa); }
+#family-vaults-requests-live { display: grid; }
+/* Requests are rows within their card, divided like the vault table rather than boxed. */
+#family-vaults-requests-live article { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--peppy-border, #555); }
+.family-vaults-request-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.family-vaults-request-meta dt { color: var(--peppy-text-secondary, #aaa); }
+.family-vaults-request-meta dd { margin: 4px 0 0; }
+#family-vaults-table { width: 100%; border-collapse: collapse; text-align: left; }
+#family-vaults-table th, #family-vaults-table td { padding: 12px 8px; border-top: 1px solid var(--peppy-border, #555); }
+.family-vaults-admin-badge { color: var(--peppy-text-secondary, #aaa); }
+
+@media (max-width: 560px) {
+  #instance-management, #instance-management-loading, #instance-management-sign-in, #instance-management-hosted, #instance-management-error { padding: 16px; }
+  .family-vaults-card { padding: 16px; overflow-x: auto; }
+}
 
 @keyframes browser-spin { to { transform: rotate(360deg); } }

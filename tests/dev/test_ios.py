@@ -295,6 +295,66 @@ esac
         self.assertIn(f"open {self.xcode27_developer}/../Applications/DeviceHub.app", calls)
         self.assertNotIn("--args -CurrentDeviceUDID", calls)
 
+    def test_run_builds_selected_source_tree_and_keeps_caller_target_directory(self):
+        source = self.root / "selected source"
+        (source / "apps/ios/Generated").mkdir(parents=True)
+        (source / "apps/ios/Generated/bindings.swift").write_text("current bindings\n")
+        target = self.root / "caller target"
+        result = self.run_helper(
+            "run",
+            PEPPY_SOURCE_TREE=str(source),
+            IOS_ROOT=str(source),
+            CARGO_TARGET_DIR=str(target),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"cwd={source}", self.calls())
+        self.assertIn(f"--target-dir {target}", self.calls())
+
+    def test_device_shutdown_during_build_prevents_install(self):
+        """Simulator shutdown during xcodebuild must be detected before install."""
+        # Model: device is booted initially, but shuts down during build (e.g., DeviceHub quit).
+        # The pre-build bootstatus check passes; post-build check must fail and prevent install.
+        # Use a two-phase xcrun stub: initial bootstatus for run() pre-build check succeeds,
+        # but a second bootstatus call (modeled as post-build readiness check) fails.
+        self.fake("xcrun", '''
+echo "xcrun $*" >> "$IOS_LOG"
+case "$*" in
+  *--show-sdk-path*) echo "$IOS_SDK" ;;
+  *'--find clang'*|*'--find ar'*|*'--find ranlib'*) echo "$IOS_TOOL" ;;
+  *'list devices available -j'*) cat "$IOS_DEVICES" ;;
+  *'list runtimes -j'*) cat "$IOS_RUNTIMES" ;;
+  *'bootstatus '*)
+    # Track the call count to simulate shutdown during build:
+    # First call (pre-build) succeeds; second call (post-build) fails.
+    if [ ! -f "$IOS_BOOTSTATUS_COUNT" ]; then
+      echo 1 > "$IOS_BOOTSTATUS_COUNT"
+    else
+      count=$(cat "$IOS_BOOTSTATUS_COUNT")
+      if [ "$count" -eq 1 ]; then
+        echo 2 > "$IOS_BOOTSTATUS_COUNT"
+        [ "${IOS_FAIL:-}" != "shutdown" ] || exit 1
+      fi
+    fi
+    ;;
+  *'install '*) [ "${IOS_FAIL:-}" != install ] || exit 1 ;;
+  *'launch '*) [ "${IOS_FAIL:-}" != launch ] || exit 1 ;;
+esac
+exit 0
+''')
+        bootcount_file = self.root / "bootstatus_count"
+        result = self.run_helper("run", IOS_FAIL="shutdown", IOS_BOOTSTATUS_COUNT=str(bootcount_file))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        # Pre-build bootstatus should have run
+        self.assertIn("bootstatus A -b", calls)
+        # Build should have completed
+        self.assertIn("cargo build", calls)
+        # But install must NOT happen because post-build readiness check failed
+        self.assertNotIn("install A", calls)
+        # And launch must NOT happen
+        self.assertNotIn("launch --terminate-running-process", calls)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,160 +1,237 @@
 # Peppy desktop frontend style guide
 
-Use this guide for the Tauri desktop UI: a dense, bounded workbench with
-Pushbullet-style placement and Ragtime Modern as visual intent. It documents
-UI contracts as well as presentation; behavior and source take precedence over
-this guide. [Domain guidance](AGENTS.md) covers security, data, and evidence.
+Reference for the Tauri desktop UI: a dense, bounded workbench in the VS Code
+Modern palette, with a coral accent and locally bundled Droid Sans. Ragtime is
+visual intent only; do not import from it. Keep the compact 4px rhythm.
+Security, data, and evidence rules live in [domain guidance](AGENTS.md).
 
 ## Source ownership
 
-Resolve a discrepancy from the implementation and its tests first, then the
-token and style sources, then this guide. Ragtime is visual intent only; do
-not import from it.
-
 | Source | Owns |
 |---|---|
-| `packages/desktop-ui/src/peppy-tokens.css` | `--peppy-*` theme tokens, local Droid Sans, reduced motion |
-| `packages/desktop-ui/src/styles.css` | Shared titlebar, panes, composer, resize, and status-popover styling |
-| `packages/desktop-ui/src/index.tsx` | `AppTitlebar`, `Panel`, `StatusPopover`, `ConnectionDot`, shared desktop UI, composer, recipient panel |
-| `packages/desktop-ui/src/phone.ts` | Shared phone validation, normalization, input and display formatting |
-| `packages/desktop-ui/src/ResizeHandle.tsx` | Resizing behavior and handle semantics |
-| `apps/desktop/src/App.tsx` | Shells, views, drafts, persistence, status details, and status severity bindings |
-| `apps/desktop/src/status.ts` | Desktop-domain connection/sync labels, summaries, and severity priority |
-| `apps/desktop/src/app.css` | Desktop shell, conversation view, bubbles, and settings |
+| `packages/desktop-ui/src/peppy-tokens.css` | `--peppy-*` tokens, local font, reduced motion |
+| `packages/desktop-ui/src/styles.css` | Shared titlebar, panes, composer, resize, status styling (legacy aliases are compatibility only) |
+| `packages/desktop-ui/src/index.tsx` | `AppTitlebar`, `Panel`, `StatusPopover`, `ConnectionDot`, composer, recipient panel |
+| `packages/desktop-ui/src/phone.ts` | Shared phone validation and formatting |
+| `apps/desktop/src/App.tsx`, `status.ts` | Shells, views, drafts, persistence, status details and severity |
+| `apps/desktop/src/app.css`, `settings.css`, `vibrancy.css` | Desktop chrome, settings cards, native-material CSS |
+| `apps/desktop/src-tauri/src/window_chrome.rs`, `material_state.rs`, `tray.rs` | Native effect lifecycle, success inspection, deferred show, `data-vibrancy` |
+| `apps/desktop/src-tauri/tauri.conf.json`, `tauri.macos.conf.json` | Base config keeps the main window opaque; the macOS overlay makes it transparent |
 
-## Distinctive design and themes
+## Surfaces and themes
 
-Keep the rail, thread list, and conversation as docked workbench panes. Use
-the compact 4px rhythm, tonal surfaces, and structural borders rather than a
-generic web-page layout. The composer and contacts rail are deliberate
-exceptions: both may float above the conversation with `--peppy-shadow-floating`.
+- **Tier 1, desk:** window background. Solid or subtle tonal fill; translucent
+  only under native macOS material.
+- **Tier 2, docked:** rail, titlebar, thread list, conversation, contacts, and
+  settings. Structural borders, full legibility, no blur. Settings cards are opaque.
+- **Tier 3, floating:** composer, recipient rail, popovers, pickers, dialogs.
+  CSS glass, on small areas only. Never blur a full scrolling list.
 
-All themeable color, surface, border, typography, spacing, radius, and shadow
-values use explicit `--peppy-*` tokens. Shells carry `theme-system`,
-`theme-light`, or `theme-dark`; light values intentionally appear in both
-`.theme-light` and the system-light media rule. Legacy aliases in `styles.css`
-are compatibility mappings, not new-code tokens.
+Preserve the composer's opaque gutters and fade, read-visibility geometry,
+recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 
-Bundle fonts and assets locally with relative URLs. The CSP remains
-`default-src 'self'`; do not introduce remote font or asset sources. Treat
-display timestamps as opaque strings rather than values to parse or reformat.
+- Use `--peppy-*` tokens for themeable values in touched styles. Read exact
+  values from `peppy-tokens.css`; this guide does not copy them.
+- Shells carry `theme-system`, `theme-light`, or `theme-dark`. Light values
+  appear in both `.theme-light` and the system-light media rule; keep them in sync.
+- Glass falls back to opaque with zero blur on native Linux, under
+  `prefers-reduced-transparency`, without `backdrop-filter`, and on native
+  vibrancy failure or inactive state. Forced colors use system colors and no
+  shadows. Reduced motion disables animation.
+- Theme overrides target the shell element carrying the theme class, not a
+  descendant of it or an assumed theme on the document root.
+- A fallback must stay readable. A native fallback must never leave a transparent,
+  blank shell.
+- Bundle fonts and assets locally. The CSP stays `default-src 'self'`; add no
+  remote sources. Treat display timestamps as opaque strings.
 
 ## Titlebar status and chrome
 
-The main window supplies a `Panel.status` with the sync state, carrier
-disclosure, and connection state. `StatusPopover` exposes those details from
-the navigation-rail dot; keep the detail rows readable and wrapped. The main
-titlebar has no status pills. Composer and floating-head headers use only a
-read-only `ConnectionDot` with the complete `Connection: <connectionText>`
-label; they do not show sync or carrier disclosures.
+- Main `Panel.status` carries sync, carrier disclosure, and connection state.
+  `StatusPopover`, opened from the rail dot, shows full wrapped details. The
+  main titlebar has no status pills.
+- Composer and floating-head headers show only a read-only `ConnectionDot` with
+  the full `Connection: <connectionText>` label. They never show sync or carrier
+  disclosures.
+- These disclosure strings stay exact and untruncated: `Device sync encrypted`,
+  `Device sync key mismatch`, `Device sync not unlocked`, and `Carrier SMS/MMS not
+  end-to-end encrypted`.
+- App-drawn platform-appropriate chrome; do not switch to native decorations. Close paths use
+  `closeAfterSave`, and a draft flush failure keeps the window open. The detached
+  composer is not a second main window.
 
-Keep this fixed text exactly: `Device sync encrypted`, `Device sync key
-mismatch`, `Device sync not unlocked`, and `Carrier SMS/MMS not end-to-end
-encrypted`. Do not truncate these disclosure rows.
+## Icons and compose
 
-The app draws platform-appropriate chrome so both windows share a recognizable
-shell. Do not switch to native decorations: main-window and composer close
-paths use `closeAfterSave`. A draft flush failure keeps the window open.
+- Lucide icons only, through `desktop-ui` re-exports. No direct Lucide dependency
+  in app packages. Keep each platform's window-control conventions.
+- The in-place compose action is in the thread-list toolbar in side-rail mode;
+  it is in the titlebar in titlebar navigation or when the list is hidden,
+  collapsed, or another view is selected. With no conversation selected, a
+  centered empty-state `New conversation` CTA may coexist with either and
+  invokes the same in-place draft action.
+- `AppTitlebar.onNewMessage` is passed only in titlebar mode or when the list is
+  inaccessible; otherwise it stays `undefined`.
+- In-place compose uses `MessageSquarePlus`. The separate detached action,
+  labeled `New message window`, uses `SquarePen`.
+
+## Settings
+
+- Category navigation beside one scrolling column of cards. Scroll position
+  selects the category through anchors and `aria-current`, not tabs, since several
+  sections can be visible together. Omit categories without content. Keep
+  `data-settings-section` values.
+- Do not add settings search, settings QR, QR save, credential-file onboarding,
+  credential export, or database-reset UI.
+- Secondary controls sit behind disclosure. Pending drafts and in-flight actions
+  survive toggles; async failures and capability states stay visible.
+- On submit, reveal validation errors before focusing a hidden field. A known
+  host error focuses its matching field; an ambiguous edit error reveals
+  populated groups without moving focus.
+- Setup follows the server-advertised deployment mode. Never route a community
+  browser into hosted sign-in because an outer UI preference defaults to Hosted.
+
+## Enrollment UI
+
+Stable stage and QR hooks live in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
+Protocol rules are in [domain guidance](AGENTS.md).
+
+- One `connect_phone` QR, shown on first setup or from **Add phone** while the
+  owner has no phone. Keep it in onboarding or Add phone, never Settings. It has
+  no Save action and is not a credential or approval.
+- Rotate only near or after expiry, or when the requested method changes. Never
+  rotate while verifying a claimed phone.
+- **Enter shared secret on phone** switches a waiting invitation to the
+  shared-secret method before revealing the secret. **Set up phone later**
+  cancels only the invitation and is remembered per origin.
+- After claim, show the SAS and require the owner's explicit checkbox before
+  approval. After approval, never offer **Start again** or a replacement, even if
+  the server reports expiry first.
+- A cancellation racing a claim must preserve verification (`SetupLanding.test.tsx`).
+
+Secret handling:
+
+- **Native desktop:** the setup code is requested only for token-protected first
+  claim, and the admin password comes from a native secure prompt. The vault
+  shared secret stays native and is shown only in a native dialog (**Copy
+  secret**). Phone approval uses the active Rust client's verified handoff
+  capability without a secret prompt; recovery may use the protected binding
+  secret when that capability is unavailable.
+- **Browser:** the generated secret is shown once and needs a save
+  acknowledgement. DOM prompts are reachable by same-origin JavaScript and must
+  not be described as native secure. Keep values out of shared React snapshots.
+  Clear secret fields after use.
+  Phone approval invokes worker-private Rust capability, not a DOM secret prompt.
+- App-lock credentials are a separate native gate. See
+  [native enrollment](../apps/desktop/src-tauri/src/enrollment.rs),
+  [app lock](../apps/desktop/src-tauri/src/app_lock.rs), and
+  [browser bridge](../apps/web/src/browser-bridge.ts).
+
+Community first setup shows the server-advertised mode. Open claim shows no
+setup-code input; token-protected claim shows it, citing `PEPPY_SETUP_TOKEN`.
+Keep the setup code, administrator password, and vault shared secret distinct.
+Show no recovery or reset control. Web-only **Manage server** shows device status
+and read-only storage, quota, and retention, with no pairing QR or database reset.
+
+Local lock is off by default, protects local UI access only, and applies on the
+next launch. Native dispatch enforces it; a React overlay is not a security gate.
+It does not replace account authorization, device credentials, or the vault shared
+secret. Native code sanitizes locked snapshots and suppresses plaintext in
+notification previews and floating heads.
 
 ## Windows, drafts, and layout
 
-The main window owns rail, list, and conversation views; the composer window
-is a focused conversation surface without rail or thread list. The composer
-must preserve draft recovery and close behavior rather than acting as a
-second main window.
+- The main window owns rail, list, and conversation. The composer window is a
+  focused conversation surface with draft recovery and close behavior of its own.
+- `peppy.layout.v1` is shared by both windows. Read it defensively, clamp at
+  render time, and persist only explicit resize or rail moves. Merge only changed
+  keys so one window does not erase the other's settings. Never persist a
+  viewport-clamped value.
+- The composer overlays the conversation: `#message-list` reserves space from
+  `--composer-overlay-height`. The visibility observer is rooted at the list with
+  a negative bottom `rootMargin`, and is recreated on height change without
+  resending seen IDs. A message is read only when actually visible.
+- The composer resize handle uses `resize-handle resize-handle-vertical
+  composer-resize-grip`, which replaces the default handle classes.
 
-`peppy.layout.v1` is shared by both windows. Read it defensively, clamp
-values while rendering, and persist only explicit user resize or rail position
-changes. Merge only changed keys before writing so one window does not erase
-the other's settings; never write back a value merely clamped for its current
-viewport.
+## Floating recipient rail
 
-The composer overlays the conversation: `#message-list` reserves space from
-`--composer-overlay-height`, while opaque gutters and its fade preserve legible
-content beneath it. The visibility observer is rooted at that list and uses a
-rounded negative bottom `rootMargin` for the overlay, recreating on height
-changes without re-sending already seen message ids. Messages become read only
-when actually visible.
-
-The composer resize handle uses the supplied
-`resize-handle resize-handle-vertical composer-resize-grip` `className`; that
-class replaces default handle classes. Its card-top grip sizes the composer
-without turning it into the list sash.
-
-## Floating contacts rail
-
-For a new conversation, `RecipientPanel` is a separate overlay inside
-`#conversation-stage`, not a child of the composer. Its clipped
-`#recipient-rail-layer` ends at the composer's top edge: downward movement
-stops with the rail's bottom flush to that edge, never over the message input.
-Default to the left edge with an 8px gap above that boundary. Drag freely in
-the remaining conversation area; there are no corner anchors, docking rows,
-or drop-target grids. Keep the panel mounted while moving so pending input
-and focus survive.
-
-Size the rail to its contents; its input grows and shrinks with its text and
-placeholder. Wrap chips within the available width and scroll inside the rail
-when its content exceeds the safe area's height. Observe the boundary layer
-as well as the rail so composer resizing or validation errors re-clamp the
-rail without saving window-only adjustments. The composer stacks above the
-rail layer as a final protection against transient measurement changes.
-Hide the composer's top fade while the rail is present so it does not dim the
-rail's controls at the flush boundary; keep the fade in existing threads.
-
-Persist exact `{ x, y }` pixels relative to the conversation area's top-left
-as `recipientPosition` in the shared layout. Accept only finite nonnegative
-coordinates. Ignore legacy `recipientAnchor`; remove it on the next explicit
-rail move. Resize-only clamping never writes back the saved position. Pointer
-cancellation reverts without saving. Grip arrows move 8px (Shift: 32px), with
-no quantization of pointer movement. Keep the rail rounded, above the composer
-in stacking order, and use `--peppy-shadow-floating` in both themes.
-
-Recipient tokenization commits on Enter outside IME, delimiters, blur, and
-separated paste. It trims and deduplicates committed tokens in first-occurrence
-order, but typing alone does not commit; a paste's unseparated trailing text
-remains in the input. Empty-input Backspace removes the last token.
-
-Use the shared phone helpers for new recipient entry. Parsing defaults to US;
-explicit international numbers remain supported. New numbers normalize to
-E.164 IDs (for example, `+12025550123`) while US display uses national format
-(`(202) 555-0123`). Keep existing synced IDs and contact names unchanged.
-Validation checks numbering-plan structure, not ownership or SMS reachability.
-
-Format the rail input while typing without changing IME composition or losing
-the caret. Validate on commit, retain rejected text with an inline accessible
-error, and never partially commit a mixed valid/invalid batch. Search remains
-free text for existing contacts; only valid numbers offer a new conversation.
-Pending recipient text blocks Send until committed or cleared. Chip removal
-uses stored IDs; an explicit empty recipient list clears a saved draft rather
-than restoring its previous recipients. Established replies still resolve
-conversation recipients at send time.
+- For a new conversation, `RecipientPanel` is a separate overlay in
+  `#conversation-stage`, not a composer child. The clipped `#recipient-rail-layer`
+  ends at the composer's top edge and never covers the input. Default to the left
+  edge with a gap above it. Otherwise drag freely; there are no docking grids.
+- Keep the panel mounted while moving. Observe the boundary layer too, so
+  composer resizing re-clamps without saving.
+- Persist exact `{ x, y }` pixels from the conversation top-left as
+  `recipientPosition`; accept only finite nonnegative values. Ignore
+  `recipientAnchor`. Resize-only clamping and pointer cancellation never save.
+- Tokens commit on Enter outside IME, delimiters, blur, and separated paste; typing
+  alone does not. Trim and deduplicate in first-occurrence order.
+- New entry uses the shared phone helpers: US default, E.164 IDs for new numbers,
+  synced IDs unchanged. Validation checks numbering-plan structure, not
+  ownership or SMS reachability. Never partially commit a mixed batch. Pending
+  text blocks Send until committed or cleared. Chip removal uses stored IDs; an
+  explicit empty list clears the draft's recipients.
+- Established replies resolve conversation recipients at send time; the new-
+  conversation rail must not replace that lookup.
 
 ## Contacts view
 
-Keep contact books, contact search/list and contact detail as bounded workbench
-panes. Use the existing theme tokens, controls and resize behavior. Each phone's
-book remains identifiable; do not silently merge books or shared phone numbers.
+- Keep each phone's contact book distinct. Never silently merge books or shared numbers.
+- Edits are requests to the owning phone: show pending, conflict, approval,
+  expired, and unavailable states, never an optimistic OS write. Local forget
+  hides a book and never deletes OS contacts.
+- Display names and photos never rewrite conversation IDs, draft recipients, or
+  notification contents.
 
-Contact edits are requests to the owning phone. Show pending, conflict, approval,
-expired and unavailable states without presenting an optimistic local edit as an
-OS write that succeeded. Include the source account/container and read-only
-field capabilities. Local forgetting hides a book; it never deletes OS contacts.
+## Native vibrancy
 
-Resolve names and avatars for display without rewriting conversation IDs,
-addresses, draft recipients or mirrored notification contents. Honor native
-banner preview settings. Preserve a number-selection step for contacts with
-multiple phone numbers and an initials fallback when a photo is unavailable.
+The macOS contract spans `window_chrome.rs`, `material_state.rs`, `tray.rs`,
+`lib.rs`, and the CSS half in `vibrancy.css`. Every native visual state stays
+unverified until the runtime checks in [Native and fixture limits](#native-and-fixture-limits) pass.
 
-Use stable contact/book identifiers for repeated component hooks. Keep photo
-cropping keyboard-accessible and maintain focus through async save states.
+- Uses Tauri 2 `set_effects`; no window-vibrancy crate. Requested on macOS only,
+  for the main window and non-panel composers. Head windows are untouched.
+- `set_effects` reports only dispatch, so success is inspected. macOS is active
+  only when the content view contains an `NSVisualEffectView` child. Windows
+  material is disabled: every window reports opaque, and the WebView background
+  is not mutated. A DWM backdrop attribute is not evidence, and Acrylic is not
+  used. Linux and other platforms are never active.
+- `material_state.rs` caches results per window label. Apply or clear only on
+  explicit transitions: first configuration and effective panel-mode change.
+  Resize and page-load hooks republish the cached result without reinstalling.
+- Reserve a transition in the cache before native calls. Do not borrow the cache
+  during AppKit or DWM work. Record a result only if the window is still in the
+  reserved mode.
+- A failed effect stays opaque and is not retried on refresh. Closing a window
+  calls `forget_material`, so a recreated label retries.
+- Main and composer windows start hidden and show after `PageLoadEvent::Finished`, so first paint
+  follows the material result. Background starts never show explicitly; a second
+  explicit show (tray "Open Peppy") during a pending load does.
+- `window_chrome::sync_webview` sets `html[data-vibrancy]` to `active` or `opaque`.
+  No attribute means opaque, and browser and fixture hosts never receive it.
+  `DesktopSnapshot` is unchanged.
+- Transparency: `macos-private-api` belongs on the common `tauri` dependency in
+  `Cargo.toml`, since cfg-only dependencies are ignored by manifest validation.
+  The base config keeps the main window opaque; the macOS overlay makes it
+  transparent. `apply_macos_window` clears the native background on every sync,
+  so the opaque CSS fallback is the only guard against a blank shell.
+- `macOSPrivateApi` blocks Mac App Store distribution; keep that recorded for any
+  store path. Windows material needs validation on Windows 11 and the Windows 10
+  fallback before the opaque fallback may be removed.
+- CSS (`vibrancy.css`, only under `html[data-vibrancy="active"]`): desk surfaces
+  go transparent; the titlebar and rail use `--peppy-surface-native-chrome`;
+  `#conversation-stage` stays `--peppy-surface-editor` so text and visibility
+  geometry remain opaque. The content list is never blurred. Native material
+  applies only to `.theme-system`; the OS supplies its appearance, and the app
+  theme only tints CSS.
 
 ## Native and fixture limits
 
-The browser fixture uses realistic data, while ` · Simulated` identifies a
-simulated native gateway only. Native banners depend on OS permission and app
-installation, so the fixture cannot prove delivery or banner activation;
-notification preview preferences remain distinct from encrypted-sync state.
-
-Floating-head behavior needs the native input-region and focus integration;
-keep the main-window and composer fallbacks. Do not infer native-host behavior
-from browser CSS alone.
+- The browser fixture uses realistic data. ` · Simulated` marks a simulated native
+  gateway only. The fixture cannot prove banner delivery or activation, and
+  preview preferences stay distinct from encrypted-sync state.
+- Floating-head behavior needs native input-region and focus integration. Keep
+  the main-window and composer fallbacks; do not infer native behavior from browser CSS.
+- Browser inspection and builds cover CSS and layout only. Native material needs
+  macOS runtime evidence (cold start, bright and dark backgrounds, resizing,
+  fullscreen, reduced transparency). Report missing evidence as unverified.

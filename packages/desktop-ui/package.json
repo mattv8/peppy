@@ -8,6 +8,7 @@
     "./bridge-contracts": "./src/bridge-contracts.ts"
   },
   "scripts": {
+    "palette": "node scripts/avatar-palette.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -26,7 +27,6 @@
     "vitest": "catalog:"
   },
   "dependencies": {
-    "@remixicon/react": "catalog:",
     "libphonenumber-js": "^1.13.14",
     "lucide-react": "^0.468.0",
     "qrcode": "catalog:"

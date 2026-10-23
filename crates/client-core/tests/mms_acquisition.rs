@@ -156,6 +156,48 @@ fn mapped_parts_preserve_order_when_retried_as_an_ordered_prefix() {
 }
 
 #[test]
+fn list_matches_repeated_source_lookup_with_state_reason_and_attachments() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "gateway", &vault), &vault);
+    let acquisition = client
+        .begin_mms_acquisition(input("lookup-list", Direction::Incoming))
+        .unwrap();
+    let [first, second] = [
+        attachment(&client, &dir, "lookup-first.png"),
+        attachment(&client, &dir, "lookup-second.png"),
+    ];
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "first", first)
+        .unwrap();
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "second", second)
+        .unwrap();
+    client
+        .set_mms_acquisition_state(
+            &acquisition.acquisition_id,
+            MmsAcquisitionState::Pending,
+            Some("waiting for provider"),
+        )
+        .unwrap();
+
+    let by_source = client
+        .begin_mms_acquisition(input("lookup-list", Direction::Incoming))
+        .unwrap();
+    let listed = client
+        .mms_acquisitions(MAX_MMS_ACQUISITIONS)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.acquisition_id == acquisition.acquisition_id)
+        .unwrap();
+
+    assert_eq!(by_source, listed);
+    assert_eq!(listed.state, MmsAcquisitionState::Pending);
+    assert_eq!(listed.reason.as_deref(), Some("waiting for provider"));
+    assert_eq!(listed.attachment_ids, vec![first, second]);
+}
+
+#[test]
 fn source_thread_and_sim_keep_conversations_isolated() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -673,6 +715,51 @@ fn own_send_with_media_reconciles_at_begin_without_copy_or_payload_rewrite() {
 }
 
 #[test]
+fn command_media_demand_is_limited_to_the_live_designated_gateway() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let desktop_cfg = config(&dir, "demand-desktop", &vault);
+    let gateway_cfg = config(&dir, "demand-gateway", &vault);
+    let desktop = unlocked(&desktop_cfg, &vault);
+    let gateway = unlocked(&gateway_cfg, &vault);
+    let other = unlocked(&config(&dir, "demand-other", &vault), &vault);
+    let source = dir.path().join("demand.png");
+    fs::write(&source, b"demand media").unwrap();
+    let media = desktop
+        .prepare_attachment(&source, "image/png", "demand.png")
+        .unwrap();
+    desktop
+        .queue_mms(
+            OutgoingMms {
+                conversation_id: ConversationId::new(),
+                recipients: vec![ADDRESS.into()],
+                body: String::new(),
+                attachment_ids: vec![media.attachment_id],
+                subject: None,
+            },
+            route(&gateway_cfg),
+        )
+        .unwrap();
+    desktop
+        .mark_attachment_uploaded(media.attachment_id, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let mut server = Server::default();
+    server.upload(&desktop);
+    assert_eq!(server.sync(&other).applied, 1);
+    assert!(
+        !other
+            .attachment_download_requested(media.attachment_id)
+            .unwrap()
+    );
+    assert_eq!(server.sync(&gateway).applied, 1);
+    assert!(
+        gateway
+            .attachment_download_requested(media.attachment_id)
+            .unwrap()
+    );
+}
+
+#[test]
 fn late_own_send_reconciliation_unlinks_and_discards_partial_copies() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -797,4 +884,88 @@ fn terminal_history_does_not_consume_active_capacity_and_is_bounded() {
             .acquisition_id,
         first_id.unwrap()
     );
+}
+
+#[test]
+fn blocked_mapped_media_is_released_and_manual_recheck_recopies_once() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "blocked-mapped", &vault), &vault);
+    let plans = client
+        .plan_mms_backfill_scans("phone-install-a", "sim-1", "1")
+        .unwrap();
+    let history_bound = plans
+        .iter()
+        .find(|plan| plan.phase == MmsBackfillPhase::History)
+        .unwrap()
+        .history_upper_bound
+        .clone()
+        .unwrap();
+    let acquisition = client
+        .begin_mms_acquisition(input("blocked-mapped", Direction::Incoming))
+        .unwrap();
+    let original = attachment(&client, &dir, "blocked-original.png");
+    let thumbnail = attachment(&client, &dir, "blocked-thumbnail.png");
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "part", original)
+        .unwrap();
+    client
+        .set_mms_acquisition_part_metadata(
+            &acquisition.acquisition_id,
+            "part",
+            None,
+            None,
+            None,
+            Some(thumbnail),
+        )
+        .unwrap();
+
+    client
+        .set_mms_acquisition_state(
+            &acquisition.acquisition_id,
+            MmsAcquisitionState::Blocked,
+            Some("terminal provider limitation"),
+        )
+        .unwrap();
+
+    assert!(
+        client
+            .mms_acquisition_parts(&acquisition.acquisition_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(client.mms_pending_media_bytes().unwrap(), 0);
+    assert_eq!(client.attachment_info(original), Err(Error::NotFound));
+    assert_eq!(client.attachment_info(thumbnail), Err(Error::NotFound));
+    assert!(
+        client
+            .finish_mms_backfill_phase(
+                "phone-install-a",
+                "sim-1",
+                MmsBackfillPhase::History,
+                &history_bound,
+                true,
+            )
+            .unwrap()
+    );
+
+    assert_eq!(
+        client
+            .request_mms_recheck("phone-install-a", "sim-1", 1)
+            .unwrap(),
+        1
+    );
+    let reopened = client
+        .begin_mms_acquisition(input("blocked-mapped", Direction::Incoming))
+        .unwrap();
+    assert_eq!(reopened.acquisition_id, acquisition.acquisition_id);
+    let recopied = attachment(&client, &dir, "recopied-original.png");
+    client
+        .set_mms_acquisition_part(&acquisition.acquisition_id, "part", recopied)
+        .unwrap();
+    let captured = client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    assert!(!captured.duplicate);
+    assert_eq!(client.messages(captured.conversation_id).unwrap().len(), 1);
 }

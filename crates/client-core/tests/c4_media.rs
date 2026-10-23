@@ -315,6 +315,53 @@ fn draft_mms_is_atomic_held_for_upload_and_permit_waits_for_verified_media() {
 }
 
 #[test]
+fn unlocking_seals_a_ready_row_after_an_earlier_media_held_row() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client_config = config(&dir, "client", &vault);
+    let gateway_config = config(&dir, "gateway", &vault);
+    let attachment_path = dir.path().join("held.png");
+    fs::write(&attachment_path, image(32, 9)).unwrap();
+
+    let unlocked_client = unlocked(&client_config, &vault);
+    let attachment = unlocked_client
+        .prepare_attachment(&attachment_path, "image/png", "held.png")
+        .unwrap();
+    drop(unlocked_client);
+
+    let locked_client = open(&client_config);
+    let conversation_id = ConversationId::new();
+    for _ in 0..257 {
+        locked_client
+            .queue_mms(
+                OutgoingMms {
+                    conversation_id,
+                    recipients: vec![ADDRESS.into()],
+                    body: "held".into(),
+                    attachment_ids: vec![attachment.attachment_id],
+                    subject: None,
+                },
+                route(&gateway_config),
+            )
+            .unwrap();
+    }
+    locked_client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation_id),
+            sender_address: ADDRESS.into(),
+            body: "ready".into(),
+            provider_message_id: Some("ready-after-held".into()),
+            imported: false,
+        })
+        .unwrap();
+    drop(locked_client);
+
+    let client = unlocked(&client_config, &vault);
+    assert_eq!(client.pending_outbox().unwrap().len(), 1);
+    assert_eq!(client.seal_pending_batch(1).unwrap(), 0);
+}
+
+#[test]
 fn incoming_mms_metadata_before_bytes_keeps_unread_stable() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();

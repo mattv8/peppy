@@ -57,6 +57,9 @@
         "price_id": {
           "type": "string"
         },
+        "storage": {
+          "$ref": "#/$defs/StorageSummary"
+        },
         "subscription_id": {
           "type": [
             "string",
@@ -74,7 +77,8 @@
         "access",
         "price_id",
         "plan",
-        "invoices"
+        "invoices",
+        "storage"
       ],
       "type": "object"
     },
@@ -209,6 +213,94 @@
         "interval",
         "interval_count",
         "comped"
+      ],
+      "type": "object"
+    },
+    "StoragePackRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_quantity": {
+          "description": "Reconciled quantity displayed to the user when this edit was made.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "quantity": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "operation_id",
+        "expected_quantity",
+        "quantity"
+      ],
+      "type": "object"
+    },
+    "StorageSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "base_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "limit_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pack": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pack_bytes": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pack_max_quantity": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pack_mutation_blocked_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pack_pending": {
+          "type": "boolean"
+        },
+        "pack_purchase_available": {
+          "type": "boolean"
+        },
+        "pack_quantity": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "used_bytes": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "used_bytes",
+        "limit_bytes",
+        "base_bytes",
+        "pack_quantity",
+        "pack_bytes",
+        "pack_purchase_available",
+        "pack_pending"
       ],
       "type": "object"
     },
@@ -388,6 +480,9 @@
     "session": {
       "$ref": "#/$defs/WebSessionResponse"
     },
+    "storage_pack_request": {
+      "$ref": "#/$defs/StoragePackRequest"
+    },
     "subscribe_request": {
       "$ref": "#/$defs/SubscribeRequest"
     },
@@ -404,6 +499,7 @@
     "operation",
     "subscribe_request",
     "subscribe_response",
+    "storage_pack_request",
     "payment_method_confirm",
     "payment_method_setup"
   ],
@@ -424,6 +520,7 @@
     "reconcile": "/hosted/v1/web/billing/reconcile",
     "resume": "/hosted/v1/web/billing/resume",
     "session": "/hosted/v1/web/session",
+    "storagePack": "/hosted/v1/web/billing/storage-pack",
     "subscribe": "/hosted/v1/web/billing/subscribe"
   }
 }

@@ -100,12 +100,14 @@ pub struct Api {
     token: Zeroizing<String>,
 }
 
-fn builder(origin: &str) -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .redirect(redirect::Policy::none())
-        .https_only(!is_loopback_http(origin))
-        .connect_timeout(Duration::from_secs(5))
-        .user_agent("Peppy-Desktop")
+fn builder(origin: &str) -> Result<reqwest::ClientBuilder, BridgeError> {
+    crate::tls::http_builder(origin).map(|builder| {
+        builder
+            .redirect(redirect::Policy::none())
+            .https_only(!is_loopback_http(origin))
+            .connect_timeout(Duration::from_secs(5))
+            .user_agent("Peppy-Desktop")
+    })
 }
 
 impl Api {
@@ -113,11 +115,11 @@ impl Api {
     pub fn new(origin: &str, token: &str) -> Result<Self, BridgeError> {
         let failed = |_| BridgeError::new("network", "Could not create the native network client.");
         Ok(Self {
-            http: builder(origin)
+            http: builder(origin)?
                 .timeout(Duration::from_secs(20))
                 .build()
                 .map_err(failed)?,
-            transfer: builder(origin)
+            transfer: builder(origin)?
                 .read_timeout(Duration::from_secs(30))
                 .build()
                 .map_err(failed)?,
@@ -146,14 +148,14 @@ impl Api {
         if status.is_success() {
             return Ok(response);
         }
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(NetError::Revoked);
-        }
         let code = read_bounded(response, MAX_ERROR_BODY_BYTES)
             .await
             .ok()
             .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
             .and_then(|value| sanitize_code(&value));
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(NetError::Revoked);
+        }
         Err(NetError::Status {
             status: status.as_u16(),
             code,
@@ -315,7 +317,230 @@ impl Api {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    #[cfg(feature = "dev-local-tls")]
+    use std::time::Duration;
+    use std::{path::Path, process::Command, sync::Arc};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::TlsAcceptor;
+    #[cfg(feature = "dev-local-tls")]
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    // A trust-policy mutation that accepts this private root for a non-loopback
+    // origin, a mismatched hostname, or the default client must fail these tests.
+    #[tokio::test]
+    async fn development_ca_trust_is_loopback_scoped_for_https_and_wss() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let fixture = temporary_certificate();
+        let certificate = certificate_der(fixture.path());
+        let wrong_fixture = temporary_certificate();
+        let wrong_certificate = certificate_der(wrong_fixture.path());
+
+        let https = tls_server(fixture.path(), false).await;
+        let client = crate::tls::http_builder_with(&https, Some(&certificate))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            client.get(&https).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let wss = tls_server(fixture.path(), true)
+            .await
+            .replace("https://", "wss://");
+        let connector = crate::tls::websocket_connector_with(
+            &wss.replacen("wss://", "https://", 1),
+            Some(&certificate),
+        )
+        .unwrap()
+        .expect("loopback fixture requires the injected CA");
+        tokio_tungstenite::connect_async_tls_with_config(wss, None, true, Some(connector))
+            .await
+            .expect("the loopback development CA verifies the WSS server");
+
+        let wrong_root = tls_server(fixture.path(), false).await;
+        let wrong_client = crate::tls::http_builder_with(&wrong_root, Some(&wrong_certificate))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(wrong_client.get(&wrong_root).send().await.is_err());
+
+        let hostname_mismatch = tls_server(fixture.path(), false).await;
+        let ip_origin = hostname_mismatch.replacen("localhost", "127.0.0.1", 1);
+        let hostname_client = crate::tls::http_builder_with(&ip_origin, Some(&certificate))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(hostname_client.get(ip_origin).send().await.is_err());
+
+        assert!(!crate::tls::trusts_development_ca(
+            "https://example.test",
+            Some(&certificate)
+        ));
+        assert!(!crate::tls::trusts_development_ca(
+            "https://localhost",
+            None
+        ));
+        assert!(crate::tls::trusts_development_ca(
+            "https://localhost",
+            Some(&certificate)
+        ));
+        assert!(crate::tls::http_builder("https://localhost").is_ok());
+        #[cfg(not(feature = "dev-local-tls"))]
+        assert!(crate::tls::websocket_connector("https://localhost")
+            .unwrap()
+            .is_none());
+        let default_client = reqwest::Client::new();
+        let default_tls = tls_server(fixture.path(), false).await;
+        assert!(default_client.get(default_tls).send().await.is_err());
+    }
+
+    /// Requires a locally running development TLS proxy with the CA embedded at build time.
+    #[cfg(feature = "dev-local-tls")]
+    #[tokio::test]
+    #[ignore = "requires a running local development TLS stack"]
+    async fn local_dev_server_uses_bundled_ca() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let origin = std::env::var("PEPPY_DEV_TLS_TEST_ORIGIN")
+            .expect("PEPPY_DEV_TLS_TEST_ORIGIN must name the local HTTPS development origin");
+        let origin = crate::origin::validate_origin(&origin)
+            .expect("PEPPY_DEV_TLS_TEST_ORIGIN must be a valid origin");
+        assert!(
+            crate::origin::is_loopback_https(&origin),
+            "PEPPY_DEV_TLS_TEST_ORIGIN must be an explicit loopback HTTPS origin"
+        );
+
+        let client = crate::tls::http_builder(&origin)
+            .expect("the embedded local development CA must build an HTTP client")
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("the HTTP client must be valid");
+        let health = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get(format!("{origin}/healthz")).send(),
+        )
+        .await
+        .expect("the local HTTPS health request timed out")
+        .expect("the bundled CA must verify the local HTTPS server");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let request = crate::origin::websocket_url(&origin)
+            .expect("the local HTTPS origin must produce a WSS endpoint")
+            .into_client_request()
+            .expect("the WSS endpoint must produce a request");
+        let connector = crate::tls::websocket_connector(&origin)
+            .expect("the embedded local development CA must build a WSS connector")
+            .expect("loopback HTTPS must use the local development WSS connector");
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::connect_async_tls_with_config(request, None, true, Some(connector)),
+        )
+        .await
+        .expect("the local WSS request timed out");
+        match result {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert!(matches!(response.status().as_u16(), 401 | 403));
+            }
+            Ok(_) => panic!("the unauthenticated local WSS endpoint unexpectedly upgraded"),
+            Err(error) => panic!("the bundled CA did not verify the local WSS server: {error}"),
+        }
+    }
+
+    fn temporary_certificate() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let ca = directory.path().join("ca.pem");
+        let ca_key = directory.path().join("ca-key.pem");
+        let certificate = directory.path().join("certificate.pem");
+        let key = directory.path().join("key.pem");
+        let request = directory.path().join("certificate.csr");
+        let ca_config = directory.path().join("ca.cnf");
+        std::fs::write(
+            &ca_config,
+            "[req]\nprompt=no\ndistinguished_name=subject\nx509_extensions=extensions\n[subject]\nCN=Peppy test CA\n[extensions]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n",
+        )
+        .unwrap();
+        assert!(Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout"])
+            .arg(&ca_key)
+            .arg("-out")
+            .arg(&ca)
+            .args(["-days", "1", "-sha256", "-config"])
+            .arg(&ca_config)
+            .status()
+            .unwrap()
+            .success());
+        let server_config = directory.path().join("server.cnf");
+        std::fs::write(
+            &server_config,
+            "[req]\nprompt=no\ndistinguished_name=subject\n[subject]\nCN=localhost\n[extensions]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n",
+        )
+        .unwrap();
+        assert!(Command::new("openssl")
+            .args(["req", "-newkey", "rsa:2048", "-nodes", "-keyout"])
+            .arg(&key)
+            .arg("-out")
+            .arg(&request)
+            .args(["-config"])
+            .arg(&server_config)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-req", "-in"])
+            .arg(&request)
+            .arg("-CA")
+            .arg(&ca)
+            .arg("-CAkey")
+            .arg(&ca_key)
+            .args(["-set_serial", "1", "-out"])
+            .arg(&certificate)
+            .args(["-days", "1", "-sha256", "-extfile"])
+            .arg(&server_config)
+            .args(["-extensions", "extensions"])
+            .status()
+            .unwrap()
+            .success());
+        directory
+    }
+
+    fn certificate_der(directory: &Path) -> Vec<u8> {
+        use rustls_pki_types::{pem::PemObject, CertificateDer};
+        CertificateDer::from_pem_file(directory.join("ca.pem"))
+            .unwrap()
+            .as_ref()
+            .to_vec()
+    }
+
+    async fn tls_server(directory: &Path, websocket: bool) -> String {
+        use rustls_pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+        let certificates = CertificateDer::pem_file_iter(directory.join("certificate.pem"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = PrivateKeyDer::from_pem_file(directory.join("key.pem")).unwrap();
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, key)
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let Ok(mut stream) = TlsAcceptor::from(Arc::new(config)).accept(stream).await else {
+                return;
+            };
+            if websocket {
+                let _ = tokio_tungstenite::accept_async(stream).await;
+            } else {
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        format!("https://localhost:{}", address.port())
+    }
 
     /// Minimal one-shot HTTP/1.1 server returning `head` then `body`.
     pub async fn serve_once(head: String, body: Vec<u8>) -> String {
@@ -389,6 +614,22 @@ pub mod tests {
         let origin = serve_once(
             "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
             vec![],
+        )
+        .await;
+        let api = Api::new(&origin, "t").unwrap();
+        assert_eq!(
+            api.get_json::<serde_json::Value>("/v1/vault", 4096)
+                .await
+                .unwrap_err(),
+            NetError::Revoked
+        );
+        let body = b"{\"code\":\"invalid_bearer\"}".to_vec();
+        let origin = serve_once(
+            format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            ),
+            body,
         )
         .await;
         let api = Api::new(&origin, "t").unwrap();
