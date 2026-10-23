@@ -43,7 +43,7 @@ const diagnosticErrorCodes = new Set<string>([
   "offline", "network", "local-tls-config", "secure-store-unavailable", "enrollment", "server-rejected",
   "response-too-large", "host-state", "invalid-origin",
   "server-required",
-  "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
+  "hosted-session-required", "credentials-required", "database-key-missing", "database-key-mismatch", "credential-mismatch", "origin-binding",
   "host-config", "server-response", "revoked", "wrong-passphrase", "vault-secret-mismatch", "credential-changed", "enrollment-state", "database-key-conflict",
   "invalid_setup_token", "instance_already_claimed", "invite_invalid", "vault_owner_required",
   "username_taken", "invalid_username", "vault_request_completed", "request_completed_without_material", "vault-secret-unavailable", "hosted-checkpoint-invalid",
@@ -143,6 +143,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
   const [accountError, setAccountError] = useState(false);
   const [signInError, setSignInError] = useState(false);
+  const [recoveryPending, setRecoveryPending] = useState(false);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
   const [view, setView] = useState<EnrollmentView | null>(null);
   const [qr, setQr] = useState("");
@@ -193,6 +194,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const invitePollEpoch = useRef(0);
   const accountFetchEpoch = useRef(0);
   const signInEpoch = useRef(0);
+  const recoveryEpoch = useRef(0);
+  const recoveryInFlight = useRef(false);
+  const provisionEpoch = useRef(0);
   const enrollmentActive = useRef(false);
   const mounted = useRef(true);
   const operationId = useRef(0);
@@ -447,8 +451,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       }
       clearOwnerStatusRetry();
       setOwnerStatusChecking(false);
-      if ((routing.enrolledWithoutPhone || routing.addingPhone) && next.stage === "server") {
-        void discover();
+      if ((recoveryActive || routing.enrolledWithoutPhone || routing.addingPhone) && next.stage === "server") {
+        void (recoveryActive ? discoverHosted() : discover());
         return;
       }
       if (next.stage === "error") retryRef.current = retryStatus;
@@ -505,7 +509,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     setHostedPath("chooser");
   };
 
-  const signIn = async () => {
+  const signIn = async (): Promise<HostedAccountView | null> => {
     recordModeChoice("hosted");
     const epoch = ++signInEpoch.current;
     setSignInError(false);
@@ -514,8 +518,12 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     try {
       const next = await bridge.hosted_sign_in("google");
       if (epoch === signInEpoch.current) {
-        accountFetchEpoch.current += 1;
-        setAccount(next);
+        if (next.signedIn) {
+          accountFetchEpoch.current += 1;
+          setAccount(next);
+          return next;
+        }
+        setSignInError(true);
       }
     } catch {
       if (epoch === signInEpoch.current) setSignInError(true);
@@ -525,11 +533,16 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
         setHostedOperation(null);
       }
     }
+    return null;
   };
 
   const invalidateAccountFlows = () => {
     accountFetchEpoch.current += 1;
     signInEpoch.current += 1;
+    recoveryEpoch.current += 1;
+    recoveryInFlight.current = false;
+    provisionEpoch.current += 1;
+    provisioning.current = false;
   };
 
   useEffect(() => {
@@ -552,6 +565,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     setHostedPath("chooser");
     setAccount(null);
     setAccountError(false);
+    setSignInError(false);
     setAccountLoading(mode === "hosted");
     setConnectedOrigin(null);
     setSelfHostedUrlBlurred(false);
@@ -583,6 +597,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
               : account.resumable || account.classification === "provisioning" ? "provisioning"
                 : "passphrase"
       : hostedPath === "existing" ? "enrollment" : hostedPath === "new" ? "new" : "chooser";
+  const recoveryActive = !fixedOrigin && mode === "hosted"
+    && (view?.errorCode === "hosted-session-required" || provisionError === "hosted-session-required");
 
   useEffect(() => {
     if (addingPhone || community || route !== "enrollment" || discoverStarted.current) return;
@@ -598,10 +614,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     if (leftEnrollment) resetEnrollment();
   }, [route]);
   useEffect(() => {
-    if (route !== "provisioning" || provisioning.current) return;
-    provisioning.current = true;
+    if (recoveryActive || route !== "provisioning" || provisioning.current) return;
     provision();
-  }, [route]);
+  }, [recoveryActive, route]);
   useEffect(() => {
     if (route !== "billing" && route !== "lapsed") return;
     const onFocus = () => void refreshAccount();
@@ -756,6 +771,10 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   }, [joinedNow, onJoined]);
   useEffect(() => {
     if (route === "checking") return;
+    if (recoveryActive) {
+      requestAnimationFrame(() => bodyRef.current?.querySelector<HTMLElement>("h2")?.focus());
+      return;
+    }
     if (!community && mode === "hosted" && route === "chooser") {
       choice.current?.focus();
       return;
@@ -765,7 +784,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       else if (!fixedOrigin && mode === "self-hosted" && !connectedOrigin) modeSelect.current?.focus();
       else bodyRef.current?.querySelector<HTMLElement>("h2")?.focus();
     });
-  }, [fixedOrigin, mode, route, stage, connectedOrigin, community]);
+  }, [fixedOrigin, mode, route, stage, connectedOrigin, community, recoveryActive]);
 
   const recordModeChoice = (next: Mode) => {
     if (!fixedOrigin) window.localStorage.setItem("peppy.setup.mode", next);
@@ -792,14 +811,49 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     provision();
   };
   const provision = () => {
+    if (provisioning.current) return;
+    provisioning.current = true;
+    const epoch = ++provisionEpoch.current;
+    let errorCode: string | null = null;
     setProvisionError(null);
     setHostedOperation("hosted_create_vault_progress");
     setBusy(true);
-    void bridge.hosted_provision().catch(error => setProvisionError(thrownErrorCode(error))).finally(() => {
-      setBusy(false);
-      setHostedOperation(null);
-      void refreshAccount();
+    void bridge.hosted_provision().catch(error => {
+      errorCode = thrownErrorCode(error);
+      if (mounted.current && epoch === provisionEpoch.current) setProvisionError(errorCode);
+    }).finally(() => {
+      if (mounted.current && epoch === provisionEpoch.current) {
+        provisioning.current = false;
+        setBusy(false);
+        setHostedOperation(null);
+        if (errorCode !== "hosted-session-required") void refreshAccount();
+      }
     });
+  };
+  const recoverHostedSession = async () => {
+    if (recoveryInFlight.current) return;
+    recoveryInFlight.current = true;
+    const epoch = ++recoveryEpoch.current;
+    setRecoveryPending(true);
+    const next = await signIn();
+    if (!next || !mounted.current || epoch !== recoveryEpoch.current) return;
+    if (provisionError === "hosted-session-required") {
+      setProvisionError(null);
+      return;
+    }
+    if (invitationAttemptRef.current === "starting") setInvitationState("stopped");
+    void refreshStatus(true);
+  };
+  useEffect(() => {
+    if (!recoveryPending) return;
+    if (!recoveryActive || !busy) {
+      recoveryInFlight.current = false;
+      setRecoveryPending(false);
+    }
+  }, [busy, recoveryActive, recoveryPending]);
+  const exitRecovery = () => {
+    invalidateAccountFlows();
+    onExit?.();
   };
   const connectSelfHosted = () => {
     recordModeChoice("self-hosted");
@@ -1025,7 +1079,8 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     }
   };
 
-  const statusMessage = pendingOperation || hostedOperation || ownerStatusChecking ? "" : stage === "setup" && view?.ownerResumePending ? copy("setup_owner_resume_status")
+  const statusMessage = pendingOperation || hostedOperation || ownerStatusChecking ? "" : recoveryActive ? "Sign in again to continue."
+    : stage === "setup" && view?.ownerResumePending ? copy("setup_owner_resume_status")
     : stage === "waiting_phone" ? "Scan this code with your phone."
     : stage === "verify_phone" ? "Compare the verification code before approving."
       : stage === "phone_connected" ? "Phone connected. Finish setup on your phone."
@@ -1036,6 +1091,19 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
           : stage === "invite_expired" ? copy("enrollment_invite_expired_live_status")
           : stage === "error" ? "Something went wrong."
             : "";
+
+  const recoveryPanel = (
+    <section id="hosted-session-recovery-panel">
+      <Heading>Sign in again to continue</Heading>
+      <p>Your Peppy Hosted sign-in is no longer valid. Sign in again with the same Google account to continue. Your saved data and setup progress will be kept.</p>
+      <div id="hosted-session-recovery-actions" className="enrollment-actions">
+        <button id="hosted-session-recovery-button" className="primary-button" disabled={busy || recoveryPending} onClick={() => void recoverHostedSession()}>Sign in again with Google</button>
+        {onExit && <button id="hosted-session-recovery-close-button" className="secondary-button" onClick={exitRecovery}>Close</button>}
+      </div>
+      {signInError && <p id="hosted-session-recovery-error" role="alert">{copy("production_signin_failed")}</p>}
+      <p id="hosted-session-recovery-code" className="setup-hint" data-error-code="hosted-session-required">Error code: hosted-session-required</p>
+    </section>
+  );
 
   const hostedPanels = (
     <>
@@ -1051,7 +1119,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   );
 
   let content: ReactNode;
-  if (community) {
+  if (recoveryActive) {
+    content = recoveryPanel;
+  } else if (community) {
     const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
     const body = fixedOrigin ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
     content = (
