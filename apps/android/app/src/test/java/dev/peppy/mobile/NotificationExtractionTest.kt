@@ -2,6 +2,13 @@ package dev.peppy.mobile
 
 import android.app.Notification
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import androidx.core.content.pm.PackageInfoCompat
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.util.Base64
 import android.service.notification.StatusBarNotification
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -10,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -61,5 +69,68 @@ class NotificationExtractionTest {
         val repost = sbn(notification, 43)
         assertTrue(NotificationExtraction.removedInstanceStillActive(old, arrayOf(old)))
         assertTrue(!NotificationExtraction.removedInstanceStillActive(old, arrayOf(repost)))
+    }
+
+    @Test fun applicationMetadataUsesTheInstalledApplicationLabel() {
+        assertEquals(
+            context.applicationInfo.loadLabel(context.packageManager).toString(),
+            NotificationAppMetadata.displayLabel(context.packageManager, context.applicationInfo, context.packageName),
+        )
+    }
+
+    @Test @Config(sdk = [26]) fun applicationMetadataResolvesInstalledIconOnApi26() {
+        val packageName = "example.notification.app"
+        val iconResource = android.R.drawable.btn_star
+        shadowOf(context.packageManager).addPackage(PackageInfo().apply {
+            this.packageName = packageName
+            versionCode = 1
+            applicationInfo = ApplicationInfo().apply {
+                this.packageName = packageName
+                icon = iconResource
+                nonLocalizedLabel = "Example"
+            }
+        })
+        shadowOf(context.packageManager).setApplicationIcon(packageName, ColorDrawable(Color.CYAN))
+        assertEquals(1, PackageInfoCompat.getLongVersionCode(context.packageManager.getPackageInfo(packageName, 0)))
+        val metadata = checkNotNull(NotificationAppMetadata.resolve(context.packageManager, packageName))
+
+        assertEquals("Example", metadata.label)
+        assertTrue(checkNotNull(metadata.iconPngBase64).isNotBlank())
+    }
+
+    @Test fun applicationIconRasterizationProducesBounded32PixelPng() {
+        val icon = checkNotNull(NotificationAppMetadata.encodeIcon(ColorDrawable(Color.CYAN)))
+        val iconBytes = Base64.decode(icon, Base64.NO_WRAP)
+        val bitmap = checkNotNull(BitmapFactory.decodeByteArray(iconBytes, 0, iconBytes.size))
+        assertEquals(32, bitmap.width)
+        assertEquals(32, bitmap.height)
+        assertTrue(Base64.decode(icon, Base64.NO_WRAP).size <= 8192)
+    }
+
+    @Test fun missingApplicationMetadataDoesNotDropNotificationContent() {
+        val notification = Notification.Builder(context, "test").setContentText("Text").build()
+        val captured = checkNotNull(NotificationExtraction.extract(context, sbn(notification)))
+
+        assertNull(captured.appIconPngBase64)
+        assertEquals("Text", captured.text)
+    }
+
+    @Test fun iconCacheReusesBytesForTheSamePackageVersionAndBoundsOldVersions() {
+        val packageName = "test.cache.${System.nanoTime()}"
+        assertEquals("first", NotificationAppMetadata.cachedIcon(packageName, 1) { "first" })
+        assertEquals("first", NotificationAppMetadata.cachedIcon(packageName, 1) { "second" })
+        repeat(64) { version -> NotificationAppMetadata.cachedIcon(packageName, version + 2L) { "version-$version" } }
+        assertEquals("replaced", NotificationAppMetadata.cachedIcon(packageName, 1) { "replaced" })
+    }
+
+    @Test fun failedIconEncodingIsOmittedRatherThanCachedAsContent() {
+        val packageName = "test.failure.${System.nanoTime()}"
+        assertNull(NotificationAppMetadata.cachedIcon(packageName, 1) { null })
+        assertEquals("available", NotificationAppMetadata.cachedIcon(packageName, 1) { "available" })
+    }
+
+    @Test fun missingApplicationLabelUsesThePackageSentinelInsteadOfAGenericTerminalSegment() {
+        assertEquals("com.openchamber.app", NotificationAppMetadata.fallbackLabel("com.openchamber.app"))
+        assertEquals("android", NotificationAppMetadata.fallbackLabel("android"))
     }
 }

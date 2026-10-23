@@ -32,14 +32,7 @@ impl BrowserCore {
                     .map_err(core)?;
             }
             "dismiss_all_notifications" => {
-                let client = self.client()?;
-                for notification in client.notification_snapshot().map_err(core)?.notifications {
-                    if notification.dismissible && !notification.dismissal_pending {
-                        client
-                            .dismiss_notification(notification.target)
-                            .map_err(core)?;
-                    }
-                }
+                self.client()?.dismiss_all_notifications().map_err(core)?;
             }
             "set_app_muted" => {
                 #[derive(Deserialize)]
@@ -163,6 +156,7 @@ mod tests {
                 category: None,
                 posted_at: 100,
                 dismissible,
+                app_icon_png_base64: None,
             })
             .unwrap();
         core.client()
@@ -216,6 +210,27 @@ mod tests {
                 .iter()
                 .any(|entry| entry.target == permanent && !entry.dismissal_pending)
         );
+    }
+
+    #[test]
+    fn dismiss_all_uses_the_core_hundred_notification_cap() {
+        let (_directory, mut core) = fixture();
+        for index in 0..101 {
+            capture(&core, &format!("notice-{index}"), true);
+        }
+
+        call(&mut core, "dismiss_all_notifications", json!({}));
+
+        let pending = core
+            .client()
+            .unwrap()
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .into_iter()
+            .filter(|notification| notification.dismissal_pending)
+            .count();
+        assert_eq!(pending, 100);
     }
 
     #[test]

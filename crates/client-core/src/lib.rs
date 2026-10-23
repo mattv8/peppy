@@ -91,7 +91,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 32;
+const SCHEMA_VERSION: i64 = 33;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -381,6 +381,7 @@ pub struct NotificationCapture {
     pub instance: String,
     pub package_name: String,
     pub app_name: String,
+    pub app_icon_png_base64: Option<String>,
     pub title: String,
     pub text: String,
     pub category: Option<String>,
@@ -400,6 +401,7 @@ pub struct MirroredNotification {
     pub target: NotificationTarget,
     pub package_name: String,
     pub app_name: String,
+    pub app_icon_png_base64: Option<String>,
     pub title: String,
     pub text: String,
     pub category: Option<String>,
@@ -447,6 +449,8 @@ pub struct NotificationWire {
     instance: String,
     package_name: String,
     app_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_icon_png_base64: Option<String>,
     title: String,
     text: String,
     category: Option<String>,
@@ -4314,6 +4318,8 @@ UPDATE mms_backfill_scopes SET history_floor=(SELECT NULLIF(provider_message_id,
 CREATE TABLE IF NOT EXISTS history_import_gate(id INTEGER PRIMARY KEY CHECK(id=1),opened_at_ms INTEGER,first_closed_at_ms INTEGER,reason TEXT);
 ";
 
+const NOTIFICATION_ICON_COLUMN: &str = "app_icon_png_base64 TEXT";
+
 fn apply_migration_32(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(
         conn,
@@ -4331,6 +4337,11 @@ fn apply_migration_32(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "mms_backfill_scopes", "history_cursor TEXT")?;
     conn.execute_batch(MIGRATION_32)?;
     Ok(())
+}
+
+fn apply_migration_33(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(conn, "notifications", NOTIFICATION_ICON_COLUMN)?;
+    add_column_if_missing(conn, "projection_notifications", NOTIFICATION_ICON_COLUMN)
 }
 
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
@@ -4423,6 +4434,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             mms_backfill::initialize(&tx)?;
             tx.execute_batch(MIGRATION_31)?;
             apply_migration_32(&tx)?;
+            apply_migration_33(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4431,7 +4443,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=31)) => {
+        Some(version @ (4..=32)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4515,6 +4527,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 31 {
                 apply_migration_32(&tx)?;
+            }
+            if version <= 32 {
+                apply_migration_33(&tx)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -7022,6 +7037,7 @@ fn to_i64(value: u64) -> Result<i64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use peppy_crypto::enrollment::EnrollmentContext;
     use serde_json::json;
     use uuid::Uuid;
@@ -7031,6 +7047,236 @@ mod tests {
         assert!(is_known_private_payload_kind("contact_scan_request"));
         assert!(is_known_private_payload_kind("contact_scan_result"));
         assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn legacy_notification_wire_without_icon_deserializes() {
+        let wire: NotificationWire = serde_json::from_value(json!({
+            "target": { "sourceDeviceId": Uuid::new_v4().to_string(), "notificationKey": "key", "lifetime": Uuid::new_v4().to_string() },
+            "instance": "instance", "package_name": "com.example.app", "app_name": "App",
+            "title": "Title", "text": "Body", "category": null, "posted_at": 1, "dismissible": true
+        })).unwrap();
+        assert_eq!(wire.app_icon_png_base64, None);
+    }
+
+    #[test]
+    fn corrupt_notification_icons_are_rejected_by_live_and_snapshot_reducers() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("notification-reducer.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[34; 32]).unwrap(),
+        )
+        .unwrap();
+        let store = client.lock().unwrap();
+        let conn = &store.conn;
+        let producer = DeviceId::new();
+        let wire = NotificationWire {
+            target: NotificationTarget {
+                source_device_id: producer.to_string(),
+                notification_key: "corrupt-icon".into(),
+                lifetime: uuid::Uuid::new_v4().to_string(),
+            },
+            instance: "instance".into(),
+            package_name: "com.example.mail".into(),
+            app_name: "Mail".into(),
+            app_icon_png_base64: Some("not-a-png".into()),
+            title: "Title".into(),
+            text: "Text".into(),
+            category: None,
+            posted_at: 1,
+            dismissible: true,
+        };
+        assert!(
+            !notifications::apply_notification_payload(
+                conn,
+                PrivatePayload::NotificationPosted {
+                    notification: wire.clone()
+                },
+                producer,
+                1,
+                false,
+                1,
+            )
+            .unwrap()
+        );
+        assert!(
+            !snapshot_projection::reduce(
+                conn,
+                1,
+                &DeviceId::new().to_string(),
+                &producer.to_string(),
+                1,
+                PrivatePayload::NotificationPosted {
+                    notification: wire.clone()
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM notifications", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM projection_notifications", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        let valid_wire = NotificationWire {
+            app_icon_png_base64: Some(STANDARD.encode([
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 32, 0, 0, 0,
+                32,
+            ])),
+            ..wire
+        };
+        assert!(
+            notifications::apply_notification_payload(
+                conn,
+                PrivatePayload::NotificationPosted {
+                    notification: valid_wire.clone()
+                },
+                producer,
+                1,
+                false,
+                1,
+            )
+            .unwrap()
+        );
+        assert!(
+            snapshot_projection::reduce(
+                conn,
+                1,
+                &DeviceId::new().to_string(),
+                &producer.to_string(),
+                1,
+                PrivatePayload::NotificationPosted {
+                    notification: valid_wire
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM notifications", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM projection_notifications", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn notification_removal_clears_icons_in_live_and_staged_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_9).unwrap();
+        snapshot_projection::initialize(&conn).unwrap();
+        apply_migration_33(&conn).unwrap();
+        let target = NotificationTarget {
+            source_device_id: DeviceId::new().to_string(),
+            notification_key: "removed-icon".into(),
+            lifetime: uuid::Uuid::new_v4().to_string(),
+        };
+        let wire = NotificationWire {
+            target: target.clone(),
+            instance: "instance".into(),
+            package_name: "com.example.mail".into(),
+            app_name: "Mail".into(),
+            app_icon_png_base64: Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into()),
+            title: "Title".into(),
+            text: "Text".into(),
+            category: None,
+            posted_at: 1,
+            dismissible: true,
+        };
+        conn.execute(
+            "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![target.source_device_id, target.notification_key, target.lifetime, wire.instance, wire.package_name, wire.app_name, wire.app_icon_png_base64, wire.title, wire.text, wire.category, wire.posted_at, wire.dismissible, 0_i64, 0_i64, 1_i64],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![1_i64, target.source_device_id, target.notification_key, target.lifetime, wire.instance, wire.package_name, wire.app_name, wire.app_icon_png_base64, wire.title, wire.text, wire.category, wire.posted_at, wire.dismissible, 0_i64, 1_i64],
+        ).unwrap();
+        notifications::remove_applied(&conn, &target, 2).unwrap();
+        snapshot_projection::stage_removal(&conn, 1, &target, 2).unwrap();
+        for table in ["notifications", "projection_notifications"] {
+            let row: (i64, String, String, Option<String>) = conn.query_row(
+                &format!("SELECT removed,title,text,app_icon_png_base64 FROM {table} WHERE notification_key='removed-icon'"),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(row, (1, String::new(), String::new(), None));
+        }
+    }
+
+    #[test]
+    fn migration_33_upgrades_real_schema_32_notification_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v32-notifications.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[33; 32]).unwrap();
+        let source = DeviceId::new().to_string();
+        let lifetime = uuid::Uuid::new_v4().to_string();
+        let client = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store.conn.execute(
+                "INSERT INTO notifications(source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,seen,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![source, "live", lifetime, "instance", "com.example.mail", "Mail", "old-icon", "Live title", "Live text", "mail", 42_i64, 1_i64, 1_i64, 0_i64, 7_i64],
+            ).unwrap();
+            store.conn.execute(
+                "INSERT INTO projection_notifications(generation,source_device_id,notification_key,lifetime,instance,package_name,app_name,app_icon_png_base64,title,text,category,posted_at,dismissible,removed,source_sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![8_i64, source, "staged", uuid::Uuid::new_v4().to_string(), "instance", "com.example.mail", "Mail", "old-icon", "Staged title", "Staged text", "mail", 43_i64, 1_i64, 0_i64, 8_i64],
+            ).unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "ALTER TABLE notifications DROP COLUMN app_icon_png_base64;
+                 ALTER TABLE projection_notifications DROP COLUMN app_icon_png_base64;
+                 UPDATE schema_meta SET version=32;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let upgraded = Client::open(config, key()).unwrap();
+        let store = upgraded.lock().unwrap();
+        for (table, key, title, sequence) in [
+            ("notifications", "live", "Live title", 7_i64),
+            ("projection_notifications", "staged", "Staged title", 8_i64),
+        ] {
+            let row: (String, String, i64, Option<String>) = store.conn.query_row(
+                &format!("SELECT package_name,title,source_sequence,app_icon_png_base64 FROM {table} WHERE notification_key=?"),
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(
+                row,
+                ("com.example.mail".into(), title.into(), sequence, None)
+            );
+        }
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT version FROM schema_meta", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            33
+        );
     }
 
     #[test]
@@ -8789,6 +9035,7 @@ mod tests {
                 instance: "i".into(),
                 package_name: "p".into(),
                 app_name: "app".into(),
+                app_icon_png_base64: None,
                 title: "title".into(),
                 text: "text".into(),
                 category: None,
@@ -8948,6 +9195,7 @@ mod tests {
             instance: "i".into(),
             package_name: "p".into(),
             app_name: "app".into(),
+            app_icon_png_base64: None,
             title: "title".into(),
             text: text.into(),
             category: None,

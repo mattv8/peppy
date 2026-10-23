@@ -72,7 +72,7 @@ class NativeArm64SmokeTest {
         val material = createVaultMaterial(vault, phrase)
         val client = openNativeClient(NativeOpenConfig(database.absolutePath, vault, source, ByteArray(32) { 0x36 }))
         try {
-            val input = NativeNotificationCapture("smoke-key", "first", "example.smoke", "Smoke", "Title", "Body", null, 42L, true)
+            val input = NativeNotificationCapture("smoke-key", "first", "example.smoke", "Smoke", "Title", "Body", null, 42L, true, null)
             assertEquals(NativeNotificationCaptureOutcome.DROPPED_LOCKED, client.captureNotification(input))
             client.unlock(material.profileJson, material.headerJson, phrase)
             assertEquals(NativeNotificationCaptureOutcome.CAPTURED, client.captureNotification(input))

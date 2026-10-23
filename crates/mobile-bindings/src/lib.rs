@@ -349,6 +349,7 @@ pub struct NativeNotificationCapture {
     pub category: Option<String>,
     pub posted_at: i64,
     pub dismissible: bool,
+    pub app_icon_png_base64: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeNotificationTarget {
@@ -2174,6 +2175,7 @@ impl NativeClient {
                 category: input.category,
                 posted_at: input.posted_at,
                 dismissible: input.dismissible,
+                app_icon_png_base64: input.app_icon_png_base64,
             })
         })
         .map(|outcome| match outcome {

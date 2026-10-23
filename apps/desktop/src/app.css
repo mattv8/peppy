@@ -93,48 +93,48 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   min-height: 0;
   flex-direction: column;
   background: var(--peppy-surface-editor);
+  container: notifications / inline-size;
 }
-#notifications-header {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--peppy-border);
-}
-#notifications-dismiss-all,
 .notif-inline-action {
-  border: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--peppy-border-strong);
   border-radius: var(--peppy-control-radius);
   background: transparent;
-  color: var(--peppy-text-secondary);
+  color: var(--peppy-text-primary);
   font-size: 12px;
-  padding: 4px 8px;
 }
-#notifications-dismiss-all:hover,
 .notif-inline-action:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
-#notifications-dismiss-all:disabled { opacity: .4; }
+.notif-inline-action:focus-visible, .notif-dismiss-btn:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
 #notifications-feed { flex: 1; min-height: 0; overflow-y: auto; }
-.notif-phone-group { border-bottom: 1px solid var(--peppy-border-strong); }
-.notif-group-header, .notif-app-header, .notif-row { display: flex; align-items: center; gap: 8px; }
-.notif-group-header { position: sticky; top: 0; z-index: 1; padding: 8px 12px 6px; background: var(--peppy-surface-panel); }
-.notif-group-name, .notif-app-name, .notif-row-body { flex: 1; min-width: 0; }
-.notif-group-name { color: var(--peppy-text-strong); font-size: 13px; }
-.notif-group-count, .notif-row-time { color: var(--peppy-text-muted); font-size: 11px; white-space: nowrap; }
-.notif-app-header { padding: 6px 12px 6px 20px; background: var(--peppy-surface-widget); }
-.notif-app-name { color: var(--peppy-text-primary); font-size: 12px; }
-.notif-app-count { padding: 2px 5px; border-radius: 9px; background: var(--peppy-surface-active); color: var(--peppy-text-secondary); font-size: 11px; }
-.notif-app-letter-avatar { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border: 1px solid var(--peppy-border-strong); border-radius: 50%; background: var(--peppy-surface-widget); color: var(--peppy-text-secondary); font-size: 12px; }
-.notif-row { align-items: flex-start; min-height: 56px; padding: 8px 12px 8px 32px; border-bottom: 1px solid var(--peppy-border); }
+.notif-row { display: flex; align-items: flex-start; gap: 8px; min-height: 56px; padding: 8px 12px; border-bottom: 1px solid var(--peppy-border); }
 .notif-row:hover { background: var(--peppy-surface-hover); }
-.notif-row-body { display: grid; gap: 2px; }
+.notif-row-body { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.notif-app-icon, .notif-app-icon-fallback { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border: 1px solid var(--peppy-border-strong); border-radius: 4px; background: var(--peppy-surface-widget); color: var(--peppy-text-secondary); font-size: 12px; object-fit: cover; }
+.notif-app-letter-avatar { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border: 1px solid var(--peppy-border-strong); border-radius: 50%; background: var(--peppy-surface-widget); color: var(--peppy-text-secondary); font-size: 12px; }
+.notif-row-app-source { display: flex; gap: 4px; color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.notif-row-app-source b { color: var(--peppy-text-primary); }
+.notif-row-app-source span::before { content: "·"; margin-right: 4px; }
+.notif-row-time { color: var(--peppy-text-muted); font-size: 11px; white-space: nowrap; }
 .notif-row-title { color: var(--peppy-text-strong); font-size: 13px; }
 .notif-row-text { color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
-.notif-dismiss-btn { width: 28px; height: 28px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); opacity: 0; }
-.notif-row:hover .notif-dismiss-btn, .notif-dismiss-btn:focus-visible { opacity: 1; }
+.notif-dismiss-btn { width: 28px; height: 28px; border: 0; border-radius: var(--peppy-control-radius); background: transparent; color: var(--peppy-text-secondary); opacity: 1; }
 .notif-dismiss-btn:hover { background: var(--peppy-surface-active); }
 [data-dismiss-state="pending"] .notif-dismiss-btn { opacity: 0.4; }
+.notif-pending { color: var(--peppy-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 @media (hover: none), (pointer: coarse) {
-  .notif-dismiss-btn { opacity: 1; pointer-events: auto; }
+  .notif-inline-action, .notif-dismiss-btn { width: 44px; min-width: 44px; height: 44px; padding: 0; opacity: 1; pointer-events: auto; }
+}
+@container notifications (max-width: 480px) {
+  .notif-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 44px; }
+  .notif-row-body { overflow-wrap: anywhere; }
+  .notif-row-app-source { display: block; }
+  .notif-row-app-source b, .notif-row-app-source span { display: block; }
+  .notif-row-app-source span::before { content: none; }
+  .notif-row-time { grid-column: 2; white-space: normal; }
+  .notif-inline-action, .notif-dismiss-btn { align-self: center; }
+  .notif-inline-action { grid-column: 2; justify-self: start; }
+  .notif-dismiss-btn { grid-column: 3; grid-row: 1 / span 3; }
 }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 #notifications-empty-state, #notifications-locked-state { display: grid; height: 100%; place-content: center; justify-items: center; gap: 12px; padding: 32px; color: var(--peppy-text-secondary); text-align: center; }
@@ -181,6 +181,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   background: var(--peppy-surface-chrome);
   overflow: hidden;
 }
+#notifications-dismiss-all { flex: 0 0 auto; white-space: nowrap; }
 .server-offline-banner {
   display: flex;
   flex: 0 0 auto;
@@ -820,6 +821,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .primary-button:hover:not(:disabled) {
   background: var(--peppy-accent-hover);
 }
+.btn,
 .secondary-button {
   height: 28px;
   min-height: 28px;
@@ -831,15 +833,18 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   font-size: 13px;
   line-height: 26px;
 }
+.btn:hover:not(:disabled),
 .secondary-button:hover:not(:disabled) {
   background: var(--peppy-surface-hover);
 }
 .primary-button:disabled,
+.btn:disabled,
 .secondary-button:disabled {
   cursor: default;
   opacity: 0.5;
 }
 .primary-button:focus-visible,
+.btn:focus-visible,
 .secondary-button:focus-visible {
   outline: 2px solid var(--peppy-focus);
   outline-offset: 2px;

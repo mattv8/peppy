@@ -37,10 +37,11 @@ val peppySmsDiagnostics = strictDebugBoolean("peppySmsDiagnostics")
 
 // Robolectric's own runtime download has no network timeout and can hang the test worker, so
 // Gradle stages the framework jars and tests run Robolectric offline. These must match the SDKs
-// in the tests' @Config annotations (30, 31, 34, 35) for this Robolectric version; a missing jar
+// in the tests' @Config annotations (26, 30, 31, 34, 35) for this Robolectric version; a missing jar
 // fails the test immediately. Each needs its own configuration, or Gradle keeps only the newest.
 val robolectricDependencyDirectory = layout.buildDirectory.dir("robolectric-dependencies")
 val robolectricDependencies = listOf(
+    "org.robolectric:android-all-instrumented:8.0.0_r4-robolectric-r1-i7",
     "org.robolectric:android-all-instrumented:11-robolectric-6757853-i7",
     "org.robolectric:android-all-instrumented:12-robolectric-7732740-i7",
     "org.robolectric:android-all-instrumented:14-robolectric-10818077-i7",

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { AppFilter, MirroredNotification, NotificationPreferences } from "./bridge";
-import { notificationTuple, notificationSourceName } from "./Notifications";
+import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
 
 type PermissionResult = "granted" | "denied" | "unknown";
 
@@ -93,13 +93,14 @@ export function NotificationSettings({ notifications, filters, sources, preferen
             {apps.map(filter => {
               const id = notificationTuple(filter.sourceDeviceId, filter.packageName);
               const phone = notificationSourceName(filter.sourceDeviceId, sources, sourceIds);
+              const appName = notificationAppName(filter.appName, filter.packageName);
               return (
                 <li key={id} data-device-id={filter.sourceDeviceId} data-package={filter.packageName} className="notif-app-filter-row">
-                  <span className="notif-app-letter-avatar" aria-hidden>{filter.appName.slice(0, 1).toUpperCase()}</span>
-                  <span className="notif-app-filter-label"><b>{filter.appName}</b><small>{phone}</small></span>
+                  <span className="notif-app-letter-avatar" aria-hidden>{appName.slice(0, 1).toUpperCase()}</span>
+                  <span className="notif-app-filter-label"><b>{appName}</b><small>{phone}</small></span>
                   <span className="settings-switch">
                     <input id={`filter-${id}`} type="checkbox" role="switch" disabled={busy}
-                      aria-label={`Mirror ${filter.appName} from ${phone}`} checked={!filter.muted} aria-checked={!filter.muted}
+                      aria-label={`Mirror ${appName} from ${phone}`} checked={!filter.muted} aria-checked={!filter.muted}
                       onChange={event => void save(() => onMute({ ...filter, muted: !event.target.checked }))} />
                     <span aria-hidden />
                   </span>

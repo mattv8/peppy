@@ -31,6 +31,7 @@ fn notification(text: &str) -> NotificationCapture {
         instance: "i".into(),
         package_name: "com.example.app".into(),
         app_name: "App".into(),
+        app_icon_png_base64: None,
         title: "Download".into(),
         text: text.into(),
         category: None,

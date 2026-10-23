@@ -2844,7 +2844,7 @@ async fn dismiss_notification(
     Ok(())
 }
 
-/// Fans out at most 100 durable effects, avoiding an unbounded local outbox action.
+/// Queues at most 100 durable effects through the shared core eligibility policy.
 #[tauri::command]
 async fn dismiss_all_notifications(
     window: tauri::WebviewWindow,
@@ -2854,20 +2854,7 @@ async fn dismiss_all_notifications(
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
-    blocking(move || {
-        let snapshot = s.client.notification_snapshot().map_err(core_error)?;
-        for notification in snapshot
-            .notifications
-            .into_iter()
-            .filter(|notification| notification.dismissible && !notification.dismissal_pending)
-            .take(100)
-        {
-            s.client
-                .dismiss_notification(notification.target)
-                .map_err(core_error)?;
-        }
-        Ok(())
-    })
+    blocking(move || s.client.dismiss_all_notifications().map_err(core_error))
     .await?;
     session.notify();
     Ok(())

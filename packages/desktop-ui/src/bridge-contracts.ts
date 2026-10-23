@@ -29,7 +29,7 @@ export type SendDraftInput = DraftInput & { gatewayId: string; simId: string };
 /** A separate, server-readable re-encoded copy created only after native confirmation. */
 export type PublicCopy = { url: string; expiresInSeconds: number };
 export type NotificationTarget = { sourceDeviceId: string; notificationKey: string; lifetime: string };
-export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean };
+export type MirroredNotification = { target: NotificationTarget; packageName: string; appName: string; appIconPngBase64?: string; title: string; text: string; category?: string; postedAt: number; dismissible: boolean; seen: boolean; dismissalPending: boolean };
 export type AppFilter = { sourceDeviceId: string; packageName: string; appName: string; muted: boolean };
 export type NotificationPreferences = { messageBanners: boolean; mirroredBanners: boolean; preview: "full" | "hidden" };
 export type ContactBookState = "active" | "limited" | "unavailable" | "retired";

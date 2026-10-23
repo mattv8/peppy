@@ -1,5 +1,6 @@
 //! SQLCipher-backed notification lifecycle regression coverage.
 mod common;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use common::*;
 use tempfile::TempDir;
 
@@ -9,12 +10,362 @@ fn capture(key: &str, instance: &str, text: &str) -> NotificationCapture {
         instance: instance.into(),
         package_name: "com.example.mail".into(),
         app_name: "Mail".into(),
+        app_icon_png_base64: None,
         title: "Subject".into(),
         text: text.into(),
         category: None,
         posted_at: 42,
         dismissible: true,
     }
+}
+
+#[test]
+fn notification_capture_serializes_optional_app_icon() {
+    let value = serde_json::to_value(capture("icon", "one", "body")).unwrap();
+    assert_eq!(value["appIconPngBase64"], serde_json::Value::Null);
+}
+
+#[test]
+fn legacy_notification_capture_without_icon_deserializes() {
+    let mut value = serde_json::to_value(capture("icon", "one", "body")).unwrap();
+    value.as_object_mut().unwrap().remove("appIconPngBase64");
+    assert_eq!(
+        serde_json::from_value::<NotificationCapture>(value)
+            .unwrap()
+            .app_icon_png_base64,
+        None
+    );
+}
+
+#[test]
+fn notification_icons_require_a_32px_png() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "icon-phone", &vault), &vault);
+    let mut valid = capture("icon", "one", "body");
+    valid.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
+    assert_eq!(
+        client.capture_notification(valid).unwrap(),
+        NotificationCaptureOutcome::Captured
+    );
+    let mut invalid = capture("bad-icon", "one", "body");
+    invalid.app_icon_png_base64 = Some("not an image".into());
+    assert!(matches!(
+        client.capture_notification(invalid),
+        Err(Error::InvalidRequest(_))
+    ));
+    let valid_png_32x32_header = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 32, 0, 0, 0, 32,
+    ];
+    let decoded_oversize = [
+        valid_png_32x32_header.as_slice(),
+        &vec![0; 8_193 - valid_png_32x32_header.len()],
+    ]
+    .concat();
+    let encoded_oversize = STANDARD.encode(decoded_oversize);
+    assert_eq!(encoded_oversize.len(), 10_924);
+    for (key, icon) in [
+        ("bad-padding", "iVBORw0KGgoAAAANSUhEUgAAACAAAAA=".to_owned()),
+        ("too-large-encoded", "A".repeat(10_925)),
+        ("too-large-decoded", encoded_oversize),
+        (
+            "wrong-dimensions",
+            STANDARD.encode([
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 32, 0, 0, 0,
+                33,
+            ]),
+        ),
+    ] {
+        let mut invalid = capture(key, "one", "body");
+        invalid.app_icon_png_base64 = Some(icon);
+        assert!(matches!(
+            client.capture_notification(invalid),
+            Err(Error::InvalidRequest(_))
+        ));
+    }
+    let canonical = STANDARD.encode([valid_png_32x32_header.as_slice(), &[0]].concat());
+    assert_eq!(STANDARD.decode(&canonical).unwrap().len(), 25);
+    let noncanonical = format!("{}B==", &canonical[..canonical.len() - 3]);
+    let mut invalid = capture("noncanonical-trailing-bits", "one", "body");
+    invalid.app_icon_png_base64 = Some(noncanonical);
+    assert!(matches!(
+        client.capture_notification(invalid),
+        Err(Error::InvalidRequest(_))
+    ));
+}
+
+#[test]
+fn snapshots_use_phone_time_and_deterministic_identity_ties() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let first_phone_cfg = config(&dir, "ordered-first-phone", &vault);
+    let second_phone_cfg = config(&dir, "ordered-second-phone", &vault);
+    let desktop = unlocked(&config(&dir, "ordered-desktop", &vault), &vault);
+    let first_phone = unlocked(&first_phone_cfg, &vault);
+    let second_phone = unlocked(&second_phone_cfg, &vault);
+    let mut server = Server::default();
+    for (phone, key, posted_at) in [
+        (&first_phone, "later", 200),
+        (&second_phone, "z-tie", 100),
+        (&first_phone, "same-key", 100),
+        (&second_phone, "same-key", 100),
+    ] {
+        let mut item = capture(key, key, key);
+        item.posted_at = posted_at;
+        phone.capture_notification(item).unwrap();
+    }
+    server.upload(&first_phone);
+    server.upload(&second_phone);
+    server.sync(&desktop);
+    let identities: Vec<_> = desktop
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .into_iter()
+        .map(|item| (item.target.source_device_id, item.target.notification_key))
+        .collect();
+    assert_eq!(identities[0].1, "later");
+    let mut expected = vec![
+        (first_phone_cfg.device_id.to_string(), "same-key".into()),
+        (second_phone_cfg.device_id.to_string(), "same-key".into()),
+        (second_phone_cfg.device_id.to_string(), "z-tie".into()),
+    ];
+    expected.sort();
+    assert_eq!(
+        identities[1..],
+        expected,
+        "same timestamps remain distinct across phones and order by source then key"
+    );
+}
+
+#[test]
+fn bulk_dismiss_excludes_muted_non_dismissible_and_pending_rows() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone_cfg = config(&dir, "bulk-phone", &vault);
+    let desktop = unlocked(&config(&dir, "bulk-desktop", &vault), &vault);
+    let phone = unlocked(&phone_cfg, &vault);
+    let mut server = Server::default();
+    for key in ["eligible", "fixed", "muted"] {
+        let mut item = capture(key, key, key);
+        if key == "fixed" {
+            item.dismissible = false;
+        }
+        if key == "muted" {
+            item.package_name = "com.example.muted".into();
+        }
+        phone.capture_notification(item).unwrap();
+    }
+    server.upload(&phone);
+    server.sync(&desktop);
+    desktop
+        .set_app_muted(
+            &phone_cfg.device_id.to_string(),
+            "com.example.muted",
+            "Mail",
+            true,
+        )
+        .unwrap();
+    desktop.dismiss_all_notifications().unwrap();
+    assert!(
+        desktop
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .iter()
+            .any(|item| item.target.notification_key == "fixed" && !item.dismissal_pending)
+    );
+    assert!(
+        desktop
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .iter()
+            .any(|item| item.target.notification_key == "eligible" && item.dismissal_pending)
+    );
+    desktop
+        .set_app_muted(
+            &phone_cfg.device_id.to_string(),
+            "com.example.muted",
+            "Mail",
+            false,
+        )
+        .unwrap();
+    assert!(
+        desktop
+            .notification_snapshot()
+            .unwrap()
+            .notifications
+            .iter()
+            .any(|item| item.target.notification_key == "muted" && !item.dismissal_pending)
+    );
+}
+
+#[test]
+fn bulk_dismiss_skips_pending_and_caps_the_newest_hundred() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let cfg = config(&dir, "bulk-cap", &vault);
+    let client = unlocked(&cfg, &vault);
+    for index in 0..102 {
+        let mut item = capture(&format!("key-{index:03}"), "instance", "body");
+        item.posted_at = index;
+        client.capture_notification(item).unwrap();
+    }
+    let oldest = client
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .pop()
+        .unwrap();
+    client.dismiss_notification(oldest.target).unwrap();
+    client.dismiss_all_notifications().unwrap();
+    let snapshot = client.notification_snapshot().unwrap();
+    let pending: std::collections::BTreeSet<_> = snapshot
+        .notifications
+        .iter()
+        .filter(|item| item.dismissal_pending)
+        .map(|item| item.target.notification_key.as_str())
+        .collect();
+    let expected: std::collections::BTreeSet<_> = (0..=101)
+        .filter(|index| *index != 1)
+        .map(|index| format!("key-{index:03}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        pending,
+        expected.iter().map(String::as_str).collect(),
+        "the previous pending oldest row remains, then bulk selects keys 002 through 101"
+    );
+    assert!(
+        snapshot
+            .notifications
+            .iter()
+            .any(|item| { item.target.notification_key == "key-000" && item.dismissal_pending })
+    );
+    assert!(
+        snapshot
+            .notifications
+            .iter()
+            .any(|item| { item.target.notification_key == "key-001" && !item.dismissal_pending })
+    );
+    drop(client);
+    assert!(matches!(
+        open(&cfg).dismiss_all_notifications(),
+        Err(Error::KeysUnavailable)
+    ));
+}
+
+#[test]
+fn icon_refresh_keeps_post_time_seen_state_and_single_banner() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "refresh-phone", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "refresh-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let mut first = capture("refresh", "one", "body");
+    first.posted_at = 77;
+    phone.capture_notification(first).unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    assert_eq!(desktop.pending_banner_candidates(10).unwrap().len(), 1);
+    let original = desktop
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    desktop
+        .mark_notifications_seen(vec![original.target.clone()])
+        .unwrap();
+    let mut refresh = capture("refresh", "two", "body");
+    refresh.posted_at = 77;
+    refresh.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
+    phone.capture_notification(refresh).unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    let updated = desktop
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    assert_eq!(updated.target.lifetime, original.target.lifetime);
+    assert_eq!(updated.posted_at, 77);
+    assert!(updated.seen);
+    assert!(updated.app_icon_png_base64.is_some());
+    assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
+}
+
+#[test]
+fn unseen_icon_refresh_does_not_create_another_banner() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let phone = unlocked(&config(&dir, "unseen-refresh-phone", &vault), &vault);
+    let desktop = unlocked(&config(&dir, "unseen-refresh-desktop", &vault), &vault);
+    let mut server = Server::default();
+    let mut first = capture("refresh", "one", "body");
+    first.posted_at = 77;
+    phone.capture_notification(first).unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+    let first_banner = desktop.pending_banner_candidates(10).unwrap().remove(0);
+    desktop
+        .ack_banner_candidates(vec![first_banner.id])
+        .unwrap();
+
+    let mut refresh = capture("refresh", "two", "body");
+    refresh.posted_at = 77;
+    refresh.app_icon_png_base64 = Some("iVBORw0KGgoAAAANSUhEUgAAACAAAAAg".into());
+    phone.capture_notification(refresh).unwrap();
+    server.upload(&phone);
+    server.sync(&desktop);
+
+    let updated = desktop
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    assert!(!updated.seen);
+    assert_eq!(updated.posted_at, 77);
+    assert!(desktop.pending_banner_candidates(10).unwrap().is_empty());
+}
+
+#[test]
+fn icon_changes_capture_updates_but_identical_icons_duplicate() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "icon-duplicate", &vault), &vault);
+    let icon = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAg";
+    let mut first = capture("icon", "one", "body");
+    first.posted_at = 99;
+    first.app_icon_png_base64 = Some(icon.into());
+    assert_eq!(
+        client.capture_notification(first.clone()).unwrap(),
+        NotificationCaptureOutcome::Captured
+    );
+    let original = client
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    assert_eq!(
+        client.capture_notification(first).unwrap(),
+        NotificationCaptureOutcome::Duplicate
+    );
+    let mut changed = capture("icon", "two", "body");
+    changed.posted_at = 99;
+    changed.app_icon_png_base64 = Some(format!("{icon}AA=="));
+    assert_eq!(
+        client.capture_notification(changed).unwrap(),
+        NotificationCaptureOutcome::Captured
+    );
+    let updated = client
+        .notification_snapshot()
+        .unwrap()
+        .notifications
+        .remove(0);
+    assert_eq!(updated.target.lifetime, original.target.lifetime);
+    assert_eq!(updated.posted_at, 99);
+    assert_eq!(updated.target.notification_key, "icon");
+    assert_eq!(updated.app_icon_png_base64, Some(format!("{icon}AA==")));
 }
 
 #[test]
