@@ -59,6 +59,7 @@ import android.icu.text.MeasureFormat
 import android.icu.util.Measure
 import android.icu.util.MeasureUnit
 import java.util.Locale
+import dev.peppy.mobile.ui.InfoButton
 
 internal interface OwnerPhoneApprovalActions {
     suspend fun start(method: OwnerPhoneMethod): OwnerPhoneApprovalHost.Result
@@ -288,7 +289,15 @@ internal fun OwnerPhoneApprovalScreen(
     ) {
         when (stage) {
             OwnerPhoneStage.WAITING -> {
-                Text(stringResource(R.string.peppy_owner_phone_waiting_headline))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.peppy_owner_phone_waiting_headline), Modifier.weight(1f))
+                    InfoButton(
+                        stringResource(R.string.peppy_owner_phone_waiting_headline),
+                        stringResource(R.string.peppy_owner_phone_waiting_headline),
+                        stringResource(R.string.peppy_owner_phone_waiting_hint),
+                        "info-owner-phone-waiting",
+                    )
+                }
                 Text(stringResource(R.string.peppy_owner_phone_waiting_body))
                 QrCode(view?.qr.orEmpty(), Modifier.fillMaxWidth().weight(1f).testTag("owner-phone-qr"))
                 val expiresInSeconds = MeasureFormat.getInstance(Locale.getDefault(), MeasureFormat.FormatWidth.WIDE)
@@ -297,7 +306,6 @@ internal fun OwnerPhoneApprovalScreen(
                     "${stringResource(R.string.peppy_owner_phone_countdown_label)} $expiresInSeconds",
                     Modifier.testTag("owner-phone-countdown"),
                 )
-                Text(stringResource(R.string.peppy_owner_phone_waiting_hint), style = MaterialTheme.typography.bodySmall)
                 OutlinedButton(
                     onClick = { toggleReveal() },
                     enabled = !busy,

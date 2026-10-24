@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import dev.peppy.mobile.ui.InfoButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,48 +55,23 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
         }
     }
 
-    Section("notification-mirroring-section", "Notification mirroring", showDivider = false) {
-        Text(
-            stringResource(R.string.peppy_notification_mirroring_disclosure),
-            Modifier.testTag("notification-mirroring-disclosure"),
-            style = MaterialTheme.typography.bodyMedium,
+    Section(
+        "notification-mirroring-section",
+        "Notification mirroring",
+        showDivider = false,
+        helpBody = stringResource(R.string.peppy_help_android_notification_mirroring),
+    ) {
+        NotificationMirroringAccessControls(
+            accessGranted = accessGranted,
+            enabled = enabled,
+            onRequestAccess = { accessLauncher.launch(NotificationMirrorAccess.settingsIntent()) },
+            onEnabledChanged = { value ->
+                NotificationMirrorPreferences.setEnabled(context, value)
+                enabled = value
+                if (value) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
+                else NotificationMirrorService.clearPendingCaptures()
+            },
         )
-        Text(
-            "Upgrade your other Peppy clients before enabling mirroring. Notification history is retained like messages and shares the vault's 100,000-record recovery limit. Mute noisy apps to limit growth.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        StatusRow("status-notification-access", "Notification access", if (accessGranted) "Granted" else "Not granted")
-        if (!accessGranted) {
-            OutlinedButton(
-                onClick = { accessLauncher.launch(NotificationMirrorAccess.settingsIntent()) },
-                modifier = Modifier.testTag("notification-access-button"),
-            ) { Text("Grant notification access") }
-            Text(
-                "Peppy needs notification access to mirror app notifications to your desktop. Tap to open Android Settings, then enable Peppy.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Row(
-            Modifier.fillMaxWidth().testTag("notification-mirroring-master-row"),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Mirror app notifications", style = MaterialTheme.typography.bodyMedium)
-                Text("Send app notifications to your desktop. Off by default.", style = MaterialTheme.typography.bodySmall)
-            }
-            Switch(
-                checked = enabled,
-                enabled = accessGranted,
-                onCheckedChange = { value ->
-                    NotificationMirrorPreferences.setEnabled(context, value)
-                    enabled = value
-                    if (value) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
-                    else NotificationMirrorService.clearPendingCaptures()
-                },
-                modifier = Modifier.testTag("notification-mirroring-master-switch"),
-            )
-        }
         if (enabled && accessGranted) {
             Row(
                 Modifier.fillMaxWidth().testTag("notification-mirroring-wifi-row"),
@@ -104,8 +80,13 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
             ) {
                 Column(Modifier.weight(1f)) {
                     Text("Mirror on WiFi only", style = MaterialTheme.typography.bodyMedium)
-                    Text("WiFi only uses the active WiFi connection. Ethernet and cellular (even unlimited plans) are not included.", style = MaterialTheme.typography.bodySmall)
                 }
+                InfoButton(
+                    "Mirror on WiFi only",
+                    "Mirror on WiFi only",
+                    stringResource(R.string.peppy_help_android_notification_wifi),
+                    "info-notification-wifi",
+                )
                 Switch(wifiOnly, { value -> GatewayPolicyHost(context).mirroringWifiOnly = value; wifiOnly = value }, modifier = Modifier.testTag("notification-mirroring-wifi-switch"))
             }
             Row(
@@ -135,6 +116,47 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
                 null -> Unit
             }
         }
+    }
+}
+
+@Composable
+internal fun NotificationMirroringAccessControls(
+    accessGranted: Boolean,
+    enabled: Boolean,
+    onRequestAccess: () -> Unit,
+    onEnabledChanged: (Boolean) -> Unit,
+) {
+    Text(
+        stringResource(R.string.peppy_notification_mirroring_disclosure),
+        Modifier.testTag("notification-mirroring-disclosure"),
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    StatusRow("status-notification-access", "Notification access", if (accessGranted) "Granted" else "Not granted")
+    if (!accessGranted) {
+        OutlinedButton(onClick = onRequestAccess, modifier = Modifier.testTag("notification-access-button")) { Text("Grant notification access") }
+        Text(
+            "Peppy needs notification access to mirror app notifications to your desktop. Tap to open Android Settings, then enable Peppy.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    Row(
+        Modifier.fillMaxWidth().testTag("notification-mirroring-master-row"),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Mirror app notifications", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        InfoButton(
+            "Mirror app notifications",
+            "Mirror app notifications",
+            stringResource(R.string.peppy_help_android_notification_mirroring_toggle),
+            "info-notification-mirroring-toggle",
+        )
+        Switch(
+            checked = enabled,
+            enabled = accessGranted,
+            onCheckedChange = onEnabledChanged,
+            modifier = Modifier.testTag("notification-mirroring-master-switch"),
+        )
     }
 }
 

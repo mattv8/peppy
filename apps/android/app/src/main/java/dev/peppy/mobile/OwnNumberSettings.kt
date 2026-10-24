@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
@@ -39,6 +40,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import dev.peppy.mobile.ui.InfoButton
 
 internal sealed interface OwnNumberUiState {
     data class Detected(val number: String, val saved: String?) : OwnNumberUiState
@@ -204,9 +206,11 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
                 )
             }
             is OwnNumberUiState.Manual -> {
-                StatusRow("mms-own-number-row", "This SIM's number", state.saved ?: "Not set")
-                if (state.saved != null) StatusRow("mms-own-number-source", "Source", "Entered manually")
-                if (state.saved == null) Text("Only needed so replies to group MMS threads exclude this phone.", style = MaterialTheme.typography.bodySmall)
+                if (state.saved == null) OwnNumberStatusWithHelp("Not set")
+                else {
+                    StatusRow("mms-own-number-row", "This SIM's number", state.saved)
+                    StatusRow("mms-own-number-source", "Source", "Entered manually")
+                }
                 ManualEntryControls(
                     saved = state.saved,
                     editing = editing,
@@ -224,6 +228,22 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
             OwnNumberUiState.Unavailable -> StatusRow("mms-own-number-row", "This SIM's number", "Unavailable")
         }
         message?.let { Text(it, Modifier.testTag("mms-own-number-message"), style = MaterialTheme.typography.bodySmall) }
+    }
+}
+
+@Composable
+private fun OwnNumberStatusWithHelp(value: String) {
+    Row(Modifier.fillMaxWidth().testTag("mms-own-number-row"), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("This SIM's number", style = MaterialTheme.typography.bodyMedium)
+            InfoButton(
+                topic = "This SIM's number",
+                title = "This SIM's number",
+                body = stringResource(R.string.peppy_help_android_own_number),
+                tag = "info-own-number",
+            )
+        }
+        Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -57,6 +59,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.peppy_mobile_bindings.NativeHostedProvisioningView
 import uniffi.peppy_mobile_bindings.generateHostedPassphrase
+import dev.peppy.mobile.ui.InfoButton
 
 internal sealed interface HostedPhase {
     data object Start : HostedPhase
@@ -361,7 +364,16 @@ internal fun HostedEnrollmentScreen(
             }
             HostedPhase.SigningIn, HostedPhase.Checking -> CircularProgressIndicator(Modifier.testTag("hosted-signin-inflight"))
             HostedPhase.Billing -> {
-                Text(stringResource(R.string.peppy_production_billing_body))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.peppy_hosted_subscribe_headline), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    InfoButton(
+                        topic = stringResource(R.string.peppy_hosted_subscribe_headline),
+                        title = stringResource(R.string.peppy_hosted_subscribe_headline),
+                        body = stringResource(R.string.peppy_hosted_subscribe_body),
+                        tag = "info-hosted-billing",
+                    )
+                }
+                Text(stringResource(R.string.peppy_production_billing_body), style = MaterialTheme.typography.bodySmall)
                 Button(
                     onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://peppy.pro/account/subscribe"))) },
                     modifier = Modifier.testTag("hosted-subscribe-button"),
