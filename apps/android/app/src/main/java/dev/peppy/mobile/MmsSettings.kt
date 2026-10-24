@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import dev.peppy.mobile.ui.InfoButton
 import androidx.compose.material3.MaterialTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -158,34 +159,29 @@ internal fun MmsSettings(
     }
 
     Section("mms-settings-section", "MMS") {
-        Text(
-            stringResource(R.string.peppy_mms_capture_disclosure),
-            Modifier.testTag("mms-capture-disclosure"),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Row(Modifier.fillMaxWidth().testTag("mms-enable-row"), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column(Modifier.weight(1f)) {
-                Text("Enable MMS capture")
-                Text("Captures MMS after your phone's messaging app downloads it.", style = MaterialTheme.typography.bodySmall)
-            }
-            Switch(enabled, { value ->
+        MmsCaptureControls(
+            enabled = enabled,
+            receiveGranted = receiveGranted,
+            onEnabledChanged = { value ->
                 preferences.enabled = value
                 enabled = preferences.enabled
                 MmsCaptureWork.onPermissionOrForeground(context)
                 onChanged()
-            }, modifier = Modifier.testTag("mms-enable-switch"))
-        }
-        StatusRow("mms-permission-status", "MMS read permission", if (receiveGranted) "Allowed" else "Not allowed")
-        if (!receiveGranted) {
-            OutlinedButton(onClick = requestPermissions, modifier = Modifier.testTag("mms-permission-button")) { Text("Allow MMS permissions") }
-        }
+            },
+            onRequestPermissions = requestPermissions,
+        )
         StatusRow("mms-sim-status", "Current SIM", route?.label ?: "No default SMS SIM")
         OwnNumberSettings(context, databaseOpen, route)
         Row(Modifier.fillMaxWidth().testTag("mms-wifi-only-row"), horizontalArrangement = Arrangement.SpaceBetween) {
             Column(Modifier.weight(1f)) {
                 Text(stringResource(R.string.peppy_media_wifi_only))
-                Text("Applies to encrypted media uploads and downloads. WiFi only uses the active WiFi connection; Ethernet and cellular (even unlimited plans) are not included.", style = MaterialTheme.typography.bodySmall)
             }
+            InfoButton(
+                topic = stringResource(R.string.peppy_media_wifi_only),
+                title = stringResource(R.string.peppy_media_wifi_only),
+                body = stringResource(R.string.peppy_help_android_mms_wifi),
+                tag = "info-mms-wifi",
+            )
             Switch(mediaWifiOnly, { value -> GatewayPolicyHost(context).mediaWifiOnly = value; mediaWifiOnly = value }, modifier = Modifier.testTag("mms-wifi-only-switch"))
         }
         OutlinedButton(
@@ -215,5 +211,28 @@ internal fun MmsSettings(
             health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
             health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }
         }
+    }
+}
+
+@Composable
+internal fun MmsCaptureControls(
+    enabled: Boolean,
+    receiveGranted: Boolean,
+    onEnabledChanged: (Boolean) -> Unit,
+    onRequestPermissions: () -> Unit,
+) {
+    Text(
+        stringResource(R.string.peppy_mms_capture_disclosure),
+        Modifier.testTag("mms-capture-disclosure"),
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    Row(Modifier.fillMaxWidth().testTag("mms-enable-row"), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text("Enable MMS capture", Modifier.weight(1f))
+        InfoButton("Enable MMS capture", "Enable MMS capture", stringResource(R.string.peppy_help_android_mms_capture), "info-mms-capture")
+        Switch(enabled, onEnabledChanged, modifier = Modifier.testTag("mms-enable-switch"))
+    }
+    StatusRow("mms-permission-status", "MMS read permission", if (receiveGranted) "Allowed" else "Not allowed")
+    if (!receiveGranted) {
+        OutlinedButton(onClick = onRequestPermissions, modifier = Modifier.testTag("mms-permission-button")) { Text("Allow MMS permissions") }
     }
 }

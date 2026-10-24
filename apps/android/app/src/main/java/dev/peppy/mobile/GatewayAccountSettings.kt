@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import dev.peppy.mobile.ui.InfoButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -110,8 +111,13 @@ internal fun GatewayAccountSettings(onChanged: () -> Unit) {
                     Row(Modifier.fillMaxWidth().testTag("remote-messaging-toggle-row")) {
                         Column(Modifier.weight(1f)) {
                             Text(stringResource(R.string.peppy_remote_messaging_label))
-                            Text(stringResource(R.string.peppy_remote_messaging_hint))
                         }
+                        InfoButton(
+                            topic = stringResource(R.string.peppy_remote_messaging_label),
+                            title = stringResource(R.string.peppy_remote_messaging_label),
+                            body = stringResource(R.string.peppy_remote_messaging_hint),
+                            tag = "info-remote-messaging",
+                        )
                         Switch(
                             checked = remoteMessagingEnabled,
                             enabled = gatewayStatus?.sharedKeysReady == true && gatewayStatus?.syncPhase != SyncPhase.RECOVERY_REQUIRED,

@@ -57,7 +57,11 @@ internal fun SmsSettings(
 ) {
     val readGranted = smsReadGranted(context)
     Section("sms-history-section", stringResource(R.string.peppy_sms_history_title)) {
-        Text(stringResource(R.string.peppy_sms_history_description), style = MaterialTheme.typography.bodyMedium)
+        Text(
+            stringResource(R.string.peppy_sms_history_description),
+            Modifier.testTag("sms-history-disclosure"),
+            style = MaterialTheme.typography.bodyMedium,
+        )
         StatusRow(
             "sms-read-permission-status",
             stringResource(R.string.peppy_sms_history_permission_label),

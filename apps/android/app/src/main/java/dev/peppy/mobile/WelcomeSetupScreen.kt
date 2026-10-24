@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
@@ -21,11 +22,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import dev.peppy.mobile.ui.InfoButton
 
 internal enum class WelcomeDestination {
     HOSTED,
@@ -50,8 +53,18 @@ internal fun WelcomeScreen(onGetStarted: () -> Unit, onSelectSelfHosted: () -> U
             contentDescription = null,
             modifier = Modifier.size(88.dp),
         )
-        Text(stringResource(R.string.peppy_onboarding_headline), style = MaterialTheme.typography.headlineSmall)
-        Text(stringResource(R.string.peppy_onboarding_body), style = MaterialTheme.typography.bodyMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.peppy_onboarding_headline), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            InfoButton(
+                stringResource(R.string.peppy_onboarding_headline),
+                stringResource(R.string.peppy_onboarding_headline),
+                listOf(
+                    stringResource(R.string.peppy_onboarding_body),
+                    stringResource(R.string.peppy_onboarding_hosted_sub),
+                ).joinToString("\n\n"),
+                "info-onboarding",
+            )
+        }
         ExposedDropdownMenuBox(
             expanded = modeMenuOpen,
             onExpandedChange = { modeMenuOpen = it },
@@ -81,7 +94,6 @@ internal fun WelcomeScreen(onGetStarted: () -> Unit, onSelectSelfHosted: () -> U
                 )
             }
         }
-        Text(stringResource(R.string.peppy_onboarding_hosted_sub), style = MaterialTheme.typography.bodyMedium)
         Button(onClick = onGetStarted, modifier = Modifier.fillMaxWidth().testTag("welcome-get-started-button")) {
             Text(stringResource(R.string.peppy_onboarding_hosted_cta))
         }
@@ -103,8 +115,15 @@ internal fun SelfHostedSetupScreen(
         OutlinedButton(onClick = onBack, modifier = Modifier.testTag("self-hosted-back-button")) {
             Text(stringResource(R.string.peppy_back))
         }
-        Text(stringResource(R.string.peppy_self_hosted_headline), style = MaterialTheme.typography.headlineSmall)
-        Text(stringResource(R.string.peppy_self_hosted_body), style = MaterialTheme.typography.bodyMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.peppy_self_hosted_headline), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            InfoButton(
+                stringResource(R.string.peppy_self_hosted_headline),
+                stringResource(R.string.peppy_self_hosted_headline),
+                stringResource(R.string.peppy_self_hosted_body),
+                "info-self-hosted",
+            )
+        }
         Button(onClick = onEnroll, modifier = Modifier.fillMaxWidth().testTag("self-hosted-enroll-button")) { Text(stringResource(R.string.peppy_continue)) }
         OutlinedButton(onClick = onOpenGuide, modifier = Modifier.testTag("self-hosted-docs-link")) {
             Text(stringResource(R.string.peppy_self_hosted_docs_link))

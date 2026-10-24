@@ -61,6 +61,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -72,6 +73,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.theme.PeppyTheme
+import dev.peppy.mobile.ui.InfoButton
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CoroutineScope
@@ -411,16 +413,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
             }
         }
 
-        Section("permissions-section", "SMS permissions") {
-            Text(
-                stringResource(R.string.peppy_permissions_sms_disclosure),
-                Modifier.testTag("sms-permissions-disclosure"),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            OutlinedButton(onClick = { permissionRequest.launch(SMS_PERMISSIONS) }, modifier = Modifier.testTag("permissions-button")) {
-                Text("Allow SMS permissions")
-            }
-        }
+        SmsPermissionsSection(onRequestPermissions = { permissionRequest.launch(SMS_PERMISSIONS) })
 
         Section("battery-section", "Battery") {
             val unrestricted = context.getSystemService(PowerManager::class.java)
@@ -484,14 +477,11 @@ private fun CompanionScreen(activity: ComponentActivity) {
             ) { Text(stringResource(R.string.peppy_owner_phone_add_cta)) }
         }
 
-        Section("limitations-section", "Messaging limits") {
-            Bullet("limitation-mms", "MMS messages sync after the phone finishes downloading them and uploading encrypted copies.")
-            Bullet("limitation-rcs", "RCS requires a verified carrier or OEM integration and is not available in this build.")
-            Bullet(
-                "limitation-background",
-                "Android can delay background sync in Doze or battery saver. Force-stopping Peppy pauses capture until you open it again. " +
-                    "Some one-time-code texts may not reach companion apps.",
-            )
+        Section(
+            "limitations-section",
+            "Messaging limits",
+            helpBody = stringResource(R.string.peppy_help_android_messaging_limits),
+        ) {
             Bullet("limitation-carrier", stringResource(R.string.peppy_carrier_not_encrypted))
         }
         }
@@ -525,13 +515,36 @@ private fun CompanionScreen(activity: ComponentActivity) {
     }
 }
 
+@Composable
+internal fun SmsPermissionsSection(onRequestPermissions: () -> Unit) {
+    Section("permissions-section", "SMS permissions") {
+        Text(
+            stringResource(R.string.peppy_permissions_sms_disclosure),
+            Modifier.testTag("sms-permissions-disclosure"),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        OutlinedButton(onClick = onRequestPermissions, modifier = Modifier.testTag("permissions-button")) {
+            Text("Allow SMS permissions")
+        }
+    }
+}
+
 
 
 @Composable
-internal fun Section(tag: String, title: String, showDivider: Boolean = true, content: @Composable () -> Unit) {
+internal fun Section(
+    tag: String,
+    title: String,
+    showDivider: Boolean = true,
+    helpBody: String? = null,
+    content: @Composable () -> Unit,
+) {
     Column(Modifier.fillMaxWidth().testTag(tag), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (showDivider) HorizontalDivider()
-        Text(title, style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            helpBody?.let { InfoButton(title, title, it, "info-$tag") }
+        }
         content()
     }
 }

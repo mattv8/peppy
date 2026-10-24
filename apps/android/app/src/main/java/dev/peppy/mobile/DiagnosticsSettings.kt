@@ -104,7 +104,11 @@ internal fun DiagnosticsSettingsContent(
     val verboseLoggingLabel = stringResource(R.string.peppy_diagnostics_verbose_sync_logging)
     val workingLabel = stringResource(R.string.peppy_diagnostics_working)
 
-    Section("diagnostics-section", stringResource(R.string.peppy_diagnostics_title)) {
+    Section(
+        "diagnostics-section",
+        stringResource(R.string.peppy_diagnostics_title),
+        helpBody = stringResource(R.string.peppy_diagnostics_overhead),
+    ) {
         Row(
             Modifier.fillMaxWidth().testTag("diagnostics-verbose-sync-logging"),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -140,8 +144,11 @@ internal fun DiagnosticsSettingsContent(
             stringResource(R.string.peppy_diagnostics_dropped_events),
             state.dropped.toString(),
         )
-        Text(stringResource(R.string.peppy_diagnostics_privacy), style = MaterialTheme.typography.bodySmall)
-        Text(stringResource(R.string.peppy_diagnostics_overhead), style = MaterialTheme.typography.bodySmall)
+        Text(
+            stringResource(R.string.peppy_diagnostics_privacy),
+            Modifier.testTag("diagnostics-privacy-text"),
+            style = MaterialTheme.typography.bodySmall,
+        )
         state.error?.let { error ->
             Text(
                 stringResource(
