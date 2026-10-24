@@ -1,5 +1,11 @@
 package dev.peppy.mobile
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import androidx.work.Configuration
+import androidx.work.WorkManager
+import androidx.work.testing.SynchronousExecutor
+import androidx.work.testing.WorkManagerTestInitHelper
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -11,6 +17,25 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class RelayWakeClientTest {
+    @Test fun enrollmentChangeSchedulesOneReconcileForEnabledRelay() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            context,
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
+        context.getSharedPreferences("peppy-relay", Context.MODE_PRIVATE).edit()
+            .clear()
+            .putBoolean("relay-enabled.v1", true)
+            .putString("relay-origin.v1", "https://community.example")
+            .commit()
+        RelayWakeRuntime.enabled = false
+        RelayWakeRuntime.client = null
+
+        RelayWakeRuntime.enrollmentChanged(context)
+
+        assertEquals(1, WorkManager.getInstance(context).getWorkInfosForUniqueWork("peppy-relay-wake-reconcile").get().size)
+    }
+
     @Test fun challengeConfirmationPublishesOnlyRouteAndWakeCredential() {
         val transport = object : RelayWakeTransport {
             override fun post(path: String, body: String) = when (path) {
