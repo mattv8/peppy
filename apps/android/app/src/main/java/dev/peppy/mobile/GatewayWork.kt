@@ -39,19 +39,25 @@ object GatewayWork {
 
     private const val COALESCE = "peppy-gateway-sync-coalesce"
     private const val DIRTY = "dirty.v1"
+    private const val CAPTURE_HINT_PENDING = "capture-hint-pending.v1"
     private val coalescer = GatewaySyncCoalescer()
 
     /** Unique, network-constrained work; hints set a durable dirty bit while a pass is running. */
     fun enqueue(context: Context, diagnosticParent: Long = 0L) {
-        request(context, urgent = false, diagnosticParent = diagnosticParent)
+        request(context, urgent = false, diagnosticParent = diagnosticParent, captureHint = true)
     }
 
     /** Wake hints are latency-sensitive, but quota exhaustion must still retain bounded sync work. */
     fun enqueueUrgent(context: Context) {
-        request(context, urgent = true, diagnosticParent = 0L)
+        request(context, urgent = true, diagnosticParent = 0L, captureHint = true)
     }
 
-    private fun request(context: Context, urgent: Boolean, diagnosticParent: Long) {
+    /** Schedules an upload after capture without requesting another capture pass. */
+    internal fun enqueueAfterCapture(context: Context, diagnosticParent: Long = 0L) {
+        request(context, urgent = false, diagnosticParent = diagnosticParent, captureHint = false)
+    }
+
+    private fun request(context: Context, urgent: Boolean, diagnosticParent: Long, captureHint: Boolean) {
         val diagnosticsEnabled = SyncDiagnostics.enabled
         val enqueuedMs = if (diagnosticsEnabled) SyncDiagnostics.nowMs() else 0L
         val requestTrace = if (diagnosticsEnabled) SyncDiagnostics.currentTraceId() else 0L
@@ -59,7 +65,9 @@ object GatewayWork {
         if (diagnosticsEnabled) {
             SyncDiagnostics.record(SyncTraceEvent.GATEWAY_ENQUEUE, SyncTraceField.PARENT_ID to diagnosticParent, SyncTraceField.TRACE_ID to requestTrace, SyncTraceField.ENQUEUED_MS to enqueuedMs, SyncTraceField.SOURCE to if (appendToActivePass) 1 else 0)
         }
-        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, true).commit()
+        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, true).apply {
+            if (captureHint) putBoolean(CAPTURE_HINT_PENDING, true)
+        }.commit()
         WorkManager.getInstance(context).enqueueUniqueWork(
             NAME,
             if (appendToActivePass) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP,
@@ -92,10 +100,23 @@ object GatewayWork {
     internal const val DIAGNOSTIC_SESSION = "peppy-gateway-diagnostic-session"
 
     /** Called only under [GatewaySyncWorker]'s process-wide pass mutex. */
-    internal fun beginPass(context: Context) {
+    internal fun beginPass(context: Context): Boolean {
         coalescer.begin()
-        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(DIRTY, false).commit()
+        val prefs = context.getSharedPreferences(COALESCE, 0)
+        val captureHint = prefs.getBoolean(CAPTURE_HINT_PENDING, true)
+        prefs.edit().putBoolean(DIRTY, false).putBoolean(CAPTURE_HINT_PENDING, false).commit()
+        return captureHint
     }
+
+    /** Periodic work is an external sync hint, not a capture follow-up. */
+    internal fun captureHintPending(context: Context) {
+        context.getSharedPreferences(COALESCE, 0).edit().putBoolean(CAPTURE_HINT_PENDING, true).commit()
+    }
+
+    internal fun shouldEnqueueSmsCapture(captureHint: Boolean, readGranted: Boolean) = captureHint && readGranted
+
+    internal fun shouldEnqueueMmsCapture(captureHint: Boolean, enabled: Boolean, receiveGranted: Boolean) =
+        captureHint && enabled && receiveGranted
 
     /** Preserves the finishing fence so a concurrent wake appends one bounded successor. */
     internal fun finishPass() {
@@ -110,7 +131,9 @@ object GatewayWork {
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             PERIODIC_NAME,
             ExistingPeriodicWorkPolicy.KEEP,
-            PeriodicWorkRequestBuilder<GatewaySyncWorker>(15, TimeUnit.MINUTES).setConstraints(constraints()).build(),
+            PeriodicWorkRequestBuilder<GatewaySyncWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(constraints())
+                .build(),
         )
     }
 }
@@ -557,13 +580,22 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
     }
 
     private fun runPass(): Result {
-        GatewayWork.beginPass(applicationContext)
-        val result = pass()
+        if (isPeriodicRun()) GatewayWork.captureHintPending(applicationContext)
+        val captureHint = GatewayWork.beginPass(applicationContext)
+        val result = pass(captureHint)
         if (result == Result.success()) GatewayWork.finishPass()
         return result
     }
 
-    private fun pass(): Result {
+    // Tags are not used: KEEP leaves pre-upgrade periodic requests untagged. Unknown state counts as periodic.
+    private fun isPeriodicRun(): Boolean = try {
+        WorkManager.getInstance(applicationContext).getWorkInfosForUniqueWork(GatewayWork.PERIODIC_NAME).get()
+            .any { it.id == id }
+    } catch (_: Exception) {
+        true
+    }
+
+    private fun pass(captureHint: Boolean): Result {
         val callbacks = SmsCallbackStore(applicationContext)
         val mmsCallbacks = MmsCallbackStore(applicationContext)
         callbacks.purgeOlderThan(TimeUnit.DAYS.toMillis(7))
@@ -576,7 +608,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
         SmsCaptureWork.ensurePeriodic(applicationContext)
         val smsReadGranted = ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_SMS) ==
             PackageManager.PERMISSION_GRANTED
-        if (smsReadGranted) {
+        if (GatewayWork.shouldEnqueueSmsCapture(captureHint, smsReadGranted)) {
             SmsCaptureWork.enqueue(applicationContext)
         }
         // Not enrolled, database unopenable, or shared vault locked: nothing can be synced yet.
@@ -591,7 +623,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             applicationContext,
             Manifest.permission.RECEIVE_MMS,
         ) == PackageManager.PERMISSION_GRANTED
-        if (mmsEnabled && mmsReceiveGranted) MmsCaptureWork.enqueue(applicationContext)
+        if (GatewayWork.shouldEnqueueMmsCapture(captureHint, mmsEnabled, mmsReceiveGranted)) MmsCaptureWork.enqueue(applicationContext)
         val binding = NativeGateway.reachabilityBinding(applicationContext)
         val sync = GatewaySync(
             client = session.client,

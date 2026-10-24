@@ -53,7 +53,7 @@ object MmsCaptureWork {
     }
 
     internal fun handleResult(context: Context, result: MmsCaptureSummary) {
-        if (result.captured > 0) GatewayWork.enqueue(context)
+        if (result.captured > 0) GatewayWork.enqueueAfterCapture(context)
         if (result.more) enqueue(context)
     }
 

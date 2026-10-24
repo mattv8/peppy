@@ -310,7 +310,7 @@ object RelayWakeRuntime {
         schedule(context)
     }
     /** Enrollment completion and foreground restoration use the same serialized reconciliation path. */
-    fun enrollmentChanged(context: Context) { initialize(context); if (enabled) schedule(context) }
+    fun enrollmentChanged(context: Context) { initialize(context) }
     /** Archive removes the binding but never changes the user's durable wake preference. */
     fun archiveEnrollment(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

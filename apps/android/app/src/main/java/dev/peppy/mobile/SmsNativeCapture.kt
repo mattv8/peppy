@@ -19,9 +19,9 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         val summary = capture(client, AndroidSmsCaptureProvider(context), MmsPreferences(context).sourceGeneration)
         if (shouldScheduleGatewayUpload(summary)) {
             if (SyncDiagnostics.enabled) {
-                GatewayWork.enqueue(context.applicationContext, diagnosticParent = SyncDiagnostics.currentTraceId())
+                GatewayWork.enqueueAfterCapture(context.applicationContext, diagnosticParent = SyncDiagnostics.currentTraceId())
             } else {
-                GatewayWork.enqueue(context.applicationContext)
+                GatewayWork.enqueueAfterCapture(context.applicationContext)
             }
         }
         return summary
