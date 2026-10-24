@@ -383,6 +383,7 @@ impl Client {
     ) -> Result<Vec<SmsAcquisition>, Error> {
         let guard = self.lock()?;
         let after = after.unwrap_or("");
+        // Keep literal state='pending': a bound parameter would defeat the partial index.
         let mut statement = guard.conn.prepare("SELECT acquisition_id,conversation_id,input,state,reason FROM sms_acquisitions WHERE state='pending' AND acquisition_id>? ORDER BY acquisition_id LIMIT ?")?;
         let rows: Vec<_> = statement
             .query_map(
@@ -1329,5 +1330,55 @@ mod tests {
                 "{sql}: {plan:?}"
             );
         }
+    }
+
+    #[test]
+    fn pending_rechecks_use_the_ordered_pending_index_and_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        let mut pending_ids = Vec::new();
+        for id in 1..=5 {
+            let acquisition = client.begin_sms_acquisition(history_row(id)).unwrap();
+            if id <= 2 {
+                client
+                    .complete_sms_acquisition(&acquisition.acquisition_id)
+                    .unwrap();
+            } else {
+                pending_ids.push(acquisition.acquisition_id);
+            }
+        }
+        pending_ids.sort();
+
+        let plan: Vec<String> = client
+            .lock()
+            .unwrap()
+            .conn
+            .prepare("EXPLAIN QUERY PLAN SELECT acquisition_id,conversation_id,input,state,reason FROM sms_acquisitions WHERE state='pending' AND acquisition_id>? ORDER BY acquisition_id LIMIT ?")
+            .unwrap()
+            .query_map(params!["", 10], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("sms_acquisitions_pending_order")),
+            "{plan:?}"
+        );
+
+        let rows = client.sms_acquisitions_after(None, 10).unwrap();
+        assert_eq!(
+            rows.into_iter()
+                .map(|acquisition| acquisition.acquisition_id)
+                .collect::<Vec<_>>(),
+            pending_ids
+        );
+        let wrapped = client.sms_acquisitions_after(Some("~"), 10).unwrap();
+        assert_eq!(
+            wrapped
+                .into_iter()
+                .map(|acquisition| acquisition.acquisition_id)
+                .collect::<Vec<_>>(),
+            pending_ids
+        );
     }
 }
