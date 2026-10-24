@@ -204,16 +204,17 @@ internal object MmsCapture {
         }
         fun budgetExpired() = System.nanoTime() >= deadline
         val scanner = MmsBackfillScanner(core)
-        followup = scanner.run(
-            plan.generation,
-            PROVIDER_SCOPE,
-            MmsLegacyBackfillState(
-                plan.historyBaseline?.toString(),
-                plan.importHistory,
-                plan.recheckCursor,
-            ),
-            provider.highWater().toString(),
-            scanPage = { backfillPlan ->
+        followup = captureTimed(SyncDiagnosticStage.MMS) {
+            scanner.run(
+                plan.generation,
+                PROVIDER_SCOPE,
+                MmsLegacyBackfillState(
+                    plan.historyBaseline?.toString(),
+                    plan.importHistory,
+                    plan.recheckCursor,
+                ),
+                provider.highWater().toString(),
+                scanPage = { backfillPlan ->
                 val result = scan(
                     core, provider, tempDirectory, plan.generation,
                     imported = backfillPlan.phase == MmsBackfillPhase.HISTORY,
@@ -228,9 +229,19 @@ internal object MmsCapture {
                 pending += result.pending
                 unavailable += result.unavailable
                 followup = followup || result.more
+                captureMmsProgress(
+                    rowsQueried = result.rowsQueried,
+                    processed = result.processed,
+                    advanced = result.lastDurableId != null,
+                    budgetExhausted = result.budgetExhausted,
+                    captured = result.captured,
+                    pending = result.pending,
+                    unavailable = result.unavailable,
+                    more = result.more,
+                )
                 MmsBackfillPageResult(result.lastDurableId, result.exhausted, result.more)
-            },
-            recheck = recheck@{ request ->
+                },
+                recheck = recheck@{ request ->
                 if (budgetExpired()) return@recheck true
                 val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck false
                 val record = provider.read(providerId) ?: return@recheck false
@@ -244,8 +255,9 @@ internal object MmsCapture {
                 pending += outcome.pending
                 unavailable += outcome.unavailable
                 outcome.followup
-            },
-        )
+                },
+            )
+        }
         return MmsCaptureSummary(captured, pending, unavailable, followup)
     }
 
@@ -274,9 +286,12 @@ internal object MmsCapture {
         var lastDurableId: String? = null
         var stopped = false
         var checkpointBlocked = false
+        var processed = 0
+        var budgetExhausted = false
         for (record in page.records) {
             if (!descending && upperBound != null && record.id > upperBound) { stopped = true; break }
-            if (budgetExpired()) { followup = true; stopped = true; break }
+            if (budgetExpired()) { followup = true; stopped = true; budgetExhausted = true; break }
+            processed++
             val subscriptionId = record.subscriptionId?.takeIf { it >= 0 }
             if (subscriptionId == null) {
                 if (descending) {
@@ -318,7 +333,10 @@ internal object MmsCapture {
         }
         val reachedBound = !descending && upperBound != null && page.records.any { it.id > upperBound }
         val exhausted = !followup && !(descending && checkpointBlocked) && (page.records.size < budget || reachedBound)
-        return ScanResult(captured, pending, unavailable, followup || (!checkpointBlocked && !exhausted), lastDurableId, exhausted)
+        return ScanResult(
+            captured, pending, unavailable, followup || (!checkpointBlocked && !exhausted), lastDurableId,
+            exhausted, page.records.size, processed, budgetExhausted,
+        )
     }
 
     private fun process(
@@ -553,7 +571,17 @@ internal object MmsCapture {
     private const val UNKNOWN_SUBSCRIPTION = "android-mms-unknown-subscription"
 
     private data class ProcessResult(val durable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val followup: Boolean = false)
-    private data class ScanResult(val captured: Int, val pending: Int, val unavailable: Int, val more: Boolean, val lastDurableId: String?, val exhausted: Boolean)
+    private data class ScanResult(
+        val captured: Int,
+        val pending: Int,
+        val unavailable: Int,
+        val more: Boolean,
+        val lastDurableId: String?,
+        val exhausted: Boolean,
+        val rowsQueried: Int,
+        val processed: Int,
+        val budgetExhausted: Boolean,
+    )
 }
 
 private class NativeCore(private val client: NativeClientInterface) : MmsCaptureCore {

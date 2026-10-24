@@ -21,7 +21,6 @@ class SmsCaptureReleasePolicyTest {
         var dispatches = 0
         val observer = SmsCaptureLifecycle.observer(context) { dispatches++ }
 
-        assertFalse(BuildConfig.PEPPY_SMS_DIAGNOSTICS)
         assertFalse(SyncDiagnostics.enabled)
         observer.onChange(false)
         ShadowLooper.idleMainLooper(999, TimeUnit.MILLISECONDS)

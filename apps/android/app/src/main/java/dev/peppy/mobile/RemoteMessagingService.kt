@@ -104,6 +104,10 @@ class RemoteMessagingService : Service() {
     private var reconnects = 0
     private var connected = false
     private var reconnectJob: Job? = null
+    private var readyFrames = 0
+    private var eventFrames = 0
+    private var resyncFrames = 0
+    private var otherFrames = 0
     private lateinit var connectivity: ConnectivityManager
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = serialized(fence.current()) { scheduleReconnect(fence.current()) }
@@ -154,13 +158,22 @@ class RemoteMessagingService : Service() {
         override fun onMessage(webSocket: WebSocket, text: String) = serialized(token, webSocket) {
             when (RemoteMessagingProtocol.frameType(text)) {
                 "ready" -> if (!connected) {
+                    recordFrame(SocketFrame.READY)
                     connected = true
                     reconnects = 0
                     updateStatus(RemoteMessagingStatus.CONNECTED)
                     GatewayWork.enqueueUrgent(applicationContext)
+                } else recordFrame(SocketFrame.READY)
+                "event" -> {
+                    recordFrame(SocketFrame.EVENT)
+                    GatewayWork.enqueueUrgent(applicationContext)
                 }
-                "event", "resync_required" -> GatewayWork.enqueueUrgent(applicationContext)
+                "resync_required" -> {
+                    recordFrame(SocketFrame.RESYNC)
+                    GatewayWork.enqueueUrgent(applicationContext)
+                }
                 // A valid large replay is intentionally ignored as a hint: HTTP replay owns durable ingestion.
+                else -> recordFrame(SocketFrame.OTHER)
             }
         }
 
@@ -213,7 +226,26 @@ class RemoteMessagingService : Service() {
 
     private fun updateStatus(status: RemoteMessagingStatus) {
         RemoteMessagingRuntime.set(status)
+        if (SyncDiagnostics.enabled) {
+            BackgroundDiagnostics.socket(
+                status,
+                reconnects,
+                BackgroundDiagnostics.SocketFrameCounts(readyFrames, eventFrames, resyncFrames, otherFrames),
+            )
+        }
         startForeground(NOTIFICATION_ID, notification(status))
+    }
+
+    private enum class SocketFrame { READY, EVENT, RESYNC, OTHER }
+
+    private fun recordFrame(frame: SocketFrame) {
+        if (!SyncDiagnostics.enabled) return
+        when (frame) {
+            SocketFrame.READY -> readyFrames++
+            SocketFrame.EVENT -> eventFrames++
+            SocketFrame.RESYNC -> resyncFrames++
+            SocketFrame.OTHER -> otherFrames++
+        }
     }
 
     private fun ensureChannel() {

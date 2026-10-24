@@ -22,6 +22,16 @@ import uniffi.peppy_mobile_bindings.NativeMmsSource
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class MmsCaptureOrchestrationTest {
+    @Test fun diagnosticsEmitContentFreeMmsProgress() {
+        val events = mutableListOf<String>()
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCapture.run(plan(), FakeCore(), FakeProvider(listOf(record(1))), temp())
+        }
+
+        assertTrue(events.any { it.contains("event=${SyncTraceEvent.CAPTURE_PROGRESS.code}") && it.contains("${SyncTraceField.STAGE.code}=${SyncDiagnosticStage.MMS}") && it.contains("${SyncTraceField.PROCESSED.code}=") })
+    }
+
     @Test fun corePlanDrivesLiveAndHistoryProviderScansWithoutPreferenceCheckpoints() {
         val core = FakeCore()
         val provider = FakeProvider(listOf(record(1), record(2)))

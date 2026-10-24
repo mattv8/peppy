@@ -1741,6 +1741,206 @@
         }
       }
     },
+    "peppy.diagnostics_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnostics"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_verbose_sync_logging": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verbose sync logging"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_verbose_sync_logging_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Records bounded sync timing and counters on this phone for troubleshooting."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_recording": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recording"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_off_retained": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off — retained logs remain available"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_retained_size": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retained log size"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_retained_size_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maximum 4 MiB"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_dropped_events": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dropped events"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_privacy": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Logs stay on this phone until you choose Share log. They include sync timing, counters, and build information only—not message contents, contacts, identifiers, or credentials."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_overhead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verbose logging adds overhead. Turn it off after testing."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_share_log": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share log"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_clear_logs": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear logs"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_clear_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear diagnostic logs?"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_clear_confirm_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This removes retained logs from this phone. It cannot erase copies you already shared."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_clear_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear logs"
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_error_storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnostics storage is unavailable. Try again later."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_error_export": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not prepare the diagnostic log to share. Try again."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_error_clear": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not clear diagnostic logs. Try again."
+          }
+        }
+      }
+    },
+    "peppy.diagnostics_working": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Working"
+          }
+        }
+      }
+    },
     "peppy.hosted_subscribe_store_unavailable": {
       "localizations": {
         "en": {

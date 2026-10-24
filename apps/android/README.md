@@ -84,17 +84,7 @@ Foreground and gateway follow-up scans retain their 15-second delay. Unique-work
 
 ### Build and collect diagnostics
 
-With the [Android build prerequisites](#build-backends) installed and native libraries generated, run from `apps/android`:
-
-```sh
-# Normal build: bounded fast observer capture, diagnostics off.
-./gradlew :app:assembleDebug
-
-# Same capture behavior with content-free debug timing diagnostics.
-./gradlew :app:assembleDebug -PpeppySmsDiagnostics=true
-```
-
-Both commands write `app/build/outputs/apk/debug/app-debug.apk`. `peppySmsDiagnostics` accepts only `true` or `false`, defaults to false, and cannot enable diagnostic logging in a release build. Omit it or set it false to disable logging without changing capture timing.
+Diagnostics are off by default in every build. On a test phone, enable **Settings → Diagnostics** to record bounded numeric timing and counter records locally; turn it off after collecting a trace. Sharing is explicit and creates a private snapshot—no logcat collection or Gradle property enables runtime recording.
 
 For an already configured HTTPS local dev stack, include its existing local CA in the debug build. The native development helper does this automatically. When invoking Gradle directly from `apps/android`, set these before the build:
 
@@ -105,13 +95,7 @@ export PEPPY_DEV_TLS_CERT="$(python3 ../../infra/dev/dev_tls.py ca-path)"
 
 These settings affect only the debug loopback trust configuration. A bare Gradle build without them does not trust the local dev CA.
 
-After installing the chosen build on a test phone, collect only this diagnostic tag:
-
-```sh
-adb logcat -v threadtime -s PeppySyncTrace
-```
-
-For settled-queue measurements, allow more than 15 seconds after foregrounding or a completed sync and verify no delayed capture request is pending. Foreground entry and gateway passes enqueue delayed work; `KEEP` preserves that work even when an observer hint arrives. An enqueue trace without a corresponding worker start can therefore be expected, rather than evidence of a lost SMS. Measure this pending-work case separately from the settled case.
+Use **Share log** in Settings to create a bounded local snapshot when needed. Recording stays off until explicitly enabled, and turning recording off retains already captured local logs for sharing or clearing.
 
 Compare isolated messages and bursts with settled history, then test backfill separately. Cover foreground/background, screen on/off, and Wi-Fi/cellular with the same phone, server, permissions, and workload. Record whether diagnostics are enabled and the native build profile for each run. Server acknowledgement and appearance on another client are different endpoints; measure them separately.
 
@@ -134,7 +118,7 @@ Event/field codes are defined in [`SyncDiagnostics.kt`](app/src/main/java/dev/pe
 - `CAPTURE_END` and `GATEWAY_END` outcomes are 1 success, 2 retry, 3 failure, and 4 throw. `SUCCESS=1` means a successful worker result, which does not itself prove that a message was uploaded. `OUTBOX_ACK` is emitted only after successful local acknowledgement of the server response.
 - HTTP `SUCCESS=1` means a response completed, including 4xx/5xx; inspect `STATUS` for HTTP success. Byte fields describe application payloads, not wire/TLS/radio bytes. Transport failures can leave incomplete byte accounting. Route categories include attachments and exclude dynamic identifiers and queries.
 - `NATIVE_OPEN SUCCESS=1` means a non-null client was returned. `COLD=1` means no cached client was observed at entry, not proof that this call initialized it; duration can include lock contention.
-- Logs contain numeric metadata, not SMS bodies, phone/provider IDs, URLs, credentials, response bodies, or exception text. Logcat can drop lines. Coalesced hints, process death, retry/backoff, and Doze prevent exact per-message attribution from these pass-level traces.
+- Logs contain numeric metadata, not SMS bodies, phone/provider IDs, URLs, credentials, response bodies, or exception text. Coalesced hints, process death, retry/backoff, and Doze prevent exact per-message attribution from these pass-level traces.
 
 The five-second acknowledgement target applies to a healthy network, a live process, settled history, and no pre-existing delayed/retry or recovery work. It is not a delivery guarantee. The observer policy does not expedite uploads, keep the process alive, or change the periodic fallback.
 

@@ -365,7 +365,7 @@ jobs:
         run: ./gradlew --console=plain :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest
       - name: Verify release SMS diagnostics policy
         working-directory: apps/android
-        run: ./gradlew --console=plain :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest -PpeppySmsDiagnostics=true
+        run: ./gradlew --console=plain :app:testReleaseUnitTest --tests dev.peppy.mobile.SmsCaptureReleasePolicyTest
       - name: Stop Gradle before caching
         if: ${{ success() && github.ref == 'refs/heads/production' && steps.gradle-cache.outputs.cache-hit != 'true' }}
         working-directory: apps/android

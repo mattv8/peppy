@@ -105,7 +105,52 @@ class SmsCaptureOrchestrationTest {
             FakeProvider(listOf(record(1))),
         ) { times.removeFirst() }
         assertEquals(0, summary.captured)
+        assertEquals(0, summary.rowsQueried)
         assertTrue(summary.more)
+        assertEquals(0, summary.processed)
+        assertTrue(summary.budgetExhausted)
+        assertTrue(!summary.advanced)
+    }
+
+    @Test fun completedRowsReportDurableCaptureProgress() {
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", false, 0),
+            FakeCore(mutableListOf()),
+            FakeProvider(listOf(record(1))),
+        )
+
+        assertEquals(1, summary.processed)
+        assertEquals(1, summary.rowsQueried)
+        assertTrue(summary.advanced)
+        assertTrue(!summary.budgetExhausted)
+    }
+
+    @Test fun diagnosticsEmitStagedProgressWithoutChangingCaptureEffects() {
+        val disabledCalls = mutableListOf<String>()
+        val enabledCalls = mutableListOf<String>()
+        val events = mutableListOf<String>()
+
+        val disabled = SyncDiagnostics.withTestConfiguration(false, { error("clock") }, { error("cpu") }, { error("sink") }) {
+            SmsCapture.run(SmsCapturePlan("shared-generation", false, 0), FakeCore(disabledCalls), FakeProvider(listOf(record(1))))
+        }
+        val enabled = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            SmsCapture.run(SmsCapturePlan("shared-generation", false, 0), FakeCore(enabledCalls), FakeProvider(listOf(record(1))))
+        }
+
+        assertEquals(disabled, enabled)
+        assertEquals(disabledCalls, enabledCalls)
+        assertTrue(events.any { it.contains("event=${SyncTraceEvent.CAPTURE_PROGRESS.code}") && it.contains("${SyncTraceField.STAGE.code}=${SyncDiagnosticStage.SMS_LIVE}") })
+    }
+
+    @Test fun invalidPendingProviderIdAdvancesTheRecheckCursorWithoutAProviderQuery() {
+        val pending = acquisition("one", 1).copy(input = acquisition("one", 1).input.copy(providerMessageId = "invalid"))
+
+        val summary = SmsCapture.run(SmsCapturePlan("shared-generation", false, 100), FakeCore(mutableListOf(), listOf(pending)), FakeProvider(emptyList()))
+
+        assertEquals("one", summary.pendingRecheckCursor)
+        assertEquals(1, summary.processed)
+        assertEquals(0, summary.rowsQueried)
+        assertTrue(summary.advanced)
     }
 
     @Test fun providerFailureRequestsFollowupInsteadOfReportingEmptySuccess() {

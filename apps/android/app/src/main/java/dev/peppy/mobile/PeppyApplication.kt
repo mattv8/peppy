@@ -6,6 +6,7 @@ import android.app.Application
 class PeppyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        DiagnosticsController.initialize(this)
         RelayWakeRuntime.initialize(this)
         SmsCaptureWork.runner = SmsNativeCapture
         SmsCaptureLifecycle.ensureObserver(this)

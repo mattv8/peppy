@@ -242,6 +242,7 @@ class NotificationMirrorService : NotificationListenerService() {
                 completed++
             } catch (_: SecurityException) { return completed } catch (_: MobileBindingsException) { return completed }
         }
+        if (SyncDiagnostics.enabled) BackgroundDiagnostics.notification(active.size, reconciled = 0, dismissed = completed)
         return completed
     }
 
@@ -291,6 +292,7 @@ class NotificationMirrorService : NotificationListenerService() {
                 }
                 absent.forEach { session.client.removeNotification(it.target.notificationKey, "reconcile") }
                 if (absent.isNotEmpty()) GatewayWork.enqueueUrgent(applicationContext)
+                if (SyncDiagnostics.enabled) BackgroundDiagnostics.notification(active.size, reconciled = absent.size, dismissed = 0)
             } catch (_: MobileBindingsException) { return@post }
             active.forEach { capturePosted(it, rankings) }
         }

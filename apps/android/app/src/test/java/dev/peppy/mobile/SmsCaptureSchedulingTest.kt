@@ -12,6 +12,7 @@ import androidx.work.WorkManager
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.testing.WorkManagerTestInitHelper
 import androidx.work.testing.WorkManagerTestInitHelper.ExecutorsMode
+import androidx.work.testing.SynchronousExecutor
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -40,7 +41,10 @@ class SmsCaptureSchedulingTest {
         workerExecutor = Executors.newSingleThreadExecutor()
         WorkManagerTestInitHelper.initializeTestWorkManager(
             context,
-            Configuration.Builder().setExecutor(workerExecutor).build(),
+            Configuration.Builder()
+                .setExecutor(workerExecutor)
+                .setTaskExecutor(SynchronousExecutor())
+                .build(),
             ExecutorsMode.PRESERVE_EXECUTORS,
         )
         SmsCaptureWork.runner = null
@@ -197,6 +201,22 @@ class SmsCaptureSchedulingTest {
         assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
         assertEquals(BackoffPolicy.EXPONENTIAL, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT).workSpec.backoffPolicy)
         assertEquals(30_000L, SmsCaptureWork.createRequest(SmsCaptureRequestSource.DEFAULT).workSpec.backoffDelayDuration)
+    }
+
+    @Test fun diagnosticContinuationRecordsHintReasonWithoutChangingTheTwoQueuedRequests() {
+        val events = mutableListOf<String>()
+        SmsCaptureWork.runner = SmsCaptureRunner {
+            SmsCaptureWork.enqueueObserver(context)
+            SmsCaptureSummary()
+        }
+
+        val result = SyncDiagnostics.withTestConfiguration(true, { 100L }, { 1L }, events::add) {
+            TestListenableWorkerBuilder<SmsCaptureWorker>(context).build().startWork().get()
+        }
+
+        assertEquals(androidx.work.ListenableWorker.Result.success(), result)
+        assertEquals(2, WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().size)
+        assertTrue(events.any { it.contains("event=${SyncTraceEvent.CAPTURE_CONTINUATION.code}") && it.contains("${SyncTraceField.REASON.code}=${SyncDiagnosticReason.HINT}") })
     }
 
     @Test fun disabledDiagnosticsDoNotTouchInputsClockOrSinkAndDoNotChangeWorkerResult() {

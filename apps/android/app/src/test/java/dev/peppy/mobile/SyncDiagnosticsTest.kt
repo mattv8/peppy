@@ -109,6 +109,26 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         }
     }
 
+    @Test fun measureStageUsesInjectedClockCpuAndRecordsTheStage() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 100L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add) {
+            assertEquals("result", SyncDiagnostics.measureStage(SyncTraceEvent.CAPTURE_PROGRESS, SyncDiagnosticStage.SMS_LIVE) { "result" })
+        }
+
+        val event = traceFields(events.single())
+        assertEquals(SyncTraceEvent.CAPTURE_PROGRESS.code, event.getValue("event"))
+        assertEquals(SyncDiagnosticStage.SMS_LIVE, event.getValue(SyncTraceField.STAGE.code.toString()))
+        assertEquals(30L, event.getValue(SyncTraceField.DURATION_MS.code.toString()))
+        assertEquals(8L, event.getValue(SyncTraceField.CPU_MS.code.toString()))
+        assertEquals(1L, event.getValue(SyncTraceField.SUCCESS.code.toString()))
+    }
+
+    @Test fun measureStageDoesNotTurnMeasurementFailureIntoABlockFailure() {
+        SyncDiagnostics.withTestConfiguration(true, { error("clock") }, { error("cpu") }, { error("sink") }) {
+            assertEquals("result", SyncDiagnostics.measureStage(SyncTraceEvent.CAPTURE_PROGRESS, SyncDiagnosticStage.SMS_LIVE) { "result" })
+        }
+    }
+
     @Test fun gatewayWorkerRetainsSameSessionDiagnosticMetadataAndMeasuresQueueDelay() {
         WorkManagerTestInitHelper.initializeTestWorkManager(
             context,

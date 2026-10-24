@@ -95,6 +95,108 @@ class GatewayDiagnosticsTest {
         }
     }
 
+    @Test fun backgroundProgressUsesOnlyNumericCountersWhenEnabled() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            BackgroundDiagnostics.gateway(received = 3, snapshotReceived = 5, progressed = 2, uploaded = 1, snapshotRemaining = 4, readiness = null)
+        }
+
+        val fields = traceFields(events.single())
+        assertEquals(SyncTraceEvent.GATEWAY_PROGRESS.code, fields.getValue("event"))
+        assertEquals(3L, fields.getValue(SyncTraceField.ROWS.code.toString()))
+        assertEquals(5L, fields.getValue(SyncTraceField.PENDING.code.toString()))
+        assertEquals(2L, fields.getValue(SyncTraceField.PROCESSED.code.toString()))
+        assertEquals(1L, fields.getValue(SyncTraceField.COUNT.code.toString()))
+        assertEquals(4L, fields.getValue(SyncTraceField.REMAINING.code.toString()))
+    }
+
+    @Test fun disabledBackgroundProgressDoesNotReadDiagnosticsSuppliers() {
+        SyncDiagnostics.withTestConfiguration(false, { error("clock read") }, { error("CPU read") }, { error("sink called") }) {
+            BackgroundDiagnostics.gateway(received = 3, snapshotReceived = 5, progressed = 2, uploaded = 1, snapshotRemaining = 4, readiness = null)
+        }
+    }
+
+    @Test fun gatewayReadinessFixtureRecordsCoreReadyAndBackfillState() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            val readiness = BackgroundDiagnostics.gatewayReadiness("""{"contacts_ready":true,"state":"ready"}""")
+            BackgroundDiagnostics.gateway(received = 3, snapshotReceived = 5, progressed = 2, uploaded = 1, snapshotRemaining = 4, readiness = readiness)
+        }
+
+        val fields = traceFields(events.single())
+        assertEquals(1L, fields.getValue(SyncTraceField.READY.code.toString()))
+        assertEquals(0L, fields.getValue(SyncTraceField.BACKFILL_PENDING.code.toString()))
+    }
+
+    @Test fun gatewayBackfillFixtureRecordsPendingWithoutClaimingReady() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            val readiness = BackgroundDiagnostics.gatewayReadiness("""{"contacts_ready":false,"state":"backfill_pending"}""")
+            BackgroundDiagnostics.gateway(received = 0, snapshotReceived = 0, progressed = 0, uploaded = 0, snapshotRemaining = 0, readiness = readiness)
+        }
+
+        val fields = traceFields(events.single())
+        assertEquals(0L, fields.getValue(SyncTraceField.READY.code.toString()))
+        assertEquals(1L, fields.getValue(SyncTraceField.BACKFILL_PENDING.code.toString()))
+    }
+
+    @Test fun malformedGatewayReadinessIsDroppedWithoutDiagnosticsFailure() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            assertEquals(null, BackgroundDiagnostics.gatewayReadiness("not-json"))
+            BackgroundDiagnostics.gateway(received = 0, snapshotReceived = 0, progressed = 0, uploaded = 0, snapshotRemaining = 0, readiness = null)
+        }
+
+        val fields = traceFields(events.single())
+        assertFalse(fields.containsKey(SyncTraceField.READY.code.toString()))
+        assertFalse(fields.containsKey(SyncTraceField.BACKFILL_PENDING.code.toString()))
+    }
+
+    @Test fun disabledGatewayReadinessDoesNotParseFixture() {
+        SyncDiagnostics.withTestConfiguration(false, { error("clock read") }, { error("CPU read") }, { error("sink called") }) {
+            assertEquals(null, BackgroundDiagnostics.gatewayReadiness("not-json"))
+        }
+    }
+
+    @Test fun contactSocketAndNotificationSummariesUseNumericFields() {
+        val events = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 10L }, { 1L }, events::add) {
+            BackgroundDiagnostics.contact(
+                full = false,
+                report = ContactPassReport(ContactPassReport.Outcome.PARTIAL, observed = 7, captured = 5, applied = 2, deleted = 3, more = true),
+            )
+            BackgroundDiagnostics.socket(
+                RemoteMessagingStatus.RECONNECTING,
+                reconnects = 4,
+                frames = BackgroundDiagnostics.SocketFrameCounts(ready = 1, event = 2, resync = 3, other = 4),
+            )
+            BackgroundDiagnostics.notification(active = 6, reconciled = 2, dismissed = 1)
+        }
+
+        val contact = traceFields(events[0])
+        assertEquals(SyncTraceEvent.CONTACT_PROGRESS.code, contact.getValue("event"))
+        assertEquals(1L, contact.getValue(SyncTraceField.MORE.code.toString()))
+        assertEquals(5L, contact.getValue(SyncTraceField.PROCESSED.code.toString()))
+        val socket = traceFields(events[1])
+        assertEquals(SyncTraceEvent.SOCKET_STATE.code, socket.getValue("event"))
+        assertEquals(4L, socket.getValue(SyncTraceField.COUNT.code.toString()))
+        assertEquals(1L, socket.getValue(SyncTraceField.ROWS.code.toString()))
+        assertEquals(2L, socket.getValue(SyncTraceField.CAPTURED.code.toString()))
+        assertEquals(3L, socket.getValue(SyncTraceField.PROCESSED.code.toString()))
+        assertEquals(4L, socket.getValue(SyncTraceField.PENDING.code.toString()))
+        val notification = traceFields(events[2])
+        assertEquals(SyncTraceEvent.NOTIFICATION_PROGRESS.code, notification.getValue("event"))
+        assertEquals(6L, notification.getValue(SyncTraceField.ROWS.code.toString()))
+    }
+
+    @Test fun disabledContactSocketAndNotificationSummariesDoNoDiagnosticsWork() {
+        SyncDiagnostics.withTestConfiguration(false, { error("clock read") }, { error("CPU read") }, { error("sink called") }) {
+            BackgroundDiagnostics.contact(false, ContactPassReport(ContactPassReport.Outcome.PARTIAL, more = true))
+            BackgroundDiagnostics.socket(RemoteMessagingStatus.RECONNECTING, reconnects = 4)
+            BackgroundDiagnostics.notification(active = 6, reconciled = 2, dismissed = 1)
+        }
+    }
+
     @Test fun synchronousKeepEnqueueRetainsTheFirstDiagnosticParent() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         WorkManagerTestInitHelper.initializeTestWorkManager(

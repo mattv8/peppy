@@ -65,8 +65,11 @@ internal object SmsNativeCapture : SmsCaptureRunner {
                 ?.let(reader::read)?.let(SmsCapture::sourceRowFingerprint)
             val reconciliation = client.planSmsReconciliation(generation, scope, highWater, anchor)
             if (reconciliation != null) {
-                val result = SmsCapture.reconcile(reconciliation.toCapturePlan(), core, reader)
+                val result = captureTimed(SyncDiagnosticStage.SMS_RECONCILIATION) {
+                    SmsCapture.reconcile(reconciliation.toCapturePlan(), core, reader)
+                }
                 summary += result.summary
+                captureProgress(SyncDiagnosticStage.SMS_RECONCILIATION, result.summary)
                 recordPlanCompletion(PLAN_RECONCILIATION, imported = false, result.summary)
                 if (result.summary.providerError) {
                     client.setSmsProviderError(generation, scope, true)
@@ -250,4 +253,8 @@ private operator fun SmsCaptureSummary.plus(other: SmsCaptureSummary) = SmsCaptu
     other.pendingRecheckCursor ?: pendingRecheckCursor,
     historyExhausted || other.historyExhausted,
     coreError || other.coreError,
+    processed + other.processed,
+    rowsQueried + other.rowsQueried,
+    advanced || other.advanced,
+    budgetExhausted || other.budgetExhausted,
 )
