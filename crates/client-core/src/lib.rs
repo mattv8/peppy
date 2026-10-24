@@ -91,7 +91,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 33;
+const SCHEMA_VERSION: i64 = 34;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -4344,6 +4344,10 @@ fn apply_migration_33(conn: &Connection) -> Result<(), Error> {
     add_column_if_missing(conn, "projection_notifications", NOTIFICATION_ICON_COLUMN)
 }
 
+const MIGRATION_34: &str = "
+CREATE INDEX IF NOT EXISTS sms_acquisitions_pending_order ON sms_acquisitions(acquisition_id) WHERE state='pending';
+";
+
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
         .split_whitespace()
@@ -4435,6 +4439,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_31)?;
             apply_migration_32(&tx)?;
             apply_migration_33(&tx)?;
+            tx.execute_batch(MIGRATION_34)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4443,7 +4448,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=32)) => {
+        Some(version @ (4..=33)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4530,6 +4535,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 32 {
                 apply_migration_33(&tx)?;
+            }
+            if version <= 33 {
+                tx.execute_batch(MIGRATION_34)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -7275,7 +7283,7 @@ mod tests {
                 .query_row("SELECT version FROM schema_meta", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            33
+            SCHEMA_VERSION
         );
     }
 
@@ -8166,6 +8174,46 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn version_33_database_adds_ordered_pending_sms_index() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v33.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[33; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX sms_acquisitions_pending_order;
+                     UPDATE schema_meta SET version=33;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let client = Client::open(config, key()).unwrap();
+        let store = client.lock().unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        let index_exists: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='sms_acquisitions_pending_order')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 34);
+        assert!(index_exists);
     }
 
     #[test]
