@@ -104,8 +104,10 @@ struct DeviceView: View {
                 VStack(spacing: 16) {
                     Image(decorative: "PeppyLogo").resizable().scaledToFit().frame(width: 72, height: 72)
                         .font(.system(size: 48)).foregroundStyle(colors.Accent)
-                    Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
-                    Text("peppy.onboarding_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+                    HStack {
+                        Text("peppy.onboarding_headline", tableName: "Peppy").font(.title2).bold()
+                        InfoButton(topic: String(localized: "peppy.onboarding_headline", table: "Peppy"), title: String(localized: "peppy.onboarding_headline", table: "Peppy"), body: [String(localized: "peppy.onboarding_body", table: "Peppy"), String(localized: "peppy.onboarding_hosted_sub", table: "Peppy")].joined(separator: "\n\n"), id: "info-onboarding")
+                    }
 
                     Picker(selection: Binding(
                         get: { showingSelfHosted },
@@ -120,10 +122,6 @@ struct DeviceView: View {
                     }
                     .pickerStyle(.menu)
                     .accessibilityIdentifier("welcome-server-mode-selector")
-
-                    Text("peppy.onboarding_hosted_sub", tableName: "Peppy")
-                        .font(.subheadline)
-                        .foregroundStyle(colors.TextSecondary)
 
                     Button { showingHostedEnrollment = true } label: {
                         Text("peppy.onboarding_hosted_cta", tableName: "Peppy")
@@ -145,8 +143,10 @@ struct DeviceView: View {
         ScrollView {
             PeppyGlassSurface(colors: colors) {
                 VStack(spacing: 16) {
-                    Text("peppy.self_hosted_headline", tableName: "Peppy").font(.title2).bold()
-                    Text("peppy.self_hosted_body", tableName: "Peppy").foregroundStyle(colors.TextSecondary)
+                    HStack {
+                        Text("peppy.self_hosted_headline", tableName: "Peppy").font(.title2).bold()
+                        InfoButton(topic: String(localized: "peppy.self_hosted_headline", table: "Peppy"), title: String(localized: "peppy.self_hosted_headline", table: "Peppy"), body: String(localized: "peppy.self_hosted_body", table: "Peppy"), id: "info-self-hosted")
+                    }
 
                     Button("Set up or connect to a server") { showingSelfHostedEnrollment = true }
                         .buttonStyle(.borderedProminent)
@@ -232,12 +232,16 @@ struct DeviceView: View {
     private var mirroringTab: some View {
         NavigationStack {
             Form {
-                Section("Mirroring") {
+                Section {
                     LabeledContent("Notification mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable")
                         .accessibilityIdentifier("mirroring-ios-unavailable-row")
-                    Text("iOS does not provide a system-wide notification listener API. Mirroring is available on an Android phone.")
-                        .foregroundStyle(.secondary)
+                } header: {
+                    HStack {
+                        Text("Mirroring")
+                        InfoButton(topic: String(localized: "peppy.help_ios_mirroring_title", table: "Peppy"), title: String(localized: "peppy.help_ios_mirroring_title", table: "Peppy"), body: String(localized: "peppy.help_ios_mirroring_unavailable", table: "Peppy"), id: "info-mirroring-ios")
+                        Spacer()
+                    }
                 }.accessibilityIdentifier("mirroring-ios-section")
             }.formStyle(.grouped).navigationTitle(Text("peppy.mirroring", tableName: "Peppy")).toolbar { settingsButton }
         }
@@ -258,17 +262,23 @@ struct DeviceView: View {
                             .accessibilityIdentifier("carrier-pending-commands")
                     }
                 } header: {
-                    Text("Carrier messaging")
-                } footer: {
-                    Text("iOS cannot capture or send carrier SMS/MMS. Use an Android phone for carrier messaging. RCS is unavailable.")
+                    HStack {
+                        Text("Carrier messaging")
+                        InfoButton(topic: String(localized: "peppy.help_ios_carrier_title", table: "Peppy"), title: String(localized: "peppy.help_ios_carrier_title", table: "Peppy"), body: String(localized: "peppy.help_ios_carrier_unavailable", table: "Peppy"), id: "info-carrier-ios")
+                        Spacer()
+                    }
                 }.accessibilityIdentifier("carrier-section")
-                Section("SMS and MMS") {
+                Section {
                     LabeledContent("SMS mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("sms-mirroring-unavailable-row")
-                    Text("iOS does not provide an SMS inbox listener. An Android phone receives and sends SMS.")
                     LabeledContent("MMS capture", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("mms-unavailable-row")
-                    Text("MMS capture requires a carrier listener not available in this iOS build.")
+                } header: {
+                    HStack {
+                        Text("SMS and MMS")
+                        InfoButton(topic: String(localized: "peppy.help_ios_sms_title", table: "Peppy"), title: String(localized: "peppy.help_ios_sms_title", table: "Peppy"), body: String(localized: "peppy.help_ios_sms_unavailable", table: "Peppy"), id: "info-sms-ios")
+                        Spacer()
+                    }
                 }
             }.formStyle(.grouped).navigationTitle(Text("peppy.sms", tableName: "Peppy")).toolbar { settingsButton }
         }.accessibilityIdentifier("sms-tab-screen")

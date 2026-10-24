@@ -138,6 +138,10 @@ struct ContactsSection: View {
 
     var body: some View {
         Section {
+            Text("peppy.help_ios_contacts_footer", tableName: "Peppy")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("contacts-data-flow-hint")
             if !model.contacts.enabled {
                 Button("Sync this phone's contacts…") { Task { await model.enableContacts() } }
                     .disabled(model.contacts.working || !model.status.keysUnlocked)
@@ -158,9 +162,11 @@ struct ContactsSection: View {
                 Text(error).foregroundStyle(.red).accessibilityIdentifier("contacts-error")
             }
         } header: {
-            Text("Contacts")
-        } footer: {
-            Text("This phone publishes its own contact book to your Peppy server and applies edits from your other devices. iOS decides when background updates run; it can take hours or days. Notes are not synced from iOS.")
+            HStack {
+                Text("Contacts")
+                InfoButton(topic: String(localized: "peppy.help_ios_contacts_title", table: "Peppy"), title: String(localized: "peppy.help_ios_contacts_title", table: "Peppy"), body: String(localized: "peppy.help_ios_contacts", table: "Peppy"), id: "info-contacts")
+                Spacer()
+            }
         }
         .accessibilityIdentifier("contacts-section")
         .task(id: model.status.databaseOpen) { await model.refreshContacts() }
