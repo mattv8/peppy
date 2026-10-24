@@ -517,6 +517,7 @@ private fun CompanionScreen(activity: ComponentActivity) {
                     ) { Text(stringResource(R.string.peppy_privacy_policy)) }
                     Text(stringResource(R.string.peppy_privacy_policy_scope), style = MaterialTheme.typography.bodySmall)
                 }
+                DiagnosticsSettings()
             }
         }
             }

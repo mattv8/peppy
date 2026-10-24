@@ -483,8 +483,41 @@ class GatewaySyncTest : GatewayTestBase() {
         assertEquals(0, traces.count { traceEvent(it) == SyncTraceEvent.OUTBOX_ACK.code })
     }
 
+    @Test fun malformedDiagnosticReadinessDoesNotRepeatProbeOrChangePassOutcome() {
+        val client = live()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+        var compactionStateCalls = 0
+        val malformedReadinessClient = object : NativeClientInterface by client {
+            override fun setServerCompactionState(supported: Boolean, active: Boolean): String {
+                compactionStateCalls++
+                client.setServerCompactionState(supported, active)
+                return "not-json"
+            }
+        }
+        val traces = mutableListOf<String>()
+
+        val result = SyncDiagnostics.withTestConfiguration(true, { 10L }, { 2L }, traces::add) {
+            sync(malformedReadinessClient).run()
+        }
+
+        assertNull(result.failure)
+        assertFalse(result.more)
+        assertEquals(1, compactionStateCalls)
+        assertEquals(1, requests.count { it.first == "POST /v1/compaction/capability" })
+        assertEquals(1, requests.count { it.first == "GET /v1/snapshot" })
+        val progress = traces.map(::traceFields).single { it["event"] == SyncTraceEvent.GATEWAY_PROGRESS.code }
+        assertFalse(progress.containsKey(SyncTraceField.READY.code.toString()))
+        assertFalse(progress.containsKey(SyncTraceField.BACKFILL_PENDING.code.toString()))
+    }
+
     private fun traceEvent(line: String): Long? = line.split(' ').firstOrNull { it.startsWith("event=") }
         ?.substringAfter('=')?.toLongOrNull()
+
+    private fun traceFields(line: String): Map<String, Long> = line.split(' ').associate { token ->
+        val (key, value) = token.split('=', limit = 2)
+        key to value.toLong()
+    }
 
     @Test
     fun livePassReplaysUploadsAndDispatchesOnce() {

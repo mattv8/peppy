@@ -106,7 +106,8 @@ internal class ContactSyncCoordinator(
         val defaultAccountId = defaultAccountId(bookId)
         val checkpoint = checkpoint(bookId)
         val pendingBeforeScan = hasPendingSyncScan(bookId)
-        var report = if (forceFull || pendingBeforeScan || fullDue(checkpoint, charging)) {
+        val full = forceFull || pendingBeforeScan || fullDue(checkpoint, charging)
+        var report = if (full) {
             scanPass(book, bookId, checkpoint, defaultAccountId)
         } else {
             incrementalPass(book, bookId, checkpoint, defaultAccountId)
@@ -114,7 +115,9 @@ internal class ContactSyncCoordinator(
         report = processRequests(book, bookId, defaultAccountId, report)
         // A request received after this scan began remains waiting for the next full scan. Keep a
         // bounded gateway pass queued, but do not replace the associated scan on every pass.
-        return report.copy(more = report.more || hasPendingSyncScan(bookId))
+        report = report.copy(more = report.more || hasPendingSyncScan(bookId))
+        if (SyncDiagnostics.enabled) BackgroundDiagnostics.contact(full, report)
+        return report
     }
 
     /** Reports pending remote scan work that this host cannot execute without touching the OS. */

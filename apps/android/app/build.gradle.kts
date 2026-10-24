@@ -1,6 +1,7 @@
 import java.io.ByteArrayInputStream
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.security.MessageDigest
 import java.util.Base64
 import javax.xml.parsers.DocumentBuilderFactory
 
@@ -33,8 +34,76 @@ fun strictBooleanProperty(name: String): Boolean = providers.gradleProperty(name
     }
 } ?: false
 
-val peppySmsDiagnostics = strictBooleanProperty("peppySmsDiagnostics")
 val peppyHostedAuthDiagnostics = strictBooleanProperty("peppyHostedAuthDiagnostics")
+require(!providers.gradleProperty("peppySmsDiagnostics").isPresent) {
+    "peppySmsDiagnostics was removed; enable diagnostics at runtime in Settings"
+}
+
+fun gitValueOrNull(vararg arguments: String): String? = runCatching {
+    ProcessBuilder("git", *arguments).directory(rootProject.projectDir.resolve("../.."))
+        .redirectErrorStream(true).start().let { process ->
+            val value = process.inputStream.bufferedReader().readText().trim()
+            value.takeIf { process.waitFor() == 0 }
+        }
+}.getOrNull()
+
+fun validatedMetadata(value: String?, pattern: Regex, name: String): String = when (value) {
+    null, "unknown" -> "unknown"
+    else -> value.takeIf(pattern::matches) ?: throw GradleException("$name has an invalid format")
+}
+
+fun validatedVersionName(value: String): String {
+    require(Regex("[0-9A-Za-z._+\\-]{1,64}").matches(value)) {
+        "peppyVersionName must contain 1-64 ASCII letters, digits, dots, underscores, pluses, or hyphens"
+    }
+    return value
+}
+
+fun sourceDiffSha256(): String {
+    val sourceRoot = rootProject.projectDir.resolve("../..").canonicalFile
+    val digest = MessageDigest.getInstance("SHA-256")
+    fun updateFrom(input: java.io.InputStream) {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) return
+            digest.update(buffer, 0, count)
+        }
+    }
+    return runCatching {
+        ProcessBuilder("git", "diff", "--no-ext-diff", "--binary", "HEAD").directory(sourceRoot).start().also { process ->
+            process.inputStream.use(::updateFrom)
+            check(process.waitFor() == 0) { "git diff failed" }
+        }
+        val paths = ProcessBuilder("git", "ls-files", "-z", "--others", "--exclude-standard").directory(sourceRoot).start()
+        val untracked = buildList {
+            val path = StringBuilder()
+            paths.inputStream.use { input ->
+                while (true) {
+                    val next = input.read()
+                    if (next < 0) break
+                    if (next == 0) { add(path.toString()); path.clear() } else path.append(next.toChar())
+                }
+            }
+        }
+        check(paths.waitFor() == 0) { "git ls-files failed" }
+        untracked.forEach { path ->
+            val file = sourceRoot.resolve(path).canonicalFile
+            require(file.toPath().startsWith(sourceRoot.toPath()) && file.isFile) { "Invalid untracked build provenance path" }
+            digest.update(path.toByteArray(Charsets.UTF_8)); file.inputStream().use(::updateFrom)
+        }
+        digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }.getOrElse { "unknown" }
+}
+
+val nativeProfile = (providers.environmentVariable("PEPPY_ANDROID_NATIVE_PROFILE").orNull ?: "unknown").also { profile ->
+    require(profile in setOf("unknown", "debug", "release")) { "PEPPY_ANDROID_NATIVE_PROFILE must be debug or release" }
+}
+
+val sourceCommit = validatedMetadata(providers.gradleProperty("peppySourceCommit").orNull ?: gitValueOrNull("rev-parse", "HEAD"), Regex("[0-9a-f]{40}"), "peppySourceCommit")
+val sourceDirtyState = providers.gradleProperty("peppySourceDirty").orNull ?: gitValueOrNull("status", "--porcelain")?.let { if (it.isEmpty()) "false" else "true" } ?: "unknown"
+require(sourceDirtyState in setOf("true", "false", "unknown")) { "peppySourceDirty must be true, false, or unknown" }
+val sourceDiffSha256 = validatedMetadata(providers.gradleProperty("peppySourceDiffSha256").orNull ?: sourceDiffSha256(), Regex("[0-9a-f]{64}"), "peppySourceDiffSha256")
 
 // Robolectric's own runtime download has no network timeout and can hang the test worker, so
 // Gradle stages the framework jars and tests run Robolectric offline. These must match the SDKs
@@ -123,14 +192,18 @@ android {
             ?: throw GradleException(
                 "peppyVersionCode must be an integer between 1 and 2100000000; got '$configuredVersionCode'"
             )
-        versionName = providers.gradleProperty("peppyVersionName").orNull ?: "0.0.0-dev"
+        versionName = validatedVersionName(providers.gradleProperty("peppyVersionName").orNull ?: "0.0.0-dev")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         val googleServerClientId = providers.gradleProperty("peppyGoogleServerClientId").orElse(
             providers.environmentVariable("PEPPY_GOOGLE_NATIVE_SERVER_CLIENT_ID"),
         ).orNull.orEmpty()
         buildConfigField("String", "PEPPY_GOOGLE_SERVER_CLIENT_ID", "\"${googleServerClientId.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
-        buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
         buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", "false")
+        buildConfigField("String", "PEPPY_SOURCE_COMMIT", "\"$sourceCommit\"")
+        buildConfigField("boolean", "PEPPY_SOURCE_DIRTY", (sourceDirtyState == "true").toString())
+        buildConfigField("String", "PEPPY_SOURCE_DIRTY_STATE", "\"$sourceDirtyState\"")
+        buildConfigField("String", "PEPPY_SOURCE_DIFF_SHA256", "\"$sourceDiffSha256\"")
+        buildConfigField("String", "PEPPY_NATIVE_PROFILE", "\"$nativeProfile\"")
         // Native bindings are verified and packaged for physical ARM64 and x86_64 emulators.
         ndk {
             abiFilters.clear()
@@ -146,11 +219,9 @@ android {
 
     buildTypes {
         getByName("debug") {
-            buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", peppySmsDiagnostics.toString())
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
         getByName("release") {
-            buildConfigField("boolean", "PEPPY_SMS_DIAGNOSTICS", "false")
             buildConfigField("boolean", "PEPPY_HOSTED_AUTH_DIAGNOSTICS", peppyHostedAuthDiagnostics.toString())
         }
     }

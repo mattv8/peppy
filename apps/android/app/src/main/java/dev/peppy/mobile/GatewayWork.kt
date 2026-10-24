@@ -183,6 +183,13 @@ class GatewaySync(
     private var more = false
     private var failure: Exception? = null
     private var snapshotForRepair: JSONObject? = null
+    private val diagnosticsEnabled = SyncDiagnostics.enabled
+    private var received = 0L
+    private var snapshotReceived = 0L
+    private var progressed = 0L
+    private var uploaded = 0L
+    private var snapshotRemaining = 0L
+    private var contactReadiness: BackgroundDiagnostics.GatewayReadiness? = null
 
     fun run(): PassResult {
         if (state.phase == SyncPhase.RECOVERY_REQUIRED) {
@@ -229,6 +236,7 @@ class GatewaySync(
         // Envelopes sealed during the first upload may have produced new photo registrations.
         if (mayEmit() && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
+        if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
         return PassResult(more, failure)
     }
 
@@ -326,6 +334,7 @@ class GatewaySync(
             val event = events.getJSONObject(index)
             client.ingestRaw(event.getJSONObject("envelope").toString().toByteArray(Charsets.UTF_8), event.getString("cursor"))
         }
+        if (diagnosticsEnabled) received += events.length().toLong()
         return events.length() >= EVENT_PAGE
     }
 
@@ -355,15 +364,19 @@ class GatewaySync(
             client.setServerCompactionState(false, false)
             return
         }
-        try {
+        val readinessJson = try {
             val cut = JSONObject(checkBody(response))
             val state = snapshotCompactionState(cut)
-            client.setServerCompactionState(state.generation != null, state.active)
+            val readiness = client.setServerCompactionState(state.generation != null, state.active)
             if (state.generation != null) snapshotForRepair = cut
+            readiness
         } catch (error: Exception) {
             client.setServerCompactionState(false, false)
             throw error
         }
+        // The returned readiness is diagnostic-only. Its parsing cannot change the capability
+        // result, trigger the failure fallback above, or alter this pass's outcome.
+        if (diagnosticsEnabled) contactReadiness = BackgroundDiagnostics.gatewayReadiness(readinessJson)
     }
 
     /** Validates the canonical server fence; legacy snapshot metadata is explicitly unsupported. */
@@ -414,7 +427,9 @@ class GatewaySync(
                     NativeRawSnapshotRecord(row.getString("cursor"), envelope.toString().toByteArray(Charsets.UTF_8))
                 }
                 try {
-                    client.appendSnapshotRawPage(progress.generation, records)
+                    client.appendSnapshotRawPage(progress.generation, records).also {
+                        if (diagnosticsEnabled) snapshotReceived += records.size.toLong()
+                    }
                 } catch (_: MobileBindingsException.InvalidRequest) {
                     null
                 }
@@ -439,6 +454,10 @@ class GatewaySync(
         repeat(APPLY_BATCHES) {
             val report = client.applyPending(APPLY_BATCH.toULong())
             val progressed = report.applied + report.quarantined + report.drained + report.superseded
+            if (diagnosticsEnabled) {
+                this.progressed += progressed.toLong()
+                snapshotRemaining = report.snapshotRemaining.toLong()
+            }
             if (report.snapshotRemaining == 0uL && progressed < APPLY_BATCH.toULong()) return false
         }
         return true
@@ -451,6 +470,7 @@ class GatewaySync(
             when {
                 response.ok -> {
                     client.ackOutbox(JSONObject(envelope).getString("envelope_id"))
+                    if (diagnosticsEnabled) uploaded++
                     if (SyncDiagnostics.enabled) SyncDiagnostics.record(SyncTraceEvent.OUTBOX_ACK, SyncTraceField.COUNT to 1)
                 }
                 response.code == 401 -> throw GatewayAuthException()

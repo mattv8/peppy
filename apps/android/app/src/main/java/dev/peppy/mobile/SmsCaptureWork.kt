@@ -112,6 +112,14 @@ data class SmsCaptureSummary(
     val historyExhausted: Boolean = false,
     /** The core rejected or failed a call; distinct from Android provider read/permission errors. */
     val coreError: Boolean = false,
+    /** Diagnostic-only aggregate: rows that reached capture processing in this bounded pass. */
+    val processed: Int = 0,
+    /** Diagnostic-only aggregate: rows returned by capture provider queries. */
+    val rowsQueried: Int = 0,
+    /** Diagnostic-only aggregate: a durable checkpoint or pending-recheck cursor moved. */
+    val advanced: Boolean = false,
+    /** Diagnostic-only aggregate: the bounded pass stopped because its time budget elapsed. */
+    val budgetExhausted: Boolean = false,
 )
 
 /** Host-owned binding from scheduled Android work to the generated core adapter. */
@@ -261,13 +269,19 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                             SyncTraceField.MORE to if (summary.more) 1 else 0,
                             SyncTraceField.PROVIDER_ERROR to if (summary.providerError) 1 else 0,
                             SyncTraceField.CORE_ERROR to if (summary.coreError) 1 else 0,
+                            SyncTraceField.PROCESSED to summary.processed.toLong(),
+                            SyncTraceField.ADVANCED to if (summary.advanced) 1 else 0,
+                            SyncTraceField.BUDGET_EXHAUSTED to if (summary.budgetExhausted) 1 else 0,
                         )
                     }
                 }
                 // Provider and core failures retry with WorkManager's exponential backoff, never a tight append.
                 if (summary.providerError || summary.coreError) {
                     if (diagnostic != null) SyncDiagnostics.withTrace(traceId) {
-                        SyncDiagnostics.record(SyncTraceEvent.CAPTURE_RETRY)
+                        SyncDiagnostics.record(
+                            SyncTraceEvent.CAPTURE_RETRY,
+                            SyncTraceField.REASON to if (summary.providerError) SyncDiagnosticReason.PROVIDER_ERROR else SyncDiagnosticReason.CORE_ERROR,
+                        )
                     }
                     outcome = WORK_OUTCOME_RETRY
                     return@serialized Result.retry()
@@ -276,7 +290,10 @@ class SmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 if (summary.more || SmsCaptureWork.takeHint()) {
                     if (diagnostic != null) {
                         SyncDiagnostics.withTrace(traceId) {
-                            SyncDiagnostics.record(SyncTraceEvent.CAPTURE_CONTINUATION)
+                            SyncDiagnostics.record(
+                                SyncTraceEvent.CAPTURE_CONTINUATION,
+                                SyncTraceField.REASON to if (summary.more) SyncDiagnosticReason.MORE else SyncDiagnosticReason.HINT,
+                            )
                             SmsCaptureWork.enqueueContinuation(applicationContext)
                         }
                     } else {
@@ -361,16 +378,17 @@ internal object SmsCapture {
         fun expired() = nanoTime() >= deadline
         return try {
             val page = provider.page(plan.cursor, PAGE)
-            var result = SmsCaptureSummary()
+            var result = SmsCaptureSummary(rowsQueried = page.records.size)
             var cursor = plan.cursor
             for (row in page.records) {
                 if (row.id > plan.upperBound) break
-                if (expired()) return SmsReconciliationResult(result.copy(more = true), cursor, false)
+                if (expired()) return SmsReconciliationResult(result.copy(more = true, budgetExhausted = true), cursor, false)
                 val imported = plan.historyUpperBound != null && row.id <= plan.historyUpperBound
                 val outcome = process(core, row, plan.sourceGeneration, imported, existing = null)
-                result = merge(result, outcome.summary())
+                result = merge(result, outcome.summary()).copy(processed = result.processed + 1)
                 if (outcome.coreError || outcome.providerError || !outcome.providerDurable) return SmsReconciliationResult(result, cursor, false)
                 cursor = row.id
+                result = result.copy(advanced = true)
             }
             val exhausted = page.records.isEmpty() || page.records.any { it.id > plan.upperBound } ||
                 page.records.size < PAGE
@@ -392,13 +410,31 @@ internal object SmsCapture {
         val deadline = nanoTime() + PASS_BUDGET_NANOS
         fun expired() = nanoTime() >= deadline
         return try {
-            val rechecked = if (recheckPending) recheckPending(plan.pendingRecheckCursor, core, provider, ::expired) else SmsCaptureSummary()
+            val rechecked = if (recheckPending) {
+                captureTimed(SyncDiagnosticStage.SMS_RECHECK) {
+                    recheckPending(plan.pendingRecheckCursor, core, provider, ::expired)
+                }.also { captureProgress(SyncDiagnosticStage.SMS_RECHECK, it) }
+            } else SmsCaptureSummary()
             val budgetExpired = expired()
             when {
                 // A capacity-paused history plan still lets the pending queue drain above.
-                plan.paused -> rechecked.copy(paused = rechecked.paused + 1, more = rechecked.more || budgetExpired)
-                budgetExpired || plan.historyComplete || rechecked.coreError || rechecked.providerError -> rechecked.copy(more = rechecked.more || budgetExpired)
-                else -> merge(rechecked, scan(plan, core, provider, ::expired))
+                plan.paused -> rechecked.copy(
+                    paused = rechecked.paused + 1,
+                    more = rechecked.more || budgetExpired,
+                    budgetExhausted = rechecked.budgetExhausted || budgetExpired,
+                )
+                budgetExpired || plan.historyComplete || rechecked.coreError || rechecked.providerError -> rechecked.copy(
+                    more = rechecked.more || budgetExpired,
+                    budgetExhausted = rechecked.budgetExhausted || budgetExpired,
+                )
+                else -> {
+                    val stage = if (plan.imported) SyncDiagnosticStage.SMS_HISTORY else SyncDiagnosticStage.SMS_LIVE
+                    val scanned = captureTimed(stage) {
+                        scan(plan, core, provider, ::expired)
+                    }
+                    captureProgress(stage, scanned)
+                    merge(rechecked, scanned)
+                }
             }
         } catch (_: SmsProviderException) {
             // A permission/provider error is visible to scheduling/status rather than a false completion.
@@ -417,14 +453,18 @@ internal object SmsCapture {
             // The cursor only passes a row once it was actually rechecked, so a failed read or
             // core call retries that same row next time instead of waiting for a full wrap.
             val previous = result.pendingRecheckCursor ?: cursor
-            if (expired()) return result.copy(more = true, pendingRecheckCursor = previous)
+            if (expired()) return result.copy(more = true, pendingRecheckCursor = previous, budgetExhausted = true)
             if (acquisition.state != SmsAcquisitionState.PENDING) {
-                result = result.copy(pendingRecheckCursor = acquisition.id)
+                result = result.copy(processed = result.processed + 1, advanced = true, pendingRecheckCursor = acquisition.id)
                 continue
             }
             val providerId = acquisition.input.providerMessageId.toLongOrNull()
             if (providerId == null) {
-                result = merge(result, unavailable(core, acquisition, "provider_id_invalid").summary()).copy(pendingRecheckCursor = acquisition.id)
+                result = merge(result, unavailable(core, acquisition, "provider_id_invalid").summary()).copy(
+                    processed = result.processed + 1,
+                    advanced = true,
+                    pendingRecheckCursor = acquisition.id,
+                )
                 continue
             }
             val row = try {
@@ -433,9 +473,12 @@ internal object SmsCapture {
                 return result.copy(more = true, providerError = true, pendingRecheckCursor = previous)
             }
             val outcome = if (row == null) unavailable(core, acquisition, "provider_row_missing") else process(core, row, acquisition.input.sourceGeneration, acquisition.input.imported, acquisition)
-            result = merge(result, outcome.summary())
+            result = merge(result, outcome.summary()).copy(
+                processed = result.processed + 1,
+                rowsQueried = result.rowsQueried + 1,
+            )
             if (outcome.coreError) return result.copy(pendingRecheckCursor = previous)
-            result = result.copy(pendingRecheckCursor = acquisition.id)
+            result = result.copy(advanced = true, pendingRecheckCursor = acquisition.id)
         }
         return result
     }
@@ -447,13 +490,13 @@ internal object SmsCapture {
         } else {
             provider.page(requireNotNull(plan.checkpoint), PAGE)
         }
-        var result = SmsCaptureSummary()
+        var result = SmsCaptureSummary(rowsQueried = page.records.size)
         var checkpointBlocked = false
         for (row in page.records) {
             if (plan.historyUpperBound != null && row.id > plan.historyUpperBound) break
-            if (expired()) return result.copy(more = true)
+            if (expired()) return result.copy(more = true, budgetExhausted = true)
             val outcome = process(core, row, plan.sourceGeneration, plan.imported, null)
-            result = merge(result, outcome.summary())
+            result = merge(result, outcome.summary()).copy(processed = result.processed + 1)
             // Only a durably recorded row (captured, pending or unavailable) may pass the checkpoint.
             // Backpressure or a core failure stops this pass at the row; it is retried, not skipped.
             if (!outcome.providerDurable) {
@@ -461,6 +504,7 @@ internal object SmsCapture {
                 break
             }
             core.setCheckpoint(plan.sourceGeneration, plan.subscriptionId, plan.imported, row.id.toString())
+            result = result.copy(advanced = true)
         }
         val reachedUpperBound = !descending && plan.historyUpperBound != null && page.records.any { it.id > plan.historyUpperBound }
         val historyExhausted = plan.imported && plan.historyUpperBound != null && !checkpointBlocked && if (descending) {
@@ -577,7 +621,8 @@ internal object SmsCapture {
         left.captured + right.captured, left.pending + right.pending, left.unavailable + right.unavailable,
         left.paused + right.paused, left.more || right.more, left.providerError || right.providerError,
         right.pendingRecheckCursor ?: left.pendingRecheckCursor, left.historyExhausted || right.historyExhausted,
-        left.coreError || right.coreError,
+        left.coreError || right.coreError, left.processed + right.processed, left.rowsQueried + right.rowsQueried, left.advanced || right.advanced,
+        left.budgetExhausted || right.budgetExhausted,
     )
 
     private data class Outcome(val providerDurable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val paused: Int = 0, val providerError: Boolean = false, val coreError: Boolean = false) {
