@@ -3882,6 +3882,7 @@ name = "peppy-crypto"
 version = "0.1.0"
 dependencies = [
  "hmac",
+ "libc",
  "libsodium-rs",
  "serde",
  "sha2",

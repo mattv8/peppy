@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 hmac.workspace = true
+libc = "0.2.189"
 libsodium-rs.workspace = true
 serde.workspace = true
 sha2.workspace = true

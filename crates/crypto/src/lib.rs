@@ -452,7 +452,10 @@ fn create_private_temp(path: &Path) -> Result<File, CryptoError> {
 }
 fn promote_noclobber(temporary: &Path, destination: &Path) -> io::Result<()> {
     filesystem::promote_no_clobber(temporary, destination)?;
-    fs::remove_file(temporary)
+    match fs::remove_file(temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 #[cfg(unix)]
 fn sync_parent_directory(destination: &Path) -> io::Result<()> {
@@ -538,4 +541,29 @@ fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, CryptoError> {
         .read_exact(&mut frame)
         .map_err(|_| CryptoError::InvalidStream)?;
     Ok(frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::promote_noclobber;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[test]
+    fn promote_noclobber_succeeds_and_leaves_no_temporary() {
+        let directory = std::env::temp_dir().join(format!("peppy-noclobber-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let temporary = directory.join("temporary");
+        let destination = directory.join("destination");
+        fs::write(&temporary, b"ciphertext bytes").unwrap();
+
+        let result = promote_noclobber(&temporary, &destination);
+        let destination_bytes = fs::read(&destination);
+        let temporary_exists = temporary.exists();
+        let _ = fs::remove_dir_all(&directory);
+
+        result.unwrap();
+        assert_eq!(destination_bytes.unwrap(), b"ciphertext bytes");
+        assert!(!temporary_exists);
+    }
 }
