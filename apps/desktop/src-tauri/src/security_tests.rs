@@ -125,14 +125,80 @@ async fn serve(router: Router) -> String {
 
 // ---- 1. Per-window app-command ACL -------------------------------------------------------
 
-fn permissions(json: &str) -> HashSet<String> {
+fn permission_entries(json: &str) -> Vec<Value> {
     let value: Value = serde_json::from_str(json).unwrap();
-    value["permissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap().to_owned())
-        .collect()
+    value["permissions"].as_array().unwrap().clone()
+}
+
+// A capability entry is either a bare identifier or a scoped object carrying `identifier`
+// and `allow`. Anything else fails closed: a malformed entry is never dropped from the ACL.
+fn permission_id(entry: &Value) -> String {
+    match entry {
+        Value::String(id) => id.clone(),
+        Value::Object(scoped) => scoped
+            .get("identifier")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("scoped permission lacks a string identifier: {entry}"))
+            .to_owned(),
+        other => panic!("unsupported permission entry: {other}"),
+    }
+}
+
+fn permissions(json: &str) -> HashSet<String> {
+    permission_entries(json).iter().map(permission_id).collect()
+}
+
+#[test]
+fn permission_helper_keeps_string_and_scoped_identifiers() {
+    let json = r#"{"permissions":["allow-load-state",{"identifier":"opener:allow-open-url","allow":[{"url":"https://peppy.pro/privacy"}]}]}"#;
+    assert_eq!(
+        permissions(json),
+        HashSet::from([
+            "allow-load-state".to_owned(),
+            "opener:allow-open-url".to_owned()
+        ])
+    );
+}
+
+#[test]
+#[should_panic(expected = "scoped permission lacks a string identifier")]
+fn permission_helper_rejects_scoped_entry_without_identifier() {
+    permissions(r#"{"permissions":[{"allow":[{"url":"https://peppy.pro/privacy"}]}]}"#);
+}
+
+#[test]
+#[should_panic(expected = "scoped permission lacks a string identifier")]
+fn permission_helper_rejects_non_string_identifier() {
+    permissions(r#"{"permissions":[{"identifier":7,"allow":[]}]}"#);
+}
+
+#[test]
+#[should_panic(expected = "unsupported permission entry")]
+fn permission_helper_rejects_unsupported_entry_shapes() {
+    permissions(r#"{"permissions":[42]}"#);
+}
+
+#[test]
+fn main_window_has_exactly_the_privacy_opener() {
+    let main_json = include_str!("../capabilities/default.json");
+    let manifest: Value = serde_json::from_str(main_json).unwrap();
+    assert_eq!(manifest["windows"], json!(["main"]));
+    let openers: Vec<Value> = permission_entries(main_json)
+        .into_iter()
+        .filter(|entry| permission_id(entry).starts_with("opener:"))
+        .collect();
+    assert_eq!(
+        openers,
+        [json!({
+            "identifier": "opener:allow-open-url",
+            "allow": [{"url": "https://peppy.pro/privacy"}]
+        })]
+    );
+    let composer = permissions(include_str!("../capabilities/composer.json"));
+    assert!(
+        composer.iter().all(|id| !id.starts_with("opener:")),
+        "composer windows must not open URLs"
+    );
 }
 
 fn declared_commands() -> Vec<String> {
