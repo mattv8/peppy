@@ -98,8 +98,10 @@ struct HostedEnrollmentView: View {
     
     private var signInView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("peppy.hosted_sign_in_headline", tableName: "Peppy").font(.title.bold())
-            Text("peppy.hosted_sign_in_body", tableName: "Peppy")
+            HStack {
+                Text("peppy.hosted_sign_in_headline", tableName: "Peppy").font(.title.bold())
+                InfoButton(topic: String(localized: "peppy.hosted_sign_in_headline", table: "Peppy"), title: String(localized: "peppy.hosted_sign_in_headline", table: "Peppy"), body: String(localized: "peppy.hosted_sign_in_body", table: "Peppy"), id: "info-hosted-signin")
+            }
             
             if GoogleHostedSignIn.isAvailable() {
                 Button {
@@ -138,8 +140,10 @@ struct HostedEnrollmentView: View {
     
     private var billingView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("peppy.hosted_subscribe_headline", tableName: "Peppy").font(.title.bold())
-            Text("peppy.hosted_subscribe_body", tableName: "Peppy")
+            HStack {
+                Text("peppy.hosted_subscribe_headline", tableName: "Peppy").font(.title.bold())
+                InfoButton(topic: String(localized: "peppy.hosted_subscribe_headline", table: "Peppy"), title: String(localized: "peppy.hosted_subscribe_headline", table: "Peppy"), body: String(localized: "peppy.hosted_subscribe_body", table: "Peppy"), id: "info-hosted-billing")
+            }
             
             Button {
                 openBillingPage()
@@ -155,7 +159,7 @@ struct HostedEnrollmentView: View {
             Text("peppy.production_billing_body", tableName: "Peppy")
                 .font(.footnote)
                 .foregroundStyle(colors.TextSecondary)
-            
+
             if let err = error {
                 Text(errorMessage(err))
                     .foregroundStyle(colors.Error)
@@ -165,11 +169,13 @@ struct HostedEnrollmentView: View {
         }
         .accessibilityIdentifier("enrollment-billing-screen")
     }
-    
+
     private var passphraseView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("peppy.passphrase_create_headline", tableName: "Peppy").font(.title.bold())
-            Text("peppy.passphrase_create_body", tableName: "Peppy")
+            HStack {
+                Text("peppy.passphrase_create_headline", tableName: "Peppy").font(.title.bold())
+                InfoButton(topic: String(localized: "peppy.passphrase_create_headline", table: "Peppy"), title: String(localized: "peppy.passphrase_create_headline", table: "Peppy"), body: String(localized: "peppy.passphrase_create_body", table: "Peppy"), id: "info-passphrase-create")
+            }
             Text("peppy.passphrase_irrecoverable_warn", tableName: "Peppy").font(.footnote)
             
             passphraseField("passphrase_field", text: $generatedPassphrase)

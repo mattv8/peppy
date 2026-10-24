@@ -117,7 +117,10 @@ struct OwnerPhoneApprovalView: View {
     @ViewBuilder private var stageContent: some View {
         switch status?.stage {
         case .waiting:
-            Text("peppy.owner_phone_waiting_headline", tableName: "Peppy").font(.title2.bold())
+            HStack {
+                Text("peppy.owner_phone_waiting_headline", tableName: "Peppy").font(.title2.bold())
+                InfoButton(topic: String(localized: "peppy.owner_phone_waiting_headline", table: "Peppy"), title: String(localized: "peppy.owner_phone_waiting_headline", table: "Peppy"), body: String(localized: "peppy.owner_phone_waiting_hint", table: "Peppy"), id: "info-owner-phone-waiting")
+            }
             Text("peppy.owner_phone_waiting_body", tableName: "Peppy")
             if let qr, let image = qrImage(qr) {
                 Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
@@ -126,7 +129,6 @@ struct OwnerPhoneApprovalView: View {
                     .accessibilityIdentifier("owner-phone-qr")
             }
             Text(countdownText).font(.footnote).accessibilityIdentifier("owner-phone-countdown")
-            Text("peppy.owner_phone_waiting_hint", tableName: "Peppy").font(.footnote)
             Button { Task { await revealSharedSecret() } } label: {
                 Text("peppy.owner_phone_shared_secret_cta", tableName: "Peppy")
             }

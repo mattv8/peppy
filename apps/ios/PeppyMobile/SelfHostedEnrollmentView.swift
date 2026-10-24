@@ -96,10 +96,15 @@ struct SelfHostedEnrollmentView: View {
 
     private var ownerCredentialsSection: some View {
         Group {
-            Section("Set up your Peppy server") {
+            Section {
                 serverURLField
                 if enrollment.discoveredOrigin != nil {
                     setupModeCredentials
+                }
+            } header: {
+                HStack {
+                    Text("Set up your Peppy server")
+                    Spacer()
                 }
             }
             Section {
