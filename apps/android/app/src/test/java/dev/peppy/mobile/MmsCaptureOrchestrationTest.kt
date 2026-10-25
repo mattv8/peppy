@@ -158,7 +158,6 @@ class MmsCaptureOrchestrationTest {
         assertEquals(NativeMmsPreviewState.DEFERRED, core.previewStates("ignored")["10"])
 
         core.pendingBytes = 0
-        MmsCapture.run(plan(), core, provider, temp())
         val resumed = MmsCapture.run(plan(), core, provider, temp())
 
         assertEquals(1, core.completed)
@@ -194,6 +193,82 @@ class MmsCaptureOrchestrationTest {
         assertTrue(core.advanced.contains(MmsBackfillPhase.LIVE to "51"))
     }
 
+    @Test fun postSettleAcquisitionWithStableRowSkipsSettleResetInSamePass() {
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png())
+        val core = FakeCore(initialReason = "preview_deferred")
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertTrue(core.reasons.none { it?.startsWith("settling") == true })
+        assertEquals(1, core.completed)
+        assertEquals(1, provider.copyCount)
+        assertFalse(result.more)
+    }
+
+    @Test fun postSettleAcquisitionWithMissingMappedPartResettlesInsteadOfProcessing() {
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png())
+        val core = FakeCore(initialReason = "preview_deferred", mappedParts = mapOf("99" to "attachment-99"))
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertTrue(core.reasons.first()?.startsWith("settling:") == true)
+        assertTrue(result.more)
+    }
+
+    @Test fun providerContentPendingStillSettlesBeforeProcessing() {
+        val core = FakeCore(initialReason = "provider_content_pending")
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1))), temp())
+
+        assertTrue(core.reasons.first()?.startsWith("settling:") == true)
+        assertTrue(result.more)
+    }
+
+    @Test fun mappedDeferredPreviewWithoutThumbnailHeadroomIsNotRecopied() {
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png())
+        val core = FakeCore(
+            initialReason = "preview_deferred",
+            mappedParts = mapOf("10" to "attachment-10"),
+            initialPreviewStates = mapOf("10" to NativeMmsPreviewState.DEFERRED),
+            pendingBytes = 512L * 1024 * 1024,
+        )
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(0, provider.copyCount)
+        assertEquals(0, core.completed)
+        assertEquals(NativeMmsPreviewState.DEFERRED, core.previewStates("ignored")["10"])
+        assertTrue(core.reasons.all { it == "preview_deferred" })
+        assertFalse(result.more)
+    }
+
+    @Test fun mappedDeferredPreviewWithThumbnailHeadroomIsRecopied() {
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png())
+        val core = FakeCore(
+            initialReason = "preview_deferred",
+            mappedParts = mapOf("10" to "attachment-10"),
+            initialPreviewStates = mapOf("10" to NativeMmsPreviewState.DEFERRED),
+        )
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, provider.copyCount)
+        assertEquals(1, core.completed)
+        assertEquals(listOf("image/jpeg"), core.preparedMediaTypes)
+    }
+
+    @Test fun oversizePreviewBecomesPermanentlyUnavailableAndAcquisitionCompletes() {
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), imageBytes = png(), previewLimit = 100)
+        val core = FakeCore()
+
+        MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(1, core.completed)
+        assertEquals(NativeMmsPreviewState.PERMANENTLY_UNAVAILABLE, core.previewStates("ignored")["10"])
+    }
+
+    private fun pngPart(id: Long) = MmsProviderPart(id, 0, "image/png", "photo.png", null, null, Uri.parse("content://mms/part/$id"))
+
     private fun plan() = MmsCapturePlan("generation", null, false, null, null, false)
     private fun temp() = kotlin.io.path.createTempDirectory("mms-capture-test").toFile()
     private fun record(id: Long) = MmsProviderRecord(
@@ -205,8 +280,10 @@ class MmsCaptureOrchestrationTest {
         private val records: List<MmsProviderRecord>,
         private val imageBytes: ByteArray? = null,
         private val failCopy: Boolean = false,
+        private val previewLimit: Int = MmsMediaPreview.MAX_JPEG_BYTES,
     ) : MmsCaptureProvider {
         var copyCount = 0
+        override fun inspectMedia(file: File, contentType: String?) = MmsMediaPreview(previewLimit).inspect(file, contentType)
         override fun highWater() = records.maxOfOrNull { it.id } ?: 0
         override fun page(afterId: Long, limit: Int) = MmsProviderPage(records.filter { it.id > afterId }.take(limit), afterId)
         override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): MmsProviderPage {
@@ -237,8 +314,10 @@ class MmsCaptureOrchestrationTest {
         private val failManualRecheck: Boolean = false,
         initialPreviewStates: Map<String, NativeMmsPreviewState> = emptyMap(),
         var pendingBytes: Long = 0,
+        private val initialReason: String = "settling",
     ) : MmsCaptureCore {
         var migrations = 0
+        val reasons = mutableListOf<String?>()
         val advanced = mutableListOf<Pair<MmsBackfillPhase, String>>()
         val finished = mutableListOf<String>()
         val inputs = mutableListOf<NativeMmsAcquisitionInput>()
@@ -267,7 +346,7 @@ class MmsCaptureOrchestrationTest {
             inputs += input
             if (input.source.providerMessageId in failBeginProviderIds) error("core unavailable")
             val acquisition = acquisitions.getOrPut(input.source.providerMessageId) {
-                NativeMmsAcquisition("acq-${input.source.providerMessageId}", "conversation", input, NativeMmsAcquisitionState.PENDING, "settling", emptyList())
+                NativeMmsAcquisition("acq-${input.source.providerMessageId}", "conversation", input, NativeMmsAcquisitionState.PENDING, initialReason, emptyList())
             }
             return if (input.source.providerMessageId in quarantinedProviderIds) {
                 NativeMmsBeginOutcome.Quarantined(NativeMmsProviderIdentityQuarantine(input.source, input.incoming, "ambiguous"))
@@ -282,6 +361,7 @@ class MmsCaptureOrchestrationTest {
         }
         override fun setState(id: String, state: NativeMmsAcquisitionState, reason: String?) {
             val entry = acquisitions.entries.firstOrNull { it.value.acquisitionId == id } ?: return
+            reasons += reason
             entry.setValue(entry.value.copy(state = state, reason = reason))
         }
         override fun mappedParts(id: String) = mappedParts

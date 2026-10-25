@@ -14,6 +14,7 @@ import kotlin.math.max
  * copied original; callers must retain [MmsMediaPreviewResult.metadata] in either case.
  */
 internal class MmsMediaPreview(
+    private val maxJpegBytes: Int = MAX_JPEG_BYTES,
     private val retrieverFactory: MmsMediaMetadataRetrieverFactory = AndroidMmsMediaMetadataRetrieverFactory,
 ) {
     fun inspect(file: File, contentType: String?): MmsMediaPreviewResult {
@@ -110,14 +111,17 @@ internal class MmsMediaPreview(
         }
     }
 
-    private fun encodePreview(source: Bitmap): ByteArray? {
+    private fun encodePreview(source: Bitmap): PreviewEncoding {
         val scaled = scale(source)
         try {
-            // The scaled source is at most 480x480 ARGB, so this intermediate has a hard
-            // 921,600-byte source bound even on encoders that write in oversized chunks.
-            val output = ByteArrayOutputStream(MAX_JPEG_BYTES)
-            if (!scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, output)) return null
-            return output.toByteArray().takeIf { it.size <= MAX_JPEG_BYTES }
+            for (quality in JPEG_QUALITIES) {
+                // The scaled source is at most 480x480 ARGB, so this intermediate has a hard
+                // 921,600-byte source bound even on encoders that write in oversized chunks.
+                val output = ByteArrayOutputStream(maxJpegBytes)
+                if (!scaled.compress(Bitmap.CompressFormat.JPEG, quality, output)) return PreviewEncoding.Failed
+                if (output.size() <= maxJpegBytes) return PreviewEncoding.Jpeg(output.toByteArray())
+            }
+            return PreviewEncoding.Oversize
         } finally {
             if (scaled !== source) scaled.recycle()
         }
@@ -163,19 +167,22 @@ internal class MmsMediaPreview(
         MmsMediaMetadata(dimensions?.first, dimensions?.second), null, reason,
     )
 
-    private fun previewResult(metadata: MmsMediaMetadata, preview: ByteArray?) = MmsMediaPreviewResult(
-        metadata, preview, if (preview == null) MmsMediaPreviewUnavailable.RESOURCE_LIMIT else null,
-    )
+    private fun previewResult(metadata: MmsMediaMetadata, encoding: PreviewEncoding) = when (encoding) {
+        is PreviewEncoding.Jpeg -> MmsMediaPreviewResult(metadata, encoding.bytes, null)
+        PreviewEncoding.Oversize -> MmsMediaPreviewResult(metadata, null, MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW)
+        PreviewEncoding.Failed -> MmsMediaPreviewResult(metadata, null, MmsMediaPreviewUnavailable.RESOURCE_LIMIT)
+    }
 
     private fun String.toPositiveIntOrNull() = toIntOrNull()?.takeIf { it > 0 }
     private fun String.toPositiveLongOrNull() = toLongOrNull()?.takeIf { it > 0 }
 
-    private companion object {
+    companion object {
+        internal const val MAX_JPEG_BYTES = 512 * 1024
         const val MAX_EDGE = 480
         const val MAX_DECODE_EDGE = 960
         const val MAX_DECODE_PIXELS = 2_000_000L
-        const val MAX_JPEG_BYTES = 512 * 1024
         const val JPEG_QUALITY = 82
+        val JPEG_QUALITIES = listOf(JPEG_QUALITY, 60, 40)
         val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
         val GIF87_SIGNATURE = "GIF87a".encodeToByteArray()
         val GIF89_SIGNATURE = "GIF89a".encodeToByteArray()
@@ -192,7 +199,13 @@ internal data class MmsMediaPreviewResult(
     val unavailable: MmsMediaPreviewUnavailable?,
 )
 
-internal enum class MmsMediaPreviewUnavailable { UNSUPPORTED_MEDIA, MALFORMED_MEDIA, RESOURCE_LIMIT }
+internal enum class MmsMediaPreviewUnavailable { UNSUPPORTED_MEDIA, MALFORMED_MEDIA, RESOURCE_LIMIT, OVERSIZE_PREVIEW }
+
+private sealed interface PreviewEncoding {
+    class Jpeg(val bytes: ByteArray) : PreviewEncoding
+    object Oversize : PreviewEncoding
+    object Failed : PreviewEncoding
+}
 
 internal interface MmsMediaMetadataRetriever {
     fun setDataSource(file: File)
