@@ -29,6 +29,23 @@ enum class RecoveryReason {
     DATABASE_MISSING,
 }
 
+/**
+ * A code-less upload rejection (bare `http_<status>`) that may be transient infrastructure. Uploads
+ * retry on later passes until [escalates]; the envelope is never acked while soft-rejected.
+ */
+data class SoftRejection(val code: String, val firstSeenMs: Long, val attempts: Int) {
+    /** Only a rejection that persists across retries and time becomes permanent. */
+    fun escalates(nowMs: Long): Boolean {
+        val age = nowMs - firstSeenMs
+        return if (code in SHORT_FUSE_CODES) age >= HOUR_MS && attempts >= 3 else age >= 48 * HOUR_MS && attempts >= 10
+    }
+
+    private companion object {
+        const val HOUR_MS = 3_600_000L
+        val SHORT_FUSE_CODES = setOf("http_400", "http_413", "http_415", "http_422")
+    }
+}
+
 class GatewayStateStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -42,6 +59,12 @@ class GatewayStateStore(context: Context) {
     /** Server error code of a permanently rejected outbox envelope; uploads and carrier work stop. */
     val outboxRejection: String?
         get() = prefs.getString(P_OUTBOX_REJECTION, null)
+
+    val softRejection: SoftRejection?
+        get() {
+            val code = prefs.getString(P_SOFT_CODE, null) ?: return null
+            return SoftRejection(code, prefs.getLong(P_SOFT_FIRST_SEEN, 0L), prefs.getInt(P_SOFT_ATTEMPTS, 0))
+        }
 
     fun startBootstrap() = commit { clear().putString(P_PHASE, SyncPhase.BOOTSTRAP.name) }
 
@@ -57,7 +80,38 @@ class GatewayStateStore(context: Context) {
         putString(P_PHASE, SyncPhase.RECOVERY_REQUIRED.name).putString(P_RECOVERY, reason.name)
     }
 
-    fun rejectOutbox(code: String) = commit { putString(P_OUTBOX_REJECTION, code.take(64)) }
+    /** Permanent rejection; it supersedes any soft rejection. */
+    fun rejectOutbox(code: String) = commit { putString(P_OUTBOX_REJECTION, code.take(64)).clearSoftFields() }
+
+    /** Counts one failed upload attempt; first-seen restarts on a new code or when the clock stepped back. */
+    fun recordSoftRejection(code: String, nowMs: Long): SoftRejection = synchronized(LOCK) {
+        val previous = softRejection?.takeIf { it.code == code }
+        val record = SoftRejection(code, previous?.firstSeenMs?.takeIf { it <= nowMs } ?: nowMs, (previous?.attempts ?: 0) + 1)
+        commit { putString(P_SOFT_CODE, record.code).putLong(P_SOFT_FIRST_SEEN, record.firstSeenMs).putInt(P_SOFT_ATTEMPTS, record.attempts) }
+        record
+    }
+
+    fun clearSoftRejection() = commit { clearSoftFields() }
+
+    /**
+     * Upgrade repair: an earlier build made a code-less rejection permanent, which blocked uploads
+     * until re-pairing. It becomes a soft rejection instead. Runs once; RECOVERY_REQUIRED is untouched.
+     */
+    fun migrateRejectionPolicy(nowMs: Long) {
+        synchronized(LOCK) {
+            if (phase == SyncPhase.RECOVERY_REQUIRED || prefs.getBoolean(P_REJECTION_POLICY_V2, false)) return
+            val stored = outboxRejection
+            commit {
+                if (stored != null && CODELESS_HTTP_CODE.matches(stored)) {
+                    remove(P_OUTBOX_REJECTION).putString(P_SOFT_CODE, stored).putLong(P_SOFT_FIRST_SEEN, nowMs).putInt(P_SOFT_ATTEMPTS, 0)
+                }
+                putBoolean(P_REJECTION_POLICY_V2, true)
+            }
+        }
+    }
+
+    private fun android.content.SharedPreferences.Editor.clearSoftFields() =
+        remove(P_SOFT_CODE).remove(P_SOFT_FIRST_SEEN).remove(P_SOFT_ATTEMPTS)
 
     private inline fun commit(edit: android.content.SharedPreferences.Editor.() -> android.content.SharedPreferences.Editor) {
         synchronized(LOCK) { check(prefs.edit().edit().commit()) { "gateway state not persisted" } }
@@ -68,6 +122,11 @@ class GatewayStateStore(context: Context) {
         const val P_PHASE = "phase.v1"
         const val P_RECOVERY = "recovery.v1"
         const val P_OUTBOX_REJECTION = "outbox-rejection.v1"
+        const val P_SOFT_CODE = "soft-rejection-code.v1"
+        const val P_SOFT_FIRST_SEEN = "soft-rejection-first-seen.v1"
+        const val P_SOFT_ATTEMPTS = "soft-rejection-attempts.v1"
+        const val P_REJECTION_POLICY_V2 = "rejection-policy.v2"
+        val CODELESS_HTTP_CODE = Regex("http_4\\d\\d")
         val LOCK = Any()
     }
 }

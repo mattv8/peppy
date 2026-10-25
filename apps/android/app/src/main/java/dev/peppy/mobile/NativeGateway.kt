@@ -54,6 +54,7 @@ data class GatewayStatus(
     val syncPhase: SyncPhase = SyncPhase.BOOTSTRAP,
     val recoveryReason: RecoveryReason? = null,
     val outboxRejection: String? = null,
+    val softRejection: SoftRejection? = null,
 )
 
 /** Only produced when the database is open and the shared vault purpose keys are installed. */
@@ -171,7 +172,7 @@ object NativeGateway {
             val identity = identity(prefs(context))
             GatewayStatus(
                 identity != null, identity?.origin, opened, opened && sharedKeysReady,
-                state.phase, state.recoveryReason, state.outboxRejection,
+                state.phase, state.recoveryReason, state.outboxRejection, state.softRejection,
             )
         }
     }

@@ -83,14 +83,19 @@ class GatewaySyncTest : GatewayTestBase() {
     private fun sync(
         client: NativeClientInterface,
         carrier: FakeCarrier = FakeCarrier(),
+        dispatch: () -> DispatchSummary = { SmsDispatcher(context, client, carrier, routes, sendPermissionGranted = true).dispatch() },
         media: () -> MmsTransferResult = { MmsTransferResult(false, 0, 0, emptyList()) },
         contacts: () -> Boolean = { false },
+        contactPhotos: () -> Boolean = { false },
+        nowMs: () -> Long = { System.currentTimeMillis() },
     ) = GatewaySync(
         client, GatewayHttp(server.origin, TEST_TOKEN), state, deviceId,
-        dispatch = { SmsDispatcher(context, client, carrier, routes, sendPermissionGranted = true).dispatch() },
+        dispatch = dispatch,
         capabilities = SimRoutes.capabilityReport(routes, sendPermissionGranted = true),
         media = media,
         contacts = contacts,
+        contactPhotos = contactPhotos,
+        nowMs = nowMs,
     )
 
     private fun uploads() = requests.count { it.first == "POST /v1/events" }
@@ -405,6 +410,133 @@ class GatewaySyncTest : GatewayTestBase() {
         sync(client, carrier).run()
         assertEquals("no retry loop", 0, uploads())
         assertEquals("invalid_envelope", NativeGateway.status(context).outboxRejection)
+    }
+
+    @Test
+    fun codeLessUploadRejectionIsSoftNeverAckedAndRetriedOnNextPass() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007878", "soft", "p-soft-403", false))
+        uploadResponse = LoopbackHttpServer.Response(403)
+        val result = sync(client).run()
+        assertNull(result.failure)
+        assertNull(state.outboxRejection)
+        assertEquals("http_403", state.softRejection?.code)
+        assertEquals("http_403", NativeGateway.status(context).softRejection?.code)
+        assertEquals(1, client.pendingOutboxJsonBatch(10uL).size)
+        assertEquals("one POST per pass while soft-rejected", 1, uploads())
+
+        requests.clear()
+        uploadResponse = LoopbackHttpServer.Response(200, """{"cursor":"9","duplicate":false}""")
+        sync(client).run()
+        assertEquals("the next pass retries the head envelope once", 1, uploads())
+        assertNull(state.softRejection)
+        assertTrue(client.pendingOutboxJsonBatch(10uL).isEmpty())
+    }
+
+    @Test
+    fun emptyOutboxClearsSoftUploadRejectionWithoutAcking() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007882", "soft", "p-soft-empty", false))
+        uploadResponse = LoopbackHttpServer.Response(403)
+
+        sync(client).run()
+        assertNotNull(state.softRejection)
+        assertEquals(1, client.pendingOutboxJsonBatch(10uL).size)
+
+        val emptyOutboxClient = object : NativeClientInterface by client {
+            override fun pendingOutboxJsonBatch(maxEvents: ULong) = emptyList<String>()
+        }
+        sync(emptyOutboxClient).run()
+
+        assertNull(state.softRejection)
+        assertEquals("nothing was acked", 1, client.pendingOutboxJsonBatch(10uL).size)
+    }
+
+    @Test
+    fun softUploadRejectionDoesNotHideDispatchBacklog() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007883", "soft", "p-soft-dispatch", false))
+        uploadResponse = LoopbackHttpServer.Response(403)
+        sync(client).run()
+
+        val result = sync(client, dispatch = { DispatchSummary(0, 0, 0, true) }).run()
+
+        assertTrue(result.more)
+    }
+
+    @Test
+    fun softUploadRejectionSkipsOnlyContactPhotosAndRecoveryRequeuesThem() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007884", "soft", "p-soft-photos", false))
+        var mediaCalls = 0
+        var contactCalls = 0
+        var contactPhotoCalls = 0
+        val media = { mediaCalls++; MmsTransferResult(false, 0, 0, emptyList()) }
+        val contacts = { contactCalls++; false }
+        val contactPhotos = { contactPhotoCalls++; false }
+        uploadResponse = LoopbackHttpServer.Response(403)
+        sync(client, media = media, contacts = contacts, contactPhotos = contactPhotos).run()
+
+        mediaCalls = 0
+        contactCalls = 0
+        contactPhotoCalls = 0
+        sync(client, media = media, contacts = contacts, contactPhotos = contactPhotos).run()
+
+        assertEquals(1, mediaCalls)
+        assertEquals(1, contactCalls)
+        assertEquals(0, contactPhotoCalls)
+
+        uploadResponse = LoopbackHttpServer.Response(200, """{"cursor":"9","duplicate":false}""")
+        val recovering = sync(client, media = media, contacts = contacts, contactPhotos = contactPhotos).run()
+
+        assertTrue(recovering.more)
+        assertEquals(1, contactPhotoCalls)
+    }
+
+    @Test
+    fun codedUploadRejectionStaysPermanentWithoutSoftState() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007879", "coded", "p-coded-403", false))
+        uploadResponse = LoopbackHttpServer.Response(403, """{"code":"producer_not_authorized"}""")
+        sync(client).run()
+        assertEquals("producer_not_authorized", state.outboxRejection)
+        assertNull(state.softRejection)
+    }
+
+    @Test
+    fun shortFuseSoftRejectionEscalatesAfterOneHourAndThreeAttempts() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007880", "unprocessable", "p-soft-422", false))
+        uploadResponse = LoopbackHttpServer.Response(422)
+        var now = 1_000_000L
+        fun attempt() = sync(client, nowMs = { now }).run()
+        attempt()
+        now += 30 * 60_000L
+        attempt()
+        assertNull("two attempts, 30 min: not yet", state.outboxRejection)
+        now += 30 * 60_000L
+        attempt()
+        assertEquals("http_422", state.outboxRejection)
+        assertNull(state.softRejection)
+        assertEquals("never acked", 1, client.pendingOutboxJsonBatch(10uL).size)
+    }
+
+    @Test
+    fun longFuseSoftRejectionEscalatesOnlyAfterFortyEightHoursAndTenAttempts() {
+        val client = live()
+        client.captureIncoming(NativeIncomingSms(null, "+15550007881", "forbidden", "p-soft-403-long", false))
+        uploadResponse = LoopbackHttpServer.Response(403)
+        var now = 1_000_000L
+        fun attempt() = sync(client, nowMs = { now }).run()
+        repeat(9) { attempt() }
+        now += 47 * 3_600_000L
+        attempt()
+        assertEquals("ten attempts but only 47 h old", 10, state.softRejection?.attempts)
+        assertNull(state.outboxRejection)
+        now += 3_600_000L
+        attempt()
+        assertEquals("http_403", state.outboxRejection)
+        assertNull(state.softRejection)
     }
 
     @Test fun diagnosticsAckIsRecordedOnlyAfterSuccessfulDurableAck() {
