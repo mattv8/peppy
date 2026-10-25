@@ -122,6 +122,15 @@ semantic Kotlin and Swift names.
 
 ## Settings and capability status
 
+- Android settings backed by the core (mirroring, WiFi-only, skip silent, SMS
+  capture, MMS media WiFi-only) load off the main thread; the control is
+  disabled until its value arrives and while a write is in flight, then shows
+  the value read back. A control that reads the core during composition
+  freezes the app whenever a background pass holds the client lock. See
+  [domain guidance](AGENTS.md#android-carrier-companion).
+- The main screen's startup indicator is centred in the safe drawing area
+  (`startup-loading-container`); edge-to-edge is enabled, so a bare padded
+  composable lands under the status bar.
 - Android notification access, mirroring capture, and vault unlock are separate
   states. **WiFi only** means active WiFi, excluding Ethernet and cellular.
   A queued test notification or MMS history import is not delivery or completion.

@@ -74,6 +74,15 @@ checkout.
   header or the whole container subnet. Without the setting, proxied clients
   share the proxy's bucket. See [server assembly](../services/server/src/lib.rs)
   and [request authorization](../services/server/src/api.rs).
+- A reverse proxy in front of a Peppy server can answer with its own status.
+  Observed: a Pangolin/Traefik auth middleware answered `POST /v1/events` with
+  a bodiless 403 after a ~10 s upstream timeout; the request never reached the
+  server. In a Traefik access log such a response has no `ServiceName`, a
+  `DownstreamContentSize` of 0, and a `Duration` near the timeout. Peppy
+  server rejections always carry a JSON `code`, so a code-less 4xx is proxy
+  or network evidence, never a server decision; clients treat it as
+  retryable (see [domain guidance](AGENTS.md#android-carrier-companion)).
+  Check the proxy's access log before changing the server.
 - Public core migrations live in [`services/server/migrations`](../services/server/migrations/).
   They are not evidence of a hosted migration history, upgrade path, or deployed
   schema; hosted role, source-pin, and ordering details are private.
