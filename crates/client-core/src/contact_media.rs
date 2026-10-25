@@ -36,15 +36,17 @@ const MAX_PHOTO_BYTES: u64 = 64 * 1024;
 const RECLAIM_BASE_DELAY_SECONDS: i64 = 60 * 60;
 const RECLAIM_MAX_DELAY_SECONDS: i64 = 24 * 60 * 60;
 
-/// Whether an unsealed outbox row references `col` directly or through an alias.
+/// Whether an unsealed outbox row references `col` directly or through an alias. References are
+/// the photo slots sealing resolves: `contact.photo`, `tombstone.restored_contact.photo`,
+/// `request.photo`, and `request.photo_op.attachment_id`.
 macro_rules! held_by_outbox {
     ($col:literal) => {
         concat!(
-            "EXISTS(SELECT 1 FROM outbox o WHERE o.state='unsealed' AND (instr(CAST(o.plain AS TEXT), ",
+            "EXISTS(SELECT 1 FROM outbox_contact_photos p JOIN outbox o ON o.seq=p.outbox_sequence WHERE o.state='unsealed' AND (p.attachment_id=",
             $col,
-            ")>0 OR EXISTS(SELECT 1 FROM contact_photo_aliases al WHERE al.new_id=",
+            " OR p.attachment_id IN (SELECT old_id FROM contact_photo_aliases WHERE new_id=",
             $col,
-            " AND instr(CAST(o.plain AS TEXT), al.old_id)>0)))"
+            ")))"
         )
     };
 }
@@ -58,7 +60,13 @@ pub(crate) const UPLOAD_IDS_SQL: &str = concat!(
 );
 
 pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
-    conn.execute_batch(
+    let tx = conn.unchecked_transaction()?;
+    let had_outbox_contact_photos: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox_contact_photos')",
+        [],
+        |r| r.get(0),
+    )?;
+    tx.execute_batch(
         "\
 CREATE TABLE IF NOT EXISTS contact_photo_attachments(attachment_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS contact_photo_references(holder_kind TEXT NOT NULL, book_id TEXT NOT NULL, holder_id TEXT NOT NULL, attachment_id TEXT NOT NULL, retain_until INTEGER, PRIMARY KEY(holder_kind,book_id,holder_id));
@@ -68,23 +76,44 @@ CREATE TABLE IF NOT EXISTS contact_photo_reclaims(attachment_id TEXT PRIMARY KEY
 CREATE TABLE IF NOT EXISTS contact_photo_aliases(old_id TEXT PRIMARY KEY, new_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contact_photo_unavailable(outbox_sequence INTEGER PRIMARY KEY, attachment_id TEXT, reason TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contact_photo_received(attachment_id TEXT PRIMARY KEY, rejected INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS outbox_contact_photos(outbox_sequence INTEGER NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(outbox_sequence,attachment_id));
+CREATE INDEX IF NOT EXISTS outbox_contact_photos_attachment ON outbox_contact_photos(attachment_id);
 ",
     )?;
+    let has_outbox: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !had_outbox_contact_photos && has_outbox {
+        let rows = tx
+            .prepare("SELECT seq,plain FROM outbox WHERE state='unsealed' AND plain IS NOT NULL")?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (sequence, plain) in rows {
+            if let Ok(payload) = serde_json::from_slice::<PrivatePayload>(&plain) {
+                record_outbox_photos(&tx, sequence, &payload)?;
+            }
+        }
+    }
     // Pre-release databases: add the retry schedule and resume any abandoned candidate.
-    let has_due: bool = conn.query_row(
+    let has_due: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('contact_photo_reclaims') WHERE name='next_due_at')",
         [],
         |r| r.get(0),
     )?;
     if !has_due {
-        conn.execute_batch(
+        tx.execute_batch(
             "ALTER TABLE contact_photo_reclaims ADD COLUMN next_due_at INTEGER NOT NULL DEFAULT 0",
         )?;
     }
-    conn.execute(
+    tx.execute(
         "UPDATE contact_photo_reclaims SET state='pending' WHERE state='exhausted'",
         [],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -115,6 +144,54 @@ fn reference_id(photo: &Value) -> Option<AttachmentId> {
         _ => return None,
     };
     text.parse().ok()
+}
+
+/// Enumerates the photo slots resolved by `resolve_payload`; keep both in sync.
+pub(crate) fn payload_photo_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
+    match payload {
+        PrivatePayload::ContactUpserted { contact, .. } => contact
+            .get("photo")
+            .and_then(reference_id)
+            .into_iter()
+            .collect(),
+        PrivatePayload::ContactRemoved { tombstone, .. } => tombstone
+            .get("restored_contact")
+            .and_then(|contact| contact.get("photo"))
+            .and_then(reference_id)
+            .into_iter()
+            .collect(),
+        PrivatePayload::ContactEditRequest { request } => {
+            let mut ids: Vec<_> = request
+                .get("photo")
+                .and_then(reference_id)
+                .into_iter()
+                .collect();
+            if request.pointer("/photo_op/op").and_then(Value::as_str) == Some("set")
+                && let Some(id) = request
+                    .pointer("/photo_op/attachment_id")
+                    .and_then(reference_id)
+            {
+                ids.push(id);
+            }
+            ids
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Records the photo slots in a still-plaintext outbox payload.
+pub(crate) fn record_outbox_photos(
+    conn: &Connection,
+    sequence: i64,
+    payload: &PrivatePayload,
+) -> Result<(), Error> {
+    for attachment_id in payload_photo_ids(payload) {
+        conn.execute(
+            "INSERT OR IGNORE INTO outbox_contact_photos(outbox_sequence,attachment_id) VALUES(?,?)",
+            params![sequence, attachment_id.to_string()],
+        )?;
+    }
+    Ok(())
 }
 
 fn photo_row_ok(media_type: &str, plaintext_bytes: u64) -> bool {
@@ -524,6 +601,7 @@ fn resolve_payload(
     payload: PrivatePayload,
     refs: &mut Registrations,
 ) -> Result<Result<PrivatePayload, Wire>, Error> {
+    // Keep the resolved slots in sync with `payload_photo_ids`.
     Ok(Ok(match payload {
         PrivatePayload::ContactUpserted { book, mut contact } => {
             if let Some(stop) = seal_photo(conn, &mut contact, "photo", refs)? {
@@ -1036,6 +1114,188 @@ mod tests {
     }
     fn state(client: &Client) -> Value {
         serde_json::from_str(&client.contact_photo_transfer_state_json().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn payload_photo_ids_enumerates_every_seal_slot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (client, _) = client(&dir);
+        let upsert = photo(&client, &dir);
+        let restored = photo(&client, &dir);
+        let request_photo = photo(&client, &dir);
+        let request_set = photo(&client, &dir);
+        for id in [upsert, restored, request_photo, request_set] {
+            exec(
+                &client,
+                "UPDATE attachments SET state='uploaded',remote_object_id=attachment_id WHERE attachment_id=?",
+                id,
+            );
+        }
+        let payloads = [
+            PrivatePayload::ContactUpserted {
+                book: json!({}),
+                contact: json!({"photo": upsert.to_string()}),
+            },
+            PrivatePayload::ContactRemoved {
+                book_id: "book".into(),
+                contact_id: "contact".into(),
+                tombstone: json!({"restored_contact": {"photo": {"attachment_id": restored.to_string()}}}),
+            },
+            PrivatePayload::ContactEditRequest {
+                request: json!({
+                    "photo": request_photo.to_string(),
+                    "photo_op": {"op": "set", "attachment_id": request_set.to_string()},
+                }),
+            },
+        ];
+        for payload in payloads {
+            let expected = payload_photo_ids(&payload);
+            let session = client.lock().unwrap();
+            let (_, registrations) = resolve_for_seal(&session.conn, 1, payload)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                registrations
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn held_outbox_photo_follows_aliases() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outbox(seq INTEGER PRIMARY KEY, state TEXT NOT NULL, plain BLOB);",
+        )
+        .unwrap();
+        initialize(&conn).unwrap();
+        let old = AttachmentId::new();
+        let new = AttachmentId::new();
+        let payload = PrivatePayload::ContactUpserted {
+            book: json!({}),
+            contact: json!({"photo": old.to_string()}),
+        };
+        conn.execute(
+            "INSERT INTO outbox(seq,state,plain) VALUES(1,'unsealed',?)",
+            [serde_json::to_vec(&payload).unwrap()],
+        )
+        .unwrap();
+        record_outbox_photos(&conn, 1, &payload).unwrap();
+        conn.execute(
+            "INSERT INTO contact_photo_aliases(old_id,new_id) VALUES(?,?)",
+            params![old.to_string(), new.to_string()],
+        )
+        .unwrap();
+
+        let held: bool = conn
+            .query_row(
+                concat!("SELECT ", held_by_outbox!("?1")),
+                [new.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held);
+    }
+
+    #[test]
+    fn initialize_backfills_held_outbox_photo_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outbox(seq INTEGER PRIMARY KEY, state TEXT NOT NULL, plain BLOB);",
+        )
+        .unwrap();
+        let id = AttachmentId::new();
+        let payload = PrivatePayload::ContactUpserted {
+            book: json!({}),
+            contact: json!({"photo": id.to_string()}),
+        };
+        conn.execute(
+            "INSERT INTO outbox(seq,state,plain) VALUES(1,'unsealed',?)",
+            [serde_json::to_vec(&payload).unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox(seq,state,plain) VALUES(2,'unsealed',?)",
+            [b"not a payload"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO outbox(seq,state,plain) VALUES(3,'queued',?)",
+            [serde_json::to_vec(&payload).unwrap()],
+        )
+        .unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch("DROP TABLE outbox_contact_photos;")
+            .unwrap();
+
+        initialize(&conn).unwrap();
+        let held: bool = conn
+            .query_row(
+                concat!("SELECT ", held_by_outbox!("?1")),
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held);
+        let skipped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outbox_contact_photos WHERE outbox_sequence IN (2,3)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn initialize_rolls_back_backfill_before_retrying() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE outbox(seq INTEGER PRIMARY KEY, state TEXT NOT NULL, plain BLOB);",
+        )
+        .unwrap();
+        let id = AttachmentId::new();
+        let payload = PrivatePayload::ContactUpserted {
+            book: json!({}),
+            contact: json!({"photo": id.to_string()}),
+        };
+        conn.execute(
+            "INSERT INTO outbox(seq,state,plain) VALUES(1,'unsealed',?)",
+            [serde_json::to_vec(&payload).unwrap()],
+        )
+        .unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE outbox_contact_photos;
+             INSERT INTO contact_photo_reclaims(attachment_id,remote_object_id,state,attempts,next_due_at) VALUES('reclaim','remote','exhausted',0,0);
+             CREATE TRIGGER fail_reclaim_resume BEFORE UPDATE ON contact_photo_reclaims WHEN OLD.state='exhausted' BEGIN SELECT RAISE(ABORT, 'fail'); END;",
+        )
+        .unwrap();
+
+        assert!(initialize(&conn).is_err());
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbox_contact_photos')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_exists);
+
+        conn.execute_batch("DROP TRIGGER fail_reclaim_resume;")
+            .unwrap();
+        initialize(&conn).unwrap();
+        let held: bool = conn
+            .query_row(
+                concat!("SELECT ", held_by_outbox!("?1")),
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held);
     }
 
     /// An attachment row deleted out-of-band never turns "set photo" into "no photo" on the wire.

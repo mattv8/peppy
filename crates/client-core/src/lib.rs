@@ -5335,6 +5335,7 @@ fn enqueue(
             params![envelope_id.to_string(), attachment_id.to_string()],
         )?;
     }
+    contact_media::record_outbox_photos(conn, to_i64(sequence)?, payload)?;
     learn_compaction(
         conn,
         identity.as_deref(),
@@ -5356,6 +5357,7 @@ fn enqueue(
                 plain.as_slice(),
                 checkpoint.as_ref(),
             )?;
+            contact_media::record_outbox_photos(conn, to_i64(checkpoint_sequence)?, payload)?;
             if let PrivatePayload::NotificationPosted { notification } = payload {
                 conn.execute(
                     "INSERT INTO outbox_notification_posts(envelope_id,source_device_id,package_name) VALUES(?,?,?)",
@@ -6143,6 +6145,10 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                     serde_json::to_vec(&envelope).map_err(|_| Error::Database)?,
                     sequence
                 ],
+            )?;
+            conn.execute(
+                "DELETE FROM outbox_contact_photos WHERE outbox_sequence=?",
+                [sequence],
             )?;
             contact_media::record_registrations(
                 conn,
