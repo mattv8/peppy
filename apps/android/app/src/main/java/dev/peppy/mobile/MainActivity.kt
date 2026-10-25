@@ -219,7 +219,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
         status = current
         smsCaptureEnabled = withContext(Dispatchers.IO) { GatewayPolicyHost(context).smsCaptureEnabled }
         ownerPhoneAvailable = current.sharedKeysReady &&
-            GatewayAccountHost.load(context)?.self?.let { it.role == "owner" && !it.revoked } == true
+            withContext(Dispatchers.IO) {
+                GatewayAccountHost.load(context)?.self?.let { it.role == "owner" && !it.revoked } == true
+            }
         smsHistory = withContext(Dispatchers.IO) {
             val fallback = smsHistoryState(
                 readGranted = smsReadGranted(context),

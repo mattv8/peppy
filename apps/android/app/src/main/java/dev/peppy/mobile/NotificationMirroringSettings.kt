@@ -33,9 +33,9 @@ import kotlinx.coroutines.withContext
 internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, onOpenAppFilters: () -> Unit) {
     val context = LocalContext.current
     var accessGranted by remember { mutableStateOf(false) }
-    var enabled by remember { mutableStateOf(false) }
-    var wifiOnly by remember { mutableStateOf(false) }
-    var skipSilent by remember { mutableStateOf(false) }
+    var enabled by remember { mutableStateOf<Boolean?>(null) }
+    var wifiOnly by remember { mutableStateOf<Boolean?>(null) }
+    var skipSilent by remember { mutableStateOf<Boolean?>(null) }
     var filterSummary by remember { mutableStateOf<NotificationAppFilterSummaryState>(NotificationAppFilterSummaryState.Loading) }
     var testResult by remember { mutableStateOf<NotificationTestCaptureResult?>(null) }
     val scope = rememberCoroutineScope()
@@ -44,14 +44,16 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
     }
     LaunchedEffect(refresh) {
         accessGranted = NotificationMirrorAccess.granted(context)
-        enabled = NotificationMirrorPreferences.enabled(context)
-        wifiOnly = GatewayPolicyHost(context).mirroringWifiOnly
-        skipSilent = GatewayPolicyHost(context).skipSilent
-        filterSummary = when (val loaded = NativeNotificationAppFilterActions(context.applicationContext, includeAppInventory = false).load()) {
-            is NotificationAppFilterLoadResult.Ready -> NotificationAppFilterSummaryState.Ready(loaded.mutedPackages)
-            NotificationAppFilterLoadResult.Locked -> NotificationAppFilterSummaryState.Locked
-            NotificationAppFilterLoadResult.Error -> NotificationAppFilterSummaryState.Error
-            NotificationAppFilterLoadResult.Loading -> NotificationAppFilterSummaryState.Loading
+        enabled = withContext(Dispatchers.IO) { NotificationMirrorPreferences.enabled(context) }
+        wifiOnly = withContext(Dispatchers.IO) { GatewayPolicyHost(context).mirroringWifiOnly }
+        skipSilent = withContext(Dispatchers.IO) { GatewayPolicyHost(context).skipSilent }
+        filterSummary = withContext(Dispatchers.IO) {
+            when (val loaded = NativeNotificationAppFilterActions(context.applicationContext, includeAppInventory = false).load()) {
+                is NotificationAppFilterLoadResult.Ready -> NotificationAppFilterSummaryState.Ready(loaded.mutedPackages)
+                NotificationAppFilterLoadResult.Locked -> NotificationAppFilterSummaryState.Locked
+                NotificationAppFilterLoadResult.Error -> NotificationAppFilterSummaryState.Error
+                NotificationAppFilterLoadResult.Loading -> NotificationAppFilterSummaryState.Loading
+            }
         }
     }
 
@@ -63,16 +65,24 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
     ) {
         NotificationMirroringAccessControls(
             accessGranted = accessGranted,
-            enabled = enabled,
+            enabled = enabled == true,
+            toggleEnabled = enabled != null,
             onRequestAccess = { accessLauncher.launch(NotificationMirrorAccess.settingsIntent()) },
             onEnabledChanged = { value ->
-                NotificationMirrorPreferences.setEnabled(context, value)
-                enabled = value
-                if (value) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
-                else NotificationMirrorService.clearPendingCaptures()
+                // Null disables the control until the write's read-back lands, so taps cannot interleave.
+                enabled = null
+                scope.launch {
+                    val persistedValue = withContext(Dispatchers.IO) {
+                        NotificationMirrorPreferences.setEnabled(context, value)
+                        NotificationMirrorPreferences.enabled(context)
+                    }
+                    enabled = persistedValue
+                    if (persistedValue) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
+                    else NotificationMirrorService.clearPendingCaptures()
+                }
             },
         )
-        if (enabled && accessGranted) {
+        if (enabled == true && accessGranted) {
             Row(
                 Modifier.fillMaxWidth().testTag("notification-mirroring-wifi-row"),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -87,7 +97,20 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
                     stringResource(R.string.peppy_help_android_notification_wifi),
                     "info-notification-wifi",
                 )
-                Switch(wifiOnly, { value -> GatewayPolicyHost(context).mirroringWifiOnly = value; wifiOnly = value }, modifier = Modifier.testTag("notification-mirroring-wifi-switch"))
+                Switch(
+                    checked = wifiOnly == true,
+                    enabled = wifiOnly != null,
+                    onCheckedChange = { value ->
+                        wifiOnly = null
+                        scope.launch {
+                            wifiOnly = withContext(Dispatchers.IO) {
+                                GatewayPolicyHost(context).mirroringWifiOnly = value
+                                GatewayPolicyHost(context).mirroringWifiOnly
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("notification-mirroring-wifi-switch"),
+                )
             }
             Row(
                 Modifier.fillMaxWidth().testTag("notification-mirroring-skip-silent-row"),
@@ -95,7 +118,20 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(stringResource(R.string.peppy_skip_silent), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                Switch(skipSilent, { value -> GatewayPolicyHost(context).skipSilent = value; skipSilent = value }, modifier = Modifier.testTag("notification-mirroring-skip-silent-switch"))
+                Switch(
+                    checked = skipSilent == true,
+                    enabled = skipSilent != null,
+                    onCheckedChange = { value ->
+                        skipSilent = null
+                        scope.launch {
+                            skipSilent = withContext(Dispatchers.IO) {
+                                GatewayPolicyHost(context).skipSilent = value
+                                GatewayPolicyHost(context).skipSilent
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("notification-mirroring-skip-silent-switch"),
+                )
             }
             NotificationAppFiltersNavRow(filterSummary, onOpenAppFilters)
             if (filterSummary is NotificationAppFilterSummaryState.Ready) OutlinedButton(
@@ -123,6 +159,7 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
 internal fun NotificationMirroringAccessControls(
     accessGranted: Boolean,
     enabled: Boolean,
+    toggleEnabled: Boolean = true,
     onRequestAccess: () -> Unit,
     onEnabledChanged: (Boolean) -> Unit,
 ) {
@@ -153,7 +190,7 @@ internal fun NotificationMirroringAccessControls(
         )
         Switch(
             checked = enabled,
-            enabled = accessGranted,
+            enabled = accessGranted && toggleEnabled,
             onCheckedChange = onEnabledChanged,
             modifier = Modifier.testTag("notification-mirroring-master-switch"),
         )
