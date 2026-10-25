@@ -47,6 +47,14 @@ class MmsMediaPreviewTest {
         assertEquals(24, bitmap.height)
     }
 
+    @Test fun previewOverLimitAtEveryQualityIsOversizeNotResourceLimit() {
+        val source = jpeg(64, 64)
+        val result = MmsMediaPreview(maxJpegBytes = 100).inspect(source, "image/jpeg")
+
+        assertNull(result.jpegPreview)
+        assertEquals(MmsMediaPreviewUnavailable.OVERSIZE_PREVIEW, result.unavailable)
+    }
+
     @Test fun malformedImageReturnsUnavailableWithoutThrowing() {
         val source = File.createTempFile("mms-preview", ".jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val result = MmsMediaPreview().inspect(source, "image/jpeg")

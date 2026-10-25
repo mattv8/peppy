@@ -107,6 +107,7 @@ internal interface MmsCaptureProvider {
     fun read(id: Long): MmsProviderRecord?
     fun readPartText(part: MmsProviderPart, byteLimit: Int): String?
     fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long): Long
+    fun inspectMedia(file: File, contentType: String?): MmsMediaPreviewResult = MmsMediaPreview().inspect(file, contentType)
 }
 
 internal interface MmsCaptureCore : MmsBackfillCore {
@@ -140,6 +141,10 @@ internal object MmsCapture {
     private const val MAX_BYTES = 32L * 1024 * 1024
     private const val MAX_BINARY = 10
     private const val PENDING_MEDIA_LIMIT = 512L * 1024 * 1024
+    private val POST_SETTLE_REASONS = setOf(
+        "preview_deferred", "media_quota", "parts_incomplete", "text_unavailable",
+        "preview_unavailable", "part_unavailable", "preview_metadata_unavailable",
+    )
 
     fun run(context: Context, manualRecheck: Boolean = false): MmsCaptureSummary {
         val prefs = MmsPreferences(context)
@@ -380,7 +385,8 @@ internal object MmsCapture {
         }
 
         val fingerprint = fingerprint(record)
-        if (acquisition.reason != "settling:$fingerprint") {
+        val postSettle = acquisition.reason in POST_SETTLE_REASONS
+        if (!postSettle && acquisition.reason != "settling:$fingerprint") {
             core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "settling:$fingerprint")
             return ProcessResult(true, pending = 1, followup = true)
         }
@@ -390,7 +396,7 @@ internal object MmsCapture {
             return ProcessResult(true, unavailable = 1)
         }
         val stableFingerprint = fingerprint(stable)
-        if (!stable.ready || stable.messageBox !in setOf(INBOX, SENT) || stableFingerprint != fingerprint) {
+        if (!stable.ready || stable.messageBox !in setOf(INBOX, SENT) || stableFingerprint != fingerprint || (postSettle && !mappedPartsRetained(core, acquisition.acquisitionId, stable))) {
             core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "settling:$stableFingerprint")
             return ProcessResult(true, pending = 1, followup = true)
         }
@@ -408,6 +414,12 @@ internal object MmsCapture {
             NativeMmsAcquisitionState.BLOCKED -> ProcessResult(true, pending = 1)
             NativeMmsAcquisitionState.PENDING -> copyParts(core, provider, tempDirectory, updated, stable)
         }
+    }
+
+    private fun mappedPartsRetained(core: MmsCaptureCore, id: String, stable: MmsProviderRecord): Boolean {
+        val mapped = try { core.mappedParts(id) } catch (_: Exception) { return false }
+        val providerPartIds = stable.parts.mapTo(mutableSetOf()) { it.providerPartId.toString() }
+        return mapped.keys.all { it in providerPartIds }
     }
 
     private fun unavailableUnknownSubscription(
@@ -446,6 +458,10 @@ internal object MmsCapture {
                 core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "media_quota")
                 return ProcessResult(true, pending = 1)
             }
+            if (mappedAttachmentId != null && remaining < MmsMediaPreview.MAX_JPEG_BYTES) {
+                hasDeferredPreview = true
+                continue
+            }
             val temp = File.createTempFile("mms-", ".part", tempDirectory)
             var attachmentId: String? = null
             var createdAttachment = false
@@ -456,7 +472,7 @@ internal object MmsCapture {
                     createdAttachment = true
                     core.mapPart(acquisition.acquisitionId, providerPartId, requireNotNull(attachmentId))
                 }
-                val preview = MmsMediaPreview().inspect(temp, part.mediaType)
+                val preview = provider.inspectMedia(temp, part.mediaType)
                 var thumbnailId: String? = null
                 var previewState = when {
                     preview.jpegPreview != null -> NativeMmsPreviewState.READY
