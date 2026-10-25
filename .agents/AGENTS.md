@@ -280,6 +280,57 @@ This reference records non-obvious Peppy domain constraints. Related references:
   physical-SIM identity. Commands for an old or missing route remain pending;
   never redirect them to another SIM. See
   [SIM routes](../apps/android/app/src/main/java/dev/peppy/mobile/SimRoutes.kt).
+- `Client` is one `Mutex<Store>`; every binding call takes it, and a gateway
+  pass can hold it for seconds (a slow core query, a large outbox). Compose
+  code therefore never calls `NativeGateway`, `GatewayPolicyHost`,
+  `GatewayAccountHost`, or `NotificationMirrorPreferences` on the main
+  thread: read in `LaunchedEffect` under `Dispatchers.IO`, keep the value
+  nullable, disable the control until it loads, and write with
+  `scope.launch { withContext(Dispatchers.IO) { write; read back } }`.
+  An ANR whose `main` stack shows `Mutex::lock_contended` under
+  `peppy_client_core::Client` is this; the holder is the other thread in the
+  trace inside `peppy_client_core::Client>::<method>`. Pull traces with
+  `adb bugreport` (`FS/data/anr/`), and `dumpsys activity exit-info
+  dev.peppy.mobile` lists the exits. See
+  [main screen](../apps/android/app/src/main/java/dev/peppy/mobile/MainActivity.kt)
+  and [MMS settings](../apps/android/app/src/main/java/dev/peppy/mobile/MmsSettings.kt).
+- Outbox rejection policy: a 4xx on `POST /v1/events` that carries a server
+  `code` is a permanent decision (`rejectOutbox`, re-pair required). A 4xx
+  with no code is a `SoftRejection`: retried one head envelope per pass with
+  bounded fuses, never acked, and it blocks only the contact-photo phases.
+  Every Peppy server 403 is an `ApiError` with a JSON `code`; a bodiless 403
+  comes from a reverse proxy (see [infra](infra.md#community-setup-state-and-proxies))
+  and must not halt the outbox. See
+  [gateway state](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayState.kt)
+  and [gateway pass](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt).
+- The pass order is receive/apply, contacts, media, contact photos, upload,
+  dispatch. The contact-photo phase asks the core which tracked photos an
+  unsealed outbox row still references (`outbox_contact_photos`, filled at
+  enqueue from the same slots `resolve_payload` seals). Never reintroduce a
+  text scan of `outbox.plain` for that question; with a multi-day backlog it
+  held the lock for seconds per pass. Keep `payload_photo_ids` and
+  `resolve_payload` enumerating the same slots. See
+  [contact media](../crates/client-core/src/contact_media.rs).
+- Battery and timing rules for the Android host: the 25 s socket ping, the
+  15-minute periodic work, observer debounce, and zero-delay observer capture
+  are delivery timing and stay fixed; reduce cost by removing duplicate
+  scheduling and repeated work, not by delaying. Known fixed causes: a relay
+  reconnect that double-scheduled the gateway, a capture→gateway→capture
+  loop now gated by a durable `CAPTURE_HINT_PENDING` flag, MMS deferred
+  previews re-copied every pass (now re-settled only when the quota has
+  512 KiB headroom, with `OVERSIZE_PREVIEW` as a permanent outcome), and
+  `SmsCaptureWorker` ANRs from an unindexed pending-acquisition scan
+  (`sms_acquisitions_pending_order`). Measure with
+  `dumpsys batterystats`, `dumpsys jobscheduler`, and the Diagnostics trace
+  (Settings → Diagnostics); logcat on the phone rotates within about a
+  minute, so it is not a timing source. See
+  [gateway scheduling](../apps/android/app/src/main/java/dev/peppy/mobile/GatewayWork.kt),
+  [MMS capture](../apps/android/app/src/main/java/dev/peppy/mobile/MmsCaptureWork.kt),
+  and [MMS previews](../apps/android/app/src/main/java/dev/peppy/mobile/MmsMediaPreview.kt).
+- Encrypted media is published with an atomic no-replace rename first;
+  SELinux denies `hard_link` for app data on current Android, so the link
+  path is a fallback, not the primary. See
+  [crypto filesystem](../crates/crypto/src/filesystem.rs).
 
 ## iOS limits
 
