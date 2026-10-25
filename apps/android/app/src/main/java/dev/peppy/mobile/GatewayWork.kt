@@ -197,6 +197,7 @@ class GatewaySync(
     private val contacts: () -> Boolean = { false },
     /** Contact photo reference registration/reclaim; must precede outbox upload. */
     private val contactPhotos: () -> Boolean = { false },
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private enum class GatewayPhase(val code: Long) {
         RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19),
@@ -211,6 +212,8 @@ class GatewaySync(
     private var snapshotReceived = 0L
     private var progressed = 0L
     private var uploaded = 0L
+    /** Set by a soft rejection so the second upload phase of the same pass does not POST again. */
+    private var uploadSoftRejected = false
     private var snapshotRemaining = 0L
     private var contactReadiness: BackgroundDiagnostics.GatewayReadiness? = null
 
@@ -243,27 +246,28 @@ class GatewaySync(
                 phase(GatewayPhase.NOTIFICATION_DISMISSALS) { NotificationMirrorService.runPendingDismissals(); false }
                 // Synthetic records are core-only, so retire them without listener access.
                 phase(GatewayPhase.NOTIFICATION_TEST_DISMISSALS) { NotificationTestCapture.applyDismissals(client); false }
-                // Contacts follow receive/apply (incoming edit requests are journaled first) and
-                // precede media, so newly prepared photos upload in this same pass.
+                // Contacts follow receive/apply so incoming edits are journaled first.
+                // The contact-photo phase scans the outbox backlog and waits for accepted uploads.
                 if (mayEmit() && !client.contactRepairRequired()) phase(GatewayPhase.CONTACTS) { contacts() }
                 // Media is local encrypted work, but it must finish before its message envelope is
                 // uploaded or a carrier command which references it can be dispatched.
                 if (mayEmit()) phase(GatewayPhase.MEDIA) { transferMedia() }
                 // Photo references are registered before the core releases those envelopes.
-                if (mayEmit()) phase(GatewayPhase.CONTACT_PHOTOS) { contactPhotos() }
+                if (mayPrepare()) phase(GatewayPhase.CONTACT_PHOTOS) { contactPhotos() }
             }
             SyncPhase.RECOVERY_REQUIRED -> Unit
         }
         if (mayEmit()) phase(GatewayPhase.UPLOAD) { upload() }
         if (mayEmit()) phase(GatewayPhase.DISPATCH) { dispatch().moreRemaining }
         // Envelopes sealed during the first upload may have produced new photo registrations.
-        if (mayEmit() && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
+        if (mayPrepare() && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
         if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
         return PassResult(more, failure)
     }
 
     private fun mayEmit() = state.phase == SyncPhase.LIVE && state.outboxRejection == null
+    private fun mayPrepare() = mayEmit() && state.softRejection == null
 
     private fun phase(phase: GatewayPhase, block: () -> Boolean) {
         try {
@@ -487,12 +491,18 @@ class GatewaySync(
     }
 
     private fun upload(): Boolean {
+        if (uploadSoftRejected) return false
         val batch = client.pendingOutboxJsonBatch(OUTBOX_BATCH.toULong())
+        if (batch.isEmpty() && state.softRejection != null) state.clearSoftRejection()
         for (envelope in batch) {
             val response = http.postJson("/v1/events", envelope)
             when {
                 response.ok -> {
                     client.ackOutbox(JSONObject(envelope).getString("envelope_id"))
+                    if (state.softRejection != null) {
+                        state.clearSoftRejection()
+                        more = true
+                    }
                     if (diagnosticsEnabled) uploaded++
                     if (SyncDiagnostics.enabled) SyncDiagnostics.record(SyncTraceEvent.OUTBOX_ACK, SyncTraceField.COUNT to 1)
                 }
@@ -502,8 +512,18 @@ class GatewaySync(
                     return false
                 }
                 response.code in 400..499 && response.code != 408 && response.code != 429 -> {
-                    // Permanent: never acked (that would be a lie) and never retried in a loop.
-                    state.rejectOutbox(response.errorCode ?: "http_${response.code}")
+                    // Never acked (that would be a lie). A server code is a permanent decision; a
+                    // code-less rejection may be transient infrastructure, so it is retried on later
+                    // passes while DISPATCH still runs (mayEmit stays true) until it escalates.
+                    val code = response.errorCode
+                    if (code != null) {
+                        state.rejectOutbox(code)
+                    } else {
+                        val now = nowMs()
+                        val soft = state.recordSoftRejection("http_${response.code}", now)
+                        if (soft.escalates(now)) state.rejectOutbox(soft.code)
+                        uploadSoftRejected = true
+                    }
                     return false
                 }
                 else -> throw GatewayTransportException("HTTP ${response.code}")
@@ -581,6 +601,7 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
 
     private fun runPass(): Result {
         if (isPeriodicRun()) GatewayWork.captureHintPending(applicationContext)
+        GatewayStateStore(applicationContext).migrateRejectionPolicy(System.currentTimeMillis())
         val captureHint = GatewayWork.beginPass(applicationContext)
         val result = pass(captureHint)
         if (result == Result.success()) GatewayWork.finishPass()

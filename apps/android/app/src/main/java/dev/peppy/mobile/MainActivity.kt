@@ -153,6 +153,10 @@ internal fun syncMessage(status: GatewayStatus): String = when {
         else -> "Stopped: this credential was already used by an earlier install. Pair this phone again as a new device."
     }
     status.outboxRejection != null -> "Stopped: the server permanently rejected a queued update (${status.outboxRejection}). Sending and uploads are paused; pair this phone again."
+    status.softRejection != null -> "Uploads paused after a server error (${status.softRejection.code}); retrying automatically" +
+        (System.currentTimeMillis() - status.softRejection.firstSeenMs).let { ageMs ->
+            if (ageMs < 3_600_000L) "." else " (since ~${(ageMs + 1_800_000L) / 3_600_000L} h)."
+        }
     !status.sharedKeysReady -> stringResource(R.string.peppy_not_unlocked)
     status.syncPhase == SyncPhase.LIVE -> "Live"
     else -> "Importing vault history (no texts are sent until this finishes)"
