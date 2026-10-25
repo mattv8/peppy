@@ -19,11 +19,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -283,7 +285,13 @@ private fun CompanionScreen(activity: ComponentActivity) {
     }
 
     if (status == null) {
-        CircularProgressIndicator(Modifier.padding(24.dp))
+        // Edge-to-edge is enabled, so the startup spinner centers within the safe drawing area.
+        Box(
+            Modifier.fillMaxSize().safeDrawingPadding().testTag("startup-loading-container"),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(Modifier.testTag("startup-loading-indicator"))
+        }
         return
     }
     ObserveServerReachability(status?.enrolled == true, refresh)
