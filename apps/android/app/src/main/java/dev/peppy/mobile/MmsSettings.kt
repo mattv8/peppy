@@ -19,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import dev.peppy.mobile.ui.InfoButton
 import androidx.compose.material3.MaterialTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -142,7 +144,10 @@ internal fun MmsSettings(
 ) {
     val preferences = remember { MmsPreferences(context) }
     var enabled by remember(refresh) { mutableStateOf(preferences.enabled) }
-    var mediaWifiOnly by remember(refresh) { mutableStateOf(GatewayPolicyHost(context).mediaWifiOnly) }
+    var mediaWifiOnly by remember { mutableStateOf<Boolean?>(null) }
+    // The core-backed policy read takes the client lock; keep it off the main thread.
+    LaunchedEffect(refresh) { mediaWifiOnly = withContext(Dispatchers.IO) { GatewayPolicyHost(context).mediaWifiOnly } }
+    val scope = rememberCoroutineScope()
     var health by remember { mutableStateOf(MmsHealth()) }
     val route = SimRoutes.current().singleOrNull()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -182,7 +187,20 @@ internal fun MmsSettings(
                 body = stringResource(R.string.peppy_help_android_mms_wifi),
                 tag = "info-mms-wifi",
             )
-            Switch(mediaWifiOnly, { value -> GatewayPolicyHost(context).mediaWifiOnly = value; mediaWifiOnly = value }, modifier = Modifier.testTag("mms-wifi-only-switch"))
+            Switch(
+                checked = mediaWifiOnly == true,
+                enabled = mediaWifiOnly != null,
+                onCheckedChange = { value ->
+                    mediaWifiOnly = null
+                    scope.launch {
+                        mediaWifiOnly = withContext(Dispatchers.IO) {
+                            GatewayPolicyHost(context).mediaWifiOnly = value
+                            GatewayPolicyHost(context).mediaWifiOnly
+                        }
+                    }
+                },
+                modifier = Modifier.testTag("mms-wifi-only-switch"),
+            )
         }
         OutlinedButton(
             onClick = { MmsCaptureWork.refresh(context); onChanged() },
