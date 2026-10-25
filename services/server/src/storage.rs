@@ -158,9 +158,10 @@ impl Storage {
             ],
             SignableBody::Precomputed(body_hash),
         )?;
+        // `content-length` is already on the request as a signed header; a second copy is
+        // malformed framing that strict stores (Backblaze B2) reject with 400.
         let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
         let response = request
-            .header(CONTENT_LENGTH, length)
             .body(body)
             .timeout(PUT_TIMEOUT)
             .send()
@@ -622,6 +623,79 @@ mod tests {
             range,
             4
         ));
+    }
+
+    /// Backblaze B2 rejects a PUT carrying two `content-length` headers as malformed
+    /// framing; permissive stores (the integration fixtures) accept it silently.
+    #[tokio::test]
+    async fn put_file_sends_exactly_one_content_length_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local listener");
+        let port = listener.local_addr().expect("local address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            // Drain the whole sized body before answering, so closing the socket never
+            // resets a client that is still writing.
+            let expected = |request: &[u8]| -> Option<usize> {
+                let head_end = request.windows(4).position(|w| w == b"\r\n\r\n")?;
+                let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())?;
+                Some(head_end + 4 + length)
+            };
+            while expected(&request).is_none_or(|total| request.len() < total) {
+                let read = socket.read(&mut chunk).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nx-amz-server-side-encryption: AES256\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write response");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let storage = Storage::new(&S3Config {
+            endpoint: Url::parse(&format!("http://127.0.0.1:{port}")).expect("endpoint"),
+            bucket: "bucket".into(),
+            access_key: "access".into(),
+            secret_key: "secret".into(),
+            signing_region: "us-west-000".into(),
+            precreated_bucket: true,
+            readiness_timeout: Duration::from_secs(5),
+        });
+        let mut file = tempfile::NamedTempFile::new().expect("temporary file");
+        file.write_all(&[7_u8; 1024]).expect("write body");
+        storage
+            .put_file("private/v/o", file.path().to_path_buf())
+            .await
+            .expect("local stub accepts the upload");
+        let request = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("stub answered in time")
+            .expect("captured request");
+        let head = request.split("\r\n\r\n").next().unwrap_or_default();
+        let content_length_headers = head
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            content_length_headers,
+            vec!["content-length: 1024"],
+            "request head:\n{head}"
+        );
+        assert!(
+            !head.to_ascii_lowercase().contains("transfer-encoding"),
+            "upload must be sized, not chunked:\n{head}"
+        );
     }
 
     #[tokio::test]
