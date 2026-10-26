@@ -1,25 +1,25 @@
 //! Regression tests for the DU security review (reports/DU-security-review.md).
 use crate::{
-    AppState, PreparedPublicCopy,
-    credentials::{parse_credential, tests::TOKEN, tests::credential_json},
+    credentials::{parse_credential, tests::credential_json, tests::TOKEN},
     secure_store::{MemoryStore, SecretStore},
     session::Session,
-    sync::{self, Failure, MediaOutcome, STABLE_CONNECTION, classify, next_backoff},
-    tests::{PHRASE, fixture_at, gateway, input, noop, open, routed},
+    sync::{self, classify, next_backoff, Failure, MediaOutcome, STABLE_CONNECTION},
+    tests::{fixture_at, gateway, input, noop, open, routed, PHRASE},
+    AppState, PreparedPublicCopy,
 };
 use axum::{
-    Json, Router,
     extract::{Path as AxumPath, Query},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
+    Json, Router,
 };
 use peppy_client_core::{Cursor, RawSnapshotRecord, SnapshotPurpose};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
         atomic::{AtomicU16, AtomicUsize, Ordering},
+        Arc,
     },
     time::Duration,
 };
@@ -246,6 +246,9 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     assert!(crate::COMPOSER_COMMANDS.contains(&"load_history"));
     assert!(main.contains("allow-load-history"));
     assert!(composer.contains("allow-load-history"));
+    assert!(!composer.contains("allow-load-message-window"));
+    assert!(main.contains("allow-load-message-window"));
+    assert!(!crate::COMPOSER_COMMANDS.contains(&"load_message_window"));
     for command in [
         "request_attachment_download",
         "media_page",
@@ -358,6 +361,232 @@ fn runtime_window_checks_back_the_acl() {
     assert_eq!(
         crate::require_main("composer-any").unwrap_err().code,
         "window-context"
+    );
+}
+
+#[test]
+fn external_url_validation_accepts_only_safe_http_destinations() {
+    for value in [
+        "https://example.com/path",
+        "http://localhost:8080",
+        "www.example.com",
+        "https://[::1]/",
+    ] {
+        assert!(crate::validate_external_url(value).is_ok(), "{value}");
+    }
+    for value in [
+        "javascript:alert(1)",
+        "https://user@example.com",
+        "https://@example.com",
+        "https://example.com\n",
+        "https://exa\u{200b}mple.com",
+        "https://example\\.com",
+        "https://example.com:",
+        "https://0x7f.0.0.1",
+        "https://example.com\u{e0001}",
+    ] {
+        assert_eq!(
+            crate::validate_external_url(value).unwrap_err().code,
+            "invalid-request",
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn webview_navigation_allows_trusted_origins_with_any_route() {
+    let dev_url = url::Url::parse("http://localhost:1420/base").unwrap();
+    for value in [
+        "tauri://localhost/index.html?window=composer&conversationId=abc",
+        "tauri://localhost/reload/path?cache=2#message",
+        "http://tauri.localhost/index.html?window=composer&conversationId=abc",
+        "http://tauri.localhost/reload/path?cache=2#message",
+    ] {
+        assert!(
+            crate::allows_app_navigation(&url::Url::parse(value).unwrap(), Some(&dev_url)),
+            "{value}"
+        );
+    }
+    if cfg!(debug_assertions) {
+        for value in [
+            "http://localhost:1420/index.html?window=composer&conversationId=abc",
+            "http://localhost:1420/reload/path?cache=2#message",
+        ] {
+            assert!(
+                crate::allows_app_navigation(&url::Url::parse(value).unwrap(), Some(&dev_url)),
+                "{value}"
+            );
+        }
+        let secure_dev_url = url::Url::parse("https://dev.peppy.test:4443/root").unwrap();
+        assert!(crate::allows_app_navigation(
+            &url::Url::parse("https://dev.peppy.test:4443/index.html?window=composer").unwrap(),
+            Some(&secure_dev_url),
+        ));
+    }
+}
+
+#[test]
+fn webview_navigation_denies_untrusted_origins_and_credentials() {
+    let dev_url = url::Url::parse("http://localhost:1420").unwrap();
+    for value in [
+        "https://example.com",
+        "http://tauri.localhost.evil.test/index.html",
+        "http://localhost:1421/index.html",
+        "http://user@tauri.localhost/index.html",
+        "http://user@localhost:1420/index.html",
+    ] {
+        assert!(
+            !crate::allows_app_navigation(&url::Url::parse(value).unwrap(), Some(&dev_url)),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn app_acl_cannot_create_windows_or_webviews() {
+    for manifest in [
+        include_str!("../capabilities/default.json"),
+        include_str!("../capabilities/composer.json"),
+    ] {
+        let granted = permissions(manifest);
+        for denied in [
+            "core:window:allow-create",
+            "core:webview:allow-create",
+            "core:webview:allow-create-webview",
+            "core:webview:allow-create-webview-window",
+        ] {
+            assert!(!granted.contains(denied), "unexpected capability: {denied}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn search_index_ready_latch_prevents_reentry_and_notifies_only_on_transition() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifier_count = notifications.clone();
+    let session = Arc::new(
+        crate::session::open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                notifier_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .unwrap(),
+    );
+
+    assert!(crate::claim_search_index_driver(&session));
+    let action = crate::observe_search_index_state(
+        &session,
+        None,
+        peppy_client_core::SearchIndexState::Ready,
+    );
+    let gate = crate::update_safety::SafetyGate::default();
+    assert!(!crate::complete_search_index_batch(&session, gate.enter().unwrap(), action).await);
+    session.index_driver_running.store(false, Ordering::Release);
+    assert_eq!(notifications.load(Ordering::SeqCst), 0);
+    assert!(!crate::claim_search_index_driver(&session));
+    assert!(!crate::claim_search_index_driver(&session));
+
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifier_count = notifications.clone();
+    let session = Arc::new(
+        crate::session::open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                notifier_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        crate::observe_search_index_state(
+            &session,
+            None,
+            peppy_client_core::SearchIndexState::Indexing,
+        ),
+        crate::SearchIndexDriverAction::Wait
+    );
+    // The transition state belongs to the session, so a transient worker restart cannot lose it.
+    session.index_driver_running.store(false, Ordering::Release);
+    assert!(crate::claim_search_index_driver(&session));
+    let action = crate::observe_search_index_state(
+        &session,
+        None,
+        peppy_client_core::SearchIndexState::Ready,
+    );
+    assert!(!crate::complete_search_index_batch(&session, gate.enter().unwrap(), action).await);
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn search_index_first_batch_ready_notifies_only_after_initial_indexing() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifier_count = notifications.clone();
+    let session = Arc::new(
+        crate::session::open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                notifier_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .unwrap(),
+    );
+    let gate = crate::update_safety::SafetyGate::default();
+
+    let action = crate::observe_search_index_state(
+        &session,
+        Some(peppy_client_core::SearchIndexState::Indexing),
+        peppy_client_core::SearchIndexState::Ready,
+    );
+    assert!(!crate::complete_search_index_batch(&session, gate.enter().unwrap(), action).await);
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+
+    let action = crate::observe_search_index_state(
+        &session,
+        None,
+        peppy_client_core::SearchIndexState::Ready,
+    );
+    assert!(!crate::complete_search_index_batch(&session, gate.enter().unwrap(), action).await);
+    assert_eq!(notifications.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn search_index_wait_releases_update_admission_and_honors_cancellation() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    let gate = crate::update_safety::SafetyGate::default();
+    let operation = gate.enter().unwrap();
+    let waiting_session = session.clone();
+    let waiter = tokio::spawn(async move {
+        crate::complete_search_index_batch(
+            &waiting_session,
+            operation,
+            crate::SearchIndexDriverAction::Wait,
+        )
+        .await
+    });
+
+    tokio::task::yield_now().await;
+    let restart = gate
+        .reserve()
+        .expect("the completed batch must release update admission before its wait");
+    drop(restart);
+    session.cancel.cancel();
+    assert!(
+        !waiter.await.unwrap(),
+        "cancellation must prevent the next batch"
     );
 }
 
@@ -743,14 +972,12 @@ async fn reserve_conflict_recovers_only_from_authenticated_duplicate_finalize_pr
 
     assert_eq!(finalized.load(Ordering::SeqCst), 1);
     assert!(session.client.pending_uploads().unwrap().is_empty());
-    assert!(
-        session
-            .client
-            .attachment_info(attachment.id.parse().unwrap())
-            .unwrap()
-            .state
-            .is_local()
-    );
+    assert!(session
+        .client
+        .attachment_info(attachment.id.parse().unwrap())
+        .unwrap()
+        .state
+        .is_local());
     session.cancel.cancel();
 }
 
@@ -822,35 +1049,29 @@ async fn work_requests_wake_only_the_worker() {
         );
     tokio::time::sleep(Duration::from_millis(100)).await;
     session.request_work();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), worker)
-            .await
-            .expect("worker woke")
-            .unwrap()
-    );
+    assert!(tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .expect("worker woke")
+        .unwrap());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !live.is_finished(),
         "a reconnect wait must not consume the worker's wake-up"
     );
     session.reconnect_wake.notify_one();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), live)
-            .await
-            .unwrap()
-            .unwrap()
-    );
+    assert!(tokio::time::timeout(Duration::from_secs(2), live)
+        .await
+        .unwrap()
+        .unwrap());
     // Cancellation ends both waits with `false`.
     let waiter = session.clone();
     let cancelled =
         tokio::spawn(async move { sync::pause_worker(&waiter, Duration::from_secs(30)).await });
     session.cancel.cancel();
-    assert!(
-        !tokio::time::timeout(Duration::from_secs(2), cancelled)
-            .await
-            .unwrap()
-            .unwrap()
-    );
+    assert!(!tokio::time::timeout(Duration::from_secs(2), cancelled)
+        .await
+        .unwrap()
+        .unwrap());
 }
 
 #[test]
@@ -946,11 +1167,9 @@ fn refused_sends_keep_the_revision_and_results_report_it() {
         (stale.code, stale.current_revision.as_deref()),
         ("stale-draft", Some(draft.revision.as_str()))
     );
-    assert!(
-        serde_json::to_string(&stale)
-            .unwrap()
-            .contains("\"currentRevision\"")
-    );
+    assert!(serde_json::to_string(&stale)
+        .unwrap()
+        .contains("\"currentRevision\""));
     // A successful send (route persisted + atomic send) reports the stored revision.
     let fixed = session
         .save_draft(&input(

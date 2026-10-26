@@ -9,6 +9,7 @@ export type MediaGridProps = {
   renderMessageMeta?(message: GalleryMessage): ReactNode;
   renderAttachmentActions?(attachment: GalleryAttachment): ReactNode;
   messageRef?(message: GalleryMessage): RefCallback<HTMLElement> | undefined;
+  renderCaption?(message: GalleryMessage): ReactNode;
 };
 
 function thumbnailState(attachment: GalleryAttachment): string {
@@ -39,7 +40,7 @@ function usablePreview(attachment: GalleryAttachment): AttachmentView | undefine
   return undefined;
 }
 
-function Group({ group, onOpen, renderMessageMeta, renderAttachmentActions, messageRef }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; renderAttachmentActions?: MediaGridProps["renderAttachmentActions"]; messageRef?: MediaGridProps["messageRef"] }) {
+function Group({ group, onOpen, renderMessageMeta, renderAttachmentActions, messageRef, renderCaption }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; renderAttachmentActions?: MediaGridProps["renderAttachmentActions"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"] }) {
   const visible = group.attachments.length > 4 ? group.attachments.slice(0, 3) : group.attachments;
   const finalMessage = group.messages.at(-1);
   const isGrouped = group.messages.length > 1 || group.attachments.length > 1;
@@ -58,7 +59,7 @@ function Group({ group, onOpen, renderMessageMeta, renderAttachmentActions, mess
         })}
         {group.attachments.length > 4 && <button type="button" data-overflow-count aria-label={`Open gallery, ${group.attachments.length - 3} more images`} onClick={() => onOpen(group.attachments[3])}>+{group.attachments.length - 3} more</button>}
       </div>
-      {finalMessage?.body && <p data-group-caption>{finalMessage.body}</p>}
+      {finalMessage?.body && <p data-group-caption>{renderCaption?.(finalMessage) ?? finalMessage.body}</p>}
       {finalMessage?.subject && <p data-group-subject>Subject: {finalMessage.subject}</p>}
     </article>
     {group.messages.map((message) => <div key={message.id} ref={messageRef?.(message)} data-message-row={message.id}><div data-message-id={message.id} data-message-meta={message.id}>{renderMessageMeta?.(message)}</div></div>)}

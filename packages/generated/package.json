@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./protocol": "./src/protocol.ts"
+    "./protocol": "./src/protocol.ts",
+    "./local-search": "./src/local-search.ts"
   }
 }

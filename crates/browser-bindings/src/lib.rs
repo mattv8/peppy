@@ -4,7 +4,7 @@
 //! filesystem and must checkpoint it before acknowledging mutating calls.
 use peppy_client_core::{
     AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Error as CoreError,
-    MessageId, VaultId,
+    Message, MessageId, VaultId,
 };
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
@@ -288,6 +288,9 @@ impl BrowserCore {
             "set_host_context" => self.set_host_context(args_value(raw_args)?),
             "snapshot" => self.snapshot(args_value(raw_args)?),
             "load_history" => self.load_history(args_value(raw_args)?),
+            "search_local" => self.search_local(args_value(raw_args)?),
+            "advance_search_index" => self.advance_search_index(args_value(raw_args)?),
+            "load_message_window" => self.load_message_window(args_value(raw_args)?),
             "save_draft" => self.save_draft(args_value(raw_args)?),
             "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
@@ -402,6 +405,11 @@ impl BrowserCore {
         Ok(json!({}))
     }
     fn snapshot(&self, args: Value) -> Result<Value, Failure> {
+        let metadata_only = match args.get("metadataOnly") {
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err(invalid()),
+            None => false,
+        };
         let requested = args
             .get("conversationId")
             .and_then(Value::as_str)
@@ -458,53 +466,32 @@ impl BrowserCore {
                     }
                 })
                 .unwrap_or_default();
-            let (messages, has_older_messages) = if Some(conversation.conversation_id) == active {
-                let (history, has_more) = match history_from_message_id {
-                    Some(anchor) => {
-                        let has_more = !client
-                            .messages_page(conversation.conversation_id, Some(anchor), 1)
-                            .map_err(core)?
-                            .messages
-                            .is_empty();
-                        client
-                            .messages_since(conversation.conversation_id, anchor)
-                            .map(|messages| (messages, has_more))
+            let (messages, has_older_messages) =
+                if !metadata_only && Some(conversation.conversation_id) == active {
+                    let (history, has_more) = match history_from_message_id {
+                        Some(anchor) => {
+                            let has_more = !client
+                                .messages_page(conversation.conversation_id, Some(anchor), 1)
+                                .map_err(core)?
+                                .messages
+                                .is_empty();
+                            client
+                                .messages_since(conversation.conversation_id, anchor)
+                                .map(|messages| (messages, has_more))
+                        }
+                        None => client
+                            .messages_page(conversation.conversation_id, None, HISTORY_PAGE_SIZE)
+                            .map(|page| (page.messages, page.has_more)),
                     }
-                    None => client
-                        .messages_page(conversation.conversation_id, None, HISTORY_PAGE_SIZE)
-                        .map(|page| (page.messages, page.has_more)),
-                }
-                .map_err(core)?;
-                let messages = history
-                    .iter()
-                    .map(|message| {
-                        let attachments = message
-                            .payload
-                            .record
-                            .attachments
-                            .iter()
-                            .filter_map(|id| {
-                                client.attachment_info(id.attachment_id).ok().map(|info| {
-                                    let mut view = dto::attachment_view(&info, None, None);
-                                    view.media_meta = dto::message_attachment_media_metadata_view(
-                                        client,
-                                        message.payload.record.message_id,
-                                        info.attachment_id,
-                                    )
-                                    .ok()
-                                    .flatten()
-                                    .map(Box::new);
-                                    view
-                                })
-                            })
-                            .collect();
-                        dto::message_view(message, attachments)
-                    })
-                    .collect();
-                (messages, Some(has_more))
-            } else {
-                (Vec::new(), None)
-            };
+                    .map_err(core)?;
+                    let messages = history
+                        .iter()
+                        .map(|message| message_view(client, message))
+                        .collect();
+                    (messages, Some(has_more))
+                } else {
+                    (Vec::new(), None)
+                };
             let reply_context = client.mms_reply_context(conversation.conversation_id).ok();
             views.push(dto::ConversationView {
                 id: conversation.conversation_id.to_string(),
@@ -618,38 +605,40 @@ impl BrowserCore {
         let messages = page
             .messages
             .iter()
-            .map(|message| {
-                let attachments = message
-                    .payload
-                    .record
-                    .attachments
-                    .iter()
-                    .filter_map(|reference| {
-                        client
-                            .attachment_info(reference.attachment_id)
-                            .ok()
-                            .map(|info| {
-                                let mut view = dto::attachment_view(&info, None, None);
-                                view.media_meta = dto::message_attachment_media_metadata_view(
-                                    client,
-                                    message.payload.record.message_id,
-                                    info.attachment_id,
-                                )
-                                .ok()
-                                .flatten()
-                                .map(Box::new);
-                                view
-                            })
-                    })
-                    .collect();
-                dto::message_view(message, attachments)
-            })
+            .map(|message| message_view(client, message))
             .collect();
         serde_json::to_value(dto::HistoryPage {
             conversation_id: conversation.to_string(),
             messages,
             has_more: page.has_more,
         })
+        .map_err(|_| core(CoreError::Database))
+    }
+    fn search_local(&self, args: Value) -> Result<Value, Failure> {
+        let input: dto::LocalSearchRequestView =
+            serde_json::from_value(args).map_err(|_| invalid())?;
+        let page = self.client()?.search_local(input.into()).map_err(core)?;
+        serde_json::to_value(dto::local_search_page_view(page))
+            .map_err(|_| core(CoreError::Database))
+    }
+    fn advance_search_index(&self, args: Value) -> Result<Value, Failure> {
+        let input: dto::AdvanceSearchIndexInputView =
+            serde_json::from_value(args).map_err(|_| invalid())?;
+        let progress = self
+            .client()?
+            .advance_search_index(input.budget_rows)
+            .map_err(core)?;
+        serde_json::to_value(dto::search_index_progress_view(progress))
+            .map_err(|_| core(CoreError::Database))
+    }
+    fn load_message_window(&self, args: Value) -> Result<Value, Failure> {
+        let input: dto::MessageWindowRequestView =
+            serde_json::from_value(args).map_err(|_| invalid())?;
+        let client = self.client()?;
+        let window = client.load_message_window(input.into()).map_err(core)?;
+        serde_json::to_value(dto::message_window_view(window, |message| {
+            message_view(client, &message)
+        }))
         .map_err(|_| core(CoreError::Database))
     }
     fn save_draft(&self, args: Value) -> Result<Value, Failure> {
@@ -706,6 +695,33 @@ impl BrowserCore {
         }
         Ok(path)
     }
+}
+
+fn message_view(client: &Client, message: &Message) -> dto::MessageView {
+    let attachments = message
+        .payload
+        .record
+        .attachments
+        .iter()
+        .filter_map(|reference| {
+            client
+                .attachment_info(reference.attachment_id)
+                .ok()
+                .map(|info| {
+                    let mut view = dto::attachment_view(&info, None, None);
+                    view.media_meta = dto::message_attachment_media_metadata_view(
+                        client,
+                        message.payload.record.message_id,
+                        info.attachment_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .map(Box::new);
+                    view
+                })
+        })
+        .collect();
+    dto::message_view(message, attachments)
 }
 fn args_value(raw: Option<&RawValue>) -> Result<Value, Failure> {
     raw.map_or(Ok(Value::Null), |raw| {
@@ -866,6 +882,110 @@ mod tests {
             core.dispatch(r#"{"command":"pairing"}"#)
                 .contains("unknown-command")
         );
+    }
+
+    #[test]
+    fn search_and_message_window_commands_are_typed_read_only_routes_and_locked_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let mut core = BrowserCore::new(root.path().to_path_buf());
+        open(&mut core, vault, device, [7; 32]);
+
+        for request in [
+            json!({"command":"search_local","args":{"query":"hello"}}),
+            json!({"command":"load_message_window","args":{"direction":"refresh","conversationId":ConversationId::new(),"messageIds":[]}}),
+        ] {
+            let response: Value =
+                serde_json::from_str(&core.dispatch(&request.to_string())).unwrap();
+            assert_eq!(response["error"]["code"], "locked");
+        }
+        let malformed: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"advance_search_index","args":{"budgetRows":"100"}}"#),
+        )
+        .unwrap();
+        assert_eq!(malformed["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn sqlcipher_search_and_refresh_window_return_canonical_views() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let mut core = BrowserCore::new(root.path().to_path_buf());
+        open(&mut core, vault, device, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(&json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string()));
+        let message = core
+            .client()
+            .unwrap()
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "needle message".into(),
+                provider_message_id: Some("search-window".into()),
+                imported: false,
+            })
+            .unwrap();
+
+        let search = value(&core.dispatch(
+            &json!({"command":"search_local","args":{"query":"needle","kind":"message","limit":1}}).to_string(),
+        ));
+        assert_eq!(search["items"][0]["kind"], "message");
+        assert_eq!(
+            search["items"][0]["messageId"],
+            message.message_id.to_string()
+        );
+        let window = value(&core.dispatch(
+            &json!({"command":"load_message_window","args":{"direction":"refresh","conversationId":message.conversation_id,"messageIds":[message.message_id]}}).to_string(),
+        ));
+        assert_eq!(
+            window["conversationId"],
+            message.conversation_id.to_string()
+        );
+        assert_eq!(window["messages"].as_array().unwrap().len(), 1);
+
+        let full = value(
+            &core.dispatch(
+                &json!({"command":"snapshot","args":{"conversationId":message.conversation_id}})
+                    .to_string(),
+            ),
+        );
+        let metadata = value(&core.dispatch(
+            &json!({"command":"snapshot","args":{"conversationId":message.conversation_id,"metadataOnly":true}})
+                .to_string(),
+        ));
+        let full_conversation = full["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|conversation| conversation["id"] == message.conversation_id.to_string())
+            .unwrap();
+        let metadata_conversation = metadata["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|conversation| conversation["id"] == message.conversation_id.to_string())
+            .unwrap();
+        for field in ["name", "preview", "participants", "replyBlockedReason"] {
+            assert_eq!(metadata_conversation[field], full_conversation[field]);
+        }
+        assert!(
+            metadata_conversation["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let invalid_metadata: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"snapshot","args":{"metadataOnly":"true"}}"#),
+        )
+        .unwrap();
+        assert_eq!(invalid_metadata["error"]["code"], "invalid-request");
     }
 
     #[test]

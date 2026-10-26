@@ -31,13 +31,18 @@ const scanStatusText = (status: ContactScanStatus) => ({
 }[status.state]);
 
 export type ContactNavigationGuard = (navigate: () => void) => void;
+export type ContactTarget = { bookId: string; contactId: string; requestId?: number };
+const MAX_TARGET_LOOKUP_PAGES = 500;
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard }: {
+export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
+  target?: ContactTarget | null;
+  onTargetConsumed?(requestId: number): void;
 }) {
   const [books, setBooks] = useState(initialBooks);
+  const [booksLoaded, setBooksLoaded] = useState(initialBooks.length > 0);
   const [bookId, setBookId] = useState(initialBooks[0]?.id ?? "");
   const [contacts, setContacts] = useState<ContactView[]>([]);
   const [selected, setSelected] = useState<ContactView | null>(null);
@@ -54,19 +59,62 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const [scanStatus, setScanStatus] = useState<ContactScanStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [pendingNavigation, setPendingNavigation] = useState<(() => void) | null>(null);
+  const [pendingNavigation, setPendingNavigation] = useState<{ action: () => void; onCancel?: () => void } | null>(null);
+  const [targetLoading, setTargetLoading] = useState(false);
+  const [targetError, setTargetError] = useState("");
+  const [focusTargetId, setFocusTargetId] = useState<string | null>(null);
   const restoreTriggerRef = useRef<HTMLButtonElement>(null);
   // Only the newest list request may apply its result (book/search/page changes and live hints).
   const pageRequestRef = useRef(0);
   const scanStatusRequestRef = useRef(0);
   const syncActionRef = useRef(0);
   const currentBookRef = useRef(bookId);
+  const booksRef = useRef(books);
+  const booksLoadedRef = useRef(initialBooks.length > 0);
+  const busyRef = useRef(busy);
+  const dirtyRef = useRef(dirty);
+  const editingRef = useRef(editing);
   const mountedRef = useRef(true);
+  const completedTargetRef = useRef<string | undefined>(undefined);
+  const targetLookupRef = useRef(0);
+  const targetRef = useRef(target);
+  const onTargetConsumedRef = useRef(onTargetConsumed);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  booksRef.current = books;
+  busyRef.current = busy;
+  dirtyRef.current = dirty;
+  editingRef.current = editing;
+  targetRef.current = target;
+  onTargetConsumedRef.current = onTargetConsumed;
+
+  const targetKey = (value: ContactTarget) => value.requestId === undefined
+    ? `${value.bookId}:${value.contactId}`
+    : `request:${value.requestId}`;
+  const consumeTarget = useCallback((value: ContactTarget) => {
+    const key = targetKey(value);
+    if (completedTargetRef.current === key) return;
+    completedTargetRef.current = key;
+    if (value.requestId !== undefined) onTargetConsumedRef.current?.(value.requestId);
+  }, []);
+  const cancelTargetLookup = useCallback((consume = true) => {
+    targetLookupRef.current += 1;
+    setTargetLoading(false);
+    setTargetError("");
+    const current = targetRef.current;
+    if (consume && current) consumeTarget(current);
+  }, [consumeTarget]);
+  useEffect(() => () => {
+    targetLookupRef.current += 1;
+    const unmountedTarget = targetRef.current;
+    queueMicrotask(() => {
+      if (!mountedRef.current && unmountedTarget && targetRef.current === unmountedTarget) consumeTarget(unmountedTarget);
+    });
+  }, [consumeTarget]);
 
   const loadBooks = useCallback(() => {
     void bridge
@@ -74,9 +122,33 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       .then(next => {
         if (!mountedRef.current) return;
         setBooks(next);
-        setBookId(current => (current && next.some(book => book.id === current) ? current : next[0]?.id ?? ""));
+        booksLoadedRef.current = true;
+        setBooksLoaded(true);
+        const currentBookId = currentBookRef.current;
+        if (currentBookId && next.some(book => book.id === currentBookId)) return;
+        const fallbackBookId = next[0]?.id ?? "";
+        if (fallbackBookId === currentBookId) return;
+        currentBookRef.current = fallbackBookId;
+        setOffset(0);
+        setBookId(fallbackBookId);
       })
-      .catch(e => { if (mountedRef.current) setError(String(e?.message ?? e)); });
+      .catch(() => {
+        if (!mountedRef.current) return;
+        // A background refresh failure keeps the loaded books and any active target walk.
+        if (booksLoadedRef.current) {
+          setError("Contacts could not be loaded right now.");
+          return;
+        }
+        booksLoadedRef.current = true;
+        setBooksLoaded(true);
+        const currentTarget = targetRef.current;
+        if (!currentTarget || completedTargetRef.current === targetKey(currentTarget)) {
+          setError("Contacts could not be loaded right now.");
+          return;
+        }
+        setTargetError("The requested contact could not be opened because contact books could not be loaded.");
+        consumeTarget(currentTarget);
+      });
   }, []);
 
   const loadPage = useCallback((showLoading: boolean) => {
@@ -101,7 +173,6 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
 
   useEffect(loadBooks, [loadBooks]);
   useEffect(() => loadPage(true), [loadPage]);
-  useEffect(() => setOffset(0), [bookId, query]);
 
   const book = books.find(item => item.id === bookId);
 
@@ -241,7 +312,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
       loadPage(false);
       if (pendingNavigation) {
         setPendingNavigation(null);
-        pendingNavigation();
+        pendingNavigation.action();
       }
     } catch (e) {
       const message = contactErrorText(e);
@@ -300,7 +371,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const requestNavigation = useCallback((action: () => void) => {
     if (busy) return;
     if (editing && dirty) {
-      setPendingNavigation(() => action);
+      setPendingNavigation({ action });
       return;
     }
     action();
@@ -311,42 +382,147 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
     return () => onNavigationGuard?.(null);
   }, [onNavigationGuard, requestNavigation]);
 
+  const activeTargetKey = target ? targetKey(target) : undefined;
+  useEffect(() => {
+    const requestedTarget = targetRef.current;
+    if (!requestedTarget || !booksLoaded || targetKey(requestedTarget) !== activeTargetKey) return;
+    if (completedTargetRef.current === activeTargetKey) return;
+    setTargetError("");
+    const sequence = ++targetLookupRef.current;
+    const isCurrent = () => mountedRef.current
+      && sequence === targetLookupRef.current
+      && targetRef.current !== null
+      && targetRef.current !== undefined
+      && targetKey(targetRef.current) === activeTargetKey;
+    const finish = () => {
+      if (!isCurrent()) return;
+      setTargetLoading(false);
+      consumeTarget(requestedTarget);
+    };
+    const startLookup = () => {
+      const targetBook = booksRef.current.find(candidate => candidate.id === requestedTarget.bookId);
+      if (!targetBook) {
+        if (isCurrent()) setTargetError("The requested contact book is no longer available.");
+        finish();
+        return;
+      }
+      setTargetLoading(true);
+      void (async () => {
+        for (let page = 0; page < MAX_TARGET_LOOKUP_PAGES; page += 1) {
+          const pageOffset = page * CONTACTS_PAGE_SIZE;
+          const results = await bridge.list_contacts(requestedTarget.bookId, "", pageOffset);
+          if (!isCurrent()) return;
+          if (!booksRef.current.some(candidate => candidate.id === requestedTarget.bookId)) {
+            setTargetError("The requested contact book is no longer available.");
+            finish();
+            return;
+          }
+          const contact = results.find(candidate => candidate.id === requestedTarget.contactId);
+          if (contact) {
+            setTargetError("");
+            ++pageRequestRef.current;
+            if (currentBookRef.current !== requestedTarget.bookId) {
+              ++scanStatusRequestRef.current;
+              ++syncActionRef.current;
+              setScanStatus(null);
+              setSyncing(false);
+            }
+            currentBookRef.current = requestedTarget.bookId;
+            setBookId(requestedTarget.bookId);
+            setQuery("");
+            setOffset(pageOffset);
+            setContacts(results);
+            setSelected(contact);
+            setEditing(null);
+            setConfirmDelete(false);
+            setFocusTargetId(contact.id);
+            finish();
+            return;
+          }
+          if (results.length < CONTACTS_PAGE_SIZE) {
+            if (isCurrent()) setTargetError("The requested contact is no longer available.");
+            finish();
+            return;
+          }
+        }
+        if (isCurrent()) setTargetError("The requested contact could not be searched because this book is too large.");
+        finish();
+      })().catch(() => {
+        if (isCurrent()) setTargetError("The requested contact could not be searched right now.");
+        finish();
+      });
+    };
+    if (busyRef.current) {
+      setTargetLoading(false);
+      setNotice("Finish saving the current contact before opening the requested contact.");
+      consumeTarget(requestedTarget);
+      return;
+    }
+    if (editingRef.current && dirtyRef.current) {
+      setPendingNavigation({ action: startLookup, onCancel: () => consumeTarget(requestedTarget) });
+      return;
+    }
+    startLookup();
+  }, [activeTargetKey, booksLoaded, consumeTarget]);
+
+  useEffect(() => {
+    if (!focusTargetId) return;
+    const frame = requestAnimationFrame(() => {
+      const row = Array.from(document.querySelectorAll<HTMLButtonElement>("button[data-contact-id]"))
+        .find(node => node.dataset.contactId === focusTargetId);
+      row?.scrollIntoView({ block: "nearest" });
+      row?.focus();
+      setFocusTargetId(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusTargetId]);
+
   const discardNavigation = () => {
     if (!pendingNavigation || busy) return;
     setDirty(false);
-    const action = pendingNavigation;
+    const { action } = pendingNavigation;
     setPendingNavigation(null);
     action();
   };
 
-  const handleSelectBook = (id: string) => requestNavigation(() => {
-    currentBookRef.current = id;
-    ++scanStatusRequestRef.current;
-    ++syncActionRef.current;
-    setBookId(id);
-    setScanStatus(null);
-    setSyncing(false);
-    setSelected(null);
-    setEditing(null);
-    setConfirmDelete(false);
-    setError("");
-  });
+  const handleSelectBook = (id: string) => {
+    cancelTargetLookup();
+    requestNavigation(() => {
+      currentBookRef.current = id;
+      ++scanStatusRequestRef.current;
+      ++syncActionRef.current;
+      setBookId(id);
+      setOffset(0);
+      setScanStatus(null);
+      setSyncing(false);
+      setSelected(null);
+      setEditing(null);
+      setConfirmDelete(false);
+      setError("");
+    });
+  };
 
   const handleCancelConfirm = () => setConfirmDelete(false);
 
-  const handleSelectContact = (contact: ContactView) => requestNavigation(() => {
+  const handleSelectContact = (contact: ContactView) => {
+    cancelTargetLookup();
+    requestNavigation(() => {
     setSelected(contact);
     setEditing(null);
     setConfirmDelete(false);
-  });
+    });
+  };
 
-  const handleEditStart = (contact?: ContactView) => requestNavigation(() => {
+  const handleEditStart = (contact?: ContactView) => {
+    cancelTargetLookup();
+    requestNavigation(() => {
     setEditing(contact ?? "create");
     setDirty(false);
     setConfirmDelete(false);
     setError("");
     setValidationError("");
-  });
+    });
+  };
 
   const handleEditCancel = () => requestNavigation(() => {
     setEditing(null);
@@ -420,7 +596,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
         {pendingNavigation && (
           <p id="contacts-unsaved-changes" role="status" data-banner-state="unsaved-changes">
             You have unsaved changes.
-            <button type="button" className="secondary-button" onClick={() => setPendingNavigation(null)}>Keep editing</button>
+            <button type="button" className="secondary-button" onClick={() => { pendingNavigation.onCancel?.(); setPendingNavigation(null); }}>Keep editing</button>
             <button type="button" className="secondary-button" onClick={discardNavigation} disabled={busy}>Discard</button>
           </p>
         )}
@@ -448,6 +624,12 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             </button>
           </p>
         )}
+        {targetError && <p id="contacts-target-error" role="status" data-target-state="error">{targetError}</p>}
+        {targetLoading && (
+          <p id="contacts-target-status" role="status" data-target-state="loading">
+            Finding requested contact… <button type="button" className="secondary-button" onClick={() => cancelTargetLookup()}>Cancel</button>
+          </p>
+        )}
         <header id="contacts-center-toolbar">
           <button id="contacts-sync-now" className="secondary-button" data-action="request-contact-sync" aria-describedby={syncDisabledReason ? "contacts-sync-unavailable" : undefined} disabled={Boolean(syncDisabledReason) || syncing} onClick={requestSync}>{syncing ? "Requesting…" : "Sync now"}</button>
           <input
@@ -455,10 +637,10 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             aria-label="Search contacts"
             type="search"
             value={query}
-            onChange={e => setQuery(e.target.value)}
+            onChange={e => { cancelTargetLookup(); setOffset(0); setQuery(e.target.value); }}
           />
           {query && (
-            <button aria-label="Clear search" onClick={() => setQuery("")}>
+            <button aria-label="Clear search" onClick={() => { setOffset(0); setQuery(""); }}>
               <X size={14} />
             </button>
           )}
@@ -559,7 +741,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             <button
               data-action="contacts-previous-page"
               disabled={offset === 0 || loading}
-              onClick={() => setOffset(current => Math.max(0, current - CONTACTS_PAGE_SIZE))}
+              onClick={() => { cancelTargetLookup(); setOffset(current => Math.max(0, current - CONTACTS_PAGE_SIZE)); }}
             >
               Previous
             </button>
@@ -567,7 +749,7 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
             <button
               data-action="contacts-next-page"
               disabled={contacts.length < CONTACTS_PAGE_SIZE || loading}
-              onClick={() => setOffset(current => current + CONTACTS_PAGE_SIZE)}
+              onClick={() => { cancelTargetLookup(); setOffset(current => current + CONTACTS_PAGE_SIZE); }}
             >
               Next
             </button>

@@ -55,6 +55,30 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("forwards flat metadata and search/history bridge contracts", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const state = bridge.load_state("conversation-1", undefined, { metadataOnly: true });
+    const search = bridge.search_local({ query: "hello", kind: "message", limit: 6 });
+    const index = bridge.advance_search_index({ budgetRows: 100 });
+    const window = bridge.load_message_window({ direction: "around", conversationId: "conversation-1", messageId: "message-1" });
+    expect(port.sent).toEqual([
+      { id: 1, command: "load_state", args: { conversationId: "conversation-1", metadataOnly: true } },
+      { id: 2, command: "search_local", args: { query: "hello", kind: "message", limit: 6 } },
+      { id: 3, command: "advance_search_index", args: { budgetRows: 100 } },
+      { id: 4, command: "load_message_window", args: { direction: "around", conversationId: "conversation-1", messageId: "message-1" } },
+    ]);
+    port.reply({ id: 1, ok: true, value: {} });
+    port.reply({ id: 2, ok: true, value: { query: "hello", items: [], indexState: "indexing", hasMore: {} } });
+    port.reply({ id: 3, ok: true, value: { indexState: "indexing", processed: 100, remaining: 1 } });
+    port.reply({ id: 4, ok: true, value: { conversationId: "conversation-1", messages: [], hasOlder: false, hasNewer: false } });
+    await expect(state).resolves.toEqual({});
+    await expect(search).resolves.toMatchObject({ query: "hello" });
+    await expect(index).resolves.toMatchObject({ processed: 100 });
+    await expect(window).resolves.toMatchObject({ conversationId: "conversation-1" });
+    bridge.dispose();
+  });
+
   it("routes roster and revoke requests through the active browser worker", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

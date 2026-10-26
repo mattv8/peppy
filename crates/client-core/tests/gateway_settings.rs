@@ -4,7 +4,25 @@ use common::*;
 
 fn roll_back_migrations_after_version_25(conn: &rusqlite::Connection) {
     conn.execute_batch(
-        "DROP TABLE mms_backfill_remote_capacity;
+        "DROP TRIGGER IF EXISTS messages_search_insert;
+         DROP TRIGGER IF EXISTS messages_search_update;
+         DROP TRIGGER IF EXISTS messages_search_delete;
+         DROP TRIGGER IF EXISTS contacts_search_insert;
+         DROP TRIGGER IF EXISTS contacts_search_update;
+         DROP TRIGGER IF EXISTS contacts_search_delete;
+         DROP TRIGGER IF EXISTS contact_books_search_insert;
+         DROP TRIGGER IF EXISTS contact_books_search_update;
+         DROP TRIGGER IF EXISTS contact_books_search_delete;
+         DROP TRIGGER IF EXISTS contact_address_search_insert;
+         DROP TRIGGER IF EXISTS contact_address_search_update;
+         DROP TRIGGER IF EXISTS contact_address_search_delete;
+         DROP TRIGGER IF EXISTS addresses_search_insert;
+         DROP TRIGGER IF EXISTS addresses_search_update;
+         DROP TRIGGER IF EXISTS addresses_search_delete;
+         DROP INDEX IF EXISTS messages_search_metadata;
+         DROP TABLE IF EXISTS local_search_fts;
+         DELETE FROM metadata WHERE k IN ('search_remaining','search_generation','search_backfill_highwater','search_backfill_watermark');
+         DROP TABLE mms_backfill_remote_capacity;
          CREATE TABLE mms_provider_identity_conflicts(
            source_generation TEXT NOT NULL,
            subscription_id TEXT NOT NULL,
@@ -177,7 +195,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 34);
+    assert_eq!(version, 35);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

@@ -30,6 +30,7 @@ import {
 } from "./phone";
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
+export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
 export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
@@ -690,6 +691,7 @@ export function AppTitlebar({
   sidebarControls,
   onNewMessage,
   navigation,
+  search,
 }: {
   onMinimize?(): void;
   onMaximize?(): void;
@@ -704,12 +706,35 @@ export function AppTitlebar({
   sidebarControls?: string;
   onNewMessage?(): void;
   navigation?: ReactNode;
+  search?: ReactNode;
 }) {
+  const titlebarRef = useRef<HTMLElement>(null);
   const macos = (platform ?? detectPlatform()) === "macos";
+  const hasSearch = Boolean(search);
   const renderedNavigation = !isComposer && navigation;
+  useLayoutEffect(() => {
+    const titlebar = titlebarRef.current;
+    if (isComposer || !hasSearch || !titlebar || typeof ResizeObserver === "undefined") return;
+    const previousHeight = titlebar.style.getPropertyValue("--peppy-active-titlebar-height");
+    const updateHeight = () => {
+      const height = `${titlebar.getBoundingClientRect().height}px`;
+      if (titlebar.style.getPropertyValue("--peppy-active-titlebar-height") !== height) {
+        titlebar.style.setProperty("--peppy-active-titlebar-height", height);
+      }
+    };
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(titlebar);
+    updateHeight();
+    return () => {
+      observer.disconnect();
+      if (previousHeight) titlebar.style.setProperty("--peppy-active-titlebar-height", previousHeight);
+      else titlebar.style.removeProperty("--peppy-active-titlebar-height");
+    };
+  }, [hasSearch, isComposer]);
   return (
     <header
       id="desktop-titlebar"
+      ref={titlebarRef}
       className="titlebar"
       data-tauri-drag-region
       role="banner"
@@ -772,13 +797,14 @@ export function AppTitlebar({
       <span className="titlebar-product" aria-hidden>
         <img src={logoUrl} alt="" draggable={false} />
       </span>
-      <strong className="titlebar-wordmark" data-tauri-drag-region>
+      {!isComposer && search}
+      {(!search || isComposer) && <strong className="titlebar-wordmark" data-tauri-drag-region>
         {isComposer ? (
           <b className="titlebar-conversation-title">
             {title ?? "Compose message"}
           </b>
         ) : "Peppy"}
-      </strong>
+      </strong>}
       <div className="titlebar-spacer" data-tauri-drag-region />
       {status && <div id="titlebar-status" className="titlebar-status">{status}</div>}
       {!macos && (onClose || (!isComposer && (onMinimize || onMaximize))) && <div

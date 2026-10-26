@@ -1,9 +1,11 @@
 import type {
-  AttachmentView, BridgeError, ContactBookView, ContactEditOutcome, ContactEditRequestInput,
-  ContactEditStatus, ContactSyncStatus, ContactView, DesktopBridge, DesktopSnapshot, Draft, HistoryPage,
-  AppLockStatus, DraftInput, NotificationPreferences, NotificationTarget, PublicCopy,
-  RecipientSuggestion, RestorableContact, SendDraftInput, ContactScanStatus, DeviceRosterView, MediaCursor, MediaOpen, MediaPage,
-} from "../../desktop/src/bridge";
+  AppLockStatus, AttachmentView, BridgeError, ContactBookView, ContactEditOutcome,
+  ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
+  DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
+  LocalSearchPage, LocalSearchRequest, MediaCursor, MediaOpen, MediaPage, MessageWindow,
+  MessageWindowRequest, NotificationPreferences, NotificationTarget, PublicCopy,
+  RecipientSuggestion, RestorableContact, SearchIndexProgress, SendDraftInput,
+} from "@peppy/desktop-ui/bridge-contracts";
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
@@ -409,7 +411,16 @@ export class BrowserBridge implements DesktopBridge {
     }
     this.stop("disconnected");
   }
-  public load_state(conversationId?: string, historyFromMessageId?: string): Promise<DesktopSnapshot> { return this.call("load_state", { conversationId, historyFromMessageId }); }
+  public load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot> {
+    return this.call("load_state", {
+      ...(conversationId ? { conversationId } : {}),
+      ...(historyFromMessageId ? { historyFromMessageId } : {}),
+      ...(options?.metadataOnly === undefined ? {} : { metadataOnly: options.metadataOnly }),
+    });
+  }
+  public search_local(input: LocalSearchRequest): Promise<LocalSearchPage> { return this.call("search_local", input); }
+  public advance_search_index(input?: { budgetRows?: number }): Promise<SearchIndexProgress> { return this.call("advance_search_index", input ?? {}); }
+  public load_message_window(input: MessageWindowRequest): Promise<MessageWindow> { return this.call("load_message_window", input); }
   public load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage> { return this.call("load_history", { conversationId, beforeMessageId }); }
   public save_draft(input: DraftInput): Promise<Draft> { return this.call("save_draft", { input }); }
   public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }

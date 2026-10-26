@@ -170,6 +170,7 @@ server-test:
 
 contracts-check:
     cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
+    cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
 
 desktop-build:
     pnpm --filter @peppy/desktop build

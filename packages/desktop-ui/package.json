@@ -27,6 +27,7 @@
     "vitest": "catalog:"
   },
   "dependencies": {
+    "@peppy/generated": "workspace:*",
     "libphonenumber-js": "^1.13.14",
     "lucide-react": "^0.468.0",
     "qrcode": "catalog:"
