@@ -142,6 +142,13 @@ const FINGERPRINT_HEX_BYTES: usize = 64;
 const KEY_CACHE_BYTES: usize = 4 + 1 + 16 + 16 + 4 + FINGERPRINT_HEX_BYTES + 32 + 32 + 32;
 const LEGACY_KEY_CACHE_BYTES: usize = KEY_CACHE_BYTES - 32;
 const KEY_CACHE_CHECK_DOMAIN: &[u8] = b"peppy-native-key-cache-check-v1\0";
+const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
+const SEAL_PENDING_SQL: &str = "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND seq>? ORDER BY seq LIMIT 256";
+const BATTERY_LOOKUP_INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
+CREATE INDEX IF NOT EXISTS outbox_unsealed_order ON outbox(seq) WHERE state='unsealed';
+CREATE INDEX IF NOT EXISTS outbox_queued_order ON outbox(seq) WHERE state='queued';
+";
 
 type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Store>>>>;
 type MediaMetaColumns = (Option<i64>, Option<i64>, Option<i64>, Option<String>);
@@ -2216,10 +2223,7 @@ impl Client {
             // receiver would quarantine the record. They are never resealed (same identity,
             // different digest); they upload unchanged once support is recorded again. Rows
             // without metadata (SMS, commands, legacy events) are unaffected.
-            .prepare(&format!(
-                "SELECT wire FROM outbox WHERE state='queued' AND {} ORDER BY seq LIMIT ?",
-                history_import::outbox_upload_eligible_predicate()
-            ))?;
+            .prepare(&queued_outbox_sql())?;
         let wires = query
             .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
                 r.get::<_, Vec<u8>>(0)
@@ -4622,6 +4626,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     }
     mms_backfill::initialize(conn)?;
     media_cache::initialize(conn)?;
+    initialize_battery_lookup_indexes(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -4662,6 +4667,13 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
         )?;
         emit_status(&tx, &ctx, parse(&id)?, SendState::OutcomeUnknown)?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+fn initialize_battery_lookup_indexes(conn: &mut Connection) -> Result<(), Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(BATTERY_LOOKUP_INDEXES)?;
     tx.commit()?;
     Ok(())
 }
@@ -6108,9 +6120,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
     );
     while count < limit {
         let rows: Vec<Row> = {
-            let mut query = conn.prepare(
-                "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND seq>? ORDER BY seq LIMIT 256",
-            )?;
+            let mut query = conn.prepare(SEAL_PENDING_SQL)?;
             query
                 .query_map(params![after], |r| {
                     Ok((
@@ -6277,11 +6287,19 @@ fn next_source_sequence(
 ) -> Result<SourceSequence, Error> {
     let last: i64 = conn.query_row(
         // Pending MMS/SMS provider acquisitions reserve their sequence before publication.
-        "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')",
-        params![conversation_id.to_string(), device_id.to_string()], |r| r.get(0),
+        NEXT_SOURCE_SEQUENCE_SQL,
+        params![conversation_id.to_string(), device_id.to_string()],
+        |r| r.get(0),
     )?;
     let last = u64::try_from(last).map_err(|_| Error::Database)?;
     Ok(SourceSequence(last.checked_add(1).ok_or(Error::Database)?))
+}
+
+fn queued_outbox_sql() -> String {
+    format!(
+        "SELECT wire FROM outbox WHERE state='queued' AND {} ORDER BY seq LIMIT ?",
+        history_import::outbox_upload_eligible_predicate()
+    )
 }
 
 fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<SendState>, Error> {
@@ -7128,7 +7146,9 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use peppy_crypto::enrollment::EnrollmentContext;
+    use rusqlite::StatementStatus;
     use serde_json::json;
+    use std::time::Instant;
     use uuid::Uuid;
 
     #[test]
@@ -8269,6 +8289,30 @@ mod tests {
         let client = Client::open(config.clone(), key()).unwrap();
         {
             let store = client.lock().unwrap();
+            for (index, definition) in [
+                (
+                    "sms_acquisitions_reserved_sequence",
+                    "CREATE INDEX sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete'",
+                ),
+                (
+                    "outbox_unsealed_order",
+                    "CREATE INDEX outbox_unsealed_order ON outbox(seq) WHERE state='unsealed'",
+                ),
+                (
+                    "outbox_queued_order",
+                    "CREATE INDEX outbox_queued_order ON outbox(seq) WHERE state='queued'",
+                ),
+            ] {
+                let actual: String = store
+                    .conn
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                        [index],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(actual, definition);
+            }
             store
                 .conn
                 .execute_batch(
@@ -8295,6 +8339,396 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert!(index_exists);
+    }
+
+    #[test]
+    fn current_schema_reopen_adds_battery_lookup_indexes() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("battery-indexes.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[35; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX sms_acquisitions_reserved_sequence;
+                 DROP INDEX outbox_unsealed_order;
+                 DROP INDEX outbox_queued_order;",
+                )
+                .unwrap();
+        }
+        drop(client);
+
+        let reopened = Client::open(config.clone(), key()).unwrap();
+        let store = reopened.lock().unwrap();
+        for index in [
+            "sms_acquisitions_reserved_sequence",
+            "outbox_unsealed_order",
+            "outbox_queued_order",
+        ] {
+            let exists: bool = store
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?)",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing {index}");
+        }
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT version FROM schema_meta", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION,
+        );
+        drop(store);
+        drop(reopened);
+        let reopened_again = Client::open(config, key()).unwrap();
+        let store = reopened_again.lock().unwrap();
+        assert_eq!(
+            store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('sms_acquisitions_reserved_sequence','outbox_unsealed_order','outbox_queued_order')", [], |row| row.get::<_, i64>(0)).unwrap(),
+            3,
+        );
+    }
+
+    #[test]
+    fn battery_lookup_indexes_use_the_hot_query_plans() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("battery-query-plans.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config.clone(), DatabaseKey::new(&[36; 32]).unwrap()).unwrap();
+        let store = client.lock().unwrap();
+        let conversation = ConversationId::new();
+        let device = config.device_id;
+        let plan = |sql: &str, values: &[&dyn rusqlite::ToSql]| {
+            store
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(values, |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+        };
+        assert!(
+            plan(
+                NEXT_SOURCE_SEQUENCE_SQL,
+                &[&conversation.to_string(), &device.to_string()]
+            )
+            .contains("sms_acquisitions_reserved_sequence")
+        );
+        assert!(plan(SEAL_PENDING_SQL, &[&0_i64]).contains("outbox_unsealed_order"));
+        assert!(plan(&queued_outbox_sql(), &[&1_i64]).contains("outbox_queued_order"));
+
+        let mut statement = store.conn.prepare(SEAL_PENDING_SQL).unwrap();
+        statement
+            .query_map([0_i64], |_| Ok(()))
+            .unwrap()
+            .for_each(Result::unwrap);
+        assert!(statement.get_status(StatementStatus::VmStep) > 0);
+    }
+
+    #[test]
+    fn battery_lookup_indexes_upgrade_and_future_version_guard_preserve_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("battery-version-guards.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[37; 32]).unwrap();
+        let client = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO drafts(conversation_id,content,revision) VALUES(?,'kept',1)",
+                    [ConversationId::new().to_string()],
+                )
+                .unwrap();
+            // This mirrors the existing version-33 fixture: the schema is current except for
+            // artifacts introduced by the simulated upgrade.
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX sms_acquisitions_reserved_sequence;
+                 DROP INDEX outbox_unsealed_order;
+                 DROP INDEX outbox_queued_order;
+                 UPDATE schema_meta SET version=34;",
+                )
+                .unwrap();
+        }
+        drop(client);
+        let upgraded = Client::open(config.clone(), key()).unwrap();
+        {
+            let store = upgraded.lock().unwrap();
+            assert_eq!(
+                store
+                    .conn
+                    .query_row("SELECT COUNT(*) FROM drafts", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store
+                    .conn
+                    .query_row("SELECT version FROM schema_meta", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+        }
+        drop(upgraded);
+
+        let conn = Connection::open(&config.database_path).unwrap();
+        apply_database_key(&conn, &key()).unwrap();
+        conn.execute_batch(
+            "DROP INDEX outbox_queued_order;
+             UPDATE schema_meta SET version=36;",
+        )
+        .unwrap();
+        drop(conn);
+        assert!(matches!(
+            Client::open(config.clone(), key()),
+            Err(Error::UnsupportedSchema)
+        ));
+
+        let conn = Connection::open(&config.database_path).unwrap();
+        apply_database_key(&conn, &key()).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT version FROM schema_meta", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            36
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM drafts", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let queued_index: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='outbox_queued_order')",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(!queued_index);
+    }
+
+    #[test]
+    fn battery_lookup_indexes_bound_empty_active_lookup_vm_steps() {
+        const COMPLETE_SMS: i64 = 100_000;
+        const ACKNOWLEDGED_OUTBOX: i64 = 20_000;
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("battery-vm-steps.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config.clone(), DatabaseKey::new(&[38; 32]).unwrap()).unwrap();
+        let mut store = client.lock().unwrap();
+        let conversation_id = ConversationId::new();
+        let conversation = conversation_id.to_string();
+        let device = config.device_id.to_string();
+        {
+            let tx = store.conn.transaction().unwrap();
+            for sequence in 1..=COMPLETE_SMS {
+                tx.execute(
+                    "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,0)",
+                    params![format!("message-{sequence}"), conversation, device, sequence, "{}"],
+                ).unwrap();
+                tx.execute(
+                    "INSERT INTO sms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_row_fingerprint,direction,conversation_id,input,state,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    params![format!("acquisition-{sequence}"), "generation", "subscription", format!("provider-{sequence}"), format!("fingerprint-{sequence}"), "incoming", conversation, "{}", "complete", format!("message-{sequence}"), sequence, sequence],
+                ).unwrap();
+            }
+            for sequence in 1..=ACKNOWLEDGED_OUTBOX {
+                tx.execute(
+                    "INSERT INTO outbox(seq,envelope_id,purpose,state) VALUES(?,?,?,?)",
+                    params![
+                        sequence,
+                        format!("acknowledged-{sequence}"),
+                        "event",
+                        "acknowledged"
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let vm_steps = |conn: &Connection, sql: &str, values: &[&dyn rusqlite::ToSql]| {
+            let mut statement = conn.prepare(sql).unwrap();
+            statement
+                .query_map(values, |_| Ok(()))
+                .unwrap()
+                .for_each(Result::unwrap);
+            statement.get_status(StatementStatus::VmStep)
+        };
+        let indexed_sms = vm_steps(
+            &store.conn,
+            NEXT_SOURCE_SEQUENCE_SQL,
+            &[&conversation, &device],
+        );
+        let indexed_unsealed = vm_steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]);
+        let queued_sql = queued_outbox_sql();
+        let indexed_queued = vm_steps(&store.conn, &queued_sql, &[&1_i64]);
+        for (query, steps) in [
+            ("SMS", indexed_sms),
+            ("unsealed", indexed_unsealed),
+            ("queued", indexed_queued),
+        ] {
+            assert!(
+                (1..=256).contains(&steps),
+                "100k {query} indexed VM steps must stay bounded: {steps}"
+            );
+        }
+
+        store
+            .conn
+            .execute_batch(
+                "DROP INDEX sms_acquisitions_reserved_sequence;
+             DROP INDEX outbox_unsealed_order;
+             DROP INDEX outbox_queued_order;",
+            )
+            .unwrap();
+        let unindexed_sms = vm_steps(
+            &store.conn,
+            NEXT_SOURCE_SEQUENCE_SQL,
+            &[&conversation, &device],
+        );
+        let unindexed_unsealed = vm_steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]);
+        let unindexed_queued = vm_steps(&store.conn, &queued_sql, &[&1_i64]);
+        let index_build_started = Instant::now();
+        store.conn.execute_batch(BATTERY_LOOKUP_INDEXES).unwrap();
+        let index_build = index_build_started.elapsed();
+
+        assert!(
+            indexed_sms < unindexed_sms,
+            "SMS indexed={indexed_sms}, unindexed={unindexed_sms}"
+        );
+        assert!(
+            indexed_unsealed < unindexed_unsealed,
+            "unsealed indexed={indexed_unsealed}, unindexed={unindexed_unsealed}"
+        );
+        assert!(
+            indexed_queued < unindexed_queued,
+            "queued indexed={indexed_queued}, unindexed={unindexed_queued}"
+        );
+        store.conn.execute(
+            "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,0)",
+            params!["other-device", conversation, DeviceId::new().to_string(), 1_000_000_i64, "{}"],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO sms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_row_fingerprint,direction,conversation_id,input,state,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            params!["pending-sms", "generation", "subscription", "pending-sms", "pending-sms", "incoming", conversation, "{}", "pending", "pending-sms", 300_000_i64, 300_000_i64],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO mms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,direction,conversation_id,input,state,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            params!["pending-mms", "generation", "subscription", "pending-mms", "incoming", conversation, "{}", "pending", "pending-mms", 200_000_i64, 200_000_i64],
+        ).unwrap();
+        assert_eq!(
+            next_source_sequence(&store.conn, conversation_id, config.device_id).unwrap(),
+            SourceSequence(300_001),
+        );
+        eprintln!(
+            "battery lookup 100k VM steps: sms {indexed_sms}/{unindexed_sms}, unsealed {indexed_unsealed}/{unindexed_unsealed}, queued {indexed_queued}/{unindexed_queued}; index build {index_build:?}"
+        );
+        drop(store);
+        drop(client);
+        let reopen_started = Instant::now();
+        let reopened = Client::open(config, DatabaseKey::new(&[38; 32]).unwrap()).unwrap();
+        let reopen = reopen_started.elapsed();
+        drop(reopened);
+        eprintln!("battery lookup 100k reopen {reopen:?}");
+    }
+
+    #[test]
+    fn battery_lookup_indexes_print_1k_history_vm_steps() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("battery-vm-steps-1k.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config.clone(), DatabaseKey::new(&[39; 32]).unwrap()).unwrap();
+        let mut store = client.lock().unwrap();
+        let conversation = ConversationId::new().to_string();
+        let device = config.device_id.to_string();
+        let tx = store.conn.transaction().unwrap();
+        for sequence in 1..=1_000_i64 {
+            tx.execute("INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen) VALUES(?,?,?,?,?,0)", params![format!("small-message-{sequence}"), conversation, device, sequence, "{}"]).unwrap();
+            tx.execute("INSERT INTO sms_acquisitions(acquisition_id,source_generation,subscription_id,provider_message_id,source_row_fingerprint,direction,conversation_id,input,state,message_id,source_sequence,local_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", params![format!("small-acquisition-{sequence}"), "generation", "subscription", format!("small-provider-{sequence}"), format!("small-fingerprint-{sequence}"), "incoming", conversation, "{}", "complete", format!("small-message-{sequence}"), sequence, sequence]).unwrap();
+            tx.execute(
+                "INSERT INTO outbox(seq,envelope_id,purpose,state) VALUES(?,?,?,?)",
+                params![
+                    sequence,
+                    format!("small-acknowledged-{sequence}"),
+                    "event",
+                    "acknowledged"
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let steps = |conn: &Connection, sql: &str, values: &[&dyn rusqlite::ToSql]| {
+            let mut statement = conn.prepare(sql).unwrap();
+            statement
+                .query_map(values, |_| Ok(()))
+                .unwrap()
+                .for_each(Result::unwrap);
+            statement.get_status(StatementStatus::VmStep)
+        };
+        let queued_sql = queued_outbox_sql();
+        let indexed = [
+            steps(
+                &store.conn,
+                NEXT_SOURCE_SEQUENCE_SQL,
+                &[&conversation, &device],
+            ),
+            steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]),
+            steps(&store.conn, &queued_sql, &[&1_i64]),
+        ];
+        for (query, steps) in ["SMS", "unsealed", "queued"].into_iter().zip(indexed) {
+            assert!(
+                (1..=256).contains(&steps),
+                "1k {query} indexed VM steps must stay bounded: {steps}"
+            );
+        }
+        store.conn.execute_batch("DROP INDEX sms_acquisitions_reserved_sequence; DROP INDEX outbox_unsealed_order; DROP INDEX outbox_queued_order;").unwrap();
+        let unindexed = [
+            steps(
+                &store.conn,
+                NEXT_SOURCE_SEQUENCE_SQL,
+                &[&conversation, &device],
+            ),
+            steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]),
+            steps(&store.conn, &queued_sql, &[&1_i64]),
+        ];
+        assert!(
+            indexed
+                .into_iter()
+                .zip(unindexed)
+                .all(|(indexed, unindexed)| indexed < unindexed)
+        );
+        eprintln!(
+            "battery lookup 1k VM steps: sms {}/{}, unsealed {}/{}, queued {}/{}",
+            indexed[0], unindexed[0], indexed[1], unindexed[1], indexed[2], unindexed[2]
+        );
     }
 
     #[test]
