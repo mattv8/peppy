@@ -11,6 +11,8 @@ pub mod avatar;
 pub mod compose;
 pub mod gateways;
 pub mod images;
+pub mod search;
+pub use search::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -159,6 +159,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The integration job runs all workspace tests, including library tests.
       - run: cargo run --locked -p peppy-protocol --bin generate-contracts -- --check
+      - run: cargo run --locked -p peppy-desktop-api --bin generate-search-contracts -- --check
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check licenses bans sources
       - run: cargo deny check advisories

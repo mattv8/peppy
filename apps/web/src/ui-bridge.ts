@@ -17,6 +17,11 @@ export type {
   MediaPageItem,
   MediaPage,
   MediaOpen,
+  LocalSearchRequest,
+  LocalSearchPage,
+  SearchIndexProgress,
+  MessageWindowRequest,
+  MessageWindow,
   DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 

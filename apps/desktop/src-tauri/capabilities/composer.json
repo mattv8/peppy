@@ -11,6 +11,7 @@
     "core:window:allow-start-dragging",
     "allow-load-state",
     "allow-load-history",
+    "allow-open-external-url",
     "allow-save-draft",
     "allow-send-draft",
     "allow-mark-seen",

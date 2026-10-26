@@ -319,6 +319,9 @@ importers:
 
   packages/desktop-ui:
     dependencies:
+      '@peppy/generated':
+        specifier: workspace:*
+        version: link:../generated
       libphonenumber-js:
         specifier: ^1.13.14
         version: 1.13.14

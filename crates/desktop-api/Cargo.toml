@@ -11,3 +11,4 @@ serde_json.workspace = true
 base64.workspace = true
 uuid.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+ts-rs = "10.1.0"

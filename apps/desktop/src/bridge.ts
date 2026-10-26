@@ -50,6 +50,11 @@ import type {
   MediaPageItem,
   MediaPage,
   MediaOpen,
+  LocalSearchRequest,
+  LocalSearchPage,
+  SearchIndexProgress,
+  MessageWindowRequest,
+  MessageWindow,
   DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 import { normalizePhoneNumber } from "@peppy/desktop-ui";
@@ -102,6 +107,11 @@ export {
   type MediaPageItem,
   type MediaPage,
   type MediaOpen,
+  type LocalSearchRequest,
+  type LocalSearchPage,
+  type SearchIndexProgress,
+  type MessageWindowRequest,
+  type MessageWindow,
   type DesktopBridge,
 } from "@peppy/desktop-ui/bridge-contracts";
 
@@ -135,6 +145,32 @@ const fixtureDrafts = new Map<string, Draft>();
 let fixtureCreated = 0;
 let fixturePhoneApproved = false;
 const fixtureError = (code: string, message: string): BridgeError => ({ code, message });
+const fixtureSearchContacts = [
+  { id: "contact-aurora", bookId: "book-pixel8", title: "Aurora Chen", subtitle: "+12025550123" },
+  { id: "contact-river", bookId: "book-pixel8", title: "River Park", subtitle: "+12025550124" },
+  { id: "contact-mina", bookId: "book-pixel8", title: "Mina Torres", subtitle: "+12025550125" },
+];
+const fixtureSearch = (input: LocalSearchRequest): LocalSearchPage => {
+  const query = input.query.trim().toLocaleLowerCase();
+  if (!query) return { query: input.query, items: [], indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
+  const limit = Math.min(input.limit ?? 6, 50);
+  const accepts = (kind: "conversation" | "message" | "contact") => !input.kind || input.kind === "all" || input.kind === kind;
+  const conversations = fixtureSnapshot.conversations.filter(item => `${item.name} ${item.participants?.join(" ") ?? ""}`.toLocaleLowerCase().includes(query)).map(item => ({ kind: "conversation" as const, conversationId: item.id, title: item.name, subtitle: item.preview })).slice(0, limit);
+  const messages = fixtureSnapshot.conversations.flatMap(conversation => conversation.messages.filter(message => `${message.body} ${message.subject ?? ""}`.toLocaleLowerCase().includes(query)).map(message => ({ kind: "message" as const, conversationId: conversation.id, messageId: message.id, title: conversation.name, snippet: message.body, timestamp: message.timestamp }))).slice(0, limit);
+  const contacts = fixtureSearchContacts.filter(contact => `${contact.title} ${contact.subtitle}`.toLocaleLowerCase().includes(query)).map(contact => ({ kind: "contact" as const, bookId: contact.bookId, contactId: contact.id, title: contact.title, subtitle: contact.subtitle })).slice(0, limit);
+  const items = [...(accepts("conversation") ? conversations : []), ...(accepts("message") ? messages : []), ...(accepts("contact") ? contacts : [])];
+  return { query: input.query, items, indexState: "ready", hasMore: { conversation: false, message: false, contact: false } };
+};
+const fixtureMessageWindow = (input: MessageWindowRequest): MessageWindow => {
+  const conversation = fixtureSnapshot.conversations.find(item => item.id === input.conversationId);
+  if (!conversation) throw fixtureError("not-found", "The requested stored item was not found.");
+  if (input.direction === "refresh") return { conversationId: conversation.id, messages: conversation.messages.filter(message => input.messageIds.includes(message.id)), hasOlder: false, hasNewer: false };
+  const anchor = conversation.messages.findIndex(message => message.id === input.messageId);
+  if (anchor < 0) throw fixtureError("not-found", "The requested stored item was not found.");
+  const start = input.direction === "older" ? Math.max(0, anchor - 50) : input.direction === "newer" ? anchor + 1 : Math.max(0, anchor - 24);
+  const end = input.direction === "older" ? anchor : Math.min(conversation.messages.length, start + 50);
+  return { conversationId: conversation.id, messages: conversation.messages.slice(start, end), hasOlder: start > 0, hasNewer: end < conversation.messages.length };
+};
 const canonicalRecipient = (recipient: string) => normalizePhoneNumber(recipient) ?? recipient.trim();
 const canonicalRecipients = (recipientIds: string[]) => [...new Set(recipientIds.map(canonicalRecipient).filter(Boolean))];
 const recipientSetKey = (recipientIds: string[]) => canonicalRecipients(recipientIds).sort().join("\n");
@@ -229,10 +265,10 @@ const fixtureSave = (input: DraftInput): Draft => {
   return saved;
 };
 export const fixtureBridge: DesktopBridge = {
-  load_state: async (conversationId, historyFromMessageId) => {
+  load_state: async (conversationId, historyFromMessageId, options) => {
     const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
     const conversations = fixtureSnapshot.conversations.map(conversation => {
-      if (conversation.id !== active) return { ...conversation, messages: [] };
+      if (conversation.id !== active || options?.metadataOnly) return { ...conversation, messages: [] };
       const anchorIndex = historyFromMessageId === undefined ? -1 : conversation.messages.findIndex(message => message.id === historyFromMessageId);
       if (historyFromMessageId !== undefined && anchorIndex < 0) throw fixtureError("not-found", "The requested stored item was not found.");
       const messages = historyFromMessageId === undefined ? conversation.messages.slice(-50) : conversation.messages.slice(anchorIndex);
@@ -240,6 +276,10 @@ export const fixtureBridge: DesktopBridge = {
     });
     return { ...fixtureSnapshot, conversations: [...conversations, ...fixtureDraftConversations()], activeConversationId: active, draft: fixtureDrafts.get(active) };
   },
+  search_local: async input => fixtureSearch(input),
+  advance_search_index: async (): Promise<SearchIndexProgress> => ({ indexState: "ready", processed: 0, remaining: 0 }),
+  load_message_window: async input => fixtureMessageWindow(input),
+  open_external_url: async url => { if (!/^https?:\/\//.test(url)) throw fixtureError("invalid-request", "The URL is invalid."); },
   load_history: async (conversationId, beforeMessageId) => {
     const conversation = fixtureSnapshot.conversations.find(item => item.id === conversationId);
     const anchorIndex = conversation?.messages.findIndex(message => message.id === beforeMessageId) ?? -1;
@@ -375,7 +415,7 @@ const invoke = async <T>(command: string, args?: Record<string, unknown>) => (aw
 export const tauriBridge: DesktopBridge = {
   media_page_around: (conversationId, attachmentId, messageId, limit) => invoke("media_page_around", { conversationId, attachmentId, messageId, limit }),
   media_page_newer: (conversationId, cursor, limit) => invoke("media_page_newer", { conversationId, cursor, limit }),
-  load_state: (conversationId, historyFromMessageId) => invoke("load_state", { conversationId, historyFromMessageId }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
+  load_state: (conversationId, historyFromMessageId, options) => invoke("load_state", { conversationId, historyFromMessageId, metadataOnly: options?.metadataOnly }), search_local: input => invoke("search_local", { input }), advance_search_index: input => invoke("advance_search_index", { input }), load_message_window: input => invoke("load_message_window", { input }), open_external_url: url => invoke("open_external_url", { url }), load_history: (conversationId, beforeMessageId) => invoke("load_history", { conversationId, beforeMessageId }), configure_server: origin => invoke("configure_server", { origin }), unlock_sync: () => invoke("unlock_sync"), get_app_lock_status: () => invoke("get_app_lock_status"), set_app_lock: enabled => invoke("set_app_lock", { enabled }), unlock_app: () => invoke("unlock_app"), save_draft: input => invoke("save_draft", { input }), discard_draft: input => invoke("discard_draft", { input }), send_draft: input => invoke("send_draft", { input }), mark_seen: visibleMessageIds => invoke("mark_seen", { visibleMessageIds }), dismiss_notification: target => invoke("dismiss_notification", { target }), dismiss_all_notifications: () => invoke("dismiss_all_notifications"), set_app_muted: (sourceDeviceId, packageName, appName, muted) => invoke("set_app_muted", { sourceDeviceId, packageName, appName, muted }), mark_notifications_seen: targets => invoke("mark_notifications_seen", { targets }), set_notification_preferences: preferences => invoke("set_notification_preferences", { preferences }), set_notification_context: (view, conversationId) => invoke("set_notification_context", { view, conversationId }), request_notification_permission: () => invoke("request_notification_permission"), pick_attachments: () => invoke("pick_attachments"), retry_attachment: id => invoke("retry_attachment", { id }), save_attachment: id => invoke("save_attachment", { id }), request_attachment_download: id => invoke("request_attachment_download", { id }), media_page: (conversationId, cursor, limit) => invoke("media_page", { conversationId, cursor, limit }), open_media: id => invoke("open_media", { id }), close_media: (id, url) => invoke("close_media", { id, url }), load_media: id => invoke("load_media", { id }), publish_attachment: id => invoke("publish_attachment", { id }), open_composer: conversationId => invoke("open_composer", { conversationId }), set_start_at_login: enabled => invoke("set_start_at_login", { enabled }), popout_conversation: conversationId => invoke("popout_conversation", { conversationId }), hide_head: conversationId => invoke("hide_head", { conversationId }), close_composer: () => invoke("close_composer"), close_head_panel: () => invoke("close_head_panel"), subscribe: listener => subscribeEvent("peppy://state", () => listener()), subscribe_lifecycle: listener => subscribeWindowEvent("peppy://lifecycle-request", (payload: unknown) => { if (isLifecycleRequest(payload)) listener(payload); }), subscribe_lifecycle_finished: listener => subscribeWindowEvent("peppy://lifecycle-finished", (payload: unknown) => { if (isLifecycleFinished(payload)) listener(payload); }), acknowledge_lifecycle: (id, ok) => invoke("acknowledge_lifecycle", { id, ok }),
   list_devices: () => invoke("list_devices"), revoke_device: deviceId => invoke("revoke_device", { deviceId }), list_contact_books: () => invoke("list_contact_books"), forget_contact_book: bookId => invoke("forget_contact_book", { bookId }), list_contacts: (bookId, query, offset) => invoke("list_contacts", { bookId, query, offset }), submit_contact_edit: input => invoke("submit_contact_edit", { input }), list_contact_edits: bookId => invoke("list_contact_edits", { bookId }), search_contact_recipients: (query, sourceDeviceId) => invoke("search_contact_recipients", { query, sourceDeviceId }), request_contact_repair: () => invoke("request_contact_repair"), request_contact_sync: bookId => invoke("request_contact_sync", { bookId }), get_contact_sync_request: bookId => invoke("get_contact_sync_request", { bookId }), pick_contact_photo: () => invoke("pick_contact_photo"), list_restorable_contacts: bookId => invoke("list_restorable_contacts", { bookId }), restore_contact: (bookId, contactId) => invoke("restore_contact", { bookId, contactId }), hosted_account: () => invoke("hosted_account"), hosted_origin_url: () => invoke("hosted_origin_url"), hosted_sign_in: provider => invoke("hosted_sign_in", { provider }), hosted_sign_out: () => invoke("hosted_sign_out"), hosted_open_billing: () => invoke("hosted_open_billing"), hosted_provision: () => invoke("hosted_provision"), enrollment_discover: origin => invoke("enrollment_discover", { origin }), enrollment_start_over: () => invoke("enrollment_start_over"), enrollment_create_owner: input => invoke("enrollment_create_owner", { input }), enrollment_sign_in: input => invoke("enrollment_sign_in", { input }), enrollment_connect_shared_secret: input => invoke("enrollment_connect_shared_secret", { input }), enrollment_begin_vault_request: input => invoke("enrollment_begin_vault_request", { input }), enrollment_vault_request_status: () => invoke("enrollment_vault_request_status"), enrollment_create_vault: input => invoke("enrollment_create_vault", { input }), enrollment_add_phone: method => invoke("enrollment_add_phone", { method }), enrollment_rotate_phone: method => invoke("enrollment_rotate_phone", { method }), enrollment_cancel_phone: () => invoke("enrollment_cancel_phone"), reveal_vault_secret: () => invoke("reveal_vault_secret"), enrollment_status: () => invoke("enrollment_status"), enrollment_approve: () => invoke("enrollment_approve"), enrollment_cancel: () => invoke("enrollment_cancel"), enrollment_sign_out: () => invoke("enrollment_sign_out"),
   async window(action) { const w = (await import("@tauri-apps/api/window")).getCurrentWindow(); if (action === "minimize") await w.minimize(); else if (action === "maximize") await w.toggleMaximize(); else await w.close(); },
 };

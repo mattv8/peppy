@@ -426,6 +426,19 @@ describe("desktop UI controls", () => {
     expect(document.getElementById("titlebar-actions")).not.toBeInTheDocument();
   });
 
+  it.each(["macos", "windows", "linux"] as const)("places the main search directly after the product on %s", (platform) => {
+    render(<AppTitlebar platform={platform} search={<span id="search-slot">Search</span>} />);
+    const product = document.querySelector(".titlebar-product")!;
+    expect(product.nextElementSibling).toHaveAttribute("id", "search-slot");
+    expect(document.querySelector(".titlebar-wordmark")).not.toBeInTheDocument();
+  });
+
+  it("keeps the composer wordmark and excludes the main search slot", () => {
+    render(<AppTitlebar isComposer title="Aurora" search={<span id="search-slot">Search</span>} />);
+    expect(document.getElementById("search-slot")).not.toBeInTheDocument();
+    expect(document.querySelector(".titlebar-wordmark")).toHaveTextContent("Aurora");
+  });
+
   it.each(["rail", "titlebar"] as const)("renders %s navigation buttons with badges and view behavior", (orientation) => {
     const onView = vi.fn();
     const onToggleList = vi.fn();

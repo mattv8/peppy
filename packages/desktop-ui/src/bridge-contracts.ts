@@ -2,11 +2,32 @@
  * UI-only native boundary. These DTOs intentionally contain no credentials,
  * cryptographic material, device tokens, or raw filesystem paths.
  */
+import type {
+  LocalSearchHit,
+  LocalSearchPage,
+  LocalSearchRequest,
+  MessageWindow as GeneratedMessageWindow,
+  MessageWindowRequest,
+  SearchIndexProgress,
+  SearchKind,
+} from "@peppy/generated/local-search";
+export type {
+  LocalSearchHit,
+  LocalSearchPage,
+  LocalSearchRequest,
+  MessageWindowRequest,
+  SearchHasMore,
+  SearchIndexProgress,
+  SearchIndexState,
+  SearchKind,
+} from "@peppy/generated/local-search";
+
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
 export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaMeta?: MediaMetadataView };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
+export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
 export type MediaMetadataView = { width?: number; height?: number; durationMs?: string; thumbnail?: AttachmentView; previewUnavailable?: "thumbnail_unavailable" };
 export type MediaPageItem = { messageId: string; senderAddress?: string; timestamp: string; attachment: AttachmentView; mediaMeta?: MediaMetadataView; cursor: MediaCursor };
@@ -88,7 +109,11 @@ export type HostedPreviewView = {
 export type AppLockStatus = { enabled: boolean; locked: boolean; storageAvailable: boolean };
 
 export interface DesktopBridge {
-  load_state(conversationId?: string, historyFromMessageId?: string): Promise<DesktopSnapshot>;
+  load_state(conversationId?: string, historyFromMessageId?: string, options?: { metadataOnly?: boolean }): Promise<DesktopSnapshot>;
+  search_local(input: LocalSearchRequest): Promise<LocalSearchPage>;
+  advance_search_index(input?: { budgetRows?: number }): Promise<SearchIndexProgress>;
+  load_message_window(input: MessageWindowRequest): Promise<MessageWindow>;
+  open_external_url?(url: string): Promise<void>;
   load_history(conversationId: string, beforeMessageId: string): Promise<HistoryPage>;
   configure_server(origin: string): Promise<void>;
   unlock_sync(): Promise<void>;

@@ -313,6 +313,49 @@ fn choose(candidates: Vec<Candidate>, source: Option<&str>) -> Option<Candidate>
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct AddressResolution {
+    pub chosen_display_name: Option<String>,
+    pub candidate_display_names: Vec<String>,
+}
+
+pub(crate) struct DisplayResolver<'a> {
+    conn: &'a Connection,
+    books: Vec<Book>,
+}
+
+impl DisplayResolver<'_> {
+    pub(crate) fn resolve(
+        &self,
+        address: &str,
+        source: Option<&str>,
+    ) -> Result<AddressResolution, Error> {
+        let candidates = candidates(self.conn, address, source, &self.books)?;
+        let mut candidate_display_names = candidates
+            .iter()
+            .map(|candidate| candidate.display_name.clone())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        candidate_display_names.sort();
+        candidate_display_names.dedup();
+        let chosen_display_name = choose(candidates, source)
+            .map(|candidate| candidate.display_name)
+            .filter(|name| !name.is_empty());
+        Ok(AddressResolution {
+            chosen_display_name,
+            candidate_display_names,
+        })
+    }
+}
+
+/// Creates a read-only resolver that shares contact-book metadata across an entire search.
+pub(crate) fn display_resolver(conn: &Connection) -> Result<DisplayResolver<'_>, Error> {
+    Ok(DisplayResolver {
+        conn,
+        books: books(conn)?,
+    })
+}
+
 pub(crate) fn resolve(conn: &mut Connection, input: &str) -> Result<String, Error> {
     let input: Value = serde_json::from_str(input).map_err(|_| invalid())?;
     let addresses = input

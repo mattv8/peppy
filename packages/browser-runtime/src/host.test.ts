@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { CoreRejectedError } from "./core.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BrowserCoreError, CoreRejectedError } from "./core.js";
 import { BrowserWorkerHost, dispatchBrowserRpc, type BrowserPort, type HostSession } from "./host.js";
 import type { OwnerLockManager } from "./owner.js";
 import { TransportError } from "./transport.js";
@@ -31,13 +31,13 @@ class FakeSession implements HostSession {
   public previewAttachment?: (id: string) => Promise<string | undefined>;
   public exportAttachment?: (id: string) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
   public openMediaAttachment?: (id: string, maxBytes: number) => Promise<Record<string, unknown> & { bytes: Uint8Array }>;
-  public async query(command: string, args: Record<string, unknown>) {
+  public async query(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
     if (command === "_worker_identity_metadata") return { deviceId: "00000000-0000-0000-0000-000000000001" };
     return command === "snapshot" ? this.snapshot : { command };
   }
-  public async mutate(command: string, args: Record<string, unknown>) { this.calls.push({ command, args, mutation: true }); this.generation += 1; return { command }; }
+  public async mutate(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> { this.calls.push({ command, args, mutation: true }); this.generation += 1; return { command }; }
   public async unlock(_passphrase: string) { this.phase = "ready"; }
   public async enroll(_metadata: unknown, _deviceToken: string, _passphrase: string) { this.phase = "ready"; }
   public shutdown() { this.phase = "closed"; }
@@ -54,6 +54,8 @@ function port(): BrowserPort & { messages: unknown[]; emit(message: unknown): vo
 }
 
 describe("browser host RPC", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
   it("does not forward private worker commands", async () => {
     const session = new FakeSession();
     for (const command of ["_worker_transport_token", "_worker_enrollment_finish_owner"]) {
@@ -195,6 +197,263 @@ describe("browser host RPC", () => {
       { command: "save_draft", args: { text: "hello" }, mutation: true },
       { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
     ]);
+  });
+
+  it("routes search and bounded history windows as reads and index advancement as a checkpointed mutation", async () => {
+    const session = new FakeSession();
+    await dispatchBrowserRpc(session, { id: 1, command: "search_local", args: { query: "hello" } });
+    await dispatchBrowserRpc(session, { id: 2, command: "advance_search_index", args: { budgetRows: 100 } });
+    await dispatchBrowserRpc(session, { id: 3, command: "load_message_window", args: { direction: "refresh", conversationId: "conversation", messageIds: [] } });
+    expect(session.calls).toEqual([
+      { command: "search_local", args: { query: "hello" }, mutation: false },
+      { command: "advance_search_index", args: { budgetRows: 100 }, mutation: true },
+      { command: "load_message_window", args: { direction: "refresh", conversationId: "conversation", messageIds: [] }, mutation: false },
+    ]);
+  });
+
+  it("starts one checkpointed index batch after a locked session unlocks", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    session.phase = "locked";
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "search_local" ? { indexState: "indexing" } : { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "unlock", args: { passphrase: "passphrase" } });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.calls).toContainEqual({ command: "advance_search_index", args: {}, mutation: true });
+    vi.useRealTimers();
+  });
+
+  it("coalesces index searches, broadcasts only ready completion, and stops after ready", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    const states = ["indexing", "indexing", "ready"];
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      session.generation += 1;
+      return { indexState: states.shift() };
+    };
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "search_local" ? { indexState: "indexing" } : { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    for (let id = 1; id <= 10; id += 1) attached.emit({ id, command: "search_local", args: { query: "hello" } });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(3);
+    expect(attached.messages.filter(message => JSON.stringify(message) === JSON.stringify({ event: "changed" }))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(3);
+    vi.useRealTimers();
+  });
+
+  it("waits three times a slow batch duration after completion before the next batch", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    let complete!: () => void;
+    session.mutate = vi.fn(async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      await new Promise<void>(resolve => { complete = resolve; });
+      return { indexState: "indexing" };
+    });
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(session.mutate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(900);
+    complete();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(session.mutate).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4_700);
+    expect(session.mutate).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("rate-limits explicit index requests and cancels queued maintenance on lock", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "advance_search_index", args: {} });
+    await Promise.resolve();
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "busy", message: "Search indexing is already scheduled." } });
+    attached.emit({ id: 2, command: "lock_sync", args: {} });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("answers explicit index requests from a locked session with locked rather than busy", async () => {
+    const session = new FakeSession();
+    session.phase = "locked";
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "advance_search_index", args: {} });
+    await eventually(() => attached.messages.length > 1);
+    expect(attached.messages).toContainEqual({ id: 1, ok: false, error: { code: "locked", message: "Search indexing is unavailable." } });
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(0);
+  });
+
+  it("does not checkpoint maintenance when an already-indexed session unlocks", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    session.phase = "locked";
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return command === "search_local" ? { indexState: "ready" } : { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "unlock", args: { passphrase: "passphrase" } });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(session.calls.filter(call => call.command === "search_local")).toHaveLength(1);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it("does not start a maintenance batch while a dispatched request is still in flight", async () => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "snapshot") await readGate;
+      return command === "snapshot" ? {} : { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "load_state", args: {} });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(0);
+    releaseRead();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("retries transient index failures but stops after a closed-session failure", async () => {
+    vi.useFakeTimers();
+    const transient = new FakeSession();
+    let attempts = 0;
+    transient.mutate = async (command, args) => {
+      transient.calls.push({ command, args, mutation: true });
+      attempts += 1;
+      if (attempts === 1) throw new CoreRejectedError("unavailable");
+      return { indexState: "ready" };
+    };
+    const transientHost = new BrowserWorkerHost({ locks: locks(), boot: async () => transient });
+    await transientHost.attach(port());
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(attempts).toBe(2);
+
+    const permanent = new FakeSession();
+    permanent.mutate = async (command, args) => {
+      permanent.calls.push({ command, args, mutation: true });
+      throw new BrowserCoreError("core-error");
+    };
+    const permanentHost = new BrowserWorkerHost({ locks: locks(), boot: async () => permanent });
+    await permanentHost.attach(port());
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(permanent.calls.filter(call => call.command === "advance_search_index")).toHaveLength(1);
+
+    const closed = new FakeSession();
+    closed.mutate = async (command, args) => {
+      closed.calls.push({ command, args, mutation: true });
+      closed.phase = "closed";
+      throw new BrowserCoreError("core");
+    };
+    const closedHost = new BrowserWorkerHost({ locks: locks(), boot: async () => closed });
+    await closedHost.attach(port());
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(closed.calls.filter(call => call.command === "advance_search_index")).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ["succeeds", false],
+    ["commits and then fails as a handled rejection", true],
+  ])("does not broadcast a read that finishes behind an index-only checkpoint that %s", async (_outcome, rejects) => {
+    vi.useFakeTimers();
+    const session = new FakeSession();
+    let finishBatch!: () => void;
+    const batchGate = new Promise<void>(resolve => { finishBatch = resolve; });
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      if (command !== "advance_search_index") {
+        session.generation += 1;
+        return { command };
+      }
+      await batchGate;
+      session.generation += 1;
+      if (rejects) throw new CoreRejectedError("unavailable");
+      return { indexState: "indexing" };
+    };
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "search_local") return { indexState: "indexing" };
+      if (command === "snapshot") await batchGate;
+      return command === "snapshot" ? {} : { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const first = port();
+    const second = port();
+    await host.attach(first);
+    await host.attach(second);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(session.calls.filter(call => call.command === "advance_search_index")).toHaveLength(1);
+    first.emit({ id: 1, command: "load_state", args: {} });
+    await vi.advanceTimersByTimeAsync(0);
+    finishBatch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.messages).toContainEqual(expect.objectContaining({ id: 1, ok: true }));
+    expect(first.messages).not.toContainEqual({ event: "changed" });
+    expect(second.messages).not.toContainEqual({ event: "changed" });
+    vi.useRealTimers();
+  });
+
+  it("still broadcasts when a read overlaps a durable media mutation", async () => {
+    const session = new FakeSession();
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "snapshot") await readGate;
+      return command === "snapshot" ? {} : { command };
+    };
+    const host = new BrowserWorkerHost({ locks: locks(), boot: async () => session });
+    const attached = port();
+    await host.attach(attached);
+    attached.emit({ id: 1, command: "load_state", args: {} });
+    await eventually(() => session.calls.some(call => call.command === "snapshot"));
+    attached.emit({ id: 2, command: "request_attachment_download", args: { id: "00000000-0000-0000-0000-000000000002" } });
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && (message as { id?: unknown }).id === 2));
+    releaseRead();
+    await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && (message as { id?: unknown }).id === 1));
+    expect(attached.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("skips preview enrichment for a flat metadata-only snapshot", async () => {
+    const session = new FakeSession();
+    session.snapshot = { activeConversationId: "conversation", conversations: [{ id: "conversation", messages: [{ attachments: [{ id: "image", mediaType: "image/png", state: "ready" }] }] }] };
+    session.previewAttachment = vi.fn(async () => "data:image/png;base64,cHJldmlldw==");
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "load_state", args: { metadataOnly: true } })).resolves.toMatchObject({ ok: true });
+    expect(session.previewAttachment).not.toHaveBeenCalled();
   });
 
   it("checkpoints scan requests but reads scan status without a mutation", async () => {
@@ -676,7 +935,7 @@ describe("browser host RPC", () => {
     await eventually(() => enrollmentRevokeDevice.mock.calls.length === 1);
     expect(enrollmentManagement).toHaveBeenCalledOnce();
     expect(enrollmentRevokeDevice).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000002");
-    expect(session.calls).toEqual([]);
+    expect(session.calls.filter(call => call.command !== "search_local")).toEqual([]);
   });
 
   it("routes roster reads and revocation through the device-authenticated network adapter", async () => {
@@ -698,7 +957,7 @@ describe("browser host RPC", () => {
     await eventually(() => revokeDevice.mock.calls.length === 1);
     expect(listDevices).toHaveBeenCalledOnce();
     expect(revokeDevice).toHaveBeenCalledWith("00000000-0000-0000-0000-000000000002");
-    expect(session.calls).toEqual([{ command: "_worker_identity_metadata", args: {}, mutation: false }]);
+    expect(session.calls.filter(call => call.command !== "search_local")).toEqual([{ command: "_worker_identity_metadata", args: {}, mutation: false }]);
   });
 
   it("forwards optional raw roster presence without requiring older servers to provide it", async () => {

@@ -7,8 +7,9 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { StrictMode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ContactsView } from "./Contacts";
+import { ContactsView, type ContactTarget } from "./Contacts";
 import {
   bridge,
   type ContactBookView,
@@ -61,9 +62,23 @@ const mockContactRiver: ContactView = {
   addresses: [],
 };
 
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+};
+
 describe("ContactsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
     vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook]);
     vi.mocked(bridge.list_contacts).mockResolvedValue([
       mockContactAurora,
@@ -73,7 +88,14 @@ describe("ContactsView", () => {
     vi.mocked(bridge.list_restorable_contacts).mockResolvedValue([]);
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    if (originalScrollIntoView) {
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+    } else {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
 
   it("requests a fresh scan for the selected capable book", async () => {
     vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, capabilities: { ...mockContactBook.capabilities, canSync: true } }]);
@@ -902,5 +924,361 @@ describe("ContactsView", () => {
       expect(await screen.findByText("The phone finished its scan. Contacts are still being repaired locally.")).toBeInTheDocument();
       expect(screen.queryByText("Scan completed.")).not.toBeInTheDocument();
     });
+
+    it("finds an off-page target even when the book count is stale, then focuses its row", async () => {
+      const pages = Array.from({ length: 2 }, (_, page) => Array.from({ length: 200 }, (_, index) => ({
+        ...mockContactRiver,
+        id: `contact-${page * 200 + index}`,
+        displayName: `Person ${page * 200 + index}`,
+      })));
+      const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([{ ...mockContactBook, contactCount: 1 }]);
+      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset = 0) => pages[offset / 200] ?? [targetContact]);
+      const consumed = vi.fn();
+      render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 10 }} onTargetConsumed={consumed} />);
+
+      const selected = await screen.findByRole("button", { name: /Person 400/ });
+      await waitFor(() => expect(consumed).toHaveBeenCalledWith(10));
+      await waitFor(() => expect(document.activeElement).toBe(selected));
+      expect(scrollIntoView).toHaveBeenCalled();
+    });
+
+    it("consumes a cancelled dirty target so a newer request can ask again", async () => {
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView onTargetConsumed={consumed} />);
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+      fireEvent.click(screen.getByLabelText("Edit contact"));
+      fireEvent.change(screen.getByLabelText("Given name"), { target: { value: "Unsaved" } });
+
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 11 }} onTargetConsumed={consumed} />);
+      expect(await screen.findByText("You have unsaved changes.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      expect(consumed).toHaveBeenCalledWith(11);
+
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 12 }} onTargetConsumed={consumed} />);
+      expect(await screen.findByText("You have unsaved changes.")).toBeInTheDocument();
+    });
+
+    it("does not let a replaced target's deferred page apply", async () => {
+      const resolvers: Array<(contacts: ContactView[]) => void> = [];
+      vi.mocked(bridge.list_contacts).mockImplementation(() => new Promise(resolve => { resolvers.push(resolve); }));
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 13 }} onTargetConsumed={consumed} />);
+      await screen.findByText("Pixel 8");
+      await screen.findByText(/Finding requested contact/);
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 14 }} onTargetConsumed={consumed} />);
+      await waitFor(() => expect(resolvers).toHaveLength(3));
+      resolvers[0]([mockContactAurora]);
+      resolvers[1]([mockContactAurora]);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      resolvers[2]([mockContactRiver]);
+      expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledWith(14);
+      expect(consumed).not.toHaveBeenCalledWith(13);
+    });
+
+    it("consumes a pending target on unmount without applying a late page", async () => {
+      let resolveLookup!: (contacts: ContactView[]) => void;
+      vi.mocked(bridge.list_contacts).mockImplementation(() => new Promise(resolve => { resolveLookup = resolve; }));
+      const consumed = vi.fn();
+      const view = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 15 }} onTargetConsumed={consumed} />);
+      await screen.findByText("Pixel 8");
+      await screen.findByText(/Finding requested contact/);
+      view.unmount();
+      resolveLookup([mockContactAurora]);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(consumed).toHaveBeenCalledWith(15);
+      expect(screen.queryByText("Aurora Chen")).not.toBeInTheDocument();
+    });
+
+    it("returns to the first page when clearing a paged search", async () => {
+      const fullPage = Array.from({ length: 200 }, (_, index) => ({
+        ...mockContactRiver,
+        id: `search-${index}`,
+        displayName: `Search ${index}`,
+      }));
+      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, query, offset = 0) => {
+        if (query === "river" && offset === 0) return fullPage;
+        if (query === "river") return [{ ...mockContactRiver, id: "search-200", displayName: "Search 200" }];
+        return [mockContactAurora];
+      });
+      render(<ContactsView />);
+
+      fireEvent.change(screen.getByLabelText("Search contacts"), { target: { value: "river" } });
+      await screen.findByText("Search 0");
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await screen.findByText("Search 200");
+      fireEvent.click(screen.getByLabelText("Clear search"));
+
+      await screen.findByText("Aurora Chen");
+      expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-pixel8", "", 0);
+    });
+
+    it("returns to the first page when a removed current book falls back", async () => {
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      let hint: (() => void) | undefined;
+      let books = [mockContactBook, secondBook];
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
+      vi.mocked(bridge.list_contacts).mockImplementation(async (id, _query, offset = 0) => {
+        if (id === "book-iphone" && offset < 400) {
+          return Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `iphone-${offset + index}`, bookId: id, displayName: `iPhone ${offset + index}` }));
+        }
+        if (id === "book-iphone") return [{ ...mockContactRiver, id: "iphone-400", bookId: id, displayName: "iPhone 400" }];
+        return [mockContactAurora];
+      });
+      render(<ContactsView />);
+      fireEvent.click(await screen.findByRole("button", { name: /iPhone/ }));
+      await screen.findByText("iPhone 0");
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await screen.findByText("iPhone 200");
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+      await screen.findByText("iPhone 400");
+
+      books = [mockContactBook];
+      act(() => hint?.());
+
+      await screen.findByText("Aurora Chen");
+      expect(bridge.list_contacts).toHaveBeenLastCalledWith("book-pixel8", "", 0);
+    });
+
+    it("keeps the real app target through a StrictMode fake unmount", async () => {
+      const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
+      const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
+      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset = 0) => offset === 0 ? firstPage : offset === 200 ? firstPage : [targetContact]);
+
+      function StrictAppHarness() {
+        const [target, setTarget] = useState<ContactTarget | null>({ bookId: "book-pixel8", contactId: "contact-400", requestId: 40 });
+        return <ContactsView target={target} onTargetConsumed={requestId => {
+          setTarget(current => current?.requestId === requestId ? null : current);
+        }} />;
+      }
+
+      render(<StrictMode><StrictAppHarness /></StrictMode>);
+
+      expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
+    });
+
+    it("does not restart a deferred target walk when a live hint refreshes books", async () => {
+      let hint: (() => void) | undefined;
+      const pageTwo = deferred<ContactView[]>();
+      const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
+      const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.list_contacts).mockImplementation((_book, query, offset = 0) => {
+        if (query || offset === 0) return Promise.resolve(firstPage);
+        if (offset === 200) return pageTwo.promise;
+        return Promise.resolve([targetContact]);
+      });
+      render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 41 }} />);
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
+      const offsetZeroBefore = vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0).length;
+
+      act(() => hint?.());
+      await new Promise(resolve => setTimeout(resolve, 180));
+      expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && (offset ?? 0) === 0)).toHaveLength(offsetZeroBefore + 1);
+      pageTwo.resolve(firstPage);
+
+      expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
+      expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1);
+    });
+
+    it("clears a failed target alert when a newer target succeeds", async () => {
+      vi.mocked(bridge.list_contacts).mockImplementation(async (_book, _query, offset = 0) => offset === 0 ? [mockContactAurora, mockContactRiver] : []);
+      const consumed = vi.fn();
+      const { rerender, container } = render(<ContactsView target={{ bookId: "missing-book", contactId: "missing", requestId: 42 }} onTargetConsumed={consumed} />);
+      await waitFor(() => expect(container.querySelector("#contacts-target-error")).toHaveAttribute("data-target-state", "error"));
+      expect(consumed).toHaveBeenCalledWith(42);
+
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 43 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
+      expect(container.querySelector("#contacts-target-error")).toBeNull();
+      expect(container.querySelectorAll("#contacts-target-status")).toHaveLength(0);
+    });
+
+    it("does not apply a late target page after editing starts", async () => {
+      const latePage = deferred<ContactView[]>();
+      const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
+      vi.mocked(bridge.list_contacts).mockImplementation((_book, _query, offset = 0) => offset === 200 ? latePage.promise : Promise.resolve(firstPage));
+      render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 44 }} />);
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts)).toHaveBeenCalledWith("book-pixel8", "", 200));
+      fireEvent.click(screen.getByRole("button", { name: "New contact" }));
+      expect(screen.getByRole("form")).toBeInTheDocument();
+      latePage.resolve([{ ...mockContactAurora, id: "contact-400", displayName: "Person 400" }]);
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      expect(screen.getByRole("form")).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Person 400" })).not.toBeInTheDocument();
+    });
+
+    it("handles A to B browsing then a new nonce for A", async () => {
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 45 }} onTargetConsumed={consumed} />);
+      expect(await screen.findByRole("heading", { name: "Aurora Chen" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /River Park/ }));
+      expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
+
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 46 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByRole("heading", { name: "Aurora Chen" })).toBeInTheDocument();
+      const targetedRow = screen.getByRole("button", { name: /Aurora Chen/ });
+      await waitFor(() => expect(document.activeElement).toBe(targetedRow));
+      expect(consumed).toHaveBeenCalledWith(46);
+    });
+
+    it("keeps the old target absent when it resolves after its replacement", async () => {
+      const oldLookup = deferred<ContactView[]>();
+      const newLookup = deferred<ContactView[]>();
+      let targetCall = 0;
+      vi.mocked(bridge.list_contacts).mockImplementation((_book, _query, _offset) => {
+        targetCall += 1;
+        if (targetCall === 1) return Promise.resolve([]);
+        return targetCall === 2 ? oldLookup.promise : newLookup.promise;
+      });
+      const { rerender } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 47 }} />);
+      await screen.findByText(/Finding requested contact/);
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 48 }} />);
+      await waitFor(() => expect(targetCall).toBe(3));
+
+      oldLookup.resolve([mockContactAurora]);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.queryByRole("heading", { name: "Aurora Chen" })).not.toBeInTheDocument();
+      newLookup.resolve([mockContactRiver]);
+      expect(await screen.findByRole("heading", { name: "River Park" })).toBeInTheDocument();
+    });
+
+    it("consumes a target with a notice when loading books fails", async () => {
+      vi.mocked(bridge.list_contact_books).mockRejectedValue(new Error("offline"));
+      const consumed = vi.fn();
+      const { container } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-aurora", requestId: 49 }} onTargetConsumed={consumed} />);
+
+      await waitFor(() => expect(consumed).toHaveBeenCalledWith(49));
+      expect(container.querySelector("#contacts-target-error")).toHaveAttribute("data-target-state", "error");
+      expect(consumed).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps a deferred target through one transient background book-list failure", async () => {
+      let hint: (() => void) | undefined;
+      const pageTwo = deferred<ContactView[]>();
+      const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
+      const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
+      const consumed = vi.fn();
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.list_contacts).mockImplementation((_book, query, offset = 0) => {
+        if (query || offset === 0) return Promise.resolve(firstPage);
+        if (offset === 200) return pageTwo.promise;
+        return Promise.resolve([targetContact]);
+      });
+      function StatefulParent() {
+        const [target, setTarget] = useState<ContactTarget | null>({ bookId: "book-pixel8", contactId: "contact-400", requestId: 51 });
+        return <ContactsView target={target} onTargetConsumed={requestId => {
+          consumed(requestId);
+          setTarget(current => current?.requestId === requestId ? null : current);
+        }} />;
+      }
+      const { container } = render(<StatefulParent />);
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
+
+      vi.mocked(bridge.list_contact_books).mockRejectedValueOnce(new Error("transient"));
+      act(() => hint?.());
+      await waitFor(() => expect(vi.mocked(bridge.list_contact_books)).toHaveBeenCalledTimes(2));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(consumed).not.toHaveBeenCalled();
+      expect(screen.getByText(/Finding requested contact/)).toBeInTheDocument();
+
+      pageTwo.resolve(firstPage);
+      expect(await screen.findByRole("heading", { name: "Person 400" })).toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledTimes(1);
+      expect(consumed).toHaveBeenCalledWith(51);
+      expect(container.querySelector("#contacts-target-error")).toBeNull();
+    });
+
+    it("aborts a deferred target with a book notice when its book disappears", async () => {
+      let hint: (() => void) | undefined;
+      const pageTwo = deferred<ContactView[]>();
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      const firstPage = Array.from({ length: 200 }, (_, index) => ({ ...mockContactRiver, id: `contact-${index}`, displayName: `Person ${index}` }));
+      const targetContact = { ...mockContactAurora, id: "contact-400", displayName: "Person 400" };
+      let books = [mockContactBook, secondBook];
+      const consumed = vi.fn();
+      vi.mocked(bridge.subscribe).mockImplementation(listener => { hint = listener; return () => undefined; });
+      vi.mocked(bridge.list_contact_books).mockImplementation(async () => books);
+      vi.mocked(bridge.list_contacts).mockImplementation((_book, query, offset = 0) => {
+        if (query || offset === 0) return Promise.resolve(firstPage);
+        if (offset === 200) return pageTwo.promise;
+        return Promise.resolve([targetContact]);
+      });
+      const { container } = render(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-400", requestId: 52 }} onTargetConsumed={consumed} />);
+      await waitFor(() => expect(vi.mocked(bridge.list_contacts).mock.calls.filter(([, query, offset]) => query === "" && offset === 200)).toHaveLength(1));
+
+      books = [secondBook];
+      act(() => hint?.());
+      await waitFor(() => expect(screen.queryByText("Pixel 8")).not.toBeInTheDocument());
+      pageTwo.resolve(firstPage);
+
+      await waitFor(() => expect(consumed).toHaveBeenCalledWith(52));
+      expect(container.querySelector("#contacts-target-error")).toHaveTextContent("The requested contact book is no longer available.");
+      expect(screen.queryByRole("heading", { name: "Person 400" })).not.toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledTimes(1);
+    });
+
+    it("clears a target error when the user opens another contact", async () => {
+      const { container } = render(<ContactsView target={{ bookId: "missing-book", contactId: "missing", requestId: 54 }} onTargetConsumed={vi.fn()} />);
+      await waitFor(() => expect(container.querySelector("#contacts-target-error")).toBeInTheDocument());
+
+      fireEvent.click(await screen.findByRole("button", { name: /Aurora Chen/ }));
+
+      expect(container.querySelector("#contacts-target-error")).toBeNull();
+    });
+
+    it("consumes a target arriving during a save with a finish-saving notice", async () => {
+      const submit = deferred<Awaited<ReturnType<typeof bridge.submit_contact_edit>>>();
+      vi.mocked(bridge.submit_contact_edit).mockReturnValue(submit.promise);
+      const consumed = vi.fn();
+      const { rerender } = render(<ContactsView onTargetConsumed={consumed} />);
+      fireEvent.click(await screen.findByLabelText("New contact"));
+      fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Grace" } });
+      fireEvent.click(screen.getByText("Save"));
+      await waitFor(() => expect(bridge.submit_contact_edit).toHaveBeenCalledTimes(1));
+
+      rerender(<ContactsView target={{ bookId: "book-pixel8", contactId: "contact-river", requestId: 53 }} onTargetConsumed={consumed} />);
+
+      expect(await screen.findByText("Finish saving the current contact before opening the requested contact.")).toBeInTheDocument();
+      expect(consumed).toHaveBeenCalledWith(53);
+      submit.resolve({ state: "pending", requestId: "r10" });
+      expect(await screen.findByText("Sent to Pixel 8. Waiting for the phone to apply it.")).toBeInTheDocument();
+    });
+
+    it("focuses a target row whose id contains selector-special characters", async () => {
+      const quoted = { ...mockContactAurora, id: 'contact"quoted', displayName: "Quoted Person" };
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+      vi.mocked(bridge.list_contacts).mockResolvedValue([quoted, mockContactRiver]);
+      render(<ContactsView target={{ bookId: "book-pixel8", contactId: 'contact"quoted', requestId: 55 }} onTargetConsumed={vi.fn()} />);
+
+      const row = await screen.findByRole("button", { name: /Quoted Person/ });
+      await waitFor(() => expect(document.activeElement).toBe(row));
+    });
+
+    it("resets scan state when a target switches books", async () => {
+      const secondBook = { ...mockContactBook, id: "book-iphone", deviceName: "iPhone" };
+      vi.mocked(bridge.list_contact_books).mockResolvedValue([mockContactBook, secondBook]);
+      vi.mocked(bridge.get_contact_sync_request).mockImplementation(async bookId => bookId === "book-pixel8"
+        ? { requestId: "old", bookId, state: "waiting" }
+        : null);
+      vi.mocked(bridge.list_contacts).mockImplementation(async bookId => bookId === "book-iphone"
+        ? [{ ...mockContactRiver, id: "iphone-contact", bookId, displayName: "iPhone Person" }]
+        : [mockContactAurora]);
+      const { rerender } = render(<ContactsView />);
+      expect(await screen.findByText("Waiting for the phone to scan contacts.")).toBeInTheDocument();
+
+      rerender(<ContactsView target={{ bookId: "book-iphone", contactId: "iphone-contact", requestId: 50 }} />);
+
+      expect(await screen.findByRole("heading", { name: "iPhone Person" })).toBeInTheDocument();
+      expect(screen.queryByText("Waiting for the phone to scan contacts.")).not.toBeInTheDocument();
+    });
+
   });
 });

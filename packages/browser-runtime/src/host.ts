@@ -1,5 +1,5 @@
 import { IndexedDbCheckpointStore } from "./checkpoint.js";
-import { BrowserCore, type CoreResult, type EmscriptenCoreModule } from "./core.js";
+import { BrowserCore, CoreRejectedError, type CoreResult, type EmscriptenCoreModule } from "./core.js";
 import { type EmscriptenFilesystem } from "./filesystem.js";
 import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./owner.js";
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
@@ -15,6 +15,9 @@ const MAX_PREVIEWS_PER_SNAPSHOT = 32;
 const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
 const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
 const OWNER_NAME = "peppy-browser-v1";
+const SEARCH_INDEX_DELAY_MS = 1_000;
+const SEARCH_INDEX_MAX_RETRIES = 3;
+const SEARCH_INDEX_IDLE_RETRY_MS = 100;
 
 export type RpcError = { code: string; message: string; conversationId?: string; currentRevision?: string; draftId?: string };
 export type RpcResponse = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: RpcError };
@@ -121,6 +124,9 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   list_restorable_contacts: { coreCommand: "list_restorable_contacts", mutation: false },
   restore_contact: { coreCommand: "restore_contact", mutation: true },
   contact_snapshot: { coreCommand: "contact_snapshot", mutation: false },
+  search_local: { coreCommand: "search_local", mutation: false },
+  advance_search_index: { coreCommand: "advance_search_index", mutation: true },
+  load_message_window: { coreCommand: "load_message_window", mutation: false },
 };
 
 const NATIVE_ONLY = new Set([
@@ -158,6 +164,20 @@ function isReadyEnrollmentView(value: unknown): boolean {
   return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).stage === "ready";
 }
 
+function isIndexing(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && (value as Record<string, unknown>).indexState === "indexing";
+}
+
+function isSearchIndexState(value: unknown): value is { indexState: "indexing" | "ready" } {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && ((value as Record<string, unknown>).indexState === "indexing" || (value as Record<string, unknown>).indexState === "ready");
+}
+
+/** Only handled core rejections and busy sessions retry; poisoned or corrupt runtime failures stop maintenance. */
+function isTransientSearchIndexError(error: unknown): boolean {
+  return error instanceof BrowserSessionError && error.code === "busy"
+    || error instanceof CoreRejectedError && error.code === "unavailable";
+}
+
 function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
   return {
     version: "1", mode: "browser", connection: { state: "offline" },
@@ -174,7 +194,7 @@ function errorFor(error: unknown): RpcError {
   if (error instanceof BrowserSessionError) return { code: error.code, message: "Browser session is not ready." };
   if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
     const details = errorDetails(error);
-    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed"]);
+    const codes = new Set(["already-open", "attachment-invalid", "attachment-local", "busy", "core", "database-key-mismatch", "gateway-offline", "gateway-unavailable", "gateway-unsupported", "gateways-unknown", "invalid-request", "locked", "not-found", "request-too-large", "stale-draft", "draft-moved", "draft-not-discardable", "recipientless-draft-exists", "draft-merge-overflow", "unknown-command", "unlock-failed", "invalid-contact-edit", "contact-book-read-only", "contact-field-read-only", "contact-photo-invalid", "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable", "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message", "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked", "media-pending", "public-copy-unsupported", "public-copy-too-large", "host-state", "device-revoked", "unsupported", "http-401", "http-403", "invalid_setup_token", "instance_already_claimed"]);
     const code = codes.has(error.code) ? error.code : "unavailable";
     return { code, message: "Browser operation failed.", ...details };
   }
@@ -256,9 +276,11 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
       const savedPreferences = await settings?.load();
       const snapshot = await session.query("snapshot", args);
       if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
+      const metadataOnly = args.metadataOnly === true;
       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
-      return { id, ok: true, value: { ...await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT), ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+      const enriched = metadataOnly ? snapshot as Record<string, unknown> : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
+      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
     }
     if (command === "load_history") {
       const page = await session.query("load_history", args);
@@ -550,6 +572,16 @@ export class BrowserWorkerHost {
   private presenter?: BannerPresenter;
   private presentationPort?: BrowserPort;
   private readonly mediaLeases = new Map<BrowserPort, Map<string, number>>();
+  private searchIndexTimer?: ReturnType<typeof setTimeout>;
+  private searchIndexInFlight = false;
+  private searchIndexLastCompletedAt?: number;
+  private searchIndexLastMutationDurationMs = 0;
+  private searchIndexRetries = 0;
+  private searchIndexState?: "indexing" | "ready";
+  /** Generation commits made by index-only maintenance; subtracted so they never look like visible changes. */
+  private searchIndexCommits = 0;
+  /** Dispatched RPCs in flight; maintenance waits for zero so its generation delta is exact. */
+  private dispatchesInFlight = 0;
 
   public constructor(private readonly dependencies: BrowserHostDependencies) {}
 
@@ -585,6 +617,7 @@ export class BrowserWorkerHost {
       try { await this.dependencies.network?.stop(); } catch {}
       this.unsubscribeNetwork?.();
       this.presenter?.clear();
+      this.cancelSearchIndex();
       this.owner?.owner.shutdown();
       try { await this.owner?.owner.drain?.(); } catch {}
       acknowledge?.();
@@ -609,6 +642,7 @@ export class BrowserWorkerHost {
     this.owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
     this.presenter = new BannerPresenter(this.owner.owner, this.dependencies.settings ?? new IndexedDbNotificationSettings(`${OWNER_NAME}-presentation`), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
     this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
+    void this.startSearchIndexWhenReady();
   }
 
   private async handle(port: BrowserPort, request: unknown): Promise<void> {
@@ -645,7 +679,7 @@ export class BrowserWorkerHost {
     if (validRequest(request) && request.command === "unlock" && this.owner.owner.phase === "ready") {
       const passphrase = secretString(request.args, "passphrase");
       if (!passphrase || !this.dependencies.network?.unlockNewEpoch) { port.postMessage({ id: request.id, ok: false, error: { code: "invalid-request", message: "The request is invalid." } }); return; }
-      try { await this.dependencies.network.unlockNewEpoch(passphrase); port.postMessage({ id: request.id, ok: true, value: undefined }); this.changed(); this.dependencies.network.wake?.(); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
+      try { await this.dependencies.network.unlockNewEpoch(passphrase); void this.startSearchIndexWhenReady(); port.postMessage({ id: request.id, ok: true, value: undefined }); this.changed(); this.dependencies.network.wake?.(); } catch (error) { port.postMessage({ id: request.id, ok: false, error: errorFor(error) }); }
       return;
     }
     if (validRequest(request) && request.command.startsWith("enrollment_")) {
@@ -655,6 +689,7 @@ export class BrowserWorkerHost {
         this.changed();
         if (ENROLLMENT_ACTIVATIONS.has(request.command) && this.owner.owner.phase === "ready" && isReadyEnrollmentView(response.value)) {
           await this.dependencies.network?.start();
+          void this.startSearchIndexWhenReady();
         }
       }
       if (this.owner.owner.phase === "closed") await this.stop("closed");
@@ -666,9 +701,20 @@ export class BrowserWorkerHost {
       if (response.ok && request.command === "revoke_device") this.changed();
       return;
     }
-    const generation = this.owner.owner.generation;
+    if (validRequest(request) && request.command === "advance_search_index") {
+      const response = await this.explicitSearchIndexAdvance(request);
+      if (this.ports.has(port)) port.postMessage(response);
+      return;
+    }
+    const generation = this.visibleGeneration();
     const command = validRequest(request) ? request.command : undefined;
-    let response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.portMediaLeases(port));
+    let response: RpcResponse;
+    this.dispatchesInFlight += 1;
+    try {
+      response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.portMediaLeases(port));
+    } finally {
+      this.dispatchesInFlight -= 1;
+    }
     if (response.ok && command === "load_state" && this.dependencies.network?.epochStatus?.()) {
       const value = response.value;
       if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -681,13 +727,20 @@ export class BrowserWorkerHost {
       await this.stop("closed");
       return;
     }
-    const mutationChanged = command !== undefined && INVOCATIONS[command]?.mutation && (response.ok || (!response.ok && response.error.code === "draft-moved"));
+    const mutationChanged = command !== "advance_search_index" && command !== undefined && INVOCATIONS[command]?.mutation && (response.ok || (!response.ok && response.error.code === "draft-moved"));
     const successfulSideEffect = response.ok && (command === "unlock" || command === "publish_attachment" || command === "retry_attachment");
-    if (mutationChanged || successfulSideEffect || generation !== this.owner.owner.generation) {
+    if (mutationChanged || successfulSideEffect || generation !== this.visibleGeneration()) {
       this.changed();
-      if (command === "unlock") await this.dependencies.network?.start();
+      if (command === "unlock") {
+        await this.dependencies.network?.start();
+        void this.startSearchIndexWhenReady();
+      }
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
+    }
+    if (response.ok && command === "search_local") {
+      this.recordSearchIndexState(response.value);
+      if (isIndexing(response.value)) this.scheduleSearchIndex();
     }
   }
 
@@ -701,6 +754,139 @@ export class BrowserWorkerHost {
   }
 
   private drainPresentation(): void { void this.presenter?.drain().catch(() => undefined); }
+
+  /** Reads index metadata first so an already-indexed unlock writes no maintenance checkpoint. */
+  private async startSearchIndexWhenReady(): Promise<void> {
+    const session = this.owner?.owner;
+    if (!session || session.phase !== "ready" || this.stopping) return;
+    this.searchIndexLastCompletedAt ??= Date.now();
+    this.searchIndexRetries = 0;
+    const state = await this.readSearchIndexState(session);
+    if (this.owner?.owner !== session || session.phase !== "ready" || this.stopping) return;
+    this.recordSearchIndexState(state);
+    if (!(isSearchIndexState(state) && state.indexState === "ready")) this.scheduleSearchIndex();
+  }
+
+  private async readSearchIndexState(session: HostSession): Promise<unknown> {
+    try {
+      return await session.query("search_local", { query: "" });
+    } catch {
+      return undefined;
+    }
+  }
+
+  private scheduleSearchIndex(retryDelay = 0): void {
+    if (this.searchIndexTimer || this.searchIndexInFlight || !this.owner || this.stopping || this.owner.owner.phase !== "ready") return;
+    const nextAllowedAt = (this.searchIndexLastCompletedAt ?? Date.now()) + this.searchIndexDelayMs();
+    const delay = Math.max(retryDelay, nextAllowedAt - Date.now(), 0);
+    this.searchIndexTimer = setTimeout(() => {
+      this.searchIndexTimer = undefined;
+      void this.advanceSearchIndex();
+    }, delay);
+  }
+
+  private async advanceSearchIndex(): Promise<void> {
+    const session = this.owner?.owner;
+    if (!session || this.searchIndexInFlight || this.stopping || session.phase !== "ready") return;
+    if (this.dispatchesInFlight > 0) {
+      this.scheduleSearchIndex(SEARCH_INDEX_IDLE_RETRY_MS);
+      return;
+    }
+    this.searchIndexInFlight = true;
+    let continueIndexing = false;
+    let retryDelay: number | undefined;
+    try {
+      const startedAt = Date.now();
+      const progress = await this.mutateSearchIndex(session, {});
+      this.searchIndexLastMutationDurationMs = Date.now() - startedAt;
+      this.searchIndexLastCompletedAt = Date.now();
+      this.searchIndexRetries = 0;
+      this.recordSearchIndexState(progress);
+      continueIndexing = isIndexing(progress);
+    } catch (error: unknown) {
+      this.searchIndexLastCompletedAt = Date.now();
+      if (session.phase !== "ready" || this.stopping) {
+        this.cancelSearchIndex();
+        return;
+      }
+      if (isTransientSearchIndexError(error) && this.searchIndexRetries < SEARCH_INDEX_MAX_RETRIES) {
+        this.searchIndexRetries += 1;
+        retryDelay = SEARCH_INDEX_DELAY_MS * 2 ** (this.searchIndexRetries - 1);
+      } else {
+        this.cancelSearchIndex();
+      }
+    } finally {
+      this.searchIndexInFlight = false;
+      if (continueIndexing) this.scheduleSearchIndex();
+      else if (retryDelay !== undefined) this.scheduleSearchIndex(retryDelay);
+    }
+  }
+
+  private async explicitSearchIndexAdvance(request: RpcRequest): Promise<RpcResponse> {
+    const session = this.owner?.owner;
+    if (!session || this.stopping || session.phase !== "ready") {
+      const code = session?.phase === "locked" ? "locked" : "not-ready";
+      return { id: request.id, ok: false, error: { code, message: "Search indexing is unavailable." } };
+    }
+    if (this.searchIndexInFlight || this.searchIndexTimer || this.dispatchesInFlight > 0 || !this.searchIndexRateAllowsNow()) {
+      return { id: request.id, ok: false, error: { code: "busy", message: "Search indexing is already scheduled." } };
+    }
+    this.searchIndexInFlight = true;
+    let continueIndexing = false;
+    try {
+      const startedAt = Date.now();
+      const progress = await this.mutateSearchIndex(session, request.args);
+      this.searchIndexLastMutationDurationMs = Date.now() - startedAt;
+      this.searchIndexLastCompletedAt = Date.now();
+      this.searchIndexRetries = 0;
+      this.recordSearchIndexState(progress);
+      continueIndexing = isIndexing(progress);
+      return { id: request.id, ok: true, value: progress };
+    } catch (error: unknown) {
+      this.searchIndexLastCompletedAt = Date.now();
+      if (session.phase !== "ready" || this.stopping) this.cancelSearchIndex();
+      return { id: request.id, ok: false, error: errorFor(error) };
+    } finally {
+      this.searchIndexInFlight = false;
+      if (continueIndexing) this.scheduleSearchIndex();
+    }
+  }
+
+  /** Counts exactly the generations this maintenance commit added, including commits followed by a handled rejection. */
+  private async mutateSearchIndex(session: HostSession, args: Record<string, unknown>): Promise<CoreResult> {
+    const before = session.generation ?? 0;
+    try {
+      return await session.mutate("advance_search_index", args);
+    } finally {
+      this.searchIndexCommits += (session.generation ?? 0) - before;
+    }
+  }
+
+  /** User-visible generation: index-only checkpoint bumps are excluded on both sides of a comparison. */
+  private visibleGeneration(): number {
+    return (this.owner?.owner.generation ?? 0) - this.searchIndexCommits;
+  }
+
+  private searchIndexRateAllowsNow(): boolean {
+    return this.searchIndexLastCompletedAt === undefined || Date.now() - this.searchIndexLastCompletedAt >= this.searchIndexDelayMs();
+  }
+
+  private searchIndexDelayMs(): number {
+    return Math.max(SEARCH_INDEX_DELAY_MS, this.searchIndexLastMutationDurationMs * 3);
+  }
+
+  private recordSearchIndexState(value: unknown): void {
+    if (!isSearchIndexState(value)) return;
+    const changed = this.searchIndexState !== undefined && this.searchIndexState !== value.indexState;
+    this.searchIndexState = value.indexState;
+    if (changed) this.changed();
+  }
+
+  private cancelSearchIndex(): void {
+    if (this.searchIndexTimer) clearTimeout(this.searchIndexTimer);
+    this.searchIndexTimer = undefined;
+    this.searchIndexRetries = 0;
+  }
 
   private async enrollment(request: RpcRequest): Promise<RpcResponse> {
     const network = this.dependencies.network;

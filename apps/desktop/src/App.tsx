@@ -11,9 +11,10 @@ import {
   type RefCallback,
 } from "react";
 import { flushSync } from "react-dom";
-import type { GatewayAvailability } from "@peppy/desktop-ui/bridge-contracts";
+import type { GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
 import {
   AppTitlebar,
+  OmniSearch,
   Check,
   CheckCheck,
   CheckCircle,
@@ -78,7 +79,7 @@ import {
 } from "./bridge";
 import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
-import { ContactsView, type ContactNavigationGuard } from "./Contacts";
+import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./Contacts";
 import { DevicesSettings } from "./DevicesSettings";
 import { HostedAccountSettings } from "./HostedAccountSettings";
 import { PrivacySettings } from "./PrivacySettings";
@@ -93,7 +94,9 @@ import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
 import { MediaGrid } from "./media/MediaGrid";
 import { InlineMedia } from "./media/InlineMedia";
+import { MessageText } from "./message-links";
 import { groupMessages } from "./media/grouping";
+import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, searchSessionKey as createSearchSessionKey, type DetachedHistory } from "./search/detachedHistory";
 import { GatewayPicker } from "./GatewayPicker";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
@@ -505,6 +508,11 @@ function MessageList({
   checkOriginal,
   releaseMedia,
   mediaRetryKey,
+  onOpenExternal,
+  searchTargetId,
+  detachedHistory,
+  onLoadNewer,
+  onGoToLatest,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -528,6 +536,11 @@ function MessageList({
   checkOriginal(id: string): Promise<{ state: "ready"; url: string } | { state: "pending" }>;
   releaseMedia(id: string, url: string): void;
   mediaRetryKey: unknown;
+  onOpenExternal?: (url: string) => Promise<void>;
+  searchTargetId?: string;
+  detachedHistory?: DetachedHistory;
+  onLoadNewer(): void;
+  onGoToLatest(): void;
 }) {
   if (loading)
     return (
@@ -584,6 +597,12 @@ function MessageList({
       aria-label="Messages"
       onScroll={onScroll}
     >
+      {searchTargetId && <span id="search-result-message-hint" className="sr-only">Search result message</span>}
+      {detachedHistory && <section id="detached-history-status" aria-label="Search history position">
+        <span role="status">Viewing messages near a search result.</span>
+        {detachedHistory.hasNewer && <button id="history-load-newer-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={onLoadNewer}>Load newer messages</button>}
+        <button id="history-go-latest-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={onGoToLatest}>Go to latest</button>
+      </section>}
       {hasOlderMessages && <div id="history-page-sentinel" aria-hidden="true" />}
       {(historyLoading || historyError || hasOlderMessages) && <div id="history-load-band" aria-busy={historyLoading || undefined} data-history-state={historyLoading ? "loading" : historyError ? "error" : "idle"}>
         {historyLoading && !historyError && <span id="history-load-indicator" role="status">Loading older messages…</span>}
@@ -596,7 +615,7 @@ function MessageList({
         {groupMessages(conversation.messages).map((group) => {
           const message = group.messages[0];
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} />} renderAttachmentActions={(attachment) => {
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} renderAttachmentActions={(attachment) => {
             const copy = publicCopies[attachment.id];
             return <details data-gallery-sharing={attachment.id}><summary>Attachment actions</summary>{!copy && <button className="secondary-button" type="button" onClick={() => onPublish(attachment)} aria-label={`Create public link for ${attachment.name}`}>Create public link</button>}{copy && <div className="public-copy" data-public-copy-for={attachment.id}><label>Public link <span className="public-link-warning" role="status"><ShieldAlert size={12} aria-hidden /> Anyone with this link can view this copy</span><input readOnly aria-label={`Public link for ${attachment.name}`} value={copy.url} onFocus={(event) => event.currentTarget.select()} /></label><small>{expiryText(copy.expiresInSeconds)}</small></div>}</details>;
           }} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} />;
@@ -610,9 +629,12 @@ function MessageList({
               <article
                 ref={(row) => registerRow(message.id, row)}
                 data-message-id={message.id}
+                data-search-target={searchTargetId === message.id || undefined}
+                aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
+                tabIndex={searchTargetId === message.id ? -1 : undefined}
                 className={`message-bubble ${message.sender}`}
               >
-                {message.body && <p>{message.body}</p>}
+                {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
                 {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
                 {message.attachments.map((file) => {
                   const copy = publicCopies[file.id];
@@ -1079,6 +1101,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [suppressHistoryAnnouncements, setSuppressHistoryAnnouncements] = useState(false);
   const [historyExhausted, setHistoryExhausted] = useState(false);
   const [appLock, setAppLock] = useState<AppLockStatus | null>(null);
+  const appLockRef = useRef(appLock);
+  appLockRef.current = appLock;
   const [mode, setMode] = useState<"hosted" | "self-hosted">(() => browserHost ? "self-hosted" : savedSetupMode());
   const headPanel = Boolean(composerConversation && (snapshot?.head.panel ?? headPanelBootstrap));
   const [selected, setSelected] = useState(composerConversation ?? "");
@@ -1103,13 +1127,18 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [activeView, setActiveViewNow] = useState<"conversations" | "notifications" | "settings" | "contacts">(
     "conversations",
   );
+  const [contactTarget, setContactTarget] = useState<(ContactTarget & { requestId: number })>();
+  const contactTargetRequestId = useRef(0);
   const contactNavigation = useRef<ContactNavigationGuard | null>(null);
   const registerContactNavigation = useCallback((guard: ContactNavigationGuard | null) => {
     contactNavigation.current = guard;
   }, []);
   const setActiveView = useCallback((view: typeof activeView) => {
     if (view === "contacts" && contactNavigation.current) return;
-    const navigate = () => setActiveViewNow(view);
+    const navigate = () => {
+      if (view !== "contacts") setContactTarget(undefined);
+      setActiveViewNow(view);
+    };
     if (contactNavigation.current) contactNavigation.current(navigate);
     else navigate();
   }, []);
@@ -1191,6 +1220,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   overlayHeightRef.current = overlayHeight;
   const lastUnobscuredHeight = useRef<number | null>(null);
   const historyAnchorRef = useRef<{ row: HTMLElement; top: number } | null>(null);
+  const detachedHistoryRef = useRef<DetachedHistory | undefined>(undefined);
+  const [detachedHistory, setDetachedHistory] = useState<DetachedHistory>();
+  const [searchTargetId, setSearchTargetId] = useState<string>();
+  const searchReadGate = useRef(false);
+  const navigationGeneration = useRef(0);
+  const latestRequiredConversationRef = useRef<string | undefined>(undefined);
+  const previousSearchSessionKeyRef = useRef("");
+  const activateSearchHitHandlerRef = useRef<(hit: LocalSearchHit) => void>(() => undefined);
   const messageRows = useRef(new Map<string, HTMLElement>());
   const handlers = useRef({
     rekeyed: (_from: string, _to: string) => {},
@@ -1207,6 +1244,21 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       unavailable: (from, to, message) => handlers.current.unavailable(from, to, message),
     });
   const store = storeRef.current;
+  const setDetached = (next: DetachedHistory | undefined) => {
+    detachedHistoryRef.current = next;
+    setDetachedHistory(next);
+  };
+  const clearDetached = () => {
+    const detachedConversationId = detachedHistoryRef.current?.conversationId;
+    if (detachedConversationId) latestRequiredConversationRef.current = detachedConversationId;
+    navigationGeneration.current += 1;
+    loadSequence.current += 1;
+    historySequence.current += 1;
+    setDetached(undefined);
+    setSearchTargetId(undefined);
+    searchReadGate.current = false;
+  };
+  const currentSearchSessionKey = () => createSearchSessionKey(snapshotRef.current, Boolean(appLockRef.current?.locked));
 
   const captureHistoryAnchor = (fallbackMessageId?: string) => {
     const list = messageListRef.current;
@@ -1405,6 +1457,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const choose = (key: string) => {
+    if (detachedHistoryRef.current && detachedHistoryRef.current.conversationId !== key) clearDetached();
     loadSequence.current += 1;
     historySequence.current += 1;
     historyLoadingRef.current = false;
@@ -1437,24 +1490,78 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   /** Loads host state for one conversation; responses superseded by a newer request are dropped. */
   const refresh = async (conversationId = selectedRef.current) => {
     const sequence = ++loadSequence.current;
-    const loadedConversation = snapshotRef.current?.activeConversationId === conversationId
-      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)
-      : undefined;
-    const historyFromMessageId = loadedConversation?.messages[0]?.id;
+    const sessionKey = currentSearchSessionKey();
     const requestedConversationId = conversationId && !isLocalDraftKey(conversationId)
       ? conversationId
       : undefined;
-    const state = historyFromMessageId
+    const detached = detachedHistoryRef.current?.conversationId === conversationId
+      ? detachedHistoryRef.current
+      : undefined;
+    const latestRequired = latestRequiredConversationRef.current === conversationId;
+    const loadedConversation = snapshotRef.current?.activeConversationId === conversationId
+      ? snapshotRef.current.conversations.find((item) => item.id === conversationId)
+      : undefined;
+    const historyFromMessageId = detached || latestRequired ? undefined : loadedConversation?.messages[0]?.id;
+    const state = detached
+      ? await bridge.load_state(requestedConversationId, undefined, { metadataOnly: true })
+      : historyFromMessageId
       ? await bridge.load_state(requestedConversationId, historyFromMessageId)
       : await bridge.load_state(requestedConversationId);
-    if (!mountedRef.current || sequence !== loadSequence.current) return;
+    if (
+      !mountedRef.current ||
+      sequence !== loadSequence.current ||
+      sessionKey !== currentSearchSessionKey() ||
+      (detached && detachedHistoryRef.current !== detached)
+    ) return;
+
+    if (detached && (detached.pendingLoad || !detached.messageIds.length)) {
+      setSnapshot((current) => {
+        if (!current || current.activeConversationId !== conversationId) return state;
+        const currentConversation = current.conversations.find((item) => item.id === conversationId);
+        return {
+          ...state,
+          activeConversationId: conversationId,
+          conversations: state.conversations.map((item) => item.id === conversationId && currentConversation
+            ? { ...item, messages: currentConversation.messages, hasOlderMessages: detached.hasOlder }
+            : item),
+        };
+      });
+      if (state.activeConversationId) store.adopt(state.activeConversationId, state.draft);
+      return;
+    }
+
+    const refreshedWindow = detached
+      ? await bridge.load_message_window({ direction: "refresh", conversationId, messageIds: detached.messageIds.slice(0, DETACHED_HISTORY_LIMIT) })
+      : undefined;
+    if (
+      !mountedRef.current ||
+      sequence !== loadSequence.current ||
+      sessionKey !== currentSearchSessionKey() ||
+      (detached && detachedHistoryRef.current !== detached)
+    ) return;
+
     const refreshed = state.conversations.find((item) => item.id === state.activeConversationId);
-    const shouldPreserveScrollPosition = Boolean(
-      !nearBottom.current &&
-      !historyLoadingRef.current,
-    );
+    let refreshedDetached: DetachedHistory | undefined;
+    const shouldPreserveScrollPosition = Boolean(!nearBottom.current && !historyLoadingRef.current);
     if (shouldPreserveScrollPosition) historyAnchorRef.current = captureHistoryAnchor(historyFromMessageId);
     const updateSnapshot = () => setSnapshot((current) => {
+      if (detached && refreshedWindow && current?.activeConversationId === conversationId) {
+        const currentMessages = current.conversations.find((item) => item.id === conversationId)?.messages ?? [];
+        const detachedMessages = mergeDetachedMessages(currentMessages, refreshedWindow.messages, "refresh").messages;
+        refreshedDetached = {
+          ...detached,
+          messageIds: detachedMessages.map((message) => message.id),
+          hasOlder: refreshedWindow.hasOlder,
+          hasNewer: refreshedWindow.hasNewer,
+        };
+        return {
+          ...state,
+          activeConversationId: conversationId,
+          conversations: state.conversations.map((item) => item.id === conversationId
+            ? { ...item, messages: detachedMessages, hasOlderMessages: refreshedWindow.hasOlder }
+            : item),
+        };
+      }
       const previous = historyFromMessageId && current && current.activeConversationId === state.activeConversationId
         ? current.conversations.find((item) => item.id === state.activeConversationId)
         : undefined;
@@ -1470,37 +1577,141 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       flushSync(updateSnapshot);
       correctHistoryAnchorScroll(historyAnchorRef.current);
     } else {
-      updateSnapshot();
+      flushSync(updateSnapshot);
     }
-    const activeConversation = refreshed;
-    if (state.activeConversationId)
-      store.adopt(state.activeConversationId, state.draft);
-    if (
-      !composerConversation &&
-      !selectedRef.current &&
-      state.activeConversationId
-    )
-      choose(state.activeConversationId);
-    const responseHasOlder = activeConversation?.hasOlderMessages ?? false;
+    if (refreshedDetached && detachedHistoryRef.current === detached) setDetached(refreshedDetached);
+    if (latestRequiredConversationRef.current === conversationId && !detached) {
+      latestRequiredConversationRef.current = undefined;
+    }
+    if (state.activeConversationId) store.adopt(state.activeConversationId, state.draft);
+    if (!composerConversation && !selectedRef.current && state.activeConversationId) choose(state.activeConversationId);
+    const responseHasOlder = refreshedDetached?.hasOlder ?? refreshed?.hasOlderMessages ?? false;
     const currentAnchor = snapshotRef.current?.activeConversationId === conversationId
       ? snapshotRef.current.conversations.find((item) => item.id === conversationId)?.messages[0]?.id
       : undefined;
-    if (currentAnchor === historyFromMessageId || !currentAnchor) {
+    if (currentAnchor === historyFromMessageId || !currentAnchor || detached) {
       hasOlderMessagesRef.current = responseHasOlder;
       setHasOlderMessages(responseHasOlder);
       if (responseHasOlder) setHistoryExhausted(false);
     }
   };
 
+  const loadLatest = async (conversationId: string, unavailableNotice = "") => {
+    const generation = ++navigationGeneration.current;
+    const sessionKey = currentSearchSessionKey();
+    const state = await bridge.load_state(conversationId);
+    if (!mountedRef.current || generation !== navigationGeneration.current || sessionKey !== currentSearchSessionKey() || selectedRef.current !== conversationId) return;
+    clearDetached();
+    if (state.activeConversationId !== conversationId) {
+      latestRequiredConversationRef.current = conversationId;
+      setSnapshot({ ...state, activeConversationId: undefined });
+      choose("");
+      setNotice("The selected conversation is unavailable. Retry from search.");
+      return;
+    }
+    latestRequiredConversationRef.current = undefined;
+    nearBottom.current = true;
+    setSnapshot(state);
+    if (state.activeConversationId === conversationId) store.adopt(conversationId, state.draft);
+    setNewComposeKey(null);
+    setNotice(unavailableNotice);
+    const conversation = state.conversations.find(item => item.id === conversationId);
+    const hasOlder = conversation?.hasOlderMessages ?? false;
+    hasOlderMessagesRef.current = hasOlder;
+    setHasOlderMessages(hasOlder);
+    setHistoryExhausted(!hasOlder);
+  };
+
   const select = (key: string) => {
     const previous = selectedRef.current;
-    if (key === previous) return;
+    if (key === previous) {
+      if (detachedHistoryRef.current?.conversationId === key) void loadLatest(key).catch(report(""));
+      return;
+    }
     if (previous) void store.flush(previous);
     choose(key);
     if (newComposeKey && key !== newComposeKey && !isLocalDraftKey(key)) setNewComposeKey(null);
     setNotice("");
     if (!isLocalDraftKey(key)) void refresh(key).catch(report(""));
   };
+
+  const activateApprovedSearchHit = async (hit: LocalSearchHit) => {
+    const activationGeneration = ++navigationGeneration.current;
+    const activationSessionKey = currentSearchSessionKey();
+    const previous = selectedRef.current;
+    if (previous) {
+      const flushed = await store.flush(previous);
+      if (!flushed.ok) return setNotice(`Search result not opened: ${flushed.error}`);
+    }
+    if (activationGeneration !== navigationGeneration.current || activationSessionKey !== currentSearchSessionKey()) return;
+    if (hit.kind === "contact") {
+      const requestId = ++contactTargetRequestId.current;
+      setActiveViewNow("contacts");
+      setContactTarget({ bookId: hit.bookId, contactId: hit.contactId, requestId });
+      return;
+    }
+    if (hit.kind === "conversation") {
+      setContactTarget(undefined);
+      setActiveViewNow("conversations");
+      if (hit.conversationId === selectedRef.current && detachedHistoryRef.current) await loadLatest(hit.conversationId);
+      else select(hit.conversationId);
+      return;
+    }
+
+    const generation = activationGeneration;
+    const sessionKey = activationSessionKey;
+    loadSequence.current += 1;
+    setContactTarget(undefined);
+    const pending: DetachedHistory = { conversationId: hit.conversationId, messageIds: [], hasOlder: false, hasNewer: false, pendingTarget: hit.messageId, pendingLoad: "around", generation, sessionKey };
+    setDetached(pending);
+    setSearchTargetId(undefined);
+    searchReadGate.current = true;
+    nearBottom.current = false;
+    choose(hit.conversationId);
+    setDetached(pending);
+    setActiveViewNow("conversations");
+    setNotice("");
+    try {
+      const [metadata, window] = await Promise.all([
+        bridge.load_state(hit.conversationId, undefined, { metadataOnly: true }),
+        bridge.load_message_window({ direction: "around", conversationId: hit.conversationId, messageId: hit.messageId }),
+      ]);
+      if (!mountedRef.current || generation !== navigationGeneration.current || sessionKey !== currentSearchSessionKey() || selectedRef.current !== hit.conversationId || window.conversationId !== hit.conversationId) return;
+      const messages = boundedAroundMessages(window.messages, hit.messageId);
+      if (!messages.some(message => message.id === hit.messageId)) throw new Error("search-target-missing");
+      const next: DetachedHistory = { ...pending, messageIds: messages.map(message => message.id), hasOlder: window.hasOlder, hasNewer: window.hasNewer, pendingLoad: undefined };
+      loadSequence.current += 1;
+      setDetached(next);
+      flushSync(() => {
+        setSnapshot({ ...metadata, activeConversationId: hit.conversationId, conversations: metadata.conversations.map(conversation => conversation.id === hit.conversationId ? { ...conversation, messages, hasOlderMessages: window.hasOlder } : conversation) });
+        setSearchTargetId(hit.messageId);
+      });
+      store.adopt(hit.conversationId, metadata.draft);
+      setNewComposeKey(null);
+      hasOlderMessagesRef.current = window.hasOlder;
+      setHasOlderMessages(window.hasOlder);
+      setHistoryExhausted(!window.hasOlder);
+    } catch {
+      if (!mountedRef.current || generation !== navigationGeneration.current || sessionKey !== currentSearchSessionKey() || selectedRef.current !== hit.conversationId) return;
+      setDetached(undefined);
+      setSearchTargetId(undefined);
+      searchReadGate.current = false;
+      try {
+        await loadLatest(hit.conversationId, "The selected message is no longer available. Showing the latest messages.");
+      } catch {
+        if (sessionKey === currentSearchSessionKey() && selectedRef.current === hit.conversationId) setNotice("The selected message is unavailable. Retry from search.");
+      }
+    }
+  };
+
+  activateSearchHitHandlerRef.current = (hit: LocalSearchHit) => {
+    const navigate = () => { void activateApprovedSearchHit(hit); };
+    if (contactNavigation.current) contactNavigation.current(navigate);
+    else navigate();
+  };
+  const activateSearchHit = useCallback((hit: LocalSearchHit) => {
+    activateSearchHitHandlerRef.current(hit);
+  }, []);
 
   handlers.current.rekeyed = (from, to) => {
     if (selectedRef.current !== from) return;
@@ -1528,6 +1739,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       mountedRef.current = false;
       loadSequence.current += 1;
       historySequence.current += 1;
+      navigationGeneration.current += 1;
+      detachedHistoryRef.current = undefined;
+      searchReadGate.current = false;
       historyAnchorRef.current = null;
       unsubscribe();
     };
@@ -1542,7 +1756,24 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setHistoryError(null);
     setHasOlderMessages(false);
     setHistoryExhausted(false);
+    clearDetached();
+    setContactTarget(undefined);
   }, [appLock?.locked, snapshot?.encryption.state]);
+  const renderedSearchSessionKey = currentSearchSessionKey();
+  useEffect(() => {
+    if (!previousSearchSessionKeyRef.current) {
+      previousSearchSessionKeyRef.current = renderedSearchSessionKey;
+      return;
+    }
+    if (previousSearchSessionKeyRef.current === renderedSearchSessionKey) return;
+    previousSearchSessionKeyRef.current = renderedSearchSessionKey;
+    const detachedConversationId = detachedHistoryRef.current?.conversationId;
+    clearDetached();
+    setContactTarget(undefined);
+    if (detachedConversationId && snapshotRef.current?.encryption.state === "unlocked" && !appLock?.locked) {
+      void refresh(detachedConversationId).catch(report(""));
+    }
+  }, [renderedSearchSessionKey]);
   useEffect(() => {
     if (browserHost) return;
     void bridge.get_app_lock_status().then(setAppLock).catch(() => setAppLock(null));
@@ -1642,6 +1873,33 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setHistoryLoading(true);
     setHistoryError(null);
     try {
+      const detached = detachedHistoryRef.current?.conversationId === conversationId ? detachedHistoryRef.current : undefined;
+      if (detached) {
+        loadSequence.current += 1;
+        setDetached({ ...detached, pendingLoad: "older" });
+        const window = await bridge.load_message_window({ direction: "older", conversationId, messageId: beforeMessageId });
+        if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId || window.conversationId !== conversationId || detached.generation !== detachedHistoryRef.current?.generation || detached.sessionKey !== currentSearchSessionKey()) return;
+        const existing = snapshotRef.current?.conversations.find(item => item.id === conversationId)?.messages ?? [];
+        const merged = mergeDetachedMessages(existing, window.messages, "older");
+        const next = { ...detached, messageIds: merged.messages.map(message => message.id), hasOlder: window.hasOlder, hasNewer: detached.hasNewer || window.hasNewer || merged.droppedNewer, pendingLoad: undefined };
+        loadSequence.current += 1;
+        setDetached(next);
+        historyAnchorRef.current = captureHistoryAnchor(beforeMessageId);
+        nearBottom.current = false;
+        flushSync(() => {
+          setSuppressHistoryAnnouncements(true);
+          setSnapshot((previous) => previous && previous.activeConversationId === conversationId
+            ? { ...previous, conversations: previous.conversations.map(item => item.id === conversationId ? { ...item, messages: merged.messages } : item) }
+            : previous);
+        });
+        correctHistoryAnchorScroll(historyAnchorRef.current);
+        hasOlderMessagesRef.current = window.hasOlder;
+        setHasOlderMessages(window.hasOlder);
+        if (!window.hasOlder) setHistoryExhausted(true);
+        if (typeof requestAnimationFrame === "undefined") setSuppressHistoryAnnouncements(false);
+        else requestAnimationFrame(() => mountedRef.current && setSuppressHistoryAnnouncements(false));
+        return;
+      }
       const page: HistoryPage = await bridge.load_history(conversationId, beforeMessageId);
       if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId) return;
       if (page.conversationId !== conversationId) {
@@ -1667,11 +1925,41 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (typeof requestAnimationFrame === "undefined") setSuppressHistoryAnnouncements(false);
       else requestAnimationFrame(() => mountedRef.current && setSuppressHistoryAnnouncements(false));
     } catch (error) {
-      if (sequence === historySequence.current) setHistoryError(errorText(error));
+      if (sequence === historySequence.current) {
+        const currentDetached = detachedHistoryRef.current;
+        if (currentDetached?.pendingLoad === "older") setDetached({ ...currentDetached, pendingLoad: undefined });
+        setHistoryError(errorText(error));
+      }
     } finally {
       if (sequence === historySequence.current) {
         historyLoadingRef.current = false;
         setHistoryLoading(false);
+      }
+    }
+  }, []);
+  const loadNewerMessages = useCallback(async () => {
+    const detached = detachedHistoryRef.current;
+    const conversationId = selectedRef.current;
+    const existing = snapshotRef.current?.conversations.find(item => item.id === conversationId)?.messages ?? [];
+    const afterMessageId = existing.at(-1)?.id;
+    if (!detached || detached.conversationId !== conversationId || !detached.hasNewer || detached.pendingLoad || !afterMessageId) return;
+    const sequence = ++historySequence.current;
+    loadSequence.current += 1;
+    setDetached({ ...detached, pendingLoad: "newer" });
+    try {
+      const window = await bridge.load_message_window({ direction: "newer", conversationId, messageId: afterMessageId });
+      if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId || window.conversationId !== conversationId || detached.generation !== detachedHistoryRef.current?.generation || detached.sessionKey !== currentSearchSessionKey()) return;
+      const merged = mergeDetachedMessages(existing, window.messages, "newer");
+      const next = { ...detached, messageIds: merged.messages.map(message => message.id), hasOlder: detached.hasOlder || window.hasOlder || merged.droppedOlder, hasNewer: window.hasNewer, pendingLoad: undefined };
+      loadSequence.current += 1;
+      setDetached(next);
+      setSnapshot(previous => previous ? { ...previous, conversations: previous.conversations.map(item => item.id === conversationId ? { ...item, messages: merged.messages, hasOlderMessages: next.hasOlder } : item) } : previous);
+      hasOlderMessagesRef.current = next.hasOlder;
+      setHasOlderMessages(next.hasOlder);
+    } catch (error) {
+      if (sequence === historySequence.current) {
+        setDetached(detached);
+        setHistoryError(errorText(error));
       }
     }
   }, []);
@@ -1691,13 +1979,39 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, [hasOlderMessages, loadOlderMessages, messageIds]);
   useLayoutEffect(() => {
     lastUnobscuredHeight.current = null;
-    if (!conversationLoaded) return;
+    if (!conversationLoaded || detachedHistoryRef.current?.conversationId === slotKey || searchReadGate.current) return;
     stickToBottom();
     nearBottom.current = true;
   }, [slotKey, conversationLoaded]);
   useLayoutEffect(() => {
-    if (nearBottom.current) stickToBottom();
+    if (nearBottom.current && !searchReadGate.current && !detachedHistoryRef.current) stickToBottom();
   }, [messageIds]);
+  useLayoutEffect(() => {
+    messageRows.current.forEach((candidate, id) => {
+      if (id === searchTargetId || candidate.dataset.searchTarget !== "true") return;
+      candidate.removeAttribute("data-search-target");
+      candidate.removeAttribute("tabindex");
+      candidate.removeAttribute("aria-describedby");
+    });
+    if (!searchTargetId || !conversationLoaded || detachedHistoryRef.current?.pendingTarget !== searchTargetId) return;
+    const row = messageRows.current.get(searchTargetId);
+    const list = messageListRef.current;
+    if (!row || !list) return;
+    row.setAttribute("data-search-target", "true");
+    row.setAttribute("tabindex", "-1");
+    row.setAttribute("aria-describedby", "search-result-message-hint");
+    list.setAttribute("data-scroll-programmatic", "");
+    row.scrollIntoView?.({ block: "center", behavior: "instant" });
+    row.focus({ preventScroll: true });
+    const current = detachedHistoryRef.current;
+    if (current?.pendingTarget === searchTargetId) setDetached({ ...current, pendingTarget: undefined });
+    const release = () => {
+      list.removeAttribute("data-scroll-programmatic");
+      searchReadGate.current = false;
+    };
+    if (typeof requestAnimationFrame === "undefined") release();
+    else requestAnimationFrame(release);
+  }, [searchTargetId, messageIds, conversationLoaded]);
   useLayoutEffect(() => {
     adjustMessageScrollForGeometry();
   }, [overlayHeight]);
@@ -1708,7 +2022,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const observer = new ResizeObserver((entries) => {
       if (entries.some((entry) => entry.target === list)) {
         adjustMessageScrollForGeometry(list);
-      } else if (nearBottom.current) {
+      } else if (nearBottom.current && !searchReadGate.current && !detachedHistoryRef.current) {
         stickToBottom(list);
       }
     });
@@ -1730,7 +2044,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const listNode = messageListRef.current;
     if (!listNode || overlayMargin === null) return;
     const markVisible = () => {
-      if (!document.hasFocus() || document.visibilityState !== "visible")
+      if (searchReadGate.current || !document.hasFocus() || document.visibilityState !== "visible")
         return;
       const ids = [...messageRows.current]
         .filter(([id, row]) => row.dataset.visible === "true" && !seenMessageIds.current.has(id) && !pendingSeenMessageIds.current.has(id))
@@ -1997,6 +2311,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         }
         store.markSent(current.key, sentGeneration);
         setNewComposeKey(null);
+        if (detachedHistoryRef.current?.conversationId === current.conversationId) clearDetached();
       } catch (error) {
         store.release(current.key);
         if (errorCode(error) === "draft-moved") {
@@ -2199,6 +2514,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       draftOnly,
     })),
   ], [draftsVersion, resolution, snapshot?.conversations, store]);
+  const searchLocal = useCallback(async (request: LocalSearchRequest) => {
+    const page = await bridge.search_local(request);
+    return {
+      ...page,
+      items: page.items.map((hit) => {
+        if (hit.kind !== "message") return hit;
+        const conversation = snapshotRef.current?.conversations.find(({ id }) => id === hit.conversationId);
+        if (!conversation) return hit;
+        const context = displayConversation(
+          conversation.name,
+          conversation.participants,
+          resolution,
+          conversation.id,
+          conversation.recipientlessDraft,
+        ).name;
+        if (hit.title === "Message") return { ...hit, title: context };
+        if (hit.title === context || hit.title === conversation.name) return hit;
+        return { ...hit, title: `${context} · ${hit.title}` };
+      }),
+    };
+  }, [resolution]);
 
   /* Locked snapshots carry no conversations, contacts, or notifications, so nothing else renders. */
   const lockCode = snapshot?.connection.errorCode;
@@ -2457,6 +2793,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       checkOriginal={checkOriginal}
       releaseMedia={releaseMedia}
       mediaRetryKey={mediaStateHint}
+      onOpenExternal={browserHost ? undefined : bridge.open_external_url}
+      searchTargetId={searchTargetId}
+      detachedHistory={detachedHistory?.conversationId === active?.id ? detachedHistory : undefined}
+      onLoadNewer={() => void loadNewerMessages()}
+      onGoToLatest={() => active?.id && void loadLatest(active.id).catch(report(""))}
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
@@ -2502,6 +2843,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const mutedNotificationKeys = new Set((snapshot?.appFilters ?? []).filter((filter) => filter.muted).map((filter) => notificationMuteKey(filter.sourceDeviceId, filter.packageName)));
   const notificationUnread = snapshot?.notifications.filter((notification) => !notification.seen && !notification.dismissalPending && !mutedNotificationKeys.has(notificationMuteKey(notification.target.sourceDeviceId, notification.packageName))).length ?? 0;
   const contactsPending = snapshot?.contactsPendingCount ?? snapshot?.contactBooks?.reduce((count, book) => count + book.pendingEditCount, 0) ?? 0;
+  const searchDisabled = !snapshot || snapshot.encryption.state !== "unlocked" || Boolean(appLock?.locked);
+  const searchSessionKey = renderedSearchSessionKey;
   const composerConnectionDot = snapshot
     ? <ConnectionDot state={snapshot.connection.state} label={`Connection: ${connectionText(snapshot.connection)}`} serverUnreachable={serverOffline} />
     : null;
@@ -2562,6 +2905,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
+        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
@@ -2817,7 +3161,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onSettings={() => { notificationSettingsRequested.current = true; setActiveView("settings"); }}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} onNavigationGuard={registerContactNavigation} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} />
           ) : (
             <>
               {showSetup && snapshot ? (

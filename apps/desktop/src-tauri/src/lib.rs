@@ -15,6 +15,8 @@ use std::{
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 mod app_lock;
 mod composer_scope;
@@ -67,8 +69,8 @@ use dto::{DraftView, Head, HistoryPage, PublicCopyView, SendResultView, Snapshot
 use error::{core_error, BridgeError, BridgeResult};
 use notifications::{NotificationPreferences, NotificationSettings, NotificationView};
 use peppy_client_core::{
-    AttachmentId, AttachmentInfo, ConversationId, MessageId, NativePlaintextFile,
-    NotificationTarget,
+    AttachmentId, AttachmentInfo, ConversationId, LocalSearchRequest, MessageId,
+    NativePlaintextFile, NotificationTarget, SearchIndexState,
 };
 use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
@@ -165,6 +167,7 @@ pub struct AppState {
 pub const COMPOSER_COMMANDS: &[&str] = &[
     "load_state",
     "load_history",
+    "open_external_url",
     "save_draft",
     "send_draft",
     "mark_seen",
@@ -548,6 +551,7 @@ async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>
 }
 
 /// Loads a snapshot using the same window scope policy as the Tauri command.
+#[cfg(test)]
 async fn load_state_for_window(
     state: &AppState,
     label: &str,
@@ -557,14 +561,38 @@ async fn load_state_for_window(
     origin: Option<String>,
     preferences: NotificationPreferences,
 ) -> BridgeResult<(Snapshot, bool)> {
+    load_state_for_window_with_options(
+        state,
+        label,
+        session,
+        conversation_id,
+        history_from_message_id,
+        origin,
+        preferences,
+        false,
+    )
+    .await
+}
+
+async fn load_state_for_window_with_options(
+    state: &AppState,
+    label: &str,
+    session: Arc<Session>,
+    conversation_id: Option<String>,
+    history_from_message_id: Option<String>,
+    origin: Option<String>,
+    preferences: NotificationPreferences,
+    metadata_only: bool,
+) -> BridgeResult<(Snapshot, bool)> {
     if label == tray::MAIN {
         return blocking(move || {
-            session.snapshot(
+            session.snapshot_with_metadata_only(
                 conversation_id.as_deref(),
                 history_from_message_id.as_deref(),
                 head(),
                 origin,
                 preferences,
+                metadata_only,
             )
         })
         .await;
@@ -573,6 +601,14 @@ async fn load_state_for_window(
         effective_composer_conversation(state, label, &session, conversation_id.as_deref())?
             .expect("composer conversation");
     blocking(move || {
+        if metadata_only {
+            return session.snapshot_scoped_metadata_only(
+                &conversation_id.to_string(),
+                head(),
+                origin,
+                preferences,
+            );
+        }
         session.snapshot_scoped(
             &conversation_id.to_string(),
             history_from_message_id.as_deref(),
@@ -591,6 +627,7 @@ async fn load_state(
     state: State<'_, AppState>,
     conversation_id: Option<String>,
     history_from_message_id: Option<String>,
+    metadata_only: Option<bool>,
 ) -> BridgeResult<Snapshot> {
     let _operation = admit_update_operation(&state)?;
     if state.app_locked.load(Ordering::Acquire) {
@@ -603,7 +640,7 @@ async fn load_state(
         return Ok(empty_snapshot(origin));
     };
     let preferences = state.notifications.preferences();
-    let (mut snapshot, deferred) = load_state_for_window(
+    let (mut snapshot, deferred) = load_state_for_window_with_options(
         &state,
         window.label(),
         session.clone(),
@@ -611,6 +648,7 @@ async fn load_state(
         history_from_message_id,
         origin,
         preferences,
+        metadata_only.unwrap_or(false),
     )
     .await?;
     if state.app_locked.load(Ordering::Acquire) {
@@ -633,7 +671,348 @@ async fn load_state(
     if deferred {
         session.notify();
     }
+    start_search_index_driver(app, session);
     Ok(snapshot)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchIndexDriverAction {
+    Wait,
+    Ready { notify: bool },
+}
+
+fn observe_search_index_state(
+    session: &Session,
+    prior_state: Option<SearchIndexState>,
+    state: SearchIndexState,
+) -> SearchIndexDriverAction {
+    if prior_state == Some(SearchIndexState::Indexing) {
+        session
+            .index_driver_saw_indexing
+            .store(true, Ordering::Release);
+    }
+    match state {
+        SearchIndexState::Indexing => {
+            session
+                .index_driver_saw_indexing
+                .store(true, Ordering::Release);
+            SearchIndexDriverAction::Wait
+        }
+        SearchIndexState::Ready => SearchIndexDriverAction::Ready {
+            notify: session
+                .index_driver_saw_indexing
+                .swap(false, Ordering::AcqRel),
+        },
+    }
+}
+
+async fn search_index_state(session: Arc<Session>) -> BridgeResult<SearchIndexState> {
+    blocking(move || {
+        session
+            .client
+            .search_local(LocalSearchRequest {
+                query: String::new(),
+                kind: None,
+                cursor: None,
+                limit: None,
+            })
+            .map(|page| page.index_state)
+            .map_err(core_error)
+    })
+    .await
+}
+
+fn claim_search_index_driver(session: &Session) -> bool {
+    !session.index_driver_ready.load(Ordering::Acquire)
+        && session
+            .index_driver_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
+async fn complete_search_index_batch(
+    session: &Session,
+    operation: update_safety::OperationGuard,
+    action: SearchIndexDriverAction,
+) -> bool {
+    drop(operation);
+    match action {
+        SearchIndexDriverAction::Ready { notify } => {
+            session.index_driver_ready.store(true, Ordering::Release);
+            if notify {
+                session.notify();
+            }
+            false
+        }
+        SearchIndexDriverAction::Wait => {
+            tokio::select! {
+                _ = session.cancel.cancelled() => false,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => true,
+            }
+        }
+    }
+}
+
+fn start_search_index_driver(app: tauri::AppHandle, session: Arc<Session>) {
+    if !claim_search_index_driver(&session) {
+        return;
+    }
+    let worker_session = session.clone();
+    session.track_worker(tokio::spawn(async move {
+        let session = worker_session;
+        let mut initial_state = true;
+        loop {
+            let state = app.state::<AppState>();
+            if state.app_locked.load(Ordering::Acquire)
+                || session.cancel.is_cancelled()
+                || !session_is_current(&state, &session).await
+            {
+                break;
+            }
+            let operation = match admit_update_operation(&state) {
+                Ok(operation) => operation,
+                Err(_) => break,
+            };
+            let prior_state = if initial_state {
+                initial_state = false;
+                match search_index_state(session.clone()).await {
+                    Ok(state) => state,
+                    Err(_) => break,
+                }
+            } else {
+                SearchIndexState::Indexing
+            };
+            if state.app_locked.load(Ordering::Acquire)
+                || session.cancel.is_cancelled()
+                || !session_is_current(&state, &session).await
+            {
+                break;
+            }
+            if prior_state == SearchIndexState::Ready {
+                let action = observe_search_index_state(&session, None, SearchIndexState::Ready);
+                let _ = complete_search_index_batch(&session, operation, action).await;
+                break;
+            }
+            let driver_session = session.clone();
+            let progress = blocking(move || {
+                driver_session
+                    .client
+                    .advance_search_index(Some(100))
+                    .map_err(core_error)
+            })
+            .await;
+            let Ok(progress) = progress else { break };
+            if state.app_locked.load(Ordering::Acquire)
+                || session.cancel.is_cancelled()
+                || !session_is_current(&state, &session).await
+            {
+                break;
+            }
+            let action = observe_search_index_state(&session, Some(prior_state), progress.index_state);
+            if !complete_search_index_batch(&session, operation, action).await {
+                break;
+            }
+        }
+        session.index_driver_running.store(false, Ordering::Release);
+    }));
+}
+
+#[tauri::command]
+async fn search_local(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    input: peppy_desktop_api::LocalSearchRequestView,
+) -> BridgeResult<peppy_desktop_api::LocalSearchPageView> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let session = state.require_session().await?;
+    let search_session = session.clone();
+    let page = blocking(move || {
+        search_session
+            .client
+            .search_local(input.into())
+            .map(peppy_desktop_api::local_search_page_view)
+            .map_err(core_error)
+    })
+    .await?;
+    if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    Ok(page)
+}
+
+#[tauri::command]
+async fn advance_search_index(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    input: Option<peppy_desktop_api::AdvanceSearchIndexInputView>,
+) -> BridgeResult<peppy_desktop_api::SearchIndexProgressView> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let session = state.require_session().await?;
+    let budget_rows = input.and_then(|input| input.budget_rows);
+    let index_session = session.clone();
+    let progress = blocking(move || {
+        index_session
+            .client
+            .advance_search_index(budget_rows)
+            .map(peppy_desktop_api::search_index_progress_view)
+            .map_err(core_error)
+    })
+    .await?;
+    if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    Ok(progress)
+}
+
+#[tauri::command]
+async fn load_message_window(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    input: peppy_desktop_api::MessageWindowRequestView,
+) -> BridgeResult<peppy_desktop_api::MessageWindowView<dto::MessageView>> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let session = state.require_session().await?;
+    let history_session = session.clone();
+    let result = blocking(move || history_session.message_window(input)).await?;
+    if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    Ok(result)
+}
+
+fn invalid_url() -> BridgeError {
+    BridgeError::new("invalid-request", "The URL is invalid.")
+}
+
+fn contains_forbidden_url_character(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            get_general_category(character),
+            GeneralCategory::Control | GeneralCategory::Format
+        )
+    })
+}
+
+fn validate_external_url(value: &str) -> BridgeResult<url::Url> {
+    if value.chars().count() > 4096
+        || contains_forbidden_url_character(value)
+        || value.contains('\\')
+    {
+        return Err(invalid_url());
+    }
+    let normalized = if value.starts_with("www.") {
+        format!("https://{value}")
+    } else {
+        value.to_owned()
+    };
+    if !(normalized.starts_with("http://") || normalized.starts_with("https://")) {
+        return Err(invalid_url());
+    }
+    let authority = normalized
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    if authority.is_empty() || authority.ends_with(':') || authority.contains('@') {
+        return Err(invalid_url());
+    }
+    let raw_host = authority
+        .strip_prefix('[')
+        .and_then(|authority| authority.split_once(']').map(|(host, _)| host))
+        .unwrap_or_else(|| {
+            authority
+                .rsplit_once(':')
+                .map_or(authority, |(host, port)| {
+                    if port.chars().all(|character| character.is_ascii_digit()) {
+                        host
+                    } else {
+                        authority
+                    }
+                })
+        });
+    if raw_host.is_empty()
+        || (!authority.starts_with('[')
+            && raw_host.split('.').any(|label| {
+                label.is_empty()
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label.chars().all(|character| {
+                        character.is_alphanumeric()
+                            || character == '-'
+                            || matches!(character as u32, 0x0300..=0x036f | 0x1ab0..=0x1aff | 0x1dc0..=0x1dff | 0x20d0..=0x20ff | 0xfe20..=0xfe2f)
+                    })
+            }))
+    {
+        return Err(invalid_url());
+    }
+    let url = url::Url::parse(&normalized).map_err(|_| invalid_url())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(invalid_url());
+    }
+    if matches!(url.host(), Some(url::Host::Ipv4(_)))
+        && raw_host != url.host_str().unwrap_or_default()
+    {
+        return Err(invalid_url());
+    }
+    Ok(url)
+}
+
+fn has_url_credentials(url: &url::Url) -> bool {
+    !url.username().is_empty() || url.password().is_some()
+}
+
+fn matches_origin(url: &url::Url, trusted: &url::Url) -> bool {
+    !has_url_credentials(url)
+        && !has_url_credentials(trusted)
+        && url.scheme() == trusted.scheme()
+        && url.host() == trusted.host()
+        && url.port_or_known_default() == trusted.port_or_known_default()
+}
+
+fn allows_app_navigation(url: &url::Url, configured_dev_url: Option<&url::Url>) -> bool {
+    let trusted_tauri_origin =
+        url::Url::parse("tauri://localhost").expect("valid trusted asset origin");
+    let trusted_windows_origin =
+        url::Url::parse("http://tauri.localhost").expect("valid trusted asset origin");
+    matches_origin(url, &trusted_tauri_origin)
+        || matches_origin(url, &trusted_windows_origin)
+        || (cfg!(debug_assertions)
+            && configured_dev_url.is_some_and(|dev_url| matches_origin(url, dev_url)))
+}
+
+#[tauri::command]
+fn open_external_url(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> BridgeResult<()> {
+    if state.app_locked.load(Ordering::Acquire) {
+        return Err(BridgeError::new("app-locked", "Peppy is locked."));
+    }
+    let _operation = admit_update_operation(&state)?;
+    if window.label() != tray::MAIN && tray::composer_conversation(window.label()).is_none() {
+        return Err(window_error());
+    }
+    let url = validate_external_url(&url)?;
+    app.opener()
+        .open_url(url.as_str(), None::<String>)
+        .map_err(|_| BridgeError::new("open-failed", "Could not open the URL."))
 }
 
 async fn session_is_current(state: &AppState, session: &Arc<Session>) -> bool {
@@ -2854,8 +3233,7 @@ async fn dismiss_all_notifications(
     require_main(window.label())?;
     let session = state.require_session().await?;
     let s = session.clone();
-    blocking(move || s.client.dismiss_all_notifications().map_err(core_error))
-    .await?;
+    blocking(move || s.client.dismiss_all_notifications().map_err(core_error)).await?;
     session.notify();
     Ok(())
 }
@@ -3346,11 +3724,7 @@ async fn restart_into_installed(
             "Peppy is still finishing background work.",
         ));
     }
-    if let Err(error) = updates::install::write_restart_marker(
-        &state.root,
-        version,
-        background,
-    ) {
+    if let Err(error) = updates::install::write_restart_marker(&state.root, version, background) {
         state
             .updates
             .install_failed("Could not record the update restart state.");
@@ -3415,10 +3789,9 @@ fn activate_main(app: &tauri::AppHandle) {
                 if state.updates.activation_should_restart(&version) {
                     match restart_into_installed(&app, &state, &version, false).await {
                         Ok(never) => match never {},
-                        Err(error) => eprintln!(
-                            "peppy: installed-update restart failed: {}",
-                            error.code
-                        ),
+                        Err(error) => {
+                            eprintln!("peppy: installed-update restart failed: {}", error.code)
+                        }
                     }
                 }
             }
@@ -3478,6 +3851,13 @@ pub fn run() {
             window_chrome::sync_webview(webview, head_panel);
             window_chrome::page_loaded(webview);
         })
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("external-navigation-deny")
+                .on_navigation(|webview, url| {
+                    allows_app_navigation(url, webview.app_handle().config().build.dev_url.as_ref())
+                })
+                .build(),
+        )
         // Must precede setup: a second manual launch activates the resident
         // main window before it can open another database/session.
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
@@ -3545,10 +3925,8 @@ pub fn run() {
             let updates = state.updates.clone();
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    updates::STARTUP_DELAY_SECS,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(updates::STARTUP_DELAY_SECS))
+                    .await;
                 loop {
                     if updates.check_due() {
                         let _ = updates.check_automatic(&update_handle).await;
@@ -3673,16 +4051,14 @@ pub fn run() {
                         let installed = state.updates.installed_pending();
                         let result = if let Some(version) = installed.as_deref() {
                             match state.updates.clear_attempted() {
-                                Ok(()) => {
-                                    restart_into_installed(
-                                        &app,
-                                        &state,
-                                        version,
-                                        restart_in_background(main_window_visible(&app)),
-                                    )
-                                    .await
-                                    .map(|never| match never {})
-                                }
+                                Ok(()) => restart_into_installed(
+                                    &app,
+                                    &state,
+                                    version,
+                                    restart_in_background(main_window_visible(&app)),
+                                )
+                                .await
+                                .map(|never| match never {}),
                                 Err(error) => Err(error),
                             }
                         } else {
@@ -3697,7 +4073,11 @@ pub fn run() {
                         if let Err(error) = result {
                             tray::show_main(&app);
                             if installed.is_none() || error.code != "update-busy" {
-                                dialogs::inform(&app, "Could not restart for update", &error.message);
+                                dialogs::inform(
+                                    &app,
+                                    "Could not restart for update",
+                                    &error.message,
+                                );
                             }
                         }
                     });
@@ -3819,6 +4199,10 @@ pub fn run() {
         ($($extra:path,)*) => { tauri::generate_handler![
         load_state,
         load_history,
+        search_local,
+        advance_search_index,
+        load_message_window,
+        open_external_url,
         configure_server,
         unlock_sync,
         get_app_lock_status,

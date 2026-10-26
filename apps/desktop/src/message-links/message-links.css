@@ -1,0 +1,22 @@
+[data-message-text] {
+  overflow-wrap: anywhere;
+}
+
+.message-text-link {
+  color: var(--peppy-accent);
+  overflow-wrap: anywhere;
+}
+
+[data-message-text-link]::after {
+  content: " → " attr(data-message-text-destination);
+  display: none;
+  overflow-wrap: anywhere;
+}
+
+[data-message-text-link]:focus-visible::after {
+  display: inline;
+}
+
+.message-text-open-failure {
+  color: var(--peppy-error-text);
+}

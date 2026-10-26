@@ -2,11 +2,11 @@
 //! supervisor. All functions here are synchronous (they call into client-core / the filesystem)
 //! and are invoked from `spawn_blocking`, never directly on an async worker or the UI thread.
 use crate::{
-    credentials::{Binding, ensure_database_key, prepare_data_dir, stored_credential},
+    credentials::{ensure_database_key, prepare_data_dir, stored_credential, Binding},
     dto::{
         self, AttachmentView, ConversationView, DraftView, GatewayView, Head, HistoryPage, Snapshot,
     },
-    error::{BridgeError, BridgeResult, core_error},
+    error::{core_error, BridgeError, BridgeResult},
     media,
     net::Api,
     notifications::NotificationPreferences,
@@ -23,8 +23,8 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
-        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, Weak,
     },
 };
 use tokio::sync::Notify;
@@ -115,6 +115,12 @@ pub struct Session {
     pub repair_wake: Notify,
     /// One fenced repair snapshot per session (or per manual request) while the latch is set.
     pub repair_attempted: AtomicBool,
+    /// Prevents duplicate standalone search-index maintenance loops for one session.
+    pub index_driver_running: AtomicBool,
+    /// Latches completed search-index maintenance for this session.
+    pub index_driver_ready: AtomicBool,
+    /// Remembers an indexing observation across transient driver restarts.
+    pub index_driver_saw_indexing: AtomicBool,
     /// A staged snapshot generation known to be impossible to complete; never resumed.
     pub abandoned_snapshot: Mutex<Option<u64>>,
 }
@@ -199,6 +205,9 @@ pub fn open_session(
         abandoned_snapshot: Mutex::new(None),
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
+        index_driver_running: AtomicBool::new(false),
+        index_driver_ready: AtomicBool::new(false),
+        index_driver_saw_indexing: AtomicBool::new(false),
     })
 }
 
@@ -627,6 +636,24 @@ impl Session {
         })
     }
 
+    pub fn message_window(
+        &self,
+        input: peppy_desktop_api::MessageWindowRequestView,
+    ) -> BridgeResult<peppy_desktop_api::MessageWindowView<dto::MessageView>> {
+        let window = self
+            .client
+            .load_message_window(input.into())
+            .map_err(core_error)?;
+        let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
+        let mut deferred = false;
+        Ok(peppy_desktop_api::message_window_view(window, |message| {
+            dto::message_view(
+                &message,
+                self.attachment_views(&message, &mut budget, &mut deferred, None),
+            )
+        }))
+    }
+
     pub fn media_page(
         &self,
         conversation: ConversationId,
@@ -742,6 +769,25 @@ impl Session {
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
     ) -> BridgeResult<(Snapshot, bool)> {
+        self.snapshot_with_metadata_only(
+            requested,
+            history_from_message_id,
+            head,
+            origin,
+            notification_preferences,
+            false,
+        )
+    }
+
+    pub fn snapshot_with_metadata_only(
+        &self,
+        requested: Option<&str>,
+        history_from_message_id: Option<&str>,
+        head: Head,
+        origin: Option<String>,
+        notification_preferences: NotificationPreferences,
+        metadata_only: bool,
+    ) -> BridgeResult<(Snapshot, bool)> {
         let conversations = self.client.list_conversations().map_err(core_error)?;
         let drafts = self.client.compose_drafts().map_err(core_error)?;
         let drafts_by_conversation: HashMap<ConversationId, _> = drafts
@@ -789,8 +835,8 @@ impl Session {
                     }
                 })
                 .unwrap_or_default();
-            let (message_views, has_older_messages) = if Some(conversation.conversation_id)
-                == active
+            let (message_views, has_older_messages) = if !metadata_only
+                && Some(conversation.conversation_id) == active
             {
                 let history_from_message_id = (requested.is_some()
                     && Some(conversation.conversation_id) == active)
@@ -1005,6 +1051,30 @@ impl Session {
         Ok(snapshot)
     }
 
+    pub fn snapshot_scoped_metadata_only(
+        &self,
+        requested: &str,
+        head: Head,
+        origin: Option<String>,
+        notification_preferences: NotificationPreferences,
+    ) -> BridgeResult<(Snapshot, bool)> {
+        let snapshot = self.snapshot_with_metadata_only(
+            Some(requested),
+            None,
+            head,
+            origin,
+            notification_preferences,
+            true,
+        )?;
+        if snapshot.0.active_conversation_id.as_deref() != Some(requested) {
+            return Err(BridgeError::new(
+                "not-found",
+                "The requested stored item was not found.",
+            ));
+        }
+        Ok(snapshot)
+    }
+
     /// Persists the last reported gateway views (non-secret display/routing data, mode 0600).
     pub fn persist_gateways(&self, views: &[GatewayView]) {
         if let Ok(bytes) = serde_json::to_vec(views) {
@@ -1053,7 +1123,7 @@ fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{PHRASE, fixture_at};
+    use crate::tests::{fixture_at, PHRASE};
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::AtomicUsize;
 
@@ -1200,11 +1270,9 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(refreshed.conversations[0].has_older_messages, Some(true));
-        assert!(
-            session
-                .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
-                .is_err()
-        );
+        assert!(session
+            .history_page(&conversation.to_string(), &uuid::Uuid::new_v4().to_string())
+            .is_err());
         let other = session
             .client
             .capture_incoming(IncomingSms {
@@ -1220,11 +1288,9 @@ mod tests {
             .record
             .message_id
             .to_string();
-        assert!(
-            session
-                .history_page(&conversation.to_string(), &other_id)
-                .is_err()
-        );
+        assert!(session
+            .history_page(&conversation.to_string(), &other_id)
+            .is_err());
     }
 
     #[test]
@@ -1234,15 +1300,11 @@ mod tests {
             .collect::<Vec<_>>();
         let eligible = bounded_preview_ids(ids.iter().copied());
         assert_eq!(eligible.len(), MAX_PREVIEW_CACHE);
-        assert!(
-            ids[..MAX_PREVIEW_CACHE]
-                .iter()
-                .all(|id| eligible.contains(id))
-        );
-        assert!(
-            ids[MAX_PREVIEW_CACHE..]
-                .iter()
-                .all(|id| !eligible.contains(id))
-        );
+        assert!(ids[..MAX_PREVIEW_CACHE]
+            .iter()
+            .all(|id| eligible.contains(id)));
+        assert!(ids[MAX_PREVIEW_CACHE..]
+            .iter()
+            .all(|id| !eligible.contains(id)));
     }
 }

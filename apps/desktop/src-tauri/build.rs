@@ -4,6 +4,10 @@
 const COMMANDS: &[&str] = &[
     "load_state",
     "load_history",
+    "search_local",
+    "advance_search_index",
+    "load_message_window",
+    "open_external_url",
     "configure_server",
     "unlock_sync",
     "get_app_lock_status",

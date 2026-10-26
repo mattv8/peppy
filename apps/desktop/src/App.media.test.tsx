@@ -248,4 +248,33 @@ describe("App media wiring", () => {
     expect(bridge.load_media).toHaveBeenCalledTimes(1);
     expect(bridge.open_media).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["native", "browser"] as const)("renders body and caption links for the %s host while keeping subjects plain", async (hostKind) => {
+    const bodyUrl = "https://example.test/body";
+    const captionUrl = "https://example.test/caption";
+    const subjectUrl = "https://example.test/subject";
+    const bodyMessage = { ...message("linked-body", image("unused-body-image")), body: `Open ${bodyUrl}`, transport: "sms" as const, attachments: [] };
+    const captionMessage = { ...message("linked-caption", image("linked-image")), body: `Caption ${captionUrl}`, subject: `Reference ${subjectUrl}` };
+    currentSnapshot = snapshot([bodyMessage, captionMessage]);
+    const openExternal = vi.spyOn(bridge as { open_external_url(url: string): Promise<void> }, "open_external_url").mockResolvedValue();
+
+    render(<App hostKind={hostKind} />);
+
+    const bodyLink = await screen.findByRole("link", { name: bodyUrl });
+    const captionLink = screen.getByRole("link", { name: captionUrl });
+    expect(bodyLink).toHaveAttribute("href", bodyUrl);
+    expect(captionLink).toHaveAttribute("href", captionUrl);
+    expect(screen.getByText(`Subject: Reference ${subjectUrl}`).querySelector("a")).toBeNull();
+    if (hostKind === "native") {
+      fireEvent.click(bodyLink);
+      fireEvent.click(captionLink);
+      expect(openExternal).toHaveBeenNthCalledWith(1, bodyUrl);
+      expect(openExternal).toHaveBeenNthCalledWith(2, captionUrl);
+    } else {
+      expect(bodyLink).toHaveAttribute("target", "_blank");
+      expect(captionLink).toHaveAttribute("target", "_blank");
+      expect(openExternal).not.toHaveBeenCalled();
+    }
+  });
+
 });

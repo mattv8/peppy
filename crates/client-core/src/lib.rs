@@ -32,6 +32,7 @@ mod contacts;
 mod conversation_match;
 mod gateway_settings;
 mod history_import;
+mod local_search;
 mod media;
 mod media_cache;
 mod media_paging;
@@ -45,6 +46,7 @@ mod snapshot_projection;
 pub use gateway_settings::{
     GatewayCapabilities, GatewayHostFacts, GatewayPlatform, GatewayPolicyDecision, GatewaySettings,
 };
+pub use local_search::*;
 use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
@@ -91,7 +93,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 34;
+const SCHEMA_VERSION: i64 = 35;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -4348,6 +4350,66 @@ const MIGRATION_34: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_pending_order ON sms_acquisitions(acquisition_id) WHERE state='pending';
 ";
 
+const MIGRATION_35: &str = "
+CREATE VIRTUAL TABLE IF NOT EXISTS local_search_fts USING fts5(kind UNINDEXED,target_id UNINDEXED,conversation_id UNINDEXED,title,body,timestamp UNINDEXED,content='',contentless_delete=1,tokenize='unicode61');
+CREATE INDEX IF NOT EXISTS messages_search_metadata ON messages(local_order,sort_at_ms,id,conversation_id);
+INSERT OR IGNORE INTO metadata(k,v) VALUES('search_backfill_highwater',COALESCE((SELECT MAX(local_order) FROM messages),0));
+INSERT OR IGNORE INTO metadata(k,v) VALUES('search_backfill_watermark','0');
+INSERT OR IGNORE INTO metadata(k,v) VALUES('search_remaining',(SELECT COUNT(*) FROM messages WHERE local_order<=CAST((SELECT v FROM metadata WHERE k='search_backfill_highwater') AS INTEGER)));
+INSERT OR IGNORE INTO metadata(k,v) VALUES('search_generation','0');
+CREATE TRIGGER IF NOT EXISTS messages_search_insert AFTER INSERT ON messages BEGIN
+  INSERT INTO local_search_fts(rowid,kind,target_id,conversation_id,title,body,timestamp)
+  VALUES(new.local_order,'message',new.id,new.conversation_id,COALESCE(json_extract(new.payload,'$.subject'),''),COALESCE(json_extract(new.payload,'$.body'),''),new.sort_at_ms);
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS messages_search_update AFTER UPDATE OF payload,conversation_id,sort_at_ms ON messages BEGIN
+  DELETE FROM local_search_fts WHERE rowid=old.local_order;
+  INSERT INTO local_search_fts(rowid,kind,target_id,conversation_id,title,body,timestamp)
+  VALUES(new.local_order,'message',new.id,new.conversation_id,COALESCE(json_extract(new.payload,'$.subject'),''),COALESCE(json_extract(new.payload,'$.body'),''),new.sort_at_ms);
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS messages_search_delete AFTER DELETE ON messages BEGIN
+  DELETE FROM local_search_fts WHERE rowid=old.local_order;
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contacts_search_insert AFTER INSERT ON contacts BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contacts_search_update AFTER UPDATE OF book_id,body,deleted_at ON contacts BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contacts_search_delete AFTER DELETE ON contacts BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contact_books_search_insert AFTER INSERT ON contact_books BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contact_books_search_update AFTER UPDATE OF body,forgotten ON contact_books BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contact_books_search_delete AFTER DELETE ON contact_books BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contact_address_search_insert AFTER INSERT ON contact_address_index BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contact_address_search_update AFTER UPDATE ON contact_address_index BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS contact_address_search_delete AFTER DELETE ON contact_address_index BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS addresses_search_insert AFTER INSERT ON addresses BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS addresses_search_update AFTER UPDATE ON addresses BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS addresses_search_delete AFTER DELETE ON addresses BEGIN
+  UPDATE metadata SET v=CAST(v AS INTEGER)+1 WHERE k='search_generation';
+END;
+";
+
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
         .split_whitespace()
@@ -4393,8 +4455,17 @@ fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error>
     Ok(())
 }
 
+/// Browser (emscripten) SQLCipher page cache per connection, in KiB. Measured on the same WASM
+/// binary: the default 8192-page (32 MiB) cache took the 100k-message search from 203.8 ms to
+/// 122 ms, so the default is raised to this size. It is volatile and set per connection, so it
+/// does not touch the persistent header or the native, Android, and iOS caches.
+#[cfg(target_os = "emscripten")]
+const BROWSER_CACHE_KIB: i64 = 32 * 1024;
+
 fn initialize(store: &mut Store) -> Result<(), Error> {
     let conn = &mut store.conn;
+    #[cfg(target_os = "emscripten")]
+    conn.execute_batch(&format!("PRAGMA cache_size = -{BROWSER_CACHE_KIB};"))?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER NOT NULL)")?;
     contacts::initialize(conn)?;
     contact_resolution::initialize(conn)?;
@@ -4440,6 +4511,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_32(&tx)?;
             apply_migration_33(&tx)?;
             tx.execute_batch(MIGRATION_34)?;
+            tx.execute_batch(MIGRATION_35)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4448,7 +4520,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=33)) => {
+        Some(version @ (4..=34)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4538,6 +4610,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 33 {
                 tx.execute_batch(MIGRATION_34)?;
+            }
+            if version <= 34 {
+                tx.execute_batch(MIGRATION_35)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -8218,7 +8293,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 34);
+        assert_eq!(version, SCHEMA_VERSION);
         assert!(index_exists);
     }
 
