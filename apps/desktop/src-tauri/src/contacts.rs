@@ -44,7 +44,6 @@ const AVATAR_BUDGET: usize = 64;
 const CROP_SOURCE_EDGE: u32 = 1024;
 const PHOTO_STAGING_DIR: &str = "contact-photo-staging";
 const STAGING_MAX_AGE: Duration = Duration::from_secs(10 * 60);
-const MAX_PREVIEW_CACHE: usize = 256;
 
 fn invalid(message: &'static str) -> BridgeError {
     BridgeError::new("invalid-contact-edit", message)
@@ -165,19 +164,14 @@ pub fn forget_book(session: &Session, book_id: &str) -> BridgeResult<()> {
 // ---------------------------------------------------------------------------------------------
 
 /// Decrypts a verified local contact photo into a small re-encoded JPEG data URL (at most
-/// `AVATAR_MAX_BYTES`), cached per attachment in the session preview cache, which the media
+/// `AVATAR_MAX_BYTES`), cached per attachment in the session avatar cache, which the media
 /// worker invalidates after downloads. Used for contact lists and display-only name resolution.
 pub(crate) fn session_avatar(
     session: &Session,
     budget: &mut usize,
     id: AttachmentId,
 ) -> Option<String> {
-    let cached = session
-        .previews
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(&id)
-        .cloned();
+    let cached = session.cached_avatar(&id);
     if let Some(value) = cached {
         return value;
     }
@@ -187,14 +181,7 @@ pub(crate) fn session_avatar(
     *budget -= 1;
     let value = local_photo_bytes(session, id)
         .and_then(|bytes| media::avatar_data_url(&bytes, AVATAR_EDGE, AVATAR_MAX_BYTES));
-    let mut cache = session
-        .previews
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if cache.len() >= MAX_PREVIEW_CACHE {
-        cache.clear();
-    }
-    cache.insert(id, value.clone());
+    session.cache_avatar(id, value.clone());
     value
 }
 

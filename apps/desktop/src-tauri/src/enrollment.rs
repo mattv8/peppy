@@ -964,7 +964,7 @@ async fn install_identity(
     passphrase: Zeroizing<String>,
     expected_binding: Option<crate::credentials::Binding>,
 ) -> BridgeResult<()> {
-    let _operation = crate::admit_update_operation(state)?;
+    let operation = crate::admit_update_operation(state)?;
     let metadata = identity.metadata().clone();
     let origin = identity.origin().to_owned();
     let vault_secret = passphrase.clone();
@@ -997,7 +997,7 @@ async fn install_identity(
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
         crate::verify_import(state, &credential).await?;
-        crate::activate_import_locked(state, credential).await
+        crate::activate_import_locked(state, credential, Some(&operation)).await
     }
     .await;
     if let Err(error) = result {
@@ -1009,7 +1009,7 @@ async fn install_identity(
         permit.finish().await?;
     }
     (state.notifier)();
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     if let Some(activation) = identity.into_activation() {
         let activation_session = session.clone();
         crate::sync::blocking(move || {
@@ -2793,13 +2793,13 @@ pub async fn enrollment_approve(
     state: State<'_, AppState>,
     hosted: State<'_, crate::hosted::HostedState>,
 ) -> BridgeResult<EnrollmentView> {
-    let _operation = crate::admit_update_operation(&state)?;
+    let operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     refresh_invitation(&state, &hosted).await?;
     let session = state.require_session().await?;
     let binding = session.binding.clone();
     let preparation = prepare_phone_approval_without_secret(&state.enrollment)?;
-    if state.require_session().await?.binding != binding {
+    if state.require_session_admitted(&operation).await?.binding != binding {
         return Ok(state
             .enrollment
             .lock()
@@ -2822,7 +2822,7 @@ pub async fn enrollment_approve(
                 && handoff_capability_unavailable(&error) =>
         {
             if !restore_phone_handoff_capability(&state, &session, &binding, &preparation).await?
-                || state.require_session().await?.binding != binding
+                || state.require_session_admitted(&operation).await?.binding != binding
             {
                 return Ok(state
                     .enrollment
@@ -3466,7 +3466,7 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
-    async fn stale_operation_while_confirming_a_new_password_stops_before_secret_generation() {
+    async fn staleoperation_while_confirming_a_new_password_stops_before_secret_generation() {
         let controller = Arc::new(unclaimed_controller());
         let store = MemoryStore::default();
         let prompt_controller = controller.clone();
@@ -3590,7 +3590,7 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
-    async fn lost_response_retry_reuses_operation_device_and_credential_metadata() {
+    async fn lost_response_retry_reusesoperation_device_and_credential_metadata() {
         let controller = unclaimed_controller();
         let store = MemoryStore::default();
         let requests = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -3894,7 +3894,7 @@ mod owner_retry_tests {
     }
 
     #[tokio::test]
-    async fn start_over_leaves_non_pending_or_stale_operations_unchanged() {
+    async fn start_over_leaves_non_pending_or_staleoperations_unchanged() {
         let store = MemoryStore::default();
         let controller = unclaimed_controller();
         let before = controller.lock().unwrap().view();

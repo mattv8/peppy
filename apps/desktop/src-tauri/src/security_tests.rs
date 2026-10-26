@@ -580,7 +580,7 @@ async fn search_index_wait_releases_update_admission_and_honors_cancellation() {
 
     tokio::task::yield_now().await;
     let restart = gate
-        .reserve()
+        .reserve_now()
         .expect("the completed batch must release update admission before its wait");
     drop(restart);
     session.cancel.cancel();

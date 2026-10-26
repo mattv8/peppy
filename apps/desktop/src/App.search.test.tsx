@@ -116,6 +116,25 @@ describe("App search navigation", () => {
     expect(bridge.load_state).not.toHaveBeenCalledWith("conv-aurora", expect.any(String));
   });
 
+  it("keeps detached metadata-only refreshes when a trailing state hint is queued", async () => {
+    const rows = [message("a"), message("target"), message("z")];
+    const firstState = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_message_window).mockResolvedValue({ conversationId: "conv-aurora", messages: rows, hasOlder: true, hasNewer: true });
+    render(<App hostKind="browser" />);
+    await screen.findAllByText("Can you send over the estimate?");
+    await activate({ kind: "message", conversationId: "conv-aurora", messageId: "target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
+    vi.mocked(bridge.load_state).mockReturnValueOnce(firstState.promise);
+
+    await act(async () => subscription?.());
+    await waitFor(() => expect(bridge.load_state).toHaveBeenLastCalledWith("conv-aurora", undefined, { metadataOnly: true }));
+    await act(async () => subscription?.());
+    await act(async () => firstState.resolve({ ...snapshot, activeConversationId: "conv-aurora" }));
+
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridge.load_message_window).toHaveBeenCalledWith({ direction: "refresh", conversationId: "conv-aurora", messageIds: ["a", "target", "z"] }));
+    expect(bridge.load_state).toHaveBeenLastCalledWith("conv-aurora", undefined, { metadataOnly: true });
+  });
+
   it("does not refresh an empty window while the around request is pending", async () => {
     let resolveAround!: (value: Awaited<ReturnType<typeof bridge.load_message_window>>) => void;
     vi.mocked(bridge.load_message_window).mockReturnValueOnce(new Promise(resolve => { resolveAround = resolve; }));

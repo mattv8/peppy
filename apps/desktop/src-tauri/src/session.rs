@@ -18,7 +18,7 @@ use peppy_client_core::{
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     str::FromStr,
@@ -34,7 +34,12 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
 const INITIAL_HISTORY_MESSAGES: usize = 50;
 const MAX_PREVIEWS_PER_SNAPSHOT: usize = 12;
+/// Per-session decoded attachment preview entries. Snapshot hydration adds at most 12 entries.
 const MAX_PREVIEW_CACHE: usize = 256;
+const MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT: usize = MAX_PREVIEW_CACHE / 2;
+const MAX_DEFERRED_FOLLOW_UPS: usize = 8;
+/// Per-session decoded contact avatar entries, isolated from attachment previews.
+const MAX_AVATAR_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
 const PENDING_COUNT_CAP: usize = 200;
 pub const GATEWAYS_FILE: &str = "gateways.json";
@@ -99,7 +104,8 @@ pub struct Session {
     pub api: Api,
     pub data_dir: PathBuf,
     pub status: Mutex<NetStatus>,
-    pub previews: Mutex<HashMap<AttachmentId, Option<String>>>,
+    previews: Mutex<BoundedCache>,
+    avatars: Mutex<BoundedCache>,
     pub transfer_errors: Mutex<HashMap<AttachmentId, String>>,
     pub remote_ids: Mutex<RemoteIds>,
     /// Wakes the outbound/media worker only (send, read state, unlock).
@@ -123,6 +129,94 @@ pub struct Session {
     pub index_driver_saw_indexing: AtomicBool,
     /// A staged snapshot generation known to be impossible to complete; never resumed.
     pub abandoned_snapshot: Mutex<Option<u64>>,
+    deferred_follow_up: DeferredFollowUp,
+}
+
+struct BoundedCache {
+    entries: HashMap<AttachmentId, Option<String>>,
+    insertion_order: VecDeque<AttachmentId>,
+    capacity: usize,
+}
+
+impl BoundedCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            insertion_order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn get(&self, id: &AttachmentId) -> Option<Option<String>> {
+        self.entries.get(id).cloned()
+    }
+
+    fn insert(&mut self, id: AttachmentId, value: Option<String>) {
+        if self.entries.insert(id, value).is_some() {
+            return;
+        }
+        if self.entries.len() > self.capacity {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.insertion_order.push_back(id);
+    }
+
+    fn remove(&mut self, id: &AttachmentId) {
+        if self.entries.remove(id).is_some() {
+            self.insertion_order.retain(|cached| cached != id);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeferredHydration {
+    pub hydrated: usize,
+    pub eligible_remain: bool,
+}
+
+impl DeferredHydration {
+    pub fn should_notify(self) -> bool {
+        self.hydrated > 0 && self.eligible_remain
+    }
+}
+
+#[derive(Default)]
+struct DeferredFollowUp {
+    pending: AtomicBool,
+    consecutive: std::sync::atomic::AtomicUsize,
+}
+
+impl DeferredFollowUp {
+    fn consume(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn schedule(&self, hydration: DeferredHydration) -> bool {
+        if !hydration.eligible_remain {
+            self.reset();
+            return false;
+        }
+        if !hydration.should_notify()
+            || self.consecutive.load(Ordering::Acquire) >= MAX_DEFERRED_FOLLOW_UPS
+        {
+            return false;
+        }
+        if self
+            .pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        self.consecutive.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    fn reset(&self) {
+        self.consecutive.store(0, Ordering::Release);
+    }
 }
 
 fn started_sessions() -> &'static Mutex<Vec<Weak<Session>>> {
@@ -194,7 +288,8 @@ pub fn open_session(
         remote_ids: Mutex::new(RemoteIds::load(data_dir.join("remote-objects.json"))),
         data_dir,
         status: Mutex::new(status),
-        previews: Mutex::new(HashMap::new()),
+        previews: Mutex::new(BoundedCache::new(MAX_PREVIEW_CACHE)),
+        avatars: Mutex::new(BoundedCache::new(MAX_AVATAR_CACHE)),
         transfer_errors: Mutex::new(HashMap::new()),
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
@@ -208,6 +303,7 @@ pub fn open_session(
         index_driver_running: AtomicBool::new(false),
         index_driver_ready: AtomicBool::new(false),
         index_driver_saw_indexing: AtomicBool::new(false),
+        deferred_follow_up: DeferredFollowUp::default(),
     })
 }
 
@@ -285,7 +381,20 @@ impl Session {
     }
 
     pub fn notify(&self) {
+        self.deferred_follow_up.reset();
         (self.notifier)();
+    }
+
+    pub fn notify_deferred_follow_up(&self) {
+        (self.notifier)();
+    }
+
+    pub fn consume_deferred_follow_up(&self) {
+        self.deferred_follow_up.consume();
+    }
+
+    pub fn schedule_deferred_follow_up(&self, hydration: DeferredHydration) -> bool {
+        self.deferred_follow_up.schedule(hydration)
     }
 
     pub fn gateways(&self) -> (Vec<GatewayView>, bool) {
@@ -500,17 +609,47 @@ impl Session {
             .previews
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if cache.len() >= MAX_PREVIEW_CACHE {
-            cache.clear();
-        }
         cache.insert(id, preview);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_preview(&self, id: &AttachmentId) -> Option<Option<String>> {
+        self.previews
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(id)
+    }
+
+    pub(crate) fn cached_avatar(&self, id: &AttachmentId) -> Option<Option<String>> {
+        self.avatars
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(id)
+    }
+
+    pub(crate) fn cache_avatar(&self, id: AttachmentId, avatar: Option<String>) {
+        self.avatars
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(id, avatar);
+    }
+
+    pub(crate) fn invalidate_cached_attachment(&self, id: &AttachmentId) {
+        self.previews
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(id);
+        self.avatars
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(id);
     }
 
     fn attachment_views(
         &self,
         message: &Message,
         budget: &mut usize,
-        deferred: &mut bool,
+        hydration: &mut DeferredHydration,
         eligible: Option<&HashSet<AttachmentId>>,
     ) -> Vec<AttachmentView> {
         let errors = self
@@ -556,14 +695,14 @@ impl Session {
                         .previews
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
-                        .get(&preview_id)
-                        .cloned();
+                        .get(&preview_id);
                     preview = match cached {
                         Some(value) => value,
                         None if eligible.is_none_or(|ids| ids.contains(&preview_id))
                             && *budget > 0 =>
                         {
                             *budget -= 1;
+                            hydration.hydrated += 1;
                             let value = self
                                 .client
                                 .open_native_plaintext(preview_id)
@@ -575,7 +714,7 @@ impl Session {
                         }
                         None => {
                             if eligible.is_none_or(|ids| ids.contains(&preview_id)) {
-                                *deferred = true;
+                                hydration.eligible_remain = true;
                             }
                             None
                         }
@@ -600,7 +739,7 @@ impl Session {
         &self,
         messages: Vec<Message>,
         budget: &mut usize,
-        deferred: &mut bool,
+        hydration: &mut DeferredHydration,
         eligible: Option<&HashSet<AttachmentId>>,
     ) -> Vec<dto::MessageView> {
         messages
@@ -608,7 +747,7 @@ impl Session {
             .map(|message| {
                 dto::message_view(
                     message,
-                    self.attachment_views(message, budget, deferred, eligible),
+                    self.attachment_views(message, budget, hydration, eligible),
                 )
             })
             .collect()
@@ -627,8 +766,8 @@ impl Session {
             .client
             .messages_page(conversation, Some(anchor), INITIAL_HISTORY_MESSAGES)
             .map_err(core_error)?;
-        let (mut budget, mut deferred) = (MAX_PREVIEWS_PER_SNAPSHOT, false);
-        let messages = self.message_views(page.messages, &mut budget, &mut deferred, None);
+        let (mut budget, mut hydration) = (MAX_PREVIEWS_PER_SNAPSHOT, DeferredHydration::default());
+        let messages = self.message_views(page.messages, &mut budget, &mut hydration, None);
         Ok(HistoryPage {
             conversation_id: conversation.to_string(),
             messages,
@@ -645,11 +784,11 @@ impl Session {
             .load_message_window(input.into())
             .map_err(core_error)?;
         let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
-        let mut deferred = false;
+        let mut hydration = DeferredHydration::default();
         Ok(peppy_desktop_api::message_window_view(window, |message| {
             dto::message_view(
                 &message,
-                self.attachment_views(&message, &mut budget, &mut deferred, None),
+                self.attachment_views(&message, &mut budget, &mut hydration, None),
             )
         }))
     }
@@ -693,8 +832,7 @@ impl Session {
                 .previews
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .get(&id)
-                .cloned();
+                .get(&id);
             let preview = match cached {
                 Some(value) => value,
                 None => {
@@ -759,8 +897,7 @@ impl Session {
         Ok(peppy_desktop_api::media_page_view(page))
     }
 
-    /// Builds the sanitized UI snapshot from core state. Returns whether previews were deferred
-    /// (the caller then emits another state hint).
+    /// Builds the sanitized UI snapshot and reports deferred preview hydration progress.
     pub fn snapshot(
         &self,
         requested: Option<&str>,
@@ -768,7 +905,7 @@ impl Session {
         head: Head,
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
-    ) -> BridgeResult<(Snapshot, bool)> {
+    ) -> BridgeResult<(Snapshot, DeferredHydration)> {
         self.snapshot_with_metadata_only(
             requested,
             history_from_message_id,
@@ -787,7 +924,7 @@ impl Session {
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
         metadata_only: bool,
-    ) -> BridgeResult<(Snapshot, bool)> {
+    ) -> BridgeResult<(Snapshot, DeferredHydration)> {
         let conversations = self.client.list_conversations().map_err(core_error)?;
         let drafts = self.client.compose_drafts().map_err(core_error)?;
         let drafts_by_conversation: HashMap<ConversationId, _> = drafts
@@ -805,7 +942,7 @@ impl Session {
         let active = requested
             .or_else(|| conversations.first().map(|c| c.conversation_id))
             .or_else(|| drafts.first().map(|d| d.conversation_id));
-        let (mut budget, mut deferred) = (MAX_PREVIEWS_PER_SNAPSHOT, false);
+        let (mut budget, mut hydration) = (MAX_PREVIEWS_PER_SNAPSHOT, DeferredHydration::default());
         let mut views = Vec::new();
         for conversation in &conversations {
             let latest = self
@@ -865,7 +1002,7 @@ impl Session {
                 .map_err(core_error)?;
                 let eligible = snapshot_preview_ids(&messages);
                 (
-                    self.message_views(messages, &mut budget, &mut deferred, Some(&eligible)),
+                    self.message_views(messages, &mut budget, &mut hydration, Some(&eligible)),
                     Some(has_more),
                 )
             } else {
@@ -1024,7 +1161,7 @@ impl Session {
             contacts_pending_count: contacts.pending_count,
             contact_sync: contacts.sync,
         };
-        Ok((snapshot, deferred))
+        Ok((snapshot, hydration))
     }
 
     pub fn snapshot_scoped(
@@ -1034,7 +1171,7 @@ impl Session {
         head: Head,
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
-    ) -> BridgeResult<(Snapshot, bool)> {
+    ) -> BridgeResult<(Snapshot, DeferredHydration)> {
         let snapshot = self.snapshot(
             Some(requested),
             history_from_message_id,
@@ -1057,7 +1194,7 @@ impl Session {
         head: Head,
         origin: Option<String>,
         notification_preferences: NotificationPreferences,
-    ) -> BridgeResult<(Snapshot, bool)> {
+    ) -> BridgeResult<(Snapshot, DeferredHydration)> {
         let snapshot = self.snapshot_with_metadata_only(
             Some(requested),
             None,
@@ -1110,10 +1247,10 @@ fn snapshot_preview_ids(messages: &[Message]) -> HashSet<AttachmentId> {
 }
 
 fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<AttachmentId> {
-    let mut eligible = HashSet::with_capacity(MAX_PREVIEW_CACHE);
+    let mut eligible = HashSet::with_capacity(MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT);
     for id in ids {
         eligible.insert(id);
-        if eligible.len() == MAX_PREVIEW_CACHE {
+        if eligible.len() == MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT {
             break;
         }
     }
@@ -1123,7 +1260,10 @@ fn bounded_preview_ids(ids: impl IntoIterator<Item = AttachmentId>) -> HashSet<A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{fixture_at, PHRASE};
+    use crate::{
+        media::tests::sample_png,
+        tests::{fixture_at, gateway, input, routed, PHRASE},
+    };
     use peppy_client_core::IncomingSms;
     use std::sync::atomic::AtomicUsize;
 
@@ -1299,12 +1439,133 @@ mod tests {
             .map(|_| AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap())
             .collect::<Vec<_>>();
         let eligible = bounded_preview_ids(ids.iter().copied());
-        assert_eq!(eligible.len(), MAX_PREVIEW_CACHE);
-        assert!(ids[..MAX_PREVIEW_CACHE]
+        assert_eq!(eligible.len(), MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT);
+        assert!(ids[..MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT]
             .iter()
             .all(|id| eligible.contains(id)));
-        assert!(ids[MAX_PREVIEW_CACHE..]
+        assert!(ids[MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT..]
             .iter()
             .all(|id| !eligible.contains(id)));
+    }
+
+    #[test]
+    fn bounded_cache_evicts_only_the_oldest_entry() {
+        let first = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let second = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let third = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let mut cache = BoundedCache::new(2);
+
+        cache.insert(first, Some("first".into()));
+        cache.insert(second, Some("second".into()));
+        cache.insert(third, Some("third".into()));
+
+        assert_eq!(cache.get(&first), None);
+        assert_eq!(cache.get(&second), Some(Some("second".into())));
+        assert_eq!(cache.get(&third), Some(Some("third".into())));
+    }
+
+    #[test]
+    fn preview_and_avatar_caches_are_isolated() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        let id = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+
+        session.cache_preview(id, Some("preview".into()));
+        session.cache_avatar(id, Some("avatar".into()));
+
+        assert_eq!(session.cached_preview(&id), Some(Some("preview".into())));
+        assert_eq!(session.cached_avatar(&id), Some(Some("avatar".into())));
+    }
+
+    #[test]
+    fn deferred_follow_up_requires_progress_and_coalesces_concurrent_snapshots() {
+        let follow_up = DeferredFollowUp::default();
+        let no_progress = DeferredHydration {
+            hydrated: 0,
+            eligible_remain: true,
+        };
+        let progress = DeferredHydration {
+            hydrated: 1,
+            eligible_remain: true,
+        };
+        let complete = DeferredHydration {
+            hydrated: 1,
+            eligible_remain: false,
+        };
+
+        assert!(!follow_up.schedule(no_progress));
+        assert!(!follow_up.schedule(complete));
+        for _ in 0..8 {
+            assert!(follow_up.schedule(progress));
+            follow_up.consume();
+        }
+        assert!(!follow_up.schedule(progress));
+        assert!(!follow_up.schedule(complete));
+        assert!(follow_up.schedule(progress));
+    }
+
+    #[test]
+    fn snapshot_reports_preview_hydration_progress() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let image = fixture.dir.path().join("preview.png");
+        fs::write(&image, sample_png(64, 48)).unwrap();
+        let attachment = session.prepare_attachment(&image).unwrap();
+        let attachment_id = AttachmentId::from_str(&attachment.id).unwrap();
+        session.invalidate_cached_attachment(&attachment_id);
+        let draft = session
+            .save_draft(&input("", "", "", &["+15555550100"], "0"))
+            .unwrap();
+        let mut with_attachment = input(
+            &draft.id,
+            &draft.conversation_id,
+            "",
+            &["+15555550100"],
+            &draft.revision,
+        );
+        with_attachment.attachment_ids = vec![attachment.id];
+        let draft = session.save_draft(&with_attachment).unwrap();
+        let gateway_id = uuid::Uuid::new_v4().to_string();
+        session.set_status(|status| {
+            status.gateways = vec![gateway(&gateway_id, true, true)];
+            status.gateways_known = true;
+        });
+        session
+            .send_draft(&routed(
+                input(&draft.id, "", "", &["+15555550100"], &draft.revision),
+                &gateway_id,
+                "sim-1",
+            ))
+            .unwrap();
+
+        let (_, hydration) = session
+            .snapshot(
+                Some(&draft.conversation_id),
+                None,
+                crate::head(),
+                None,
+                NotificationPreferences::default(),
+            )
+            .unwrap();
+
+        assert_eq!(hydration.hydrated, 1);
     }
 }

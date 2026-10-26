@@ -898,6 +898,32 @@ afterEach(() => {
 });
 
 describe("lazy conversation history", () => {
+  it("coalesces state-event refreshes into one trailing load", async () => {
+    const first = deferred<DesktopSnapshot>();
+    const second = deferred<DesktopSnapshot>();
+    const snapshot = await fixtureBridge.load_state();
+
+    render(<App />);
+    await screen.findByLabelText("Message");
+    const callsBeforeRefresh = vi.mocked(bridge.load_state).mock.calls.length;
+    vi.mocked(bridge.load_state)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    await act(async () => {
+      hint?.();
+    });
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeRefresh + 1));
+    await act(async () => {
+      hint?.();
+      hint?.();
+    });
+    expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeRefresh + 1);
+
+    await act(async () => first.resolve(snapshot));
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeRefresh + 2));
+    await act(async () => second.resolve(snapshot));
+  });
+
   it("renders compact message metadata with truthful delivery and phone-history timing", async () => {
     const incoming = host.conversations[0].messages[0];
     Object.assign(incoming, { timestamp: "1788435180000", attachments: [] });
@@ -1886,6 +1912,27 @@ describe("floating conversation actions", () => {
 });
 
 describe("conversation selection", () => {
+  it("keeps an explicit selection refresh when a state refresh is in flight", async () => {
+    const inFlight = deferred<DesktopSnapshot>();
+    const trailing = deferred<DesktopSnapshot>();
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const callsBeforeRefresh = vi.mocked(bridge.load_state).mock.calls.length;
+    vi.mocked(bridge.load_state)
+      .mockReturnValueOnce(inFlight.promise)
+      .mockReturnValueOnce(trailing.promise);
+
+    await act(async () => hint?.());
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeRefresh + 1));
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeRefresh + 1);
+
+    await act(async () => inFlight.resolve(host.load("aurora")));
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeRefresh + 2));
+    expect(bridge.load_state).toHaveBeenLastCalledWith("river");
+    await act(async () => trailing.resolve(host.load("river")));
+  });
+
   it("loads the selected conversation's messages and stored draft from the host", async () => {
     host.drafts.set("river", {
       id: "draft-river",
@@ -2444,6 +2491,57 @@ describe("gateway routes", () => {
     await waitFor(() => expect(bridge.retry_attachment).toHaveBeenCalledWith("photo-1"));
     expect(bridge.save_attachment).toHaveBeenCalledWith("photo-1");
     expect(bridge.send_draft).not.toHaveBeenCalled();
+  });
+
+  it("processes pending saves once per attachment while state hints overlap", async () => {
+    const first = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
+    const second = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
+    const firstAttachment = host.conversations[0].messages[0].attachments[0];
+    host.conversations[0].messages[0].attachments.push({ ...firstAttachment, id: "photo-2", name: "photo-two.png" });
+    vi.mocked(bridge.save_attachment)
+      .mockRejectedValueOnce({ code: "media-pending" })
+      .mockRejectedValueOnce({ code: "media-pending" })
+      .mockResolvedValue(true);
+    vi.spyOn(bridge, "open_media")
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    render(<App />);
+    await screen.findByRole("button", { name: "Save photo.png" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
+    await screen.findByText(/Downloading photo.png/);
+    await act(async () => hint?.());
+    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-1"));
+    await act(async () => {
+      hint?.();
+      hint?.();
+    });
+    expect(bridge.open_media).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save photo-two.png" }));
+    await screen.findByText(/Downloading photo-two.png/);
+    await act(async () => first.resolve({ state: "ready", url: "file:photo-1", mediaType: "image/png", byteSize: 1 }));
+    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-2"));
+    await act(async () => second.resolve({ state: "ready", url: "file:photo-2", mediaType: "image/png", byteSize: 1 }));
+
+    await waitFor(() => expect(bridge.save_attachment).toHaveBeenCalledWith("photo-2"));
+    expect(bridge.open_media).toHaveBeenCalledTimes(2);
+    expect(bridge.save_attachment).toHaveBeenCalledTimes(4);
+  });
+
+  it("stops pending attachment saves after unmount", async () => {
+    const media = deferred<Awaited<ReturnType<typeof bridge.open_media>>>();
+    vi.mocked(bridge.save_attachment).mockRejectedValueOnce({ code: "media-pending" });
+    vi.spyOn(bridge, "open_media").mockImplementationOnce(() => media.promise);
+    const rendered = render(<App />);
+    await screen.findByRole("button", { name: "Save photo.png" });
+    fireEvent.click(screen.getByRole("button", { name: "Save photo.png" }));
+    await screen.findByText(/Downloading photo.png/);
+    await act(async () => hint?.());
+    await waitFor(() => expect(bridge.open_media).toHaveBeenCalledWith("photo-1"));
+    rendered.unmount();
+    await act(async () => media.resolve({ state: "ready", url: "file:photo-1", mediaType: "image/png", byteSize: 1 }));
+    expect(bridge.save_attachment).toHaveBeenCalledOnce();
   });
 
   it("blocks an MMS lower-bound estimate that already exceeds the reported limit", async () => {

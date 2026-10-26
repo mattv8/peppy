@@ -84,7 +84,7 @@ pub(crate) async fn provision_enrollment(
     state: &AppState,
     hosted: &HostedState,
 ) -> BridgeResult<()> {
-    let _operation = crate::admit_update_operation(state)?;
+    let operation = crate::admit_update_operation(state)?;
     let origin = hosted_origin()?;
     provision_core(
         &*state.store,
@@ -97,7 +97,7 @@ pub(crate) async fn provision_enrollment(
             )
             .await
         },
-        |credential, passphrase| activate_and_unlock(app, state, credential, passphrase),
+        |credential, passphrase| activate_and_unlock(app, state, &operation, credential, passphrase),
     )
     .await
 }
@@ -630,11 +630,12 @@ pub async fn hosted_provision(
 async fn activate_and_unlock(
     app: &tauri::AppHandle,
     state: &AppState,
+    operation: &crate::update_safety::OperationGuard,
     credential: Zeroizing<Vec<u8>>,
     passphrase: Zeroizing<String>,
 ) -> BridgeResult<()> {
-    crate::activate_native_credential(app, state, credential).await?;
-    let native = state.require_session().await?;
+    crate::activate_native_credential(app, state, operation, credential).await?;
+    let native = state.require_session_admitted(operation).await?;
     let vault = crate::fetch_vault(
         &native.api,
         &native.binding.vault_id,

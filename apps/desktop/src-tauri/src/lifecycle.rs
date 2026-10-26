@@ -596,12 +596,17 @@ pub async fn prepare_switch(app: &tauri::AppHandle) -> crate::error::BridgeResul
 /// Acquires both update exclusion and the topology permit, then flushes every current webview
 /// draft. It never exits: callers must drain mutation workers and verify installer prerequisites
 /// before transferring it to [`UpdatePermit::commit`].
-pub async fn prepare_update(app: &tauri::AppHandle) -> crate::error::BridgeResult<UpdatePermit> {
-    let safety = app
-        .state::<crate::AppState>()
-        .update_safety
-        .reserve()
-        .map_err(|message| crate::error::BridgeError::new("update-busy", message))?;
+pub async fn prepare_update(
+    app: &tauri::AppHandle,
+    wait_for_operations: bool,
+) -> crate::error::BridgeResult<UpdatePermit> {
+    let safety_gate = &app.state::<crate::AppState>().update_safety;
+    let safety = if wait_for_operations {
+        safety_gate.reserve_async().await
+    } else {
+        safety_gate.reserve_now()
+    }
+    .map_err(|message| crate::error::BridgeError::new("update-busy", message))?;
     let id = uuid::Uuid::new_v4().to_string();
     if let Err(error) = reserve_topology(app, id.clone(), Operation::Update) {
         drop(safety);

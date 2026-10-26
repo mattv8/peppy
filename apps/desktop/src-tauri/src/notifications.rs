@@ -46,6 +46,13 @@ pub struct NotificationSettings {
     pub context: Mutex<NotificationContext>,
     /// Serializes core queue read/post/ack without holding the application/session mutex.
     drain_lock: Mutex<()>,
+    banner_drain: Mutex<BannerDrainState>,
+}
+
+#[derive(Default)]
+struct BannerDrainState {
+    running: bool,
+    trailing: bool,
 }
 
 impl NotificationSettings {
@@ -62,6 +69,7 @@ impl NotificationSettings {
             preferences: Mutex::new(preferences),
             context: Mutex::new(NotificationContext::default()),
             drain_lock: Mutex::new(()),
+            banner_drain: Mutex::new(BannerDrainState::default()),
         }
     }
 
@@ -95,6 +103,30 @@ impl NotificationSettings {
             view: Some(view),
             conversation_id,
         };
+    }
+
+    /// Starts one drain or records one coalesced trailing drain while it is active.
+    pub fn request_banner_drain(&self) -> bool {
+        let mut drain = self.banner_drain.lock().unwrap_or_else(|p| p.into_inner());
+        if drain.running {
+            drain.trailing = true;
+            false
+        } else {
+            drain.running = true;
+            true
+        }
+    }
+
+    /// Releases the single-flight drain, or consumes its coalesced trailing request.
+    pub fn finish_banner_drain(&self) -> bool {
+        let mut drain = self.banner_drain.lock().unwrap_or_else(|p| p.into_inner());
+        if drain.trailing {
+            drain.trailing = false;
+            true
+        } else {
+            drain.running = false;
+            false
+        }
     }
 }
 
@@ -334,6 +366,19 @@ mod tests {
             ) & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn banner_drain_is_single_flight_with_one_trailing_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+
+        assert!(settings.request_banner_drain());
+        assert!(!settings.request_banner_drain());
+        assert!(!settings.request_banner_drain());
+        assert!(settings.finish_banner_drain());
+        assert!(!settings.finish_banner_drain());
+        assert!(settings.request_banner_drain());
     }
 
     #[test]

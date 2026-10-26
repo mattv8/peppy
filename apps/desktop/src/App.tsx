@@ -97,6 +97,7 @@ import { InlineMedia } from "./media/InlineMedia";
 import { MessageText } from "./message-links";
 import { groupMessages } from "./media/grouping";
 import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, searchSessionKey as createSearchSessionKey, type DetachedHistory } from "./search/detachedHistory";
+
 import { GatewayPicker } from "./GatewayPicker";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
@@ -110,6 +111,12 @@ import {
   type DraftSlot,
   type SaveOutcome,
 } from "./drafts/DraftStore";
+
+type RefreshRequest = {
+  conversationId?: string;
+  explicit: boolean;
+  waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }>;
+};
 
 export { errorText } from "./bridgeErrors";
 export {
@@ -1216,6 +1223,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const historyUserScrolled = useRef(false);
   const hasOlderMessagesRef = useRef(false);
   const mountedRef = useRef(true);
+  const refreshInFlightRef = useRef(false);
+  const pendingRefreshRef = useRef<RefreshRequest | undefined>(undefined);
+  const retryPendingSavesInFlightRef = useRef(false);
+  const retryPendingSavesQueuedRef = useRef(false);
   const overlayHeightRef = useRef(overlayHeight);
   overlayHeightRef.current = overlayHeight;
   const lastUnobscuredHeight = useRef<number | null>(null);
@@ -1475,20 +1486,38 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const report = (prefix: string) => (error: unknown) =>
     setNotice(`${prefix}${errorText(error)}`);
   const retryPendingSaves = async () => {
-    for (const attachmentId of pendingSaveIdsRef.current) {
-      try {
-        const media = await bridge.open_media(attachmentId);
-        if (media.state === "pending") continue;
-        await bridge.save_attachment(attachmentId);
-        pendingSaveIdsRef.current.delete(attachmentId);
-      } catch (error) {
-        if (errorCode(error) !== "media-pending") pendingSaveIdsRef.current.delete(attachmentId);
-      }
+    if (retryPendingSavesInFlightRef.current) {
+      retryPendingSavesQueuedRef.current = true;
+      return;
+    }
+    retryPendingSavesInFlightRef.current = true;
+    try {
+      do {
+        retryPendingSavesQueuedRef.current = false;
+        const attempted = new Set<string>();
+        while (true) {
+          if (!mountedRef.current) return;
+          const attachmentId = [...pendingSaveIdsRef.current].find((id) => !attempted.has(id));
+          if (!attachmentId) break;
+          attempted.add(attachmentId);
+          try {
+            const media = await bridge.open_media(attachmentId);
+            if (!mountedRef.current) return;
+            if (media.state === "pending") continue;
+            await bridge.save_attachment(attachmentId);
+            pendingSaveIdsRef.current.delete(attachmentId);
+          } catch (error) {
+            if (errorCode(error) !== "media-pending") pendingSaveIdsRef.current.delete(attachmentId);
+          }
+        }
+      } while (retryPendingSavesQueuedRef.current && mountedRef.current);
+    } finally {
+      retryPendingSavesInFlightRef.current = false;
     }
   };
 
   /** Loads host state for one conversation; responses superseded by a newer request are dropped. */
-  const refresh = async (conversationId = selectedRef.current) => {
+  const performRefresh = async (conversationId = selectedRef.current) => {
     const sequence = ++loadSequence.current;
     const sessionKey = currentSearchSessionKey();
     const requestedConversationId = conversationId && !isLocalDraftKey(conversationId)
@@ -1595,6 +1624,38 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (responseHasOlder) setHistoryExhausted(false);
     }
   };
+  const startRefresh = (request: RefreshRequest) => {
+    refreshInFlightRef.current = true;
+    const conversationId = request.explicit ? request.conversationId : selectedRef.current;
+    const run = performRefresh(conversationId);
+    run.then(
+      () => request.waiters.forEach(({ resolve }) => resolve()),
+      (error) => request.waiters.forEach(({ reject }) => reject(error)),
+    ).finally(() => {
+      refreshInFlightRef.current = false;
+      const next = pendingRefreshRef.current;
+      pendingRefreshRef.current = undefined;
+      if (!mountedRef.current || !next) return;
+      startRefresh(next);
+    });
+  };
+  const refresh = (conversationId?: string) => new Promise<void>((resolve, reject) => {
+    const request = { conversationId, explicit: conversationId !== undefined, waiters: [{ resolve, reject }] };
+    if (!refreshInFlightRef.current) {
+      startRefresh(request);
+      return;
+    }
+    const pending = pendingRefreshRef.current;
+    if (!pending) {
+      pendingRefreshRef.current = request;
+      return;
+    }
+    pending.waiters.push({ resolve, reject });
+    if (request.explicit) {
+      pending.conversationId = request.conversationId;
+      pending.explicit = true;
+    }
+  });
 
   const loadLatest = async (conversationId: string, unavailableNotice = "") => {
     const generation = ++navigationGeneration.current;
@@ -1737,6 +1798,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     });
     return () => {
       mountedRef.current = false;
+      const pending = pendingRefreshRef.current;
+      pendingRefreshRef.current = undefined;
+      pending?.waiters.forEach(({ reject }) => reject(new Error("app-unmounted")));
       loadSequence.current += 1;
       historySequence.current += 1;
       navigationGeneration.current += 1;
