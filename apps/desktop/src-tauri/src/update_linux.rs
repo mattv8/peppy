@@ -1067,7 +1067,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn install_files_body_has_the_packagekit_u64_and_string_array_signature() {
-        use zbus::zvariant::{Endian, serialized::Context};
+        use zbus::zvariant::{serialized::Context, Endian};
 
         let body = (
             ZbusPackageKit::ONLY_TRUSTED,
@@ -1085,7 +1085,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn update_packages_body_keeps_the_trusted_flag_and_exact_selected_id() {
-        use zbus::zvariant::{Endian, serialized::Context};
+        use zbus::zvariant::{serialized::Context, Endian};
 
         let body = (
             ZbusPackageKit::ONLY_TRUSTED,

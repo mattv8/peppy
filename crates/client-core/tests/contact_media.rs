@@ -100,6 +100,15 @@ fn remote_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+fn drop_names_first_marker(config: &ClientConfig) {
+    let conn = rusqlite::Connection::open(&config.database_path).unwrap();
+    conn.execute_batch(
+        "PRAGMA key = \"x'0707070707070707070707070707070707070707070707070707070707070707'\";\
+         DROP TABLE IF EXISTS contact_photo_names_first;",
+    )
+    .unwrap();
+}
+
 struct Pair {
     dir: TempDir,
     vault: Vault,
@@ -169,10 +178,11 @@ fn photo_roundtrip_holds_until_upload_and_registration_then_peer_decrypts() {
         .attachment_id;
     call(capture(&p.owner, &p.owner_cfg, Some(id)));
 
-    // The photo-bearing upsert is held; only the book state is published.
-    assert_eq!(p.server.upload(&p.owner), 1);
+    // The names-first revision is publishable even while the photo follow-up is held.
+    assert_eq!(p.server.upload(&p.owner), 2);
     p.server.sync(&p.peer);
-    assert!(find(&p.peer, "c1").is_none());
+    assert_eq!(find(&p.peer, "c1").unwrap()["display_name"], "Ada Lovelace");
+    assert!(find(&p.peer, "c1").unwrap().get("photo").is_none());
     let s = state(&p.owner);
     assert_eq!(
         s["uploads"],
@@ -271,6 +281,123 @@ fn photo_roundtrip_holds_until_upload_and_registration_then_peer_decrypts() {
     assert!(!p.peer.discard_unreferenced_attachment(id).unwrap());
     assert_eq!(state(&p.peer)["reclaims"], json!([]));
     assert_eq!(state(&p.owner)["reclaims"], json!([]));
+}
+
+#[test]
+fn unchanged_pending_photo_after_reopen_repairs_names_first_once() {
+    let mut p = pair();
+    let id = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "legacy.png", 19))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(id)));
+    assert_eq!(p.server.upload(&p.owner), 2);
+    p.server.sync(&p.peer);
+
+    // Simulate an existing pre-upgrade held photo row: it has no durable names-first marker.
+    drop(std::mem::replace(&mut p.owner, p.peer.clone()));
+    drop_names_first_marker(&p.owner_cfg);
+    p.owner = unlocked(&p.owner_cfg, &p.vault);
+
+    // Unlock-time bounded repair publishes the missing names-first pair before a provider scan.
+    assert_eq!(p.server.upload(&p.owner), 1);
+    p.server.sync(&p.peer);
+    let names_revision = find(&p.peer, "c1").unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(find(&p.peer, "c1").unwrap().get("photo").is_none());
+
+    // The compatibility marker makes duplicate and late capture callbacks idempotent.
+    assert_eq!(
+        call(capture(&p.owner, &p.owner_cfg, Some(id)))["changed"],
+        0
+    );
+
+    p.upload_and_register(&p.owner, id);
+    p.deliver(true);
+    let repaired_contact = find(&p.peer, "c1").unwrap();
+    assert!(
+        repaired_contact["revision"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > names_revision
+    );
+    assert_eq!(repaired_contact["photo"]["attachment_id"], id.to_string());
+}
+
+#[test]
+fn deleting_while_photo_followup_is_pending_does_not_resurrect_the_contact() {
+    let mut p = pair();
+    let id = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "deleted.png", 27))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(id)));
+    assert_eq!(p.server.upload(&p.owner), 2);
+    p.server.sync(&p.peer);
+    assert!(find(&p.peer, "c1").is_some());
+
+    call(p.owner.begin_contact_scan(
+        &json!({"schema_version": 1, "scan_id": "delete-pending", "book_id": BOOK, "generation": "1", "access": "full", "authoritative": true}).to_string(),
+    ));
+    call(p.owner.finish_contact_scan(
+        &json!({"schema_version": 1, "scan_id": "delete-pending", "complete": true}).to_string(),
+    ));
+
+    p.upload_and_register(&p.owner, id);
+    p.deliver(true);
+    assert!(find(&p.peer, "c1").is_none());
+    let restorable: Value = serde_json::from_str(
+        &p.peer
+            .list_restorable_contacts_json(
+                &json!({"schema_version": 1, "book_id": BOOK}).to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restorable["contacts"][0]["photo"]["attachment_id"],
+        id.to_string()
+    );
+}
+
+#[test]
+fn replacing_a_pending_photo_publishes_the_newer_intended_photo() {
+    let mut p = pair();
+    let first = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "first-pending.png", 31))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(first)));
+    assert_eq!(p.server.upload(&p.owner), 2);
+    p.server.sync(&p.peer);
+
+    let second = p
+        .owner
+        .prepare_contact_photo(&photo_file(p.dir.path(), "second-pending.png", 47))
+        .unwrap()
+        .attachment_id;
+    call(capture(&p.owner, &p.owner_cfg, Some(second)));
+    assert_eq!(p.server.upload(&p.owner), 2);
+    p.server.sync(&p.peer);
+    assert!(find(&p.peer, "c1").unwrap().get("photo").is_none());
+
+    p.owner
+        .mark_attachment_uploaded(first, &remote_id())
+        .unwrap();
+    p.upload_and_register(&p.owner, second);
+    p.deliver(true);
+    assert_eq!(
+        find(&p.peer, "c1").unwrap()["photo"]["attachment_id"],
+        second.to_string()
+    );
 }
 
 #[test]

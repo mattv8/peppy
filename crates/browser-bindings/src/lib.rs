@@ -503,7 +503,6 @@ impl BrowserCore {
                 participants: reply_context
                     .as_ref()
                     .map(|context| context.recipients.clone()),
-                reply_blocked_reason: reply_context.and_then(|context| context.blocked_reason),
                 recipientless_draft: false,
                 draft_only,
             });
@@ -529,7 +528,6 @@ impl BrowserCore {
                 messages: Vec::new(),
                 has_older_messages: None,
                 participants: None,
-                reply_blocked_reason: None,
                 // Old recipientless compose rows predate the persisted intent bit. A row that
                 // has no history is still a draft-only row for presentation purposes.
                 recipientless_draft: draft.recipients.is_empty(),
@@ -745,9 +743,6 @@ fn canonical_origin(input: &str) -> Result<String, Failure> {
 fn compose_failure(error: ComposeError) -> Failure {
     match error {
         ComposeError::Ui { code, message } => Failure::new(code, message),
-        ComposeError::ReplyBlocked(_) => {
-            Failure::new("mms-reply-blocked", "Replying to this MMS is unavailable.")
-        }
         ComposeError::Core(error) => core(error),
         ComposeError::AfterRoute {
             source,
@@ -972,7 +967,7 @@ mod tests {
             .iter()
             .find(|conversation| conversation["id"] == message.conversation_id.to_string())
             .unwrap();
-        for field in ["name", "preview", "participants", "replyBlockedReason"] {
+        for field in ["name", "preview", "participants"] {
             assert_eq!(metadata_conversation[field], full_conversation[field]);
         }
         assert!(

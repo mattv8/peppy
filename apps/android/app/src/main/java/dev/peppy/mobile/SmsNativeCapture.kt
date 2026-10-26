@@ -1,7 +1,13 @@
 package dev.peppy.mobile
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import uniffi.peppy_mobile_bindings.MobileBindingsException
+import uniffi.peppy_mobile_bindings.NativeHistoryImportConditions
 import uniffi.peppy_mobile_bindings.NativeClientInterface
 import uniffi.peppy_mobile_bindings.NativeSmsAcquisitionState
 import uniffi.peppy_mobile_bindings.NativeSmsProviderAcquisitionInput
@@ -16,7 +22,12 @@ internal object SmsNativeCapture : SmsCaptureRunner {
     override fun run(context: Context): SmsCaptureSummary {
         if (!smsReadGranted(context) || !GatewayPolicyHost(context).permitsSmsCapture()) return SmsCaptureSummary()
         val client = NativeGateway.open(context) ?: return SmsCaptureSummary()
-        val summary = capture(client, AndroidSmsCaptureProvider(context), MmsPreferences(context).sourceGeneration)
+        val summary = capture(
+            client,
+            AndroidSmsCaptureProvider(context),
+            MmsPreferences(context).sourceGeneration,
+            historyImportConditions(context),
+        )
         if (shouldScheduleGatewayUpload(summary)) {
             if (SyncDiagnostics.enabled) {
                 GatewayWork.enqueueAfterCapture(context.applicationContext, diagnosticParent = SyncDiagnostics.currentTraceId())
@@ -28,20 +39,26 @@ internal object SmsNativeCapture : SmsCaptureRunner {
     }
 
     /** One bounded pass over the live/history plans and, when due, the reconciliation sweep. */
-    internal fun capture(client: NativeClientInterface, reader: AndroidSmsCaptureProvider, generation: String): SmsCaptureSummary {
+    internal fun capture(
+        client: NativeClientInterface,
+        reader: AndroidSmsCaptureProvider,
+        generation: String,
+        conditions: NativeHistoryImportConditions = NativeHistoryImportConditions(false, false),
+    ): SmsCaptureSummary {
         val scope = SmsCapture.PROVIDER_SCOPE
         reader.beginDiagnosticPass()
         return try {
             val highWater = reader.highWater().toString()
-            val plans = client.planSmsScans(generation, scope, highWater)
+            val plans = client.planSmsScansWithHistoryConditions(generation, scope, highWater, conditions)
             val core = NativeSmsCaptureCore(client)
+            val allowHistoryContinuation = conditions.unmeteredNetwork || conditions.charging
             var recheckPending = true
             var summary = SmsCaptureSummary()
             for (plan in plans) {
                 val result = if (recheckPending) {
-                    SmsCapture.run(plan.toCapturePlan(), core, reader)
+                    SmsCapture.run(plan.toCapturePlan(allowHistoryContinuation), core, reader)
                 } else {
-                    SmsCapture.runWithoutPendingRecheck(plan.toCapturePlan(), core, reader)
+                    SmsCapture.runWithoutPendingRecheck(plan.toCapturePlan(allowHistoryContinuation), core, reader)
                 }
                 if (recheckPending) {
                     client.setSmsPendingRecheckCursor(plan.sourceGeneration, plan.subscriptionId, plan.imported, result.pendingRecheckCursor)
@@ -95,6 +112,16 @@ internal object SmsNativeCapture : SmsCaptureRunner {
         } finally {
             reader.finishDiagnosticPass()
         }
+    }
+
+    /** Samples only Android system state on the worker thread; it never opens or locks the core. */
+    private fun historyImportConditions(context: Context): NativeHistoryImportConditions {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        val capabilities = connectivity?.getNetworkCapabilities(connectivity.activeNetwork)
+        val unmetered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
+        val battery = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val charging = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        return NativeHistoryImportConditions(unmetered, charging)
     }
 }
 
@@ -178,7 +205,7 @@ internal class AndroidSmsCaptureProvider(context: Context) : SmsCaptureProvider 
     override fun read(id: Long) = reader.read(id)
 }
 
-private fun uniffi.peppy_mobile_bindings.NativeSmsScanPlan.toCapturePlan() = SmsCapturePlan(
+private fun uniffi.peppy_mobile_bindings.NativeSmsScanPlan.toCapturePlan(allowHistoryContinuation: Boolean = false) = SmsCapturePlan(
     sourceGeneration = sourceGeneration,
     subscriptionId = subscriptionId,
     imported = imported,
@@ -189,6 +216,8 @@ private fun uniffi.peppy_mobile_bindings.NativeSmsScanPlan.toCapturePlan() = Sms
     paused = paused,
     descending = descending,
     historyFloor = historyFloor?.toLongOrNull(),
+    budget = budget.toInt().coerceIn(1, 200),
+    allowHistoryContinuation = imported && allowHistoryContinuation,
 )
 
 private fun uniffi.peppy_mobile_bindings.NativeSmsReconciliationPlan.toCapturePlan() = SmsReconciliationPlan(

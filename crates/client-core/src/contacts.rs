@@ -721,7 +721,29 @@ pub(crate) fn capture_tx(
     let mut out = Vec::with_capacity(contacts.len());
     for contact in contacts {
         let (id, body, provenance) = native_contact(contact, book_id)?;
-        let (stored, changed) = upsert_owned(tx, ctx, &public, book_id, &id, body, provenance)?;
+        let (stored, changed) =
+            if crate::contact_media::needs_names_first_capture(tx, book_id, &id, &body)? {
+                let mut names_only = body.clone();
+                let names = names_only.as_object_mut().ok_or_else(invalid)?;
+                names.remove("photo");
+                names.remove("digest");
+                names_only["digest"] = Value::String(digest(&names_only));
+                upsert_owned(
+                    tx,
+                    ctx,
+                    &public,
+                    book_id,
+                    &id,
+                    names_only,
+                    provenance.clone(),
+                )?;
+                let (stored, changed) =
+                    upsert_owned(tx, ctx, &public, book_id, &id, body, provenance)?;
+                crate::contact_media::mark_names_first_capture(tx, book_id, &id, &stored)?;
+                (stored, changed)
+            } else {
+                upsert_owned(tx, ctx, &public, book_id, &id, body, provenance)?
+            };
         out.push((id, stored["revision"].clone(), changed));
     }
     let alive: i64 = tx.query_row(
@@ -734,6 +756,47 @@ pub(crate) fn capture_tx(
     }
     publish_book_state(tx, ctx, book_id)?;
     Ok(out)
+}
+
+/// Repairs a bounded set of pre-names-first held owner contacts without touching a provider or
+/// altering their existing envelopes. The durable marker makes later seal passes idempotent.
+pub(crate) fn repair_held_photo_names(
+    conn: &Connection,
+    ctx: &Ctx<'_>,
+    limit: usize,
+) -> Result<usize, Error> {
+    require_unlocked(ctx)?;
+    let rows = conn
+        .prepare(
+            "SELECT b.id,b.body,c.id,c.body FROM contact_books b JOIN contacts c ON c.book_id=b.id LEFT JOIN attachments a ON a.attachment_id=json_extract(c.body,'$.photo.attachment_id') WHERE b.owner_device_id=?1 AND b.forgotten=0 AND b.state='active' AND c.deleted_at IS NULL AND json_extract(c.body,'$.photo.attachment_id') IS NOT NULL AND a.remote_object_id IS NULL AND NOT EXISTS(SELECT 1 FROM contact_photo_names_first m WHERE m.book_id=c.book_id AND m.contact_id=c.id AND m.contact_digest=json_extract(c.body,'$.digest') AND m.followup_revision=c.revision) ORDER BY c.rowid LIMIT ?2",
+        )?
+        .query_map(params![ctx.device_id.to_string(), limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut repaired = 0;
+    for (book_id, book, id, body) in rows {
+        let book: Value = serde_json::from_str(&book).map_err(|_| Error::Database)?;
+        let body: Value = serde_json::from_str(&body).map_err(|_| Error::Database)?;
+        if !crate::contact_media::needs_names_first_capture(conn, &book_id, &id, &body)? {
+            continue;
+        }
+        let mut names_only = body.clone();
+        let names = names_only.as_object_mut().ok_or_else(invalid)?;
+        names.remove("photo");
+        names.remove("digest");
+        names_only["digest"] = Value::String(digest(&names_only));
+        upsert_owned(conn, ctx, &book, &book_id, &id, names_only, None)?;
+        let (stored, _) = upsert_owned(conn, ctx, &book, &book_id, &id, body, None)?;
+        crate::contact_media::mark_names_first_capture(conn, &book_id, &id, &stored)?;
+        repaired += 1;
+    }
+    Ok(repaired)
 }
 
 /// Recomputes the core inventory marker (`count` and a digest over sorted
@@ -1492,7 +1555,16 @@ pub(crate) fn next_permit(
                 && (request.get("photo_op").is_none() || expected.get("photo").is_some())
                 && matches_expected(expected, current_body)
         });
-        if !merged || kind == "delete" {
+        let names_first_base = request.get("photo_op").is_none()
+            && crate::contact_media::names_first_base_is_current(
+                &tx,
+                &book_id,
+                contact_id.ok_or_else(invalid)?,
+                revision(&request, "base_revision")?,
+                *current_rev,
+                current_body,
+            )?;
+        if (!merged && !names_first_base) || (kind == "delete" && !names_first_base) {
             let out = decide("conflict", Some("stale_base"), Some(current_body.clone()))?;
             tx.commit()?;
             return Ok(out);

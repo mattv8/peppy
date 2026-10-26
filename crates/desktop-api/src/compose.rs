@@ -57,7 +57,6 @@ pub enum ComposeError {
         code: &'static str,
         message: &'static str,
     },
-    ReplyBlocked(String),
     Core(CoreError),
     AfterRoute {
         source: CoreError,
@@ -158,9 +157,6 @@ fn conversation_context(
         let context = client
             .mms_reply_context(conversation)
             .map_err(ComposeError::Core)?;
-        if let Some(reason) = context.blocked_reason {
-            return Err(ComposeError::ReplyBlocked(reason));
-        }
         return Ok((context.recipients, Some(transport)));
     }
     Ok((other_party(latest), Some(transport)))

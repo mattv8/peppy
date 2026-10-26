@@ -31,6 +31,7 @@ pub fn background_main(app: &tauri::AppHandle) -> crate::error::BridgeResult<()>
         .map_err(|_| {
             crate::error::BridgeError::new("window", "Could not enter background mode.")
         })?;
+    crate::window_placement::flush(app);
     main.hide()
         .map_err(|_| crate::error::BridgeError::new("window", "Could not hide main window."))
 }

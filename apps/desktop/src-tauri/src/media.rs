@@ -4,8 +4,8 @@
 //! other formats are never decoded or rendered.
 use crate::error::{BridgeError, BridgeResult};
 pub use peppy_desktop_api::images::{
-    MAX_IMAGE_SOURCE_BYTES, PublicImage, avatar_data_url, is_previewable, preview_data_url,
-    public_name, sniff_media_type, thumbnail_data_url,
+    avatar_data_url, is_previewable, preview_data_url, public_name, sniff_media_type,
+    thumbnail_data_url, PublicImage, MAX_IMAGE_SOURCE_BYTES,
 };
 use std::{fs, io::Read, path::Path};
 
@@ -49,8 +49,8 @@ pub fn reencode_public(bytes: &[u8]) -> BridgeResult<PublicImage> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use image::{DynamicImage, ImageFormat, codecs::jpeg::JpegEncoder};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use image::{codecs::jpeg::JpegEncoder, DynamicImage, ImageFormat};
     use std::io::Cursor;
 
     pub fn sample_png(width: u32, height: u32) -> Vec<u8> {

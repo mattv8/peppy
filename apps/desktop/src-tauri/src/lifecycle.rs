@@ -1005,11 +1005,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            coordinator
-                .expire(&first.request.id, now + Duration::from_millis(11))
-                .is_none()
-        );
+        assert!(coordinator
+            .expire(&first.request.id, now + Duration::from_millis(11))
+            .is_none());
         assert!(coordinator.is_pending());
         assert_eq!(
             coordinator
@@ -1034,37 +1032,29 @@ mod tests {
                 now,
             )
             .unwrap();
-        assert!(
-            coordinator
-                .begin_at(
-                    Operation::Quit,
-                    ["main".to_owned()],
-                    Duration::from_secs(1),
-                    now,
-                )
-                .is_err()
-        );
-        assert!(
-            coordinator
-                .acknowledge_at("old", "main", true, now)
-                .is_err()
-        );
-        assert!(
-            coordinator
-                .acknowledge_at(&started.request.id, "unknown", true, now)
-                .is_err()
-        );
+        assert!(coordinator
+            .begin_at(
+                Operation::Quit,
+                ["main".to_owned()],
+                Duration::from_secs(1),
+                now,
+            )
+            .is_err());
+        assert!(coordinator
+            .acknowledge_at("old", "main", true, now)
+            .is_err());
+        assert!(coordinator
+            .acknowledge_at(&started.request.id, "unknown", true, now)
+            .is_err());
         assert_eq!(
             coordinator
                 .acknowledge_at(&started.request.id, "main", true, now)
                 .unwrap(),
             Progress::Pending
         );
-        assert!(
-            coordinator
-                .acknowledge_at(&started.request.id, "main", true, now)
-                .is_err()
-        );
+        assert!(coordinator
+            .acknowledge_at(&started.request.id, "main", true, now)
+            .is_err());
     }
 
     #[tokio::test]

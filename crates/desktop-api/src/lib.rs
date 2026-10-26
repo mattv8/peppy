@@ -189,8 +189,6 @@ pub struct ConversationView {
     pub has_older_messages: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_blocked_reason: Option<String>,
     /// This row is the reusable recipientless composition, not an empty history.
     #[serde(default)]
     pub recipientless_draft: bool,

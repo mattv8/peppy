@@ -161,11 +161,10 @@ mod tests {
         let gate = SafetyGate::default();
         let operation = gate.enter().unwrap();
 
-        assert!(
-            gate.reserve_with_timeout(std::time::Duration::ZERO)
-                .await
-                .is_err()
-        );
+        assert!(gate
+            .reserve_with_timeout(std::time::Duration::ZERO)
+            .await
+            .is_err());
         assert!(gate.enter().is_ok());
         drop(operation);
     }

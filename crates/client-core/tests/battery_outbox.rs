@@ -132,16 +132,16 @@ fn registered_contact_photo_releases_the_earlier_held_envelope_before_later_read
     let book_event = client.pending_outbox().unwrap();
     assert_eq!(
         book_event.len(),
-        1,
-        "only the book state is eligible initially"
+        2,
+        "book metadata and the names-first contact revision are eligible initially"
     );
     capture(&client, ConversationId::new(), "ready-after-photo");
 
     let ready = client.pending_outbox().unwrap();
     assert_eq!(
         ready.len(),
-        2,
-        "photo event waits for upload and registration"
+        3,
+        "only the full photo follow-up waits for upload and registration"
     );
     client
         .mark_attachment_uploaded(photo.attachment_id, &uuid::Uuid::new_v4().to_string())
@@ -163,10 +163,14 @@ fn registered_contact_photo_releases_the_earlier_held_envelope_before_later_read
         .unwrap();
 
     let released = client.pending_outbox().unwrap();
-    assert_eq!(released.len(), 3);
+    assert_eq!(released.len(), 4);
+    // Live work keeps its priority. Within contact priority, the names-first predecessor,
+    // released photo follow-up, then book state retain producer-sequence order.
+    assert_eq!(released[0], ready[0]);
+    assert_eq!(released[1], ready[1]);
     assert_eq!(
-        released[0].envelope_id.to_string(),
+        released[2].envelope_id.to_string(),
         registration["envelope_id"]
     );
-    assert_eq!(released[1..], ready);
+    assert_eq!(released[3], ready[2]);
 }

@@ -10,7 +10,9 @@ import uniffi.peppy_mobile_bindings.NativeClientInterface
 /** What the settings screen shows; every book/policy/request value comes from the core. */
 internal data class ContactSettingsState(
     val enabled: Boolean,
+    val stopped: Boolean,
     val readGranted: Boolean,
+    val readPermissionRequested: Boolean,
     val writeGranted: Boolean,
     /** False while not enrolled or the vault keys are locked. */
     val unlocked: Boolean,
@@ -39,6 +41,19 @@ internal object ContactSyncHost {
         read = granted(context, Manifest.permission.READ_CONTACTS),
         write = granted(context, Manifest.permission.WRITE_CONTACTS),
     )
+
+    /** Reconcile an already-granted read permission only while the app is in the foreground. */
+    fun onPermissionOrForeground(context: Context): Boolean {
+        val app = context.applicationContext
+        val prefs = ContactSyncPreferences(app)
+        val readGranted = access(app).read
+        val promoted = prefs.promoteGrantedUnset(readGranted)
+        val resumed = readGranted && prefs.enabled && !prefs.readAccessGranted
+        prefs.readAccessGranted = readGranted
+        ensureObserver(app)
+        if (promoted || resumed) GatewayScheduler.schedule(app)
+        return promoted || resumed
+    }
 
     private fun granted(context: Context, permission: String) =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
@@ -155,7 +170,9 @@ internal object ContactSyncHost {
         val readiness = session?.let { runCatching { readiness(it.client) }.getOrNull() }
         return ContactSettingsState(
             enabled = prefs.enabled,
+            stopped = prefs.intent == ContactSyncIntent.STOPPED,
             readGranted = granted.read,
+            readPermissionRequested = prefs.readPermissionRequested,
             writeGranted = granted.write,
             unlocked = session != null,
             contactsReady = readiness?.contactsReady ?: false,

@@ -324,7 +324,6 @@ pub use peppy_desktop_api::compose::DraftInput;
 fn compose_error(error: ComposeError) -> BridgeError {
     match error {
         ComposeError::Ui { code, message } => BridgeError::new(code, message),
-        ComposeError::ReplyBlocked(message) => BridgeError::new("mms-reply-blocked", message),
         ComposeError::Core(error) => core_error(error),
         ComposeError::AfterRoute {
             source,
@@ -1022,7 +1021,6 @@ impl Session {
                 participants: reply_context
                     .as_ref()
                     .map(|context| context.recipients.clone()),
-                reply_blocked_reason: reply_context.and_then(|context| context.blocked_reason),
                 recipientless_draft: false,
                 draft_only,
             });
@@ -1049,7 +1047,6 @@ impl Session {
                 messages: Vec::new(),
                 has_older_messages: None,
                 participants: None,
-                reply_blocked_reason: None,
                 recipientless_draft: draft.recipients.is_empty(),
                 draft_only: true,
             });

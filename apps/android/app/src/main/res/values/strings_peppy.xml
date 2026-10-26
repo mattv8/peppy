@@ -15,6 +15,22 @@ MMS capture requires a carrier listener not available in this iOS build.</string
     <string name="peppy_help_ios_contacts_title">Contacts</string>
     <string name="peppy_help_ios_contacts">iOS decides when background updates run; it can take hours or days. Notes are not synced from iOS.</string>
     <string name="peppy_help_ios_contacts_footer">This phone publishes its own contact book to your Peppy server and applies edits from your other devices.</string>
+    <string name="peppy_contacts_description">Peppy copies this phone\'s contacts to your vault, end-to-end encrypted. Your other devices can browse and search them. Contacts with shared numbers stay separate records.</string>
+    <string name="peppy_contacts_start_explainer">Sync starts as soon as you allow access. Names and numbers come first, photos follow. You can stop any time.</string>
+    <string name="peppy_contacts_allow_access">Allow contacts access</string>
+    <string name="peppy_contacts_open_settings">Open app settings</string>
+    <string name="peppy_contacts_allow_access_ios">Allow contacts access and sync</string>
+    <string name="peppy_contacts_start">Start contact sync</string>
+    <string name="peppy_contacts_resume_ios">Resume contact sync</string>
+    <string name="peppy_contacts_stopped">Contact sync is stopped. It stays stopped until you start it.</string>
+    <string name="peppy_contacts_access_denied">Contacts access is off. Nothing was removed from your other devices.</string>
+    <string name="peppy_contacts_access_read_write">Read and edit access</string>
+    <string name="peppy_contacts_access_read_only">Read only. Desktop edits are off.</string>
+    <string name="peppy_contacts_access_not_allowed">Not allowed</string>
+    <string name="peppy_contacts_allow_edits">Allow desktop edits</string>
+    <string name="peppy_contacts_allow_edits_footer">Optional. Lets this phone save contact edits you approve from another device.</string>
+    <string name="peppy_contacts_read_label">Contacts read on this phone</string>
+    <string name="peppy_contacts_book_limit">This book exceeds 20,000 contacts; only part of it is uploaded.</string>
     <string name="peppy_help_android_messaging_limits">MMS messages sync after the phone finishes downloading them and uploading encrypted copies.
 
 RCS requires a verified carrier or OEM integration and is not available in this build.

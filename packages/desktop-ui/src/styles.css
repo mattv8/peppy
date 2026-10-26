@@ -107,7 +107,7 @@ select:focus-visible {
   width: 100%;
   min-width: 0;
   height: 26px;
-  padding: 0 8px;
+  padding: 0 28px 0 8px;
   border: 1px solid var(--peppy-border);
   border-radius: var(--peppy-control-radius);
   background: var(--peppy-surface-widget);
@@ -115,6 +115,27 @@ select:focus-visible {
   font-size: 12px;
   user-select: text;
 }
+#omni-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--peppy-control-radius);
+  background: transparent;
+  color: var(--peppy-text-secondary);
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+#omni-search-clear:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+#omni-search-clear:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: -2px; }
+#omni-search-clear:disabled { opacity: 0.4; cursor: default; background: transparent; }
 .omni-search-results {
   position: fixed;
   z-index: 40;
@@ -140,9 +161,21 @@ select:focus-visible {
 .omni-search-results [role="option"] span { color: var(--peppy-text-secondary); font-size: 12px; }
 .omni-search-results [role="option"] b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omni-search-results [role="option"] span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+@media (width > 640px) {
+  .titlebar:has(> #titlebar-search) { position: relative; }
+  .titlebar > #titlebar-search {
+    position: absolute;
+    inset-block: 0;
+    inset-inline: 0;
+    margin-block: auto;
+    margin-inline: auto;
+    height: 26px;
+    width: clamp(160px, calc(100% - 480px), 520px);
+  }
+}
 @media (max-width: 640px) {
-  .titlebar:has(#titlebar-search) { height: auto; min-height: var(--peppy-titlebar-height); flex-wrap: wrap; padding-block: 4px; }
-  #titlebar-search { order: 10; flex-basis: min(520px, 100%); }
+  .titlebar:has(#titlebar-search) { height: auto; min-height: var(--peppy-titlebar-height); flex-wrap: wrap; padding-block: 4px; padding-inline: 8px; }
+  #titlebar-search { order: 10; flex-basis: min(520px, 100%); margin-inline: auto; }
 }
 .titlebar-status {
   display: flex;
@@ -999,4 +1032,7 @@ select:focus-visible {
     outline-offset: 2px;
   }
   .omni-search-results [role="option"][aria-selected="true"] { background: Highlight; color: HighlightText; outline-color: HighlightText; }
+  #omni-search-clear { color: ButtonText; }
+  #omni-search-clear:disabled { color: GrayText; }
+  #omni-search-clear:focus-visible { outline-color: Highlight; }
 }

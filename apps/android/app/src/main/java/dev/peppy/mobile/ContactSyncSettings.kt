@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -22,6 +21,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -29,7 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-internal val CONTACT_PERMISSIONS = arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
+internal val CONTACT_PERMISSIONS = arrayOf(Manifest.permission.READ_CONTACTS)
 
 /**
  * Contact sync settings. Consent is local; everything else (book state, policy, default account,
@@ -40,7 +40,9 @@ internal val CONTACT_PERMISSIONS = arrayOf(Manifest.permission.READ_CONTACTS, Ma
 internal fun ContactSyncSettings(
     context: Context,
     refresh: Int,
-    requestPermissions: () -> Unit,
+    requestReadPermission: () -> Unit,
+    requestWritePermission: () -> Unit,
+    openAppSettings: () -> Unit,
     onChanged: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -59,43 +61,85 @@ internal fun ContactSyncSettings(
             onChanged()
         }
     }
+    fun startAndRequestRead() {
+        busy = true
+        scope.launch {
+            withContext(Dispatchers.IO) { ContactSyncPreferences(context).startAfterReadGrant = true }
+            requestReadPermission()
+            busy = false
+            reload++
+            onChanged()
+        }
+    }
+    fun startAndOpenSettings() {
+        busy = true
+        scope.launch {
+            withContext(Dispatchers.IO) { ContactSyncPreferences(context).startAfterReadGrant = true }
+            openAppSettings()
+            busy = false
+        }
+    }
 
     Section("contact-sync-section", "Contact sync", showDivider = false) {
         val current = state
         val enabled = current?.enabled == true
-        Row(Modifier.fillMaxWidth().testTag("contact-sync-enable-row"), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Sync contacts", style = MaterialTheme.typography.bodyMedium)
-            Switch(
-                checked = enabled,
-                enabled = current != null && !busy,
-                onCheckedChange = { value ->
-                    act {
-                        ContactSyncPreferences(context).enabled = value
-                        ContactSyncHost.ensureObserver(context)
-                        if (value) GatewayScheduler.schedule(context)
-                    }
-                    if (value && (current?.readGranted != true || current?.writeGranted != true)) requestPermissions()
-                },
-                modifier = Modifier.testTag("contact-sync-toggle"),
-            )
-        }
         Text(
-            "When enabled, this phone's contacts sync end-to-end encrypted. Desktop can browse, search and request edits; " +
-                "this phone applies them. Contacts with shared numbers remain distinct records. Sync can take hours while the phone is idle.",
+            stringResource(R.string.peppy_contacts_description),
             style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("contact-sync-description"),
         )
         if (current == null) return@Section
+        if (!enabled) {
+            if (current.stopped) {
+                Text(stringResource(R.string.peppy_contacts_stopped), style = MaterialTheme.typography.bodySmall)
+            }
+            if (current.retirePending) {
+                Text("Retirement will be published the next time the vault is unlocked.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("contact-retire-pending"))
+            } else if (current.readGranted) {
+                Button({ act {
+                    ContactSyncPreferences(context).enabled = true
+                    ContactSyncHost.ensureObserver(context)
+                    GatewayScheduler.schedule(context)
+                } }, Modifier.testTag("contact-start-button"), enabled = !busy) { Text(stringResource(R.string.peppy_contacts_start)) }
+            } else if (current.stopped) {
+                if (current.readPermissionRequested) {
+                    Button(::startAndOpenSettings, Modifier.testTag("contact-open-settings-button"), enabled = !busy) { Text(stringResource(R.string.peppy_contacts_open_settings)) }
+                } else {
+                    Button(::startAndRequestRead, Modifier.testTag("contact-start-button"), enabled = !busy) { Text(stringResource(R.string.peppy_contacts_start)) }
+                }
+            } else {
+                if (current.readPermissionRequested) {
+                    Text(stringResource(R.string.peppy_contacts_access_denied), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("contact-denied-status"))
+                    Button(openAppSettings, Modifier.testTag("contact-open-settings-button"), enabled = !busy) { Text(stringResource(R.string.peppy_contacts_open_settings)) }
+                } else {
+                    Button(requestReadPermission, Modifier.testTag("contact-allow-button"), enabled = !busy) { Text(stringResource(R.string.peppy_contacts_allow_access)) }
+                }
+                Text(stringResource(R.string.peppy_contacts_start_explainer), style = MaterialTheme.typography.bodySmall)
+            }
+            current.overview?.pending?.takeIf { it.isNotEmpty() }?.let { pending ->
+                Column(Modifier.testTag("contact-pending-list"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pending.forEach { item -> PendingRow(item, busy, context, ::act) }
+                }
+            }
+            return@Section
+        }
         StatusRow(
             "contact-access-status", "Contacts access",
             when {
-                !enabled -> "Disabled"
-                current.readGranted && current.writeGranted -> "Full access"
-                current.readGranted -> "Read only — desktop edits are refused"
-                else -> "Permission denied — tap to grant"
+                current.readGranted && current.writeGranted -> stringResource(R.string.peppy_contacts_access_read_write)
+                current.readGranted -> stringResource(R.string.peppy_contacts_access_read_only)
+                else -> stringResource(R.string.peppy_contacts_access_not_allowed)
             },
         )
-        if (enabled && (!current.readGranted || !current.writeGranted)) {
-            OutlinedButton(requestPermissions, Modifier.testTag("contact-grant-button")) { Text("Grant contacts access") }
+        if (!current.readGranted) {
+            Text(stringResource(R.string.peppy_contacts_access_denied), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("contact-denied-status"))
+            if (current.readPermissionRequested) {
+                OutlinedButton(openAppSettings, Modifier.testTag("contact-open-settings-button")) { Text(stringResource(R.string.peppy_contacts_open_settings)) }
+            } else {
+                OutlinedButton(requestReadPermission, Modifier.testTag("contact-allow-button")) { Text(stringResource(R.string.peppy_contacts_allow_access)) }
+            }
+        } else if (!current.writeGranted) {
+            OutlinedButton(requestWritePermission, Modifier.testTag("contact-grant-write-button")) { Text(stringResource(R.string.peppy_contacts_allow_edits)) }
+            Text(stringResource(R.string.peppy_contacts_allow_edits_footer), style = MaterialTheme.typography.bodySmall)
         }
         if (enabled && !current.unlocked) {
             Text("Unlock the vault above to sync contacts.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("contact-vault-status"))
@@ -132,7 +176,7 @@ internal fun ContactSyncSettings(
             "contact-sync-status", "Last full scan",
             overview.lastFullScanAt?.let { DateUtils.getRelativeTimeSpanString(it).toString() } ?: "Not yet",
         )
-        overview.contactCount?.let { StatusRow("contact-sync-count", "Contacts synced", it.toString()) }
+        overview.contactCount?.let { StatusRow("contact-sync-count", stringResource(R.string.peppy_contacts_read_label), it.toString()) }
 
         val writable = overview.accounts.filter { it.writable }
         if (writable.isNotEmpty()) {
@@ -156,12 +200,12 @@ internal fun ContactSyncSettings(
                 OutlinedButton(
                     { act { ContactSyncHost.withCoordinator(context) { it.setRemoteEdits(mode) } } },
                     Modifier.semantics { selected = isSelected }.testTag("remote-edits-$mode"),
-                    enabled = !busy,
+                    enabled = !busy && current.writeGranted,
                 ) { Text((if (isSelected) "✓ " else "") + label) }
             }
         }
         Text(
-            when (overview.remoteEdits) {
+            if (!current.writeGranted) stringResource(R.string.peppy_contacts_access_read_only) else when (overview.remoteEdits) {
                 "auto" -> "Small changes apply automatically. Deleting more than 10 contacts or 5% in 24 hours asks for approval here."
                 "off" -> "Desktop edits are not accepted."
                 else -> "Every desktop edit waits for approval on this phone."

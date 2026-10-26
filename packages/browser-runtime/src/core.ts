@@ -26,7 +26,7 @@ const HANDLED_CORE_CODES = [
   "invalid-contact-edit", "contact-book-read-only", "contact-photo-invalid",
   "identity-exists", "identity-unavailable", "epoch-mismatch", "invalid-rotation", "unavailable",
   "invalid-draft", "invalid-route", "invalid-recipient", "invalid-attachment", "empty-message",
-  "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large", "mms-reply-blocked",
+  "message-too-long", "mms-unsupported", "mms-too-many-recipients", "mms-too-large",
   "public-copy-unsupported", "public-copy-too-large",
 ] as const;
 

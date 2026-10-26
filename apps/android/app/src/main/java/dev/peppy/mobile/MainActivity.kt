@@ -97,6 +97,7 @@ class MainActivity : ComponentActivity() {
         // serialized relay reconciliation path without doing network work on the activity.
         RelayWakeRuntime.enrollmentChanged(applicationContext)
         SmsCaptureLifecycle.onPermissionOrForeground(applicationContext)
+        ContactSyncHost.onPermissionOrForeground(applicationContext)
     }
 }
 
@@ -266,7 +267,16 @@ private fun CompanionScreen(activity: ComponentActivity) {
         MmsCaptureWork.onPermissionOrForeground(context)
         refresh++
     }
-    val contactsPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+    val contactsReadPermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val preferences = ContactSyncPreferences(context)
+        if (preferences.startAfterReadGrant) {
+            preferences.enabled = granted(context, Manifest.permission.READ_CONTACTS)
+            preferences.startAfterReadGrant = false
+        }
+        ContactSyncHost.onPermissionOrForeground(context)
+        refresh++
+    }
+    val contactsWritePermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         ContactSyncHost.ensureObserver(context)
         if (ContactSyncPreferences(context).enabled) GatewayScheduler.schedule(context)
         refresh++
@@ -501,7 +511,19 @@ private fun CompanionScreen(activity: ComponentActivity) {
         }
         if (!settingsOpen && status?.enrolled == true && destination == "mirroring") NotificationMirroringSettings(refresh = refresh, onChanged = { refresh++ }, onOpenAppFilters = { appFiltersOpen = true })
         if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "contacts") {
-            ContactSyncSettings(context = context, refresh = refresh, requestPermissions = { contactsPermissionRequest.launch(CONTACT_PERMISSIONS) }, onChanged = { refresh++ })
+            ContactSyncSettings(
+                context = context,
+                refresh = refresh,
+                requestReadPermission = {
+                    ContactSyncPreferences(context).readPermissionRequested = true
+                    contactsReadPermissionRequest.launch(CONTACT_PERMISSIONS)
+                },
+                requestWritePermission = { contactsWritePermissionRequest.launch(arrayOf(Manifest.permission.WRITE_CONTACTS)) },
+                openAppSettings = {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+                },
+                onChanged = { refresh++ },
+            )
         }
         if (!settingsOpen && status?.enrolled == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ })
         if (settingsOpen) {

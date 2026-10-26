@@ -36,8 +36,33 @@ class MmsTransferTest {
         }.use { server ->
             val result = MmsMediaTransfer(client.client, GatewayHttp(server.origin, "secret-token"), file.parentFile).run()
             assertEquals("transient", result.failures.single().reason)
+            assertFalse("a transient failure waits for a later gateway pass", result.more)
             assertTrue(client.marked.isEmpty())
             assertEquals(listOf("/v1/attachments/reserve", "/v1/attachments/$id/upload", "/v1/attachments/$id/finalize"), seen)
+        }
+        file.delete()
+    }
+
+    @Test fun repeatedUpload503sRemainVisibleAndDoNotRequestAnImmediateRetry() {
+        val file = Files.createTempFile("cipher", ".bin").toFile().apply { writeText("cipher") }
+        val client = fakeClient(List(6) { cipher() })
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.getSharedPreferences("peppy-mms-transfer-health", android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        var reserves = 0
+        LoopbackHttpServer { request ->
+            if (request.target.endsWith("/reserve")) reserves++
+            LoopbackHttpServer.Response(503, """{"code":"busy"}""")
+        }.use { server ->
+            val result = MmsMediaTransfer(client.client, GatewayHttp(server.origin, "secret-token"), file.parentFile).run(4)
+            MmsTransferHealth(context).record(result.failures)
+
+            assertEquals("the per-pass media budget bounds repeated failures", 4, reserves)
+            assertEquals(4, result.failures.size)
+            assertTrue(result.failures.all { it.reason == "transient" })
+            assertFalse("the next transfer waits for a later gateway pass", result.more)
+            assertEquals(listOf("upload: transient", "upload: transient", "upload: transient", "upload: transient"),
+                MmsTransferHealth(context).reasons())
+            assertTrue(client.marked.isEmpty())
         }
         file.delete()
     }
@@ -182,6 +207,49 @@ class MmsTransferTest {
             assertTrue(result.failures.isEmpty())
         }
         file.delete()
+    }
+
+    @Test fun pausedUploadsWithOnlyFailedDownloadsDoNotTransferProgress() {
+        val downloadId = "22222222-2222-2222-2222-222222222222"
+        val client = fakeClient(downloads = List(2) { cipher(downloadId, downloadId) })
+        LoopbackHttpServer { LoopbackHttpServer.Response(503, """{"code":"busy"}""") }.use { server ->
+            val result = MmsMediaTransfer(
+                client.client,
+                GatewayHttp(server.origin, "token"),
+                client.file.parentFile,
+                uploadsAllowed = false,
+            ).run()
+
+            assertEquals(0, result.uploaded)
+            assertEquals(0, result.downloaded)
+            assertEquals(2, result.failures.size)
+            assertTrue(result.failures.all { it.reason == "transient" })
+            assertTrue("the media queue still has pending downloads", result.more)
+        }
+        client.file.delete()
+    }
+
+    @Test fun pausedUploadsKeepContinuationWhenADownloadActuallySucceeds() {
+        val firstId = "22222222-2222-2222-2222-222222222222"
+        val secondId = "33333333-3333-3333-3333-333333333333"
+        val client = fakeClient(downloads = listOf(cipher(firstId, firstId), cipher(secondId, secondId)))
+        LoopbackHttpServer { request ->
+            if (request.target.endsWith(secondId)) LoopbackHttpServer.Response(503, """{"code":"busy"}""")
+            else LoopbackHttpServer.Response(200, "cipher")
+        }.use { server ->
+            val result = MmsMediaTransfer(
+                client.client,
+                GatewayHttp(server.origin, "token"),
+                client.file.parentFile,
+                uploadsAllowed = false,
+            ).run()
+
+            assertEquals(0, result.uploaded)
+            assertEquals(1, result.downloaded)
+            assertEquals("transient", result.failures.single().reason)
+            assertTrue(result.more)
+        }
+        client.file.delete()
     }
 
     @Test fun positiveUsageHeadroomClearsPauseButZeroOrFailedUsageDoesNot() {

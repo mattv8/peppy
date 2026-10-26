@@ -93,7 +93,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 35;
+const SCHEMA_VERSION: i64 = 36;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -143,11 +143,11 @@ const KEY_CACHE_BYTES: usize = 4 + 1 + 16 + 16 + 4 + FINGERPRINT_HEX_BYTES + 32 
 const LEGACY_KEY_CACHE_BYTES: usize = KEY_CACHE_BYTES - 32;
 const KEY_CACHE_CHECK_DOMAIN: &[u8] = b"peppy-native-key-cache-check-v1\0";
 const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
-const SEAL_PENDING_SQL: &str = "SELECT seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND seq>? ORDER BY seq LIMIT 256";
+const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
 const BATTERY_LOOKUP_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
-CREATE INDEX IF NOT EXISTS outbox_unsealed_order ON outbox(seq) WHERE state='unsealed';
-CREATE INDEX IF NOT EXISTS outbox_queued_order ON outbox(seq) WHERE state='queued';
+CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
+ CREATE INDEX IF NOT EXISTS outbox_queued_priority ON outbox(priority,seq) WHERE state='queued';
 ";
 
 type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Store>>>>;
@@ -478,10 +478,10 @@ pub struct IncomingSms {
     pub imported: bool,
 }
 pub use sms_acquisition::{
-    MAX_PENDING_SMS_ACQUISITION_BYTES, MAX_PENDING_SMS_ACQUISITIONS, SMS_REASON_AMBIGUOUS,
-    SMS_REASON_DRAFT, SMS_REASON_FAILED, SMS_REASON_INVALID, SMS_RECONCILIATION_INTERVAL_MS,
-    SmsAcquisition, SmsAcquisitionInput, SmsAcquisitionState, SmsHistoryStatus,
-    SmsReconciliationPlan, SmsScanPlan, SmsScanStatus, SmsSource,
+    HistoryImportConditions, MAX_PENDING_SMS_ACQUISITION_BYTES, MAX_PENDING_SMS_ACQUISITIONS,
+    SMS_REASON_AMBIGUOUS, SMS_REASON_DRAFT, SMS_REASON_FAILED, SMS_REASON_INVALID,
+    SMS_RECONCILIATION_INTERVAL_MS, SmsAcquisition, SmsAcquisitionInput, SmsAcquisitionState,
+    SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsScanStatus, SmsSource,
 };
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Captured {
@@ -4414,6 +4414,29 @@ CREATE TRIGGER IF NOT EXISTS addresses_search_delete AFTER DELETE ON addresses B
 END;
 ";
 
+/// Version 35 -> 36: persisted static upload priority and a durable bounded initial history seed.
+/// Existing unknown backlog is background (4) and existing commands are priority 0. Rows keep
+/// their IDs, plain bytes, and wire bytes; only the priority metadata and its partial indexes
+/// change. The column adds are guarded so a partially upgraded database can be reopened.
+fn apply_migration_36(conn: &Connection) -> Result<(), Error> {
+    add_column_if_missing(conn, "outbox", "priority INTEGER NOT NULL DEFAULT 4")?;
+    add_column_if_missing(
+        conn,
+        "sms_scan_checkpoints",
+        "history_seed_remaining INTEGER NOT NULL DEFAULT 100",
+    )?;
+    conn.execute_batch(MIGRATION_36)?;
+    Ok(())
+}
+
+const MIGRATION_36: &str = "
+UPDATE outbox SET priority=0 WHERE purpose='command';
+DROP INDEX IF EXISTS outbox_unsealed_order;
+DROP INDEX IF EXISTS outbox_queued_order;
+CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
+CREATE INDEX IF NOT EXISTS outbox_queued_priority ON outbox(priority,seq) WHERE state='queued';
+";
+
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
         .split_whitespace()
@@ -4516,6 +4539,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_33(&tx)?;
             tx.execute_batch(MIGRATION_34)?;
             tx.execute_batch(MIGRATION_35)?;
+            apply_migration_36(&tx)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4524,7 +4548,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=34)) => {
+        Some(version @ (4..=35)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4618,6 +4642,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             if version <= 34 {
                 tx.execute_batch(MIGRATION_35)?;
             }
+            if version <= 35 {
+                apply_migration_36(&tx)?;
+            }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
         }
@@ -4627,6 +4654,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     mms_backfill::initialize(conn)?;
     media_cache::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
+    mms_identity::install_query_indexes(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (key, value) in [
         ("vault_id", store.config.vault_id.to_string()),
@@ -5415,6 +5443,7 @@ fn enqueue(
         route,
         plain.as_slice(),
         main.as_ref(),
+        outbox_priority(purpose, payload),
     )?;
     for attachment_id in payload_attachment_ids(payload) {
         conn.execute(
@@ -5443,6 +5472,7 @@ fn enqueue(
                 route,
                 plain.as_slice(),
                 checkpoint.as_ref(),
+                outbox_priority(purpose, payload),
             )?;
             contact_media::record_outbox_photos(conn, to_i64(checkpoint_sequence)?, payload)?;
             if let PrivatePayload::NotificationPosted { notification } = payload {
@@ -5504,6 +5534,7 @@ fn insert_outbox(
     route: Option<&GatewayRoute>,
     plain: &[u8],
     compaction: Option<&CompactionMetadata>,
+    priority: i64,
 ) -> Result<(EnvelopeId, u64), Error> {
     let sequence = get_meta(conn, "producer_sequence")?
         .map(|value| value.parse::<u64>().map_err(|_| Error::Database))
@@ -5514,7 +5545,7 @@ fn insert_outbox(
     set_meta(conn, "producer_sequence", &sequence.to_string())?;
     let envelope_id = EnvelopeId::new();
     conn.execute(
-        "INSERT INTO outbox(seq,envelope_id,command_id,purpose,route,plain,compaction,state) VALUES(?,?,?,?,?,?,?,'unsealed')",
+        "INSERT INTO outbox(seq,envelope_id,command_id,purpose,route,plain,compaction,priority,state) VALUES(?,?,?,?,?,?,?,?,'unsealed')",
         params![
             to_i64(sequence)?,
             envelope_id.to_string(),
@@ -5522,7 +5553,8 @@ fn insert_outbox(
             purpose_code(purpose),
             route.map(json).transpose()?,
             plain,
-            compaction.map(json).transpose()?
+            compaction.map(json).transpose()?,
+            priority,
         ],
     )?;
     Ok((envelope_id, sequence))
@@ -6093,12 +6125,20 @@ fn exists(conn: &Connection, query: &str) -> Result<bool, Error> {
 fn seal_store_batch(store: &mut Store, limit: usize) -> Result<usize, Error> {
     let (conn, ctx) = store.parts();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if limit > 0
+        && compaction_readiness(&tx, &ctx)?
+            .get("contacts_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        contacts::repair_held_photo_names(&tx, &ctx, 50)?;
+    }
     let sealed = seal_pending(&tx, &ctx, limit)?;
     tx.commit()?;
     Ok(sealed)
 }
 
-/// Encrypts up to `limit` sealable unsealed outbox rows (oldest first) exactly once under the
+/// Encrypts up to `limit` sealable unsealed outbox rows (static priority, then producer sequence) exactly once under the
 /// active epoch. Rows held for media uploads are skipped. Returns the number sealed.
 fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Error> {
     let Some(epoch) = ctx.active_epoch else {
@@ -6108,8 +6148,9 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         return Ok(0);
     };
     let mut count = 0;
-    let mut after = 0_i64;
+    let mut after = (i64::MIN, 0_i64);
     type Row = (
+        i64,
         i64,
         String,
         Option<String>,
@@ -6122,7 +6163,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         let rows: Vec<Row> = {
             let mut query = conn.prepare(SEAL_PENDING_SQL)?;
             query
-                .query_map(params![after], |r| {
+                .query_map(params![after.0, after.0, after.1], |r| {
                     Ok((
                         r.get(0)?,
                         r.get(1)?,
@@ -6131,6 +6172,7 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -6138,8 +6180,9 @@ fn seal_pending(conn: &Connection, ctx: &Ctx, limit: usize) -> Result<usize, Err
         if rows.is_empty() {
             break;
         }
-        for (sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows {
-            after = sequence;
+        for (priority, sequence, envelope_id, command_id, purpose, route, plain, compaction) in rows
+        {
+            after = (priority, sequence);
             if count >= limit {
                 break;
             }
@@ -6295,11 +6338,39 @@ fn next_source_sequence(
     Ok(SourceSequence(last.checked_add(1).ok_or(Error::Database)?))
 }
 
-fn queued_outbox_sql() -> String {
+#[cfg(test)]
+fn queued_outbox_sequence_sql() -> String {
     format!(
-        "SELECT wire FROM outbox WHERE state='queued' AND {} ORDER BY seq LIMIT ?",
+        "SELECT seq FROM outbox WHERE state='queued' AND {} ORDER BY priority,seq",
         history_import::outbox_upload_eligible_predicate()
     )
+}
+
+fn queued_outbox_sql() -> String {
+    format!(
+        "SELECT wire FROM outbox WHERE state='queued' AND {} ORDER BY priority,seq LIMIT ?",
+        history_import::outbox_upload_eligible_predicate()
+    )
+}
+
+/// Static priority is assigned before encryption so uploads never need to decrypt queued rows.
+/// Contact capture can use this shared classifier when it introduces its enqueue hook.
+pub(crate) fn outbox_priority(purpose: EnvelopePurpose, payload: &PrivatePayload) -> i64 {
+    if purpose == EnvelopePurpose::Command {
+        return 0;
+    }
+    match payload {
+        PrivatePayload::ContactBookState { .. }
+        | PrivatePayload::ContactUpserted { .. }
+        | PrivatePayload::ContactRemoved { .. }
+        | PrivatePayload::ContactEditRequest { .. }
+        | PrivatePayload::ContactEditResult { .. }
+        | PrivatePayload::ContactScanRequest { .. }
+        | PrivatePayload::ContactScanResult { .. } => 2,
+        PrivatePayload::Message(message) if message.imported => 3,
+        PrivatePayload::MmsMessage { message, .. } if message.imported => 3,
+        _ => 1,
+    }
 }
 
 fn attempt_state(conn: &Connection, command_id: CommandId) -> Result<Option<SendState>, Error> {
@@ -8295,12 +8366,12 @@ mod tests {
                     "CREATE INDEX sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete'",
                 ),
                 (
-                    "outbox_unsealed_order",
-                    "CREATE INDEX outbox_unsealed_order ON outbox(seq) WHERE state='unsealed'",
+                    "outbox_unsealed_priority",
+                    "CREATE INDEX outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed'",
                 ),
                 (
-                    "outbox_queued_order",
-                    "CREATE INDEX outbox_queued_order ON outbox(seq) WHERE state='queued'",
+                    "outbox_queued_priority",
+                    "CREATE INDEX outbox_queued_priority ON outbox(priority,seq) WHERE state='queued'",
                 ),
             ] {
                 let actual: String = store
@@ -8357,8 +8428,8 @@ mod tests {
                 .conn
                 .execute_batch(
                     "DROP INDEX sms_acquisitions_reserved_sequence;
-                 DROP INDEX outbox_unsealed_order;
-                 DROP INDEX outbox_queued_order;",
+                  DROP INDEX outbox_unsealed_priority;
+                  DROP INDEX outbox_queued_priority;",
                 )
                 .unwrap();
         }
@@ -8368,8 +8439,8 @@ mod tests {
         let store = reopened.lock().unwrap();
         for index in [
             "sms_acquisitions_reserved_sequence",
-            "outbox_unsealed_order",
-            "outbox_queued_order",
+            "outbox_unsealed_priority",
+            "outbox_queued_priority",
         ] {
             let exists: bool = store
                 .conn
@@ -8394,7 +8465,7 @@ mod tests {
         let reopened_again = Client::open(config, key()).unwrap();
         let store = reopened_again.lock().unwrap();
         assert_eq!(
-            store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('sms_acquisitions_reserved_sequence','outbox_unsealed_order','outbox_queued_order')", [], |row| row.get::<_, i64>(0)).unwrap(),
+            store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('sms_acquisitions_reserved_sequence','outbox_unsealed_priority','outbox_queued_priority')", [], |row| row.get::<_, i64>(0)).unwrap(),
             3,
         );
     }
@@ -8429,15 +8500,296 @@ mod tests {
             )
             .contains("sms_acquisitions_reserved_sequence")
         );
-        assert!(plan(SEAL_PENDING_SQL, &[&0_i64]).contains("outbox_unsealed_order"));
-        assert!(plan(&queued_outbox_sql(), &[&1_i64]).contains("outbox_queued_order"));
+        assert!(
+            plan(SEAL_PENDING_SQL, &[&i64::MIN, &i64::MIN, &0_i64])
+                .contains("outbox_unsealed_priority")
+        );
+        assert!(plan(&queued_outbox_sql(), &[&1_i64]).contains("outbox_queued_priority"));
 
         let mut statement = store.conn.prepare(SEAL_PENDING_SQL).unwrap();
         statement
-            .query_map([0_i64], |_| Ok(()))
+            .query_map([i64::MIN, i64::MIN, 0_i64], |_| Ok(()))
             .unwrap()
             .for_each(Result::unwrap);
         assert!(statement.get_status(StatementStatus::VmStep) > 0);
+    }
+
+    #[test]
+    fn queued_outbox_orders_static_priority_without_scanning_ineligible_rows() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("priority.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let client = Client::open(config, DatabaseKey::new(&[39; 32]).unwrap()).unwrap();
+        let store = client.lock().unwrap();
+        for (seq, priority) in [(1, 3), (2, 1), (3, 2), (4, 0)] {
+            store.conn.execute(
+                "INSERT INTO outbox(seq,envelope_id,purpose,state,priority) VALUES(?,?, 'event','queued',?)",
+                params![seq, format!("priority-{seq}"), priority],
+            ).unwrap();
+        }
+        store.conn.execute(
+            "INSERT INTO attachments(attachment_id,state,media_type,display_name,plaintext_bytes,ciphertext_bytes,ciphertext_sha256,stream_version,file_key) VALUES('held','pending_upload','text/plain','held',0,0,'digest',1,X'00')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO outbox(seq,envelope_id,purpose,state,priority) VALUES(5,'held-priority','event','queued',0)",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO outbox_attachments(envelope_id,attachment_id) VALUES('held-priority','held')",
+            [],
+        ).unwrap();
+        let rows: Vec<i64> = store
+            .conn
+            .prepare(&queued_outbox_sequence_sql())
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![4, 2, 3, 1]);
+        let plan: Vec<String> = store
+            .conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                queued_outbox_sequence_sql()
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("outbox_queued_priority")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn version_35_backlog_upgrade_preserves_bytes_and_orders_commands_and_live_first() {
+        const BACKLOG: i64 = 2_000;
+        type OutboxRow = (
+            i64,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        );
+        let outbox_rows = |conn: &Connection| -> Vec<OutboxRow> {
+            conn.prepare(
+                "SELECT seq,envelope_id,command_id,purpose,state,plain,wire FROM outbox ORDER BY seq",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        let directory = tempfile::TempDir::new().unwrap();
+        let config = ClientConfig {
+            database_path: directory.path().join("v35-priority.db"),
+            vault_id: VaultId::new(),
+            device_id: DeviceId::new(),
+        };
+        let key = || DatabaseKey::new(&[40; 32]).unwrap();
+        let old_command = CommandId::new().to_string();
+        let old_unsealed_command = CommandId::new().to_string();
+        let before = {
+            let client = Client::open(config.clone(), key()).unwrap();
+            let mut store = client.lock().unwrap();
+            // Recreate the baseline-35 shape: no priority column and no history seed column.
+            store
+                .conn
+                .execute_batch(
+                    "DROP INDEX outbox_unsealed_priority;
+                     DROP INDEX outbox_queued_priority;
+                     ALTER TABLE outbox DROP COLUMN priority;
+                     ALTER TABLE sms_scan_checkpoints DROP COLUMN history_seed_remaining;
+                     CREATE INDEX outbox_unsealed_order ON outbox(seq) WHERE state='unsealed';
+                     CREATE INDEX outbox_queued_order ON outbox(seq) WHERE state='queued';
+                     UPDATE schema_meta SET version=35;",
+                )
+                .unwrap();
+            {
+                let tx = store.conn.transaction().unwrap();
+                tx.execute(
+                    "INSERT INTO outbox(seq,envelope_id,command_id,purpose,state,plain,wire) VALUES(1,'old-command-queued',?,'command','queued',NULL,X'0102')",
+                    [&old_command],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO outbox(seq,envelope_id,purpose,state,plain,wire) VALUES(2,'legacy-event-queued','event','queued',NULL,X'0304')",
+                    [],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO outbox(seq,envelope_id,command_id,purpose,state,plain,wire) VALUES(3,'old-command-unsealed',?,'command','unsealed',X'0506',NULL)",
+                    [&old_unsealed_command],
+                )
+                .unwrap();
+                for sequence in 100..100 + BACKLOG {
+                    tx.execute(
+                        "INSERT INTO outbox(seq,envelope_id,purpose,state,plain,wire) VALUES(?,?,'event','unsealed',X'07',NULL)",
+                        params![sequence, format!("backlog-{sequence}")],
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let rows = outbox_rows(&store.conn);
+            drop(store);
+            rows
+        };
+
+        let client = Client::open(config.clone(), key()).unwrap();
+        let mut store = client.lock().unwrap();
+        assert_eq!(
+            outbox_rows(&store.conn),
+            before,
+            "upgrade rewrote IDs or bytes"
+        );
+        let obsolete_indexes: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('outbox_unsealed_order','outbox_queued_order')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            obsolete_indexes, 0,
+            "obsolete queue indexes remain maintained"
+        );
+        let priorities: Vec<(i64, i64)> = store
+            .conn
+            .prepare("SELECT seq,priority FROM outbox WHERE seq<=3 ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(priorities, vec![(1, 0), (2, 4), (3, 0)]);
+        let backlog: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM outbox WHERE priority=4 AND seq>=100",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backlog, BACKLOG);
+
+        // New work after the upgrade: a command and a live message, both newer than the backlog.
+        {
+            let tx = store.conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO outbox(seq,envelope_id,command_id,purpose,state,plain,priority) VALUES(9001,'new-command',?,'command','unsealed',X'08',0)",
+                [CommandId::new().to_string()],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO outbox(seq,envelope_id,purpose,state,plain,priority) VALUES(9000,'new-live','event','unsealed',X'09',1)",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let seal_head: Vec<i64> = {
+            let mut statement = store.conn.prepare(SEAL_PENDING_SQL).unwrap();
+            statement
+                .query_map(params![i64::MIN, i64::MIN, 0_i64], |row| row.get(1))
+                .unwrap()
+                .take(4)
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            seal_head,
+            vec![3, 9001, 9000, 100],
+            "commands and live work must seal before the background backlog"
+        );
+        let seal_plan: String = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SEAL_PENDING_SQL}"))
+            .unwrap()
+            .query_map(params![i64::MIN, i64::MIN, 0_i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            seal_plan.contains("outbox_unsealed_priority"),
+            "{seal_plan}"
+        );
+        assert!(!seal_plan.contains("TEMP B-TREE"), "{seal_plan}");
+        let seal_steps = {
+            let mut statement = store.conn.prepare(SEAL_PENDING_SQL).unwrap();
+            statement
+                .query_row(params![i64::MIN, i64::MIN, 0_i64], |_| Ok(()))
+                .unwrap();
+            statement.get_status(StatementStatus::VmStep)
+        };
+        assert!(
+            (1..=256).contains(&seal_steps),
+            "first seal row VM steps must stay bounded: {seal_steps}"
+        );
+
+        let queued_sql = queued_outbox_sql();
+        let queued_plan: String = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {queued_sql}"))
+            .unwrap()
+            .query_map([1_i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            queued_plan.contains("outbox_queued_priority"),
+            "{queued_plan}"
+        );
+        assert!(!queued_plan.contains("TEMP B-TREE"), "{queued_plan}");
+        let queued_wires: Vec<Vec<u8>> = {
+            let mut statement = store.conn.prepare(&queued_sql).unwrap();
+            statement
+                .query_map([2_i64], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(queued_wires, vec![vec![1, 2], vec![3, 4]]);
+        let queued_steps = {
+            let mut statement = store.conn.prepare(&queued_sql).unwrap();
+            statement.query_row([1_i64], |_| Ok(())).unwrap();
+            statement.get_status(StatementStatus::VmStep)
+        };
+        assert!(
+            (1..=256).contains(&queued_steps),
+            "first queued row VM steps must stay bounded: {queued_steps}"
+        );
+        let version: i64 = store
+            .conn
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -8465,8 +8817,8 @@ mod tests {
                 .conn
                 .execute_batch(
                     "DROP INDEX sms_acquisitions_reserved_sequence;
-                 DROP INDEX outbox_unsealed_order;
-                 DROP INDEX outbox_queued_order;
+                  DROP INDEX outbox_unsealed_priority;
+                  DROP INDEX outbox_queued_priority;
                  UPDATE schema_meta SET version=34;",
                 )
                 .unwrap();
@@ -8497,8 +8849,8 @@ mod tests {
         let conn = Connection::open(&config.database_path).unwrap();
         apply_database_key(&conn, &key()).unwrap();
         conn.execute_batch(
-            "DROP INDEX outbox_queued_order;
-             UPDATE schema_meta SET version=36;",
+            "DROP INDEX outbox_queued_priority;
+               UPDATE schema_meta SET version=38;",
         )
         .unwrap();
         drop(conn);
@@ -8513,7 +8865,7 @@ mod tests {
             conn.query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            36
+            38
         );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM drafts", [], |row| row
@@ -8522,7 +8874,7 @@ mod tests {
             1
         );
         let queued_index: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='outbox_queued_order')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='outbox_queued_priority')",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -8584,7 +8936,11 @@ mod tests {
             NEXT_SOURCE_SEQUENCE_SQL,
             &[&conversation, &device],
         );
-        let indexed_unsealed = vm_steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]);
+        let indexed_unsealed = vm_steps(
+            &store.conn,
+            SEAL_PENDING_SQL,
+            &[&i64::MIN, &i64::MIN, &0_i64],
+        );
         let queued_sql = queued_outbox_sql();
         let indexed_queued = vm_steps(&store.conn, &queued_sql, &[&1_i64]);
         for (query, steps) in [
@@ -8602,8 +8958,8 @@ mod tests {
             .conn
             .execute_batch(
                 "DROP INDEX sms_acquisitions_reserved_sequence;
-             DROP INDEX outbox_unsealed_order;
-             DROP INDEX outbox_queued_order;",
+              DROP INDEX outbox_unsealed_priority;
+              DROP INDEX outbox_queued_priority;",
             )
             .unwrap();
         let unindexed_sms = vm_steps(
@@ -8611,7 +8967,11 @@ mod tests {
             NEXT_SOURCE_SEQUENCE_SQL,
             &[&conversation, &device],
         );
-        let unindexed_unsealed = vm_steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]);
+        let unindexed_unsealed = vm_steps(
+            &store.conn,
+            SEAL_PENDING_SQL,
+            &[&i64::MIN, &i64::MIN, &0_i64],
+        );
         let unindexed_queued = vm_steps(&store.conn, &queued_sql, &[&1_i64]);
         let index_build_started = Instant::now();
         store.conn.execute_batch(BATTERY_LOOKUP_INDEXES).unwrap();
@@ -8700,7 +9060,11 @@ mod tests {
                 NEXT_SOURCE_SEQUENCE_SQL,
                 &[&conversation, &device],
             ),
-            steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]),
+            steps(
+                &store.conn,
+                SEAL_PENDING_SQL,
+                &[&i64::MIN, &i64::MIN, &0_i64],
+            ),
             steps(&store.conn, &queued_sql, &[&1_i64]),
         ];
         for (query, steps) in ["SMS", "unsealed", "queued"].into_iter().zip(indexed) {
@@ -8709,14 +9073,18 @@ mod tests {
                 "1k {query} indexed VM steps must stay bounded: {steps}"
             );
         }
-        store.conn.execute_batch("DROP INDEX sms_acquisitions_reserved_sequence; DROP INDEX outbox_unsealed_order; DROP INDEX outbox_queued_order;").unwrap();
+        store.conn.execute_batch("DROP INDEX sms_acquisitions_reserved_sequence; DROP INDEX outbox_unsealed_priority; DROP INDEX outbox_queued_priority;").unwrap();
         let unindexed = [
             steps(
                 &store.conn,
                 NEXT_SOURCE_SEQUENCE_SQL,
                 &[&conversation, &device],
             ),
-            steps(&store.conn, SEAL_PENDING_SQL, &[&0_i64]),
+            steps(
+                &store.conn,
+                SEAL_PENDING_SQL,
+                &[&i64::MIN, &i64::MIN, &0_i64],
+            ),
             steps(&store.conn, &queued_sql, &[&1_i64]),
         ];
         assert!(
@@ -9470,6 +9838,11 @@ mod tests {
             .unwrap();
         let mut envelopes = source.pending_outbox().unwrap();
         assert_eq!(envelopes.len(), 2);
+        let message_cursor = envelopes
+            .iter()
+            .position(|envelope| envelope.purpose == EnvelopePurpose::Event)
+            .unwrap() as i64
+            + 1;
         let event_key = derive_purpose_key(&root2, &p2, KeyPurpose::Event).unwrap();
         let mut dismissal = Envelope {
             protocol_version: PROTOCOL_VERSION,
@@ -9552,11 +9925,15 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 rows,
-                vec![
-                    (1, "pending".into(), 1),
-                    (2, "quarantined".into(), 0),
-                    (3, "quarantined".into(), 0),
-                ]
+                (1..=3)
+                    .map(|cursor| {
+                        if cursor == message_cursor {
+                            (cursor, "pending".into(), 1)
+                        } else {
+                            (cursor, "quarantined".into(), 0)
+                        }
+                    })
+                    .collect::<Vec<_>>()
             );
         }
         assert_eq!(recovered.apply_pending(10).unwrap().applied, 1);

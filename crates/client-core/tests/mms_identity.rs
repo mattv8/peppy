@@ -3,7 +3,7 @@ mod common;
 use common::*;
 
 #[test]
-fn own_address_sync_unblocks_an_existing_mms_group_without_rekeying_it() {
+fn own_address_sync_excludes_self_from_an_existing_mms_group_without_rekeying_it() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let phone_cfg = config(&dir, "phone", &vault);
@@ -37,8 +37,10 @@ fn own_address_sync_unblocks_an_existing_mms_group_without_rekeying_it() {
     server.sync(&desktop);
 
     let before = desktop.mms_reply_context(captured.conversation_id).unwrap();
-    assert!(before.recipients.is_empty());
-    assert!(before.blocked_reason.is_some());
+    assert_eq!(
+        before.recipients,
+        vec!["+15555550101", "+15555550100", "+15555550102"]
+    );
     phone.set_mms_own_address("sim-1", "+15555550100").unwrap();
     server.upload(&phone);
     server.sync(&desktop);
@@ -113,11 +115,10 @@ fn incoming_duplicate_participant_is_not_a_group() {
     );
     let context = client.mms_reply_context(conversation).unwrap();
     assert_eq!(context.recipients, vec![peer]);
-    assert_eq!(context.blocked_reason, None);
 }
 
 #[test]
-fn incoming_group_blocks_when_confirmed_own_format_matches_no_participant() {
+fn incoming_group_replies_to_all_when_confirmed_own_format_matches_no_participant() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "phone", &vault), &vault);
@@ -130,8 +131,10 @@ fn incoming_group_blocks_when_confirmed_own_format_matches_no_participant() {
         &["+15555550100", "+15555550102"],
     );
     let context = client.mms_reply_context(conversation).unwrap();
-    assert!(context.recipients.is_empty());
-    assert!(context.blocked_reason.is_some());
+    assert_eq!(
+        context.recipients,
+        vec!["+15555550101", "+15555550100", "+15555550102"]
+    );
 }
 
 #[test]
@@ -169,11 +172,10 @@ fn incoming_group_matches_national_format_own_number_and_excludes_it() {
     );
     let context = client.mms_reply_context(conversation).unwrap();
     assert_eq!(context.recipients, vec!["+15555550101"]);
-    assert_eq!(context.blocked_reason, None);
 }
 
 #[test]
-fn incoming_group_does_not_suffix_match_short_or_two_e164_numbers() {
+fn incoming_group_uses_sender_only_fallback_when_own_is_unmatched() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "phone", &vault), &vault);
@@ -187,18 +189,12 @@ fn incoming_group_does_not_suffix_match_short_or_two_e164_numbers() {
             &["+15555550101"],
         );
         let context = client.mms_reply_context(conversation).unwrap();
-        assert!(context.recipients.is_empty());
-        assert_eq!(
-            context.blocked_reason.as_deref(),
-            Some(
-                "This SIM's saved number isn't among this group's participants. Check the number on this phone."
-            )
-        );
+        assert_eq!(context.recipients, vec![own_participant]);
     }
 }
 
 #[test]
-fn incoming_group_does_not_match_trunk_prefixed_longer_participant() {
+fn incoming_group_replies_to_all_when_own_does_not_match_trunk_prefixed_participant() {
     let dir = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let client = unlocked(&config(&dir, "phone", &vault), &vault);
@@ -211,11 +207,65 @@ fn incoming_group_does_not_match_trunk_prefixed_longer_participant() {
         &["015550123456", "+15555550102"],
     );
     let context = client.mms_reply_context(conversation).unwrap();
-    assert!(context.recipients.is_empty());
+    assert_eq!(context.recipients.len(), 3);
+    assert!(context.recipients.contains(&"+15555550101".to_owned()));
+    assert!(context.recipients.contains(&"015550123456".to_owned()));
+    assert!(context.recipients.contains(&"+15555550102".to_owned()));
+}
+
+#[test]
+fn incoming_group_with_unknown_own_address_uses_sender_only_fallback() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "phone", &vault), &vault);
+    let conversation = complete_contextual(
+        &client,
+        "unknown-own-two",
+        Direction::Incoming,
+        Some("+15555550101"),
+        &["+15555550100"],
+    );
+
     assert_eq!(
-        context.blocked_reason.as_deref(),
-        Some(
-            "This SIM's saved number isn't among this group's participants. Check the number on this phone."
-        )
+        client.mms_reply_context(conversation).unwrap().recipients,
+        vec!["+15555550101"]
+    );
+}
+
+#[test]
+fn incoming_group_with_unknown_own_address_replies_to_all_three_participants() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "phone", &vault), &vault);
+    let conversation = complete_contextual(
+        &client,
+        "unknown-own-three",
+        Direction::Incoming,
+        Some("+15555550101"),
+        &["+15555550100", "+15555550102"],
+    );
+
+    assert_eq!(
+        client.mms_reply_context(conversation).unwrap().recipients,
+        vec!["+15555550101", "+15555550100", "+15555550102"]
+    );
+}
+
+#[test]
+fn incoming_group_dedupes_national_addresses_before_sender_only_fallback() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "phone", &vault), &vault);
+    let conversation = complete_contextual(
+        &client,
+        "canonical-own",
+        Direction::Incoming,
+        Some("8018000975"),
+        &["+18018000975", "+15555550101"],
+    );
+
+    assert_eq!(
+        client.mms_reply_context(conversation).unwrap().recipients,
+        vec!["8018000975"]
     );
 }

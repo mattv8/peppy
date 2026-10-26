@@ -2462,16 +2462,16 @@ describe("gateway routes", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
   });
 
-  it("blocks replies with the latest reason while preserving the draft", async () => {
+  it("sends group replies without an unavailable notice", async () => {
     host.gateways = [{ ...MMS_SIM }];
-    host.conversations[0].replyBlockedReason = "confirm your address on the phone";
+    host.conversations[0].participants = ["+15550001", "+15550002"];
     host.drafts.set("aurora", storedDraft());
     render(<App />);
     await waitFor(() => expect(message()).toHaveValue("MMS reply"));
-    expect(screen.getByText(/Replies unavailable: confirm your address/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.queryByText(/Replies unavailable/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(bridge.send_draft).not.toHaveBeenCalled();
-    expect(host.drafts.get("aurora")?.text).toBe("MMS reply");
+    await waitFor(() => expect(bridge.send_draft).toHaveBeenCalled());
   });
 
   it("removes a draft attachment through the CAS save path", async () => {
@@ -2550,23 +2550,6 @@ describe("gateway routes", () => {
     render(<App />);
     await screen.findByText(/estimate exceeds/);
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-  });
-
-  it("rechecks the current stored conversation after a flush updates its eligibility", async () => {
-    host.gateways = [{ ...MMS_SIM }];
-    host.drafts.set("aurora", storedDraft({ text: "before flush" }));
-    const pending = deferred<Draft>();
-    vi.mocked(bridge.save_draft).mockImplementationOnce(async (input) => pending.promise.then(() => host.save(input)));
-    render(<App />);
-    await screen.findByDisplayValue("before flush");
-    fireEvent.change(message(), { target: { value: "after flush" } });
-    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalled());
-    host.conversations[0].replyBlockedReason = "confirm your address on the phone";
-    await act(async () => hint?.());
-    pending.resolve(host.drafts.get("aurora")!);
-    await waitFor(() => expect(screen.getByText(/Replies unavailable: confirm your address/)).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-    expect(bridge.send_draft).not.toHaveBeenCalled();
   });
 
   it("distinguishes two SIMs on one gateway device and blocks MMS on the SMS-only SIM", async () => {
@@ -2710,14 +2693,6 @@ describe("gateway routes", () => {
     expect(host.drafts.get("aurora")).toBeUndefined();
   });
 
-  it("does not mark Phone invalid for a reply blocker", async () => {
-    host.conversations[0].replyBlockedReason = "confirm your address on the phone";
-    host.drafts.set("aurora", storedDraft());
-    render(<App />);
-
-    expect(await screen.findByRole("button", { name: "Send" })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "Phone" })).not.toHaveAttribute("aria-invalid");
-  });
 });
 
 describe("host state display", () => {

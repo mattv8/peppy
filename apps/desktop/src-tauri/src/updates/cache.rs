@@ -524,20 +524,16 @@ mod tests {
         .unwrap();
         sweep_orphans(root.path()).unwrap();
         assert!(active.exists());
-        assert!(
-            !directory(root.path())
-                .join(".payload-crashed.partial")
-                .exists()
-        );
+        assert!(!directory(root.path())
+            .join(".payload-crashed.partial")
+            .exists());
         remove_cached(root.path()).unwrap();
         assert!(!active.exists());
-        assert!(
-            directory(root.path())
-                .join("generations")
-                .read_dir()
-                .unwrap()
-                .next()
-                .is_none()
-        );
+        assert!(directory(root.path())
+            .join("generations")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none());
     }
 }
