@@ -52,6 +52,7 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
   const [savingIds, setSavingIds] = useState<ReadonlySet<string>>(new Set());
   const savingIdsRef = useRef<ReadonlySet<string>>(new Set());
   const [status, setStatus] = useState<Status>({ text: "", tone: "info", host: null });
+  const mounted = useRef(true);
   const clearTimer = useRef<number | undefined>(undefined);
   const animationFrame = useRef<number | undefined>(undefined);
   const lastStatusText = useRef("");
@@ -60,12 +61,17 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
   const requestDownloadHandler = useRef(props.requestDownload);
   requestDownloadHandler.current = props.requestDownload;
 
-  useEffect(() => () => {
-    window.clearTimeout(clearTimer.current);
-    if (animationFrame.current !== undefined) cancelAnimationFrame(animationFrame.current);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      window.clearTimeout(clearTimer.current);
+      if (animationFrame.current !== undefined) cancelAnimationFrame(animationFrame.current);
+    };
   }, []);
 
   const announce = useCallback((text: string, tone: StatusTone = "info") => {
+    if (!mounted.current) return;
     window.clearTimeout(clearTimer.current);
     if (animationFrame.current !== undefined) cancelAnimationFrame(animationFrame.current);
     const host = statusHost();
