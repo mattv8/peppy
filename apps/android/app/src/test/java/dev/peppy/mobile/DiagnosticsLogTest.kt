@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.core.content.FileProvider
 import java.io.File
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -134,13 +135,66 @@ class DiagnosticsLogTest {
 
     @Test fun fullQueueDropsRecordsWithoutBlockingTheProducer() = runBlocking {
         var dropped = 0L
-        val log = DiagnosticsLog(context, { file -> android.net.Uri.fromFile(file) }) { _, nextDropped, _ -> dropped = nextDropped }
+        val writerEntered = CountDownLatch(1)
+        val releaseWriter = CountDownLatch(1)
+        val log = DiagnosticsLog(context, { file ->
+            writerEntered.countDown()
+            check(releaseWriter.await(30, TimeUnit.SECONDS))
+            android.net.Uri.fromFile(file)
+        }) { _, nextDropped, _ -> dropped = nextDropped }
         log.setEnabled(true)
+        val executor = Executors.newFixedThreadPool(2)
+        val exported = executor.submit<android.net.Uri?> { runBlocking { log.export() } }
+        var produced: java.util.concurrent.Future<*>? = null
+        var testFailure: Throwable? = null
 
-        repeat(4_096) { log.record(record(1, " 30=$it")) }
-        log.export()
+        try {
+            assertTrue(writerEntered.await(10, TimeUnit.SECONDS))
+            produced = executor.submit {
+                repeat(4_096) { log.record(record(1, " 30=$it")) }
+            }
+            produced.get(10, TimeUnit.SECONDS)
+            releaseWriter.countDown()
 
-        assertTrue(dropped > 0)
+            assertNotNull(exported.get(10, TimeUnit.SECONDS))
+            assertNotNull(log.export())
+            assertTrue(dropped > 0)
+        } catch (failure: Throwable) {
+            testFailure = failure
+            throw failure
+        } finally {
+            log.setEnabled(false)
+            releaseWriter.countDown()
+            var cleanupFailure: Throwable? = null
+            var executorTerminated = false
+            try {
+                executor.shutdown()
+                executorTerminated = executor.awaitTermination(10, TimeUnit.SECONDS)
+                if (!executorTerminated) {
+                    executor.shutdownNow()
+                    executorTerminated = executor.awaitTermination(10, TimeUnit.SECONDS)
+                    assertTrue(executorTerminated)
+                }
+                if (executorTerminated) {
+                    produced?.get()
+                    exported.get()
+                }
+            } catch (failure: Throwable) {
+                cleanupFailure = failure
+            } finally {
+                if (!executor.isTerminated) executor.shutdownNow()
+            }
+            if (executorTerminated) {
+                try {
+                    log.export()
+                } catch (failure: Throwable) {
+                    if (cleanupFailure == null) cleanupFailure = failure else cleanupFailure.addSuppressed(failure)
+                }
+            }
+            cleanupFailure?.let { failure ->
+                testFailure?.addSuppressed(failure) ?: throw failure
+            }
+        }
     }
 
     @Test fun providerFactoryFailureCleansPartialSnapshotAndReportsTypedError() = runBlocking {
