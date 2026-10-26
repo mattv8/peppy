@@ -50,6 +50,10 @@ internal data class SmsCapturePlan(
     val paused: Boolean = false,
     val descending: Boolean = false,
     val historyFloor: Long? = null,
+    /** Core-admitted text-history rows for this pass; live/recheck remain at [PAGE]. */
+    val budget: Int = 50,
+    /** Only unmetered/charging facts may promptly schedule the next admitted history page. */
+    val allowHistoryContinuation: Boolean = false,
 )
 
 /** Core-owned frozen sweep state for IDs at or below forward scan checkpoints. */
@@ -485,35 +489,65 @@ internal object SmsCapture {
 
     private fun scan(plan: SmsCapturePlan, core: SmsCaptureCore, provider: SmsCaptureProvider, expired: () -> Boolean): SmsCaptureSummary {
         val descending = plan.imported && plan.descending
-        val page = if (descending) {
-            provider.descendingPage(plan.checkpoint, requireNotNull(plan.historyUpperBound), plan.historyFloor, PAGE)
-        } else {
-            provider.page(requireNotNull(plan.checkpoint), PAGE)
-        }
-        var result = SmsCaptureSummary(rowsQueried = page.records.size)
+        var remaining = if (plan.imported) plan.budget.coerceIn(1, 200) else PAGE
+        var cursor = plan.checkpoint
+        var result = SmsCaptureSummary()
         var checkpointBlocked = false
-        for (row in page.records) {
-            if (plan.historyUpperBound != null && row.id > plan.historyUpperBound) break
-            if (expired()) return result.copy(more = true, budgetExhausted = true)
-            val outcome = process(core, row, plan.sourceGeneration, plan.imported, null)
-            result = merge(result, outcome.summary()).copy(processed = result.processed + 1)
-            // Only a durably recorded row (captured, pending or unavailable) may pass the checkpoint.
-            // Backpressure or a core failure stops this pass at the row; it is retried, not skipped.
-            if (!outcome.providerDurable) {
-                checkpointBlocked = true
+        var historyExhausted = false
+        var liveHasMore = false
+        while (remaining > 0 && !checkpointBlocked) {
+            val pageLimit = minOf(PAGE, remaining)
+            val page = if (descending) {
+                provider.descendingPage(cursor, requireNotNull(plan.historyUpperBound), plan.historyFloor, pageLimit)
+            } else {
+                provider.page(requireNotNull(cursor), pageLimit)
+            }
+            result = result.copy(rowsQueried = result.rowsQueried + page.records.size)
+            for (row in page.records) {
+                if (plan.historyUpperBound != null && row.id > plan.historyUpperBound) {
+                    historyExhausted = plan.imported
+                    break
+                }
+                if (expired()) return result.copy(more = true, budgetExhausted = true)
+                val outcome = process(core, row, plan.sourceGeneration, plan.imported, null)
+                result = merge(result, outcome.summary()).copy(processed = result.processed + 1)
+                if (!outcome.providerDurable) {
+                    checkpointBlocked = true
+                    break
+                }
+                core.setCheckpoint(plan.sourceGeneration, plan.subscriptionId, plan.imported, row.id.toString())
+                cursor = row.id
+                remaining--
+                result = result.copy(advanced = true)
+            }
+            if (checkpointBlocked) break
+            if (page.records.size < pageLimit) {
+                historyExhausted = plan.imported
                 break
             }
-            core.setCheckpoint(plan.sourceGeneration, plan.subscriptionId, plan.imported, row.id.toString())
-            result = result.copy(advanced = true)
+            if (!plan.imported) {
+                liveHasMore = page.records.size == pageLimit
+                break
+            }
         }
-        val reachedUpperBound = !descending && plan.historyUpperBound != null && page.records.any { it.id > plan.historyUpperBound }
-        val historyExhausted = plan.imported && plan.historyUpperBound != null && !checkpointBlocked && if (descending) {
-            page.records.size < PAGE
-        } else {
-            reachedUpperBound || page.records.isEmpty() || page.scannedThroughId >= plan.historyUpperBound
+        if (plan.imported && !checkpointBlocked && !historyExhausted && remaining == 0) {
+            // A provider may cap a requested 100/200-row page at 50. Probe only for completion;
+            // never process a row beyond core's admission budget in this pass.
+            val probe = if (descending) {
+                provider.descendingPage(cursor, requireNotNull(plan.historyUpperBound), plan.historyFloor, 1)
+            } else {
+                provider.page(requireNotNull(cursor), 1)
+            }
+            historyExhausted = probe.records.isEmpty() || (!descending && probe.records.first().id > requireNotNull(plan.historyUpperBound))
         }
         return result.copy(
-            more = result.more || (!checkpointBlocked && page.records.size == PAGE && !reachedUpperBound),
+            // History admission is durable in core. Do not append another immediate worker pass
+            // that would consume older pages beyond that admission; periodic/observer work resumes it.
+            more = result.more || (!checkpointBlocked && if (plan.imported) {
+                plan.allowHistoryContinuation && !historyExhausted
+            } else {
+                liveHasMore
+            }),
             historyExhausted = historyExhausted,
         )
     }

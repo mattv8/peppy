@@ -1,17 +1,17 @@
 //! Native-owned runtime for floating conversation heads.
 use crate::{
-    AppState, STATE_EVENT,
     credentials::Binding,
-    error::{BridgeError, BridgeResult, core_error},
-    heads::{HeadLayout, HeadLayoutStore, MAX_HEADS, Pin, PinStore},
+    error::{core_error, BridgeError, BridgeResult},
+    heads::{HeadLayout, HeadLayoutStore, Pin, PinStore, MAX_HEADS},
     tray,
     windows::{
         self, HeadCallback, HeadEvent, HeadFrame, HeadGlyph, HeadPhoto, HeadPosition, HeadSpec,
     },
+    AppState, STATE_EVENT,
 };
 use peppy_client_core::ConversationId;
 use peppy_desktop_api::{
-    avatar::{AvatarKind, conversation_avatar, initials, palette_index},
+    avatar::{conversation_avatar, initials, palette_index, AvatarKind},
     images::avatar_rgba,
 };
 use std::{

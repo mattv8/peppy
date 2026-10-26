@@ -106,7 +106,7 @@ pub(crate) fn mms_participant_set(
     Ok((!participants.is_empty()).then_some(participants))
 }
 
-fn confirmed_own_address(own: &str, participant: &str, region: Option<&str>) -> bool {
+pub(crate) fn confirmed_own_address(own: &str, participant: &str, region: Option<&str>) -> bool {
     canonical_address(own, region) == canonical_address(participant, region)
         || crate::mms_identity::same_own_address(own, participant)
 }

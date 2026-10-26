@@ -59,6 +59,8 @@ mod update_linux;
 mod update_safety;
 mod updates;
 mod window_chrome;
+mod window_geometry;
+mod window_placement;
 mod windows;
 
 use credentials::{
@@ -827,7 +829,8 @@ fn start_search_index_driver(app: tauri::AppHandle, session: Arc<Session>) {
             {
                 break;
             }
-            let action = observe_search_index_state(&session, Some(prior_state), progress.index_state);
+            let action =
+                observe_search_index_state(&session, Some(prior_state), progress.index_state);
             if !complete_search_index_batch(&session, operation, action).await {
                 break;
             }
@@ -3951,6 +3954,10 @@ pub fn run() {
                 Arc::new(secure_store),
                 notifier,
             ));
+            window_placement::install(app.handle(), &root);
+            if let Some(main) = app.get_webview_window(tray::MAIN) {
+                window_placement::restore_initial(&main);
+            }
             let state = app.state::<AppState>();
             state
                 .updates
@@ -4186,6 +4193,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            window_placement::window_event(window, event);
             if matches!(event, WindowEvent::Destroyed) {
                 window_chrome::forget_material(window.label());
                 if let Some(state) = window.app_handle().try_state::<AppState>() {
@@ -4220,6 +4228,9 @@ pub fn run() {
                 let is_main = window.label() == tray::MAIN;
                 if is_main || tray::composer_conversation(window.label()).is_some() {
                     api.prevent_close();
+                    if is_main {
+                        window_placement::flush(window.app_handle());
+                    }
                     let operation = lifecycle::close_operation(
                         is_main,
                         TRAY_ACTIVE.load(Ordering::Relaxed),
@@ -4389,7 +4400,10 @@ pub fn run() {
                 }
             }
         }
-        RunEvent::Exit => heads_runtime::clear_on_exit(app),
+        RunEvent::Exit => {
+            window_placement::flush(app);
+            heads_runtime::clear_on_exit(app);
+        }
         _ => {}
     });
 }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use futures_util::{Stream, StreamExt};
-use reqwest::{Client, redirect::Policy};
+use reqwest::{redirect::Policy, Client};
 use semver::Version;
 use tokio::io::AsyncWriteExt;
 use url::Url;
@@ -371,12 +371,10 @@ mod tests {
 
     #[test]
     fn only_allows_exact_repo_paths_and_https() {
-        assert!(
-            validate_download_url(
-                &Url::parse("https://github.com/mattv8/peppy/releases/download/v1/a.app").unwrap()
-            )
-            .is_ok()
-        );
+        assert!(validate_download_url(
+            &Url::parse("https://github.com/mattv8/peppy/releases/download/v1/a.app").unwrap()
+        )
+        .is_ok());
         for url in [
             "http://github.com/mattv8/peppy/releases/download/v1/a",
             "https://github.com/other/peppy/releases/download/v1/a",
@@ -402,11 +400,9 @@ mod tests {
             Ok::<_, ()>(b"1234".to_vec()),
             Ok::<_, ()>(b"5".to_vec()),
         ]);
-        assert!(
-            collect_bounded(chunks, 4, Duration::from_secs(1))
-                .await
-                .is_err()
-        );
+        assert!(collect_bounded(chunks, 4, Duration::from_secs(1))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -463,9 +459,10 @@ mod tests {
             select_staging_release(&[draft, valid]).unwrap(),
             "v1.2.3-staging.1"
         );
-        assert!(
-            validate_staging_manifest(&serde_json::json!({"version":"1.2.3"}), "v1.2.3-staging.1")
-                .is_err()
-        );
+        assert!(validate_staging_manifest(
+            &serde_json::json!({"version":"1.2.3"}),
+            "v1.2.3-staging.1"
+        )
+        .is_err());
     }
 }

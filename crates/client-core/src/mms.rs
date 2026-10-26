@@ -138,7 +138,6 @@ impl MmsPreviewState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MmsReplyContext {
     pub recipients: Vec<String>,
-    pub blocked_reason: Option<String>,
     pub subject: Option<String>,
 }
 

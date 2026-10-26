@@ -411,21 +411,21 @@ fn trim_helper_terminator(value: &mut Vec<u8>) {
 #[cfg(target_os = "windows")]
 mod windows_dialog {
     use super::{
-        BridgeError, BridgeResult, MAX_PASSPHRASE_BYTES, PassphrasePurpose, Zeroizing,
-        passphrase_from_utf8,
+        passphrase_from_utf8, BridgeError, BridgeResult, PassphrasePurpose, Zeroizing,
+        MAX_PASSPHRASE_BYTES,
     };
     use windows::{
+        core::w,
         Win32::{
             Foundation::{ERROR_CANCELLED, HWND, WIN32_ERROR},
             Graphics::Gdi::HBITMAP,
             Security::Credentials::{
-                CRED_MAX_CREDENTIAL_BLOB_SIZE, CREDUI_FLAGS_ALWAYS_SHOW_UI,
+                CredUIPromptForCredentialsW, CREDUI_FLAGS_ALWAYS_SHOW_UI,
                 CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
                 CREDUI_FLAGS_PASSWORD_ONLY_OK, CREDUI_INFOW, CREDUI_MAX_USERNAME_LENGTH,
-                CredUIPromptForCredentialsW,
+                CRED_MAX_CREDENTIAL_BLOB_SIZE,
             },
         },
-        core::w,
     };
     use zeroize::Zeroize;
 
@@ -585,8 +585,8 @@ mod windows_dialog {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        BridgeError, BridgeResult, MAX_PASSPHRASE_BYTES, PassphrasePurpose, Zeroizing,
-        passphrase_from_utf8, trim_helper_terminator,
+        passphrase_from_utf8, trim_helper_terminator, BridgeError, BridgeResult, PassphrasePurpose,
+        Zeroizing, MAX_PASSPHRASE_BYTES,
     };
     use std::{
         io::{Read, Result as IoResult},
@@ -721,10 +721,10 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::{
-        COPY_FAILED, COPY_SUCCEEDED, SecretClipboard, SecretDialogAction, SecretDialogStep,
-        VAULT_SECRET_CLOSE, VAULT_SECRET_COPY, VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
         handle_secret_dialog_action, passphrase_from_utf8, secret_message, trim_helper_terminator,
-        vault_secret_action, vault_secret_buttons,
+        vault_secret_action, vault_secret_buttons, SecretClipboard, SecretDialogAction,
+        SecretDialogStep, COPY_FAILED, COPY_SUCCEEDED, VAULT_SECRET_CLOSE, VAULT_SECRET_COPY,
+        VAULT_SECRET_DONE, VAULT_SECRET_INSTRUCTIONS,
     };
     use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
 
@@ -895,7 +895,7 @@ mod tests {
 #[allow(unexpected_cfgs, deprecated)]
 mod macos {
     use cocoa::{
-        base::{YES, id, nil},
+        base::{id, nil, YES},
         foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString},
     };
     use objc::{class, msg_send, sel, sel_impl};

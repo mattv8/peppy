@@ -1,5 +1,6 @@
 import type { ChangeEvent, CSSProperties, KeyboardEvent } from "react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import type { LocalSearchHit, LocalSearchPage, LocalSearchRequest, SearchKind } from "./bridge-contracts";
 import { formatDateTime } from "./datetime";
 
@@ -17,6 +18,7 @@ type SearchAction = { kind: "more"; category: CategoryKind } | { kind: "retry" }
 type SelectableItem = { kind: "hit"; hit: LocalSearchHit } | { kind: "action"; action: SearchAction };
 
 const SEARCH_DEBOUNCE_MS = 100;
+const INDEXING_REFRESH_INTERVAL_MS = 1_000;
 const INITIAL_GROUP_LIMIT = 6;
 const MAX_CATEGORY_PAGE_LIMIT = 50;
 const categories: CategoryKind[] = ["conversation", "message", "contact"];
@@ -67,6 +69,10 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const requestSequenceRef = useRef(0);
   const requestPendingRef = useRef(false);
   const pendingRefreshRef = useRef(false);
+  const backgroundRefreshRef = useRef(false);
+  const backgroundRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const userRequestScheduledRef = useRef(false);
+  const lastRequestCompletedAtRef = useRef(0);
   const requestedPrefixRef = useRef(INITIAL_GROUP_LIMIT);
   const rebaseAttemptsRef = useRef(0);
   const refreshKeyRef = useRef(refreshKey);
@@ -83,20 +89,51 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
   const [refreshEpoch, setRefreshEpoch] = useState(0);
+  const [queryRevision, setQueryRevision] = useState(0);
   const [activeIndex, setActiveIndex] = useState(0);
   const [open, setOpen] = useState(false);
   const [composing, setComposing] = useState(false);
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties>();
   const trimmedQuery = query.trim();
 
+  const clearBackgroundRefresh = () => {
+    if (backgroundRefreshTimerRef.current === undefined) return;
+    clearTimeout(backgroundRefreshTimerRef.current);
+    backgroundRefreshTimerRef.current = undefined;
+  };
+  const scheduleBackgroundRefresh = () => {
+    if (backgroundRefreshTimerRef.current !== undefined) return;
+    const elapsed = Date.now() - lastRequestCompletedAtRef.current;
+    const delay = Math.max(0, INDEXING_REFRESH_INTERVAL_MS - elapsed);
+    backgroundRefreshTimerRef.current = setTimeout(() => {
+      backgroundRefreshTimerRef.current = undefined;
+      if (requestPendingRef.current || userRequestScheduledRef.current) {
+        pendingRefreshRef.current = true;
+        return;
+      }
+      backgroundRefreshRef.current = true;
+      setRefreshEpoch((value) => value + 1);
+    }, delay);
+  };
   const reset = () => {
     requestSequenceRef.current += 1;
     requestPendingRef.current = false;
     pendingRefreshRef.current = false;
+    backgroundRefreshRef.current = false;
+    userRequestScheduledRef.current = false;
+    clearBackgroundRefresh();
     requestedPrefixRef.current = INITIAL_GROUP_LIMIT;
     rebaseAttemptsRef.current = 0;
     setPage(null); setLoading(false); setError(false); setActiveIndex(0);
   };
+  useEffect(() => () => {
+    requestSequenceRef.current += 1;
+    requestPendingRef.current = false;
+    pendingRefreshRef.current = false;
+    backgroundRefreshRef.current = false;
+    userRequestScheduledRef.current = false;
+    clearBackgroundRefresh();
+  }, []);
   useEffect(() => {
     reset(); setQuery(""); setCategory(null); setOpen(false); openerRef.current = null;
   }, [disabled, sessionKey]);
@@ -104,9 +141,14 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   useEffect(() => {
     if (!open || disabled || composing || !trimmedQuery) { reset(); return; }
     const sequence = ++requestSequenceRef.current;
-    requestPendingRef.current = true;
-    const timer = setTimeout(() => {
-      setLoading(true); setError(false);
+    const backgroundRefresh = backgroundRefreshRef.current;
+    backgroundRefreshRef.current = false;
+    const startRequest = () => {
+      userRequestScheduledRef.current = false;
+      if (sequence !== requestSequenceRef.current) return;
+      requestPendingRef.current = true;
+      if (!backgroundRefresh) { setLoading(true); setError(false); }
+      let completedPage: LocalSearchPage | undefined;
       const loadPrefix = async () => {
         const requestedPrefix = category ? requestedPrefixRef.current : INITIAL_GROUP_LIMIT;
         let remaining = requestedPrefix;
@@ -122,8 +164,13 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
         } while (category && requestedPrefix > MAX_CATEGORY_PAGE_LIMIT && remaining > 0 && cursor);
         if (sequence !== requestSequenceRef.current) return;
         const merged = category ? { ...next!, items: prefix } : next!;
+        completedPage = merged;
         rebaseAttemptsRef.current = 0;
         setPage(merged);
+        if (merged.indexState === "ready") {
+          pendingRefreshRef.current = false;
+          clearBackgroundRefresh();
+        }
         const selectedHitKey = selectedHitKeyRef.current;
         const selectedIndex = selectedHitKey
           ? selectableItems(merged, category, false).findIndex((item) => item.kind === "hit" && hitKey(item.hit) === selectedHitKey)
@@ -131,31 +178,47 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
         setActiveIndex(selectedIndex < 0 ? 0 : selectedIndex);
       };
       void loadPrefix().catch(() => {
-        if (sequence === requestSequenceRef.current) setError(true);
+        if (!backgroundRefresh && sequence === requestSequenceRef.current) setError(true);
       }).finally(() => {
         if (sequence !== requestSequenceRef.current) return;
         requestPendingRef.current = false;
-        setLoading(false);
-        if (pendingRefreshRef.current) {
-          pendingRefreshRef.current = false;
-          setRefreshEpoch((value) => value + 1);
-        }
+        lastRequestCompletedAtRef.current = Date.now();
+        if (!backgroundRefresh) setLoading(false);
+        const refreshRequested = pendingRefreshRef.current;
+        pendingRefreshRef.current = false;
+        if (refreshRequested && completedPage?.indexState === "indexing") scheduleBackgroundRefresh();
       });
-    }, SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [category, composing, disabled, open, refreshEpoch, retry, sessionKey, trimmedQuery]);
+    };
+    if (backgroundRefresh) {
+      startRequest();
+      return;
+    }
+    clearBackgroundRefresh();
+    userRequestScheduledRef.current = true;
+    const timer = setTimeout(startRequest, SEARCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      userRequestScheduledRef.current = false;
+    };
+  }, [category, composing, disabled, open, queryRevision, refreshEpoch, retry, sessionKey, trimmedQuery]);
 
   useEffect(() => {
     if (refreshKeyRef.current === refreshKey) return;
     refreshKeyRef.current = refreshKey;
     if (!open || disabled || composing || !trimmedQuery) return;
-    if (category && page) requestedPrefixRef.current = Math.max(requestedPrefixRef.current, page.items.length);
+    if (page?.indexState === "ready") {
+      pendingRefreshRef.current = false;
+      clearBackgroundRefresh();
+      return;
+    }
     if (requestPendingRef.current) {
       pendingRefreshRef.current = true;
       return;
     }
-    setRefreshEpoch((value) => value + 1);
-  }, [composing, disabled, open, refreshKey, trimmedQuery]);
+    if (page?.indexState !== "indexing") return;
+    if (category) requestedPrefixRef.current = Math.max(requestedPrefixRef.current, page.items.length);
+    scheduleBackgroundRefresh();
+  }, [composing, disabled, open, page, refreshKey, trimmedQuery]);
 
   useEffect(() => {
     if (!keyboardShortcut || disabled) return;
@@ -187,7 +250,8 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
       const rect = inputRef.current?.getBoundingClientRect();
       if (!rect) return;
       const width = Math.min(520, Math.max(0, window.innerWidth - 16));
-      const left = Math.min(Math.max(rect.left, 8), Math.max(8, window.innerWidth - width - 8));
+      const candidate = rect.left + rect.width / 2 - width / 2;
+      const left = Math.min(Math.max(candidate, 8), Math.max(8, window.innerWidth - width - 8));
       const next = { left, top: rect.bottom + 4, width };
       setPopoverStyle((current) => current?.left === next.left && current.top === next.top && current.width === next.width ? current : next);
     };
@@ -207,6 +271,7 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
   selectedHitKeyRef.current = items[activeIndex]?.kind === "hit" ? hitKey(items[activeIndex].hit) : undefined;
 
   const close = (restoreFocus = false) => {
+    reset();
     setOpen(false);
     if (restoreFocus) openerRef.current?.focus();
     openerRef.current = null;
@@ -216,22 +281,42 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     if (action.kind === "retry") { reset(); setRetry((value) => value + 1); return; }
     if (!category) { reset(); setCategory(action.category); return; }
     if (!page?.nextCursor || loading) return;
+    clearBackgroundRefresh();
+    pendingRefreshRef.current = false;
     const sequence = ++requestSequenceRef.current;
+    requestPendingRef.current = true;
     setLoading(true); setError(false);
+    let completedPage: LocalSearchPage | undefined;
     void onSearchRef.current({ query: trimmedQuery, kind: category, cursor: page.nextCursor, limit: INITIAL_GROUP_LIMIT }).then((next) => {
+      completedPage = next;
       if (sequence !== requestSequenceRef.current || next.query !== trimmedQuery) return;
-      setPage((current) => current ? { ...next, items: appendUnique(current.items, next.items) } : current);
+      const mergedItems = appendUnique(page.items, next.items);
+      requestedPrefixRef.current = Math.max(requestedPrefixRef.current, mergedItems.length);
+      setPage({ ...next, items: mergedItems });
+      if (next.indexState === "ready") {
+        pendingRefreshRef.current = false;
+        clearBackgroundRefresh();
+      }
     }).catch((failure: unknown) => {
       const code = typeof failure === "object" && failure !== null && "code" in failure ? failure.code : undefined;
       if (sequence !== requestSequenceRef.current) return;
       if (code === "invalid-request" && rebaseAttemptsRef.current === 0) {
         rebaseAttemptsRef.current += 1;
         requestedPrefixRef.current = page.items.length + INITIAL_GROUP_LIMIT;
+        pendingRefreshRef.current = false;
         setRefreshEpoch((value) => value + 1);
         return;
       }
       setError(true);
-    }).finally(() => { if (sequence === requestSequenceRef.current) setLoading(false); });
+    }).finally(() => {
+      if (sequence !== requestSequenceRef.current) return;
+      requestPendingRef.current = false;
+      lastRequestCompletedAtRef.current = Date.now();
+      setLoading(false);
+      const refreshRequested = pendingRefreshRef.current;
+      pendingRefreshRef.current = false;
+      if (refreshRequested && completedPage?.indexState === "indexing") scheduleBackgroundRefresh();
+    });
   };
   const activate = (item: SelectableItem) => {
     if (item.kind === "action") { activateAction(item.action); return; }
@@ -248,12 +333,14 @@ export function OmniSearch({ onSearch, onActivate, sessionKey, disabled = false,
     else if (event.key === "Escape") { event.preventDefault(); close(true); }
     else if (event.key === "Tab") close();
   };
-  const change = (event: ChangeEvent<HTMLInputElement>) => { reset(); setCategory(null); setQuery(Array.from(event.target.value).slice(0, 128).join("")); setOpen(true); };
+  const clearQuery = () => { compositionRef.current = false; setComposing(false); reset(); setQuery(""); setCategory(null); setOpen(true); inputRef.current?.focus(); };
+  const change = (event: ChangeEvent<HTMLInputElement>) => { reset(); setCategory(null); setQuery(Array.from(event.target.value).slice(0, 128).join("")); setQueryRevision((value) => value + 1); setOpen(true); };
   const actionId = (action: SearchAction) => action.kind === "more" ? `more-${action.category}` : action.kind === "retry" ? "retry-search" : "back-all";
   const selectedId = items[activeIndex]?.kind === "hit" ? `${componentId}-${hitKey(items[activeIndex].hit)}` : items[activeIndex]?.kind === "action" ? `${componentId}-${actionId(items[activeIndex].action)}` : undefined;
 
   return <section ref={rootRef} id="titlebar-search" className="omni-search" aria-label="Search Peppy" onPointerDownCapture={() => { if (document.activeElement !== inputRef.current) openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; }} onBlur={(event) => { if (!(event.relatedTarget instanceof Node && rootRef.current?.contains(event.relatedTarget))) close(); }}>
-    <input ref={inputRef} role="combobox" aria-label="Search Peppy" aria-autocomplete="list" aria-expanded={open} aria-controls={listId} aria-activedescendant={selectedId} autoComplete="off" autoCorrect="off" spellCheck={false} disabled={disabled} value={query} placeholder="Search messages, conversations, contacts" onChange={change} onFocus={(event) => { if (event.relatedTarget instanceof HTMLElement) openerRef.current = event.relatedTarget; setOpen(true); }} onCompositionStart={() => { compositionRef.current = true; setComposing(true); }} onCompositionEnd={() => { compositionRef.current = false; setComposing(false); }} onKeyDown={onKeyDown} />
+    <input ref={inputRef} role="combobox" aria-label="Search Peppy" aria-autocomplete="list" aria-expanded={open} aria-controls={listId} aria-activedescendant={selectedId} autoComplete="off" autoCorrect="off" spellCheck={false} disabled={disabled} value={query} placeholder="Search messages, conversations, contacts" onChange={change} onFocus={(event) => { if (event.relatedTarget instanceof HTMLElement && !rootRef.current?.contains(event.relatedTarget)) openerRef.current = event.relatedTarget; setOpen(true); }} onCompositionStart={() => { compositionRef.current = true; setComposing(true); }} onCompositionEnd={() => { compositionRef.current = false; setComposing(false); }} onKeyDown={onKeyDown} />
+    {query.length > 0 && <button id="omni-search-clear" type="button" aria-label="Clear search" title="Clear search" disabled={disabled} onMouseDown={(event) => event.preventDefault()} onClick={clearQuery}><X size={12} strokeWidth={1.75} aria-hidden /></button>}
     {open && <div className="omni-search-results" data-omni-search-results style={popoverStyle} onMouseDown={(event) => event.preventDefault()}>
       {!trimmedQuery && <p className="omni-search-hint">Search locally synced conversations, messages, and contacts.</p>}
       {loading && <p>Searching…</p>}{page?.indexState === "indexing" && <p>Search index is updating; results may be incomplete.</p>}{error && <p>Search could not be completed. Choose Retry search.</p>}{!loading && !error && trimmedQuery && page && !page.items.length && <p>No matches.</p>}

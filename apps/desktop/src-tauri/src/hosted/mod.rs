@@ -97,7 +97,9 @@ pub(crate) async fn provision_enrollment(
             )
             .await
         },
-        |credential, passphrase| activate_and_unlock(app, state, &operation, credential, passphrase),
+        |credential, passphrase| {
+            activate_and_unlock(app, state, &operation, credential, passphrase)
+        },
     )
     .await
 }

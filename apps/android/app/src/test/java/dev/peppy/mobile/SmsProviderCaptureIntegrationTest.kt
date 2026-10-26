@@ -39,13 +39,17 @@ class SmsProviderCaptureIntegrationTest : GatewayTestBase() {
     private fun pass(client: NativeClient): SmsCaptureSummary =
         SmsNativeCapture.capture(client, AndroidSmsCaptureProvider(context), generation())
 
-    /** Runs bounded passes like WorkManager continuations until the scanner asks for no more. */
+    /** Runs bounded capture passes until initial history completes, modeling later periodic work
+     * when history deliberately declines an immediate continuation. */
     private fun drain(client: NativeClient): List<SmsCaptureSummary> {
         client.openHistoryImportGate("contacts_settled")
         val passes = mutableListOf<SmsCaptureSummary>()
         do {
             passes += pass(client)
-        } while (passes.last().more && passes.size < 20)
+        } while (
+            (passes.last().more || !client.smsHistoryStatus(generation(), SmsCapture.PROVIDER_SCOPE).historyComplete) &&
+            passes.size < 20
+        )
         return passes
     }
 

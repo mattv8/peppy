@@ -536,7 +536,10 @@ class GatewaySync(
         val result = media()
         when {
             result.failures.any { it.reason == "auth" } -> throw GatewayAuthException()
-            result.failures.any { it.reason == "transient" } -> throw IOException("MMS media transfer pending")
+            // The retained core queue retries on a later bounded gateway pass. Retrying this
+            // otherwise productive pass would exhaust its WorkManager backoff on one attachment.
+            result.failures.any { it.reason == "transient" } ->
+                return result.more && (result.uploaded > 0 || result.downloaded > 0)
             // Quota and permanent errors remain in the local media queue for user-visible MMS
             // health/recovery. They must not reject unrelated SMS outbox envelopes.
             else -> return result.more && result.failures.none { it.reason in setOf("quota", "permanent", "invalid_media") }

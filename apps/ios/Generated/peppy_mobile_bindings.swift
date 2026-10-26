@@ -867,6 +867,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func planSmsScans(sourceGeneration: String, providerScope: String, observedHighWater: String) throws  -> [NativeSmsScanPlan]
     
+    /**
+     * Additive adaptive history API. Hosts pass current OS facts; the core persists only
+     * cursor/seed progress, never network or charging state.
+     */
+    func planSmsScansWithHistoryConditions(sourceGeneration: String, providerScope: String, observedHighWater: String, conditions: NativeHistoryImportConditions) throws  -> [NativeSmsScanPlan]
+    
     func prepareAttachment(sourcePath: String, mediaType: String, displayName: String) throws  -> NativeAttachmentInfo
     
     func prepareContactPhoto(path: String) throws  -> NativeAttachmentInfo
@@ -2007,6 +2013,23 @@ open func planSmsScans(sourceGeneration: String, providerScope: String, observed
         FfiConverterString.lower(sourceGeneration),
         FfiConverterString.lower(providerScope),
         FfiConverterString.lower(observedHighWater),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Additive adaptive history API. Hosts pass current OS facts; the core persists only
+     * cursor/seed progress, never network or charging state.
+     */
+open func planSmsScansWithHistoryConditions(sourceGeneration: String, providerScope: String, observedHighWater: String, conditions: NativeHistoryImportConditions)throws  -> [NativeSmsScanPlan]  {
+    return try  FfiConverterSequenceTypeNativeSmsScanPlan.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans_with_history_conditions(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(sourceGeneration),
+        FfiConverterString.lower(providerScope),
+        FfiConverterString.lower(observedHighWater),
+        FfiConverterTypeNativeHistoryImportConditions_lower(conditions),uniffiCallStatus
     )
 })
 }
@@ -4764,6 +4787,63 @@ public func FfiConverterTypeNativeGatewaySettings_lower(_ value: NativeGatewaySe
 }
 
 
+/**
+ * Current host conditions used solely to increase text-history capture throughput.
+ */
+public struct NativeHistoryImportConditions: Equatable, Hashable {
+    public var unmeteredNetwork: Bool
+    public var charging: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(unmeteredNetwork: Bool, charging: Bool) {
+        self.unmeteredNetwork = unmeteredNetwork
+        self.charging = charging
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeHistoryImportConditions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeHistoryImportConditions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeHistoryImportConditions {
+        return
+            try NativeHistoryImportConditions(
+                unmeteredNetwork: FfiConverterBool.read(from: &buf), 
+                charging: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeHistoryImportConditions, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.unmeteredNetwork, into: &buf)
+        FfiConverterBool.write(value.charging, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHistoryImportConditions_lift(_ buf: RustBuffer) throws -> NativeHistoryImportConditions {
+    return try FfiConverterTypeNativeHistoryImportConditions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeHistoryImportConditions_lower(_ value: NativeHistoryImportConditions) -> RustBuffer {
+    return FfiConverterTypeNativeHistoryImportConditions.lower(value)
+}
+
+
 public struct NativeHostedAccount: Equatable, Hashable {
     public var accountId: String
     public var classification: String
@@ -5828,12 +5908,18 @@ public func FfiConverterTypeNativeMmsProviderIdentityQuarantine_lower(_ value: N
 
 public struct NativeMmsReplyContext: Equatable, Hashable {
     public var recipients: [String]
+    /**
+     * Deprecated; always None.
+     */
     public var blockedReason: String?
     public var subject: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recipients: [String], blockedReason: String?, subject: String?) {
+    public init(recipients: [String], 
+        /**
+         * Deprecated; always None.
+         */blockedReason: String?, subject: String?) {
         self.recipients = recipients
         self.blockedReason = blockedReason
         self.subject = subject
@@ -6947,10 +7033,11 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
     public var historyComplete: Bool
     public var paused: Bool
     public var pendingRecheckCursor: String?
+    public var budget: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?) {
+    public init(sourceGeneration: String, subscriptionId: String, imported: Bool, checkpoint: String?, descending: Bool, historyFloor: String?, historyUpperBound: String?, historyComplete: Bool, paused: Bool, pendingRecheckCursor: String?, budget: UInt64) {
         self.sourceGeneration = sourceGeneration
         self.subscriptionId = subscriptionId
         self.imported = imported
@@ -6961,6 +7048,7 @@ public struct NativeSmsScanPlan: Equatable, Hashable {
         self.historyComplete = historyComplete
         self.paused = paused
         self.pendingRecheckCursor = pendingRecheckCursor
+        self.budget = budget
     }
 
     
@@ -6988,7 +7076,8 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
                 historyUpperBound: FfiConverterOptionString.read(from: &buf), 
                 historyComplete: FfiConverterBool.read(from: &buf), 
                 paused: FfiConverterBool.read(from: &buf), 
-                pendingRecheckCursor: FfiConverterOptionString.read(from: &buf)
+                pendingRecheckCursor: FfiConverterOptionString.read(from: &buf), 
+                budget: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -7003,6 +7092,7 @@ public struct FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer {
         FfiConverterBool.write(value.historyComplete, into: &buf)
         FfiConverterBool.write(value.paused, into: &buf)
         FfiConverterOptionString.write(value.pendingRecheckCursor, into: &buf)
+        FfiConverterUInt64.write(value.budget, into: &buf)
     }
 }
 
@@ -10590,6 +10680,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans() != 2209) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans_with_history_conditions() != 61012) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment() != 2885) {

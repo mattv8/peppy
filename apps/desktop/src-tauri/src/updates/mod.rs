@@ -19,7 +19,7 @@ use crate::error::{BridgeError, BridgeResult};
 
 pub(crate) use self::policy::STARTUP_DELAY_SECS;
 use self::{
-    policy::{LATER_SECS, RetrySchedule, defer_is_active, parse_channel, strictly_newer},
+    policy::{defer_is_active, parse_channel, strictly_newer, RetrySchedule, LATER_SECS},
     types::{UpdateChannel, UpdatePhase, UpdateStatus},
 };
 
@@ -358,7 +358,9 @@ impl UpdateManager {
         if inner.installed.is_some() {
             restore_available_phase(&mut inner);
             inner.status.progress_percent = None;
-            let remove_cached = matches!(&result, Ok(Some(_))).then(|| inner.root.clone()).flatten();
+            let remove_cached = matches!(&result, Ok(Some(_)))
+                .then(|| inner.root.clone())
+                .flatten();
             let status = inner.status.clone();
             drop(inner);
             if let Some(root) = remove_cached {
@@ -553,7 +555,9 @@ impl UpdateManager {
 
     pub fn set_restarting_installed(&self, expected_version: &str) -> BridgeResult<()> {
         let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
-        if inner.operation != Operation::Idle || inner.installed.as_deref() != Some(expected_version) {
+        if inner.operation != Operation::Idle
+            || inner.installed.as_deref() != Some(expected_version)
+        {
             return Err(BridgeError::new(
                 "update-busy",
                 "The installed update is no longer ready to restart.",
@@ -1163,7 +1167,10 @@ mod tests {
         let manager = UpdateManager(Arc::new(Mutex::new(inner)));
         manager.clear_attempted().unwrap();
         assert_eq!(manager.attempted_version(), None);
-        assert_eq!(cache::load_settings(temp.path()).unwrap().attempted_version, None);
+        assert_eq!(
+            cache::load_settings(temp.path()).unwrap().attempted_version,
+            None
+        );
     }
 
     #[test]

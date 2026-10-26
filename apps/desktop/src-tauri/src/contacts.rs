@@ -11,13 +11,13 @@
 //! * View field IDs are preserved so list patches address existing items, and the original
 //!   values (`expectedOld`) become `expected_old` so the owner can merge a stale base safely.
 use crate::{
-    error::{BridgeError, BridgeResult, core_error},
+    error::{core_error, BridgeError, BridgeResult},
     fsutil, media,
     session::Session,
 };
 use peppy_client_core::{AttachmentId, Client, Error as CoreError};
 use peppy_desktop_api::contacts as shared;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::{
     collections::HashMap,
     fs,

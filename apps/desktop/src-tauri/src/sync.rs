@@ -3,23 +3,23 @@
 //! with bounded, jittered reconnect and cooperative cancellation. Every client-core call runs
 //! in `spawn_blocking`; the Tokio workers never block on SQLCipher, Argon2 or file crypto.
 use crate::{
-    error::{BridgeError, BridgeResult, core_error},
-    gateways::{CapabilitiesResponse, DevicesResponse, extract_device_role, gateway_views},
-    net::{MAX_JSON_BYTES, MAX_PAGE_BYTES, NetError},
+    error::{core_error, BridgeError, BridgeResult},
+    gateways::{extract_device_role, gateway_views, CapabilitiesResponse, DevicesResponse},
+    net::{NetError, MAX_JSON_BYTES, MAX_PAGE_BYTES},
     origin::websocket_url,
     session::{Session, VaultSummary},
 };
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
-    Client, Cursor, EnvelopePurpose, KeyProfile, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
-    MAX_SNAPSHOT_PAGE, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader,
+    Client, Cursor, EnvelopePurpose, KeyProfile, RawSnapshotRecord, SnapshotPurpose,
+    VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::{sync::Arc, time::Duration};
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{sleep, timeout, Instant};
 use tokio_tungstenite::tungstenite::{
-    self, Message, client::IntoClientRequest, protocol::WebSocketConfig,
+    self, client::IntoClientRequest, protocol::WebSocketConfig, Message,
 };
 
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -101,7 +101,7 @@ pub async fn fetch_vault(
 }
 
 pub fn vault_header(vault: &VaultResponse) -> BridgeResult<(KeyProfile, VaultCheckHeader)> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     let invalid = |m: &'static str| BridgeError::new("server-response", m);
     let profile: KeyProfile = serde_json::from_value(vault.public_key_profile.clone())
         .map_err(|_| invalid("The server key profile is invalid."))?;
@@ -1433,7 +1433,7 @@ mod contact_photo_tests {
     use super::*;
     use crate::contacts::tests::mock_server;
     use crate::tests::{fixture_at, open};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reclaims_use_fresh_generation_and_floor_only_once_the_floor_covers_references() {

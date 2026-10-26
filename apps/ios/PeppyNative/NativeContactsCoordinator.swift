@@ -3,13 +3,24 @@ import Foundation
 import PeppyBindings
 #endif
 
-/// Native-only contact preference: the user's opt-in. Books, policy, the new-contact account,
+public enum ContactsSyncIntent: Sendable, Equatable {
+    case unset
+    case on
+    case stopped
+}
+
+/// Native-only contact preference: the user's local intent. Books, policy, the new-contact account,
 /// revisions, item IDs, scan checkpoints, history tokens and the edit ledger live in the Rust core.
 public struct ContactsPreferences: Sendable, Equatable {
-    public var enabled = false
+    public var intent: ContactsSyncIntent
 
-    public init(enabled: Bool = false) {
-        self.enabled = enabled
+    public var enabled: Bool {
+        get { intent == .on }
+        set { intent = newValue ? .on : .stopped }
+    }
+
+    public init(enabled: Bool? = nil, intent: ContactsSyncIntent? = nil) {
+        self.intent = intent ?? enabled.map { $0 ? .on : .stopped } ?? .unset
     }
 }
 
@@ -25,11 +36,20 @@ public final class UserDefaultsContactsPreferences: ContactsPreferencesStore, @u
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     public func load() -> ContactsPreferences {
-        lock.withLock { ContactsPreferences(enabled: defaults.bool(forKey: "contacts.enabled")) }
+        lock.withLock {
+            guard defaults.object(forKey: "contacts.enabled") != nil else { return ContactsPreferences() }
+            return ContactsPreferences(enabled: defaults.bool(forKey: "contacts.enabled"))
+        }
     }
 
     public func save(_ value: ContactsPreferences) {
-        lock.withLock { defaults.set(value.enabled, forKey: "contacts.enabled") }
+        lock.withLock {
+            switch value.intent {
+            case .unset: defaults.removeObject(forKey: "contacts.enabled")
+            case .on: defaults.set(true, forKey: "contacts.enabled")
+            case .stopped: defaults.set(false, forKey: "contacts.enabled")
+            }
+        }
     }
 }
 

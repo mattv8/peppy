@@ -121,7 +121,7 @@ describe("App media wiring", () => {
 
     render(<App />);
 
-    await screen.findByRole("button", { name: "first-image.png" });
+    await screen.findByRole("button", { name: "Photo, 1 of 2" });
     expect(document.querySelectorAll("[data-media-message-grid]")).toHaveLength(2);
     expect(document.querySelector('[data-message-meta="first"]')).toBeInTheDocument();
     expect(document.querySelector('[data-message-meta="second"]')).toBeInTheDocument();
@@ -129,7 +129,7 @@ describe("App media wiring", () => {
     expect(document.querySelector('[data-message-row="first"]')?.closest("[data-sender]"))
       .not.toBe(document.querySelector('[data-message-row="third"]')?.closest("[data-sender]"));
 
-    fireEvent.click(screen.getByRole("button", { name: "first-image.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "Photo, 1 of 2" }));
     expect(await screen.findByRole("dialog", { name: "Media viewer" })).toBeInTheDocument();
     expect(bridge.load_media).toHaveBeenCalledTimes(1);
     expect(bridge.load_media).toHaveBeenCalledWith("first-image");
@@ -148,14 +148,14 @@ describe("App media wiring", () => {
 
     expect(await screen.findByText("A retained caption")).toBeInTheDocument();
     expect(document.querySelectorAll('[data-message-row="captioned"]')).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "remote-original.png" })).toHaveAttribute("data-thumbnail-state", "ready");
+    expect(screen.getByRole("button", { name: "remote-original.png" })).toHaveAttribute("data-attachment-id", "remote-original");
     fireEvent.click(screen.getByRole("tab", { name: "Media" }));
     const cell = await screen.findByRole("button", { name: "remote-original.png" });
-    expect(cell).toHaveAttribute("data-cell-state", "ready");
+    expect(cell.closest("[data-media-tile]")).toHaveAttribute("data-state", "ready");
     expect(cell.querySelector("img")).toHaveAttribute("src", preview);
   });
 
-  it("keeps MMS public-link creation explicit and shows the returned warning", async () => {
+  it("uses gallery hover actions to create a public link", async () => {
     const attachment = image("shared-image");
     currentSnapshot = snapshot([message("shared-message", attachment)]);
     vi.mocked(bridge.media_page).mockResolvedValue({ items: [pageItem(attachment, "shared-message")] });
@@ -163,10 +163,9 @@ describe("App media wiring", () => {
     render(<App />);
     await screen.findByRole("button", { name: "shared-image.png" });
     expect(bridge.publish_attachment).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText("Attachment actions"));
-    fireEvent.click(screen.getByRole("button", { name: "Create public link for shared-image.png" }));
-    await screen.findByDisplayValue("https://example.test/public");
-    expect(document.querySelector(".public-link-warning")).toHaveTextContent("Anyone with this link can view this copy");
+    expect(screen.queryByText("Attachment actions")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create public link" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy public link" })).toBeInTheDocument());
     expect(bridge.publish_attachment).toHaveBeenCalledWith("shared-image");
   });
 
@@ -189,7 +188,7 @@ describe("App media wiring", () => {
     vi.mocked(bridge.load_media).mockResolvedValue(ready("blob:image", oldest));
 
     render(<App />);
-    fireEvent.click((await screen.findAllByRole("button", { name: "reused.png" }))[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "Photo, 2 of 2" }));
     await screen.findByRole("dialog", { name: "Media viewer" });
     expect(bridge.media_page_around).toHaveBeenCalledWith("aurora", "reused", "middle-message", 40);
     expect(bridge.media_page).not.toHaveBeenCalled();
@@ -242,7 +241,7 @@ describe("App media wiring", () => {
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "pending-image.png" }));
-    expect(await screen.findByRole("button", { name: "Downloading…" })).toBeInTheDocument();
+    expect(await screen.findByText("Downloading from phone…")).toBeInTheDocument();
     await act(async () => stateHint?.());
     expect(await screen.findByRole("img", { name: "pending-image.png" })).toHaveAttribute("src", "blob:ready");
     expect(bridge.load_media).toHaveBeenCalledTimes(1);

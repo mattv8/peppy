@@ -121,6 +121,166 @@
         }
       }
     },
+    "peppy.contacts_description": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Peppy copies this phone's contacts to your vault, end-to-end encrypted. Your other devices can browse and search them. Contacts with shared numbers stay separate records."
+          }
+        }
+      }
+    },
+    "peppy.contacts_start_explainer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync starts as soon as you allow access. Names and numbers come first, photos follow. You can stop any time."
+          }
+        }
+      }
+    },
+    "peppy.contacts_allow_access": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow contacts access"
+          }
+        }
+      }
+    },
+    "peppy.contacts_open_settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open app settings"
+          }
+        }
+      }
+    },
+    "peppy.contacts_allow_access_ios": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow contacts access and sync"
+          }
+        }
+      }
+    },
+    "peppy.contacts_start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start contact sync"
+          }
+        }
+      }
+    },
+    "peppy.contacts_resume_ios": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume contact sync"
+          }
+        }
+      }
+    },
+    "peppy.contacts_stopped": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Contact sync is stopped. It stays stopped until you start it."
+          }
+        }
+      }
+    },
+    "peppy.contacts_access_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Contacts access is off. Nothing was removed from your other devices."
+          }
+        }
+      }
+    },
+    "peppy.contacts_access_read_write": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read and edit access"
+          }
+        }
+      }
+    },
+    "peppy.contacts_access_read_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read only. Desktop edits are off."
+          }
+        }
+      }
+    },
+    "peppy.contacts_access_not_allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not allowed"
+          }
+        }
+      }
+    },
+    "peppy.contacts_allow_edits": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow desktop edits"
+          }
+        }
+      }
+    },
+    "peppy.contacts_allow_edits_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Optional. Lets this phone save contact edits you approve from another device."
+          }
+        }
+      }
+    },
+    "peppy.contacts_read_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Contacts read on this phone"
+          }
+        }
+      }
+    },
+    "peppy.contacts_book_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This book exceeds 20,000 contacts; only part of it is uploaded."
+          }
+        }
+      }
+    },
     "peppy.help_android_messaging_limits": {
       "localizations": {
         "en": {

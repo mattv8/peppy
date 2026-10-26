@@ -4,11 +4,11 @@
 use peppy_client_core::{
     AttachmentInfo, AttachmentState, Captured, CipherObject, Client, ClientConfig,
     ComposeDraftUpdate, DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts,
-    GatewayPlatform, GatewaySettings, IncomingSms, KeyProfile, MAX_SEAL_BATCH, Message,
-    MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause, MmsBackfillPhase,
-    MmsBackfillRecheck, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
-    MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
-    NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
+    GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms, KeyProfile,
+    MAX_SEAL_BATCH, Message, MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause,
+    MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckRequest, MmsBackfillScanPlan,
+    MmsBeginOutcome, MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine,
+    MmsSource, NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
     PermitBlock, PermitDecision, ReceivedCommand, SendResult, SmsAcquisitionInput,
     SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
     Transport, VaultCheckHeader, VaultId,
@@ -178,6 +178,13 @@ pub struct NativeSmsScanPlan {
     pub history_complete: bool,
     pub paused: bool,
     pub pending_recheck_cursor: Option<String>,
+    pub budget: u64,
+}
+/// Current host conditions used solely to increase text-history capture throughput.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeHistoryImportConditions {
+    pub unmetered_network: bool,
+    pub charging: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeSmsReconciliationPlan {
@@ -327,6 +334,7 @@ pub struct NativeMmsAcquisitionPart {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsReplyContext {
     pub recipients: Vec<String>,
+    /// Deprecated; always None.
     pub blocked_reason: Option<String>,
     pub subject: Option<String>,
 }
@@ -1115,6 +1123,7 @@ fn sms_scan_plan_view(plan: SmsScanPlan) -> NativeSmsScanPlan {
         history_complete: plan.history_complete,
         paused: plan.paused,
         pending_recheck_cursor: plan.pending_recheck_cursor,
+        budget: plan.budget,
     }
 }
 fn sms_reconciliation_plan_view(plan: SmsReconciliationPlan) -> NativeSmsReconciliationPlan {
@@ -1564,6 +1573,28 @@ impl NativeClient {
         })
         .map(|plans| plans.into_iter().map(sms_scan_plan_view).collect())
     }
+    /// Additive adaptive history API. Hosts pass current OS facts; the core persists only
+    /// cursor/seed progress, never network or charging state.
+    pub fn plan_sms_scans_with_history_conditions(
+        &self,
+        source_generation: String,
+        provider_scope: String,
+        observed_high_water: String,
+        conditions: NativeHistoryImportConditions,
+    ) -> Result<Vec<NativeSmsScanPlan>, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.plan_sms_scans_with_history_conditions(
+                &source_generation,
+                &provider_scope,
+                &observed_high_water,
+                HistoryImportConditions {
+                    unmetered_network: conditions.unmetered_network,
+                    charging: conditions.charging,
+                },
+            )
+        })
+        .map(|plans| plans.into_iter().map(sms_scan_plan_view).collect())
+    }
     pub fn open_history_import_gate(&self, reason: String) -> Result<bool, MobileBindingsError> {
         with_client(&self.client, |client| {
             client.open_history_import_gate(&reason)
@@ -1959,7 +1990,7 @@ impl NativeClient {
         })
         .map(|context| NativeMmsReplyContext {
             recipients: context.recipients,
-            blocked_reason: context.blocked_reason,
+            blocked_reason: None,
             subject: context.subject,
         })
     }

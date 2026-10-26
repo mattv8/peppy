@@ -1,19 +1,19 @@
 //! Activation, unlock, and session-lifetime regressions for the native owner-claim path.
 use crate::{
-    AppState,
     contacts::tests::mock_server,
-    credentials::{parse_credential, tests::TOKEN, tests::credential_json},
+    credentials::{parse_credential, tests::credential_json, tests::TOKEN},
     secure_store::{BundledStore, MemoryStore},
     session::VaultSummary,
-    tests::{PHRASE, noop},
+    tests::{noop, PHRASE},
+    AppState,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use peppy_client_core::KeyProfile;
 use peppy_crypto::{create_vault_check_header, derive_root_key};
 use serde_json::json;
 use std::sync::{
-    Arc,
     atomic::{AtomicU32, Ordering},
+    Arc,
 };
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -153,13 +153,11 @@ async fn claim_unlock_survives_stale_session_race_reopen_and_live_rounds() {
         config.known(&session.binding).unwrap().cached_epochs,
         vec![1]
     );
-    assert!(
-        state
-            .store
-            .get(&session.binding.key_cache_account(1))
-            .unwrap()
-            .is_some()
-    );
+    assert!(state
+        .store
+        .get(&session.binding.key_cache_account(1))
+        .unwrap()
+        .is_some());
 
     // A normal close/reopen must recover the valid native cache.
     state.close_session().await;

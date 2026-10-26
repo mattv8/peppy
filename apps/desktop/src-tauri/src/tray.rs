@@ -218,6 +218,7 @@ pub fn show_main(app: &AppHandle) {
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     }
     if let Some(window) = app.get_webview_window(MAIN) {
+        crate::window_placement::recover_before_show(app);
         crate::window_chrome::prepare_material(&window, false);
         let _ = crate::window_chrome::show_when_ready(&window);
     }

@@ -13,19 +13,37 @@ import PeppyNative
 /// UI state for contact sync. Domain state comes from the core via `ContactsOverview`.
 struct ContactsState {
     var enabled = false
+    var intent: ContactsSyncIntent = .unset
     var access: ContactsAccess = .notDetermined
     var overview = ContactsOverview()
     var lastReport: ContactsSyncReport?
     var lastPassDate: Date?
+    var didReconcileAccess = false
     var working = false
     var error: String?
 }
 
 extension AppModel {
-    /// Reads access, containers and the owner book without touching contacts.
+    /// Reconciles local contact access and runs one bounded foreground pass when access starts.
     func refreshContacts() async {
+        let previousAccess = contacts.access
         contacts.access = (try? await contactsProvider.access()) ?? .notDetermined
+        var preferences = contactsPreferences.load()
+        let promoted = status.databaseOpen && contacts.access.mayRead && preferences.intent == .unset
+        if promoted {
+            preferences.intent = .on
+            contactsPreferences.save(preferences)
+            scheduleContactsBackgroundWork()
+        }
+        contacts.enabled = preferences.enabled
+        contacts.intent = preferences.intent
         if status.databaseOpen { contacts.overview = (try? await session.contactsOverview()) ?? contacts.overview }
+        let regainedAccess = !previousAccess.mayRead && contacts.access.mayRead && preferences.intent == .on && contacts.lastReport?.outcome == .noAccess
+        let initialForegroundPass = !contacts.didReconcileAccess && contacts.access.mayRead && preferences.intent == .on
+        contacts.didReconcileAccess = true
+        if status.databaseOpen, (initialForegroundPass || promoted || regainedAccess), contacts.enabled {
+            await runContactsPass(.foreground)
+        }
     }
 
     /// Explicit user action only: asks for Contacts access in the foreground, then opts in.
@@ -37,12 +55,14 @@ extension AppModel {
             _ = try? await CNContactStore().requestAccess(for: .contacts)
         }
         #endif
+        contacts.access = (try? await contactsProvider.access()) ?? .notDetermined
+        guard contacts.access.mayRead else { return }
         var preferences = contactsPreferences.load()
-        preferences.enabled = true
+        preferences.intent = .on
         contactsPreferences.save(preferences)
         contacts.enabled = true
+        contacts.intent = .on
         scheduleContactsBackgroundWork()
-        await refreshContacts()
         await runContactsPass(.foreground)
     }
 
@@ -52,6 +72,7 @@ extension AppModel {
         preferences.enabled = false
         contactsPreferences.save(preferences)
         contacts.enabled = false
+        contacts.intent = .stopped
     }
 
     /// The new-contact account is an owner setting in the core, not a phone preference.
@@ -73,6 +94,7 @@ extension AppModel {
         let preferences = contactsPreferences
         await contactsAction { try await $0.retireContacts(preferences: preferences) }
         contacts.enabled = contactsPreferences.load().enabled
+        contacts.intent = contactsPreferences.load().intent
         contacts.lastReport = nil
     }
 
@@ -143,9 +165,7 @@ struct ContactsSection: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("contacts-data-flow-hint")
             if !model.contacts.enabled {
-                Button("Sync this phone's contacts…") { Task { await model.enableContacts() } }
-                    .disabled(model.contacts.working || !model.status.keysUnlocked)
-                    .accessibilityIdentifier("contacts-enable-button")
+                disabledControls
             } else {
                 accessRows
                 containerPicker
@@ -178,6 +198,35 @@ struct ContactsSection: View {
         }
     }
 
+    @ViewBuilder private var disabledControls: some View {
+        switch model.contacts.access {
+        case .denied:
+            Text(String(localized: "peppy.contacts_access_denied", table: "Peppy")).font(.footnote).foregroundStyle(.secondary)
+            openSettingsButton
+        case .restricted:
+            Text("Contacts access is restricted by this iPhone.").font(.footnote).foregroundStyle(.secondary)
+        case .notDetermined:
+            Button(String(localized: "peppy.contacts_allow_access_ios", table: "Peppy")) { Task { await model.enableContacts() } }
+                .disabled(model.contacts.working || !model.status.keysUnlocked)
+                .accessibilityIdentifier("contacts-enable-button")
+        case .full, .limited:
+            Text(model.contacts.intent == .stopped ? String(localized: "peppy.contacts_stopped", table: "Peppy") : "Contact sync is ready to start.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Button(model.contacts.intent == .stopped ? String(localized: "peppy.contacts_resume_ios", table: "Peppy") : String(localized: "peppy.contacts_start", table: "Peppy")) { Task { await model.enableContacts() } }
+                .disabled(model.contacts.working || !model.status.keysUnlocked)
+                .accessibilityIdentifier("contacts-enable-button")
+        }
+    }
+
+    @ViewBuilder private var openSettingsButton: some View {
+        #if canImport(UIKit)
+        Button("Manage access in Settings") {
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+        }
+        .accessibilityIdentifier("contacts-manage-access-button")
+        #endif
+    }
+
     @ViewBuilder private var accessRows: some View {
         LabeledContent("Access", value: Self.accessText(model.contacts.access))
             .accessibilityIdentifier("contacts-access-row")
@@ -193,7 +242,7 @@ struct ContactsSection: View {
             .accessibilityIdentifier("contacts-manage-access-button")
             #endif
         case .notDetermined:
-            Button("Allow Contacts access…") { Task { await model.enableContacts() } }
+            Button(String(localized: "peppy.contacts_allow_access_ios", table: "Peppy")) { Task { await model.enableContacts() } }
                 .accessibilityIdentifier("contacts-request-access-button")
         case .full:
             EmptyView()
@@ -244,7 +293,7 @@ struct ContactsSection: View {
             if report.held > 0 {
                 Text("\(report.held) contacts disappeared at once; removing them from your other devices is on hold.")
             }
-            if report.limitExceeded { Text("This book exceeds 20,000 contacts; only part of it is synced.") }
+            if report.limitExceeded { Text("peppy.contacts_book_limit", tableName: "Peppy") }
             if report.photoFailures > 0 {
                 Text("\(report.photoFailures) contact photo(s) could not be prepared.")
                     .accessibilityIdentifier("contacts-photo-failures")

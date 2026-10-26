@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS contact_photo_unavailable(outbox_sequence INTEGER PRI
 CREATE TABLE IF NOT EXISTS contact_photo_received(attachment_id TEXT PRIMARY KEY, rejected INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS outbox_contact_photos(outbox_sequence INTEGER NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(outbox_sequence,attachment_id));
 CREATE INDEX IF NOT EXISTS outbox_contact_photos_attachment ON outbox_contact_photos(attachment_id);
+CREATE TABLE IF NOT EXISTS contact_photo_names_first(book_id TEXT NOT NULL, contact_id TEXT NOT NULL, contact_digest TEXT NOT NULL, followup_revision INTEGER NOT NULL, PRIMARY KEY(book_id,contact_id));
 ",
     )?;
     let has_outbox: bool = tx.query_row(
@@ -556,6 +557,108 @@ fn wire(conn: &Connection, reference: &Value) -> Result<Wire, Error> {
     };
     let descriptor = serde_json::to_value(&descriptor).map_err(|_| Error::Database)?;
     Ok(Wire::Ready(id, remote_object_id, descriptor))
+}
+
+/// Whether a captured contact needs a names-first revision because its intended photo cannot
+/// seal yet. The photo-bearing revision remains durable and unmodified for a later retry.
+pub(crate) fn contact_photo_blocks_seal(conn: &Connection, contact: &Value) -> Result<bool, Error> {
+    match contact
+        .get("photo")
+        .filter(|photo| present_photo(Some(photo)))
+    {
+        Some(photo) => Ok(!matches!(wire(conn, photo)?, Wire::Ready(..))),
+        None => Ok(false),
+    }
+}
+
+/// Whether this held photo capture still needs a names-first revision. The durable marker ties
+/// the full follow-up to the live contact revision, so an upgrade can repair legacy held rows
+/// exactly once and later callbacks cannot enqueue another pair.
+pub(crate) fn needs_names_first_capture(
+    conn: &Connection,
+    book_id: &str,
+    contact_id: &str,
+    contact: &Value,
+) -> Result<bool, Error> {
+    if !contact_photo_blocks_seal(conn, contact)? {
+        return Ok(false);
+    }
+    let digest = contact
+        .get("digest")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let marked: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_photo_names_first m JOIN contacts c ON c.book_id=m.book_id AND c.id=m.contact_id WHERE m.book_id=?1 AND m.contact_id=?2 AND m.contact_digest=?3 AND c.deleted_at IS NULL AND c.revision=m.followup_revision)",
+        params![book_id, contact_id, digest],
+        |row| row.get(0),
+    )?;
+    Ok(!marked)
+}
+
+/// Records the full held follow-up that a names-first revision precedes.
+pub(crate) fn mark_names_first_capture(
+    conn: &Connection,
+    book_id: &str,
+    contact_id: &str,
+    contact: &Value,
+) -> Result<(), Error> {
+    let digest = contact
+        .get("digest")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let revision = contact
+        .get("revision")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?
+        .parse::<i64>()
+        .map_err(|_| Error::Database)?;
+    conn.execute(
+        "INSERT INTO contact_photo_names_first(book_id,contact_id,contact_digest,followup_revision) VALUES(?,?,?,?) ON CONFLICT(book_id,contact_id) DO UPDATE SET contact_digest=excluded.contact_digest,followup_revision=excluded.followup_revision",
+        params![book_id, contact_id, digest, revision],
+    )?;
+    Ok(())
+}
+
+/// The local owner is still at the held full-photo follow-up, while peers can only have the
+/// immediately preceding names-first revision. This narrowly admits non-photo edits/deletes at
+/// that peer-visible base; arbitrary stale bases and photo operations remain strict.
+pub(crate) fn names_first_base_is_current(
+    conn: &Connection,
+    book_id: &str,
+    contact_id: &str,
+    base_revision: i64,
+    current_revision: i64,
+    current: &Value,
+) -> Result<bool, Error> {
+    if base_revision.checked_add(1) != Some(current_revision) {
+        return Ok(false);
+    }
+    let Some(digest) = current.get("digest").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let marked: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contact_photo_names_first WHERE book_id=?1 AND contact_id=?2 AND contact_digest=?3 AND followup_revision=?4)",
+        params![book_id, contact_id, digest, current_revision],
+        |row| row.get(0),
+    )?;
+    if !marked {
+        return Ok(false);
+    }
+    let rows = conn
+        .prepare("SELECT plain FROM outbox WHERE state='unsealed' AND plain IS NOT NULL")?
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let followup_revision = current_revision.to_string();
+    Ok(rows.into_iter().any(|plain| {
+        matches!(
+            serde_json::from_slice::<PrivatePayload>(&plain),
+            Ok(PrivatePayload::ContactUpserted { book, contact })
+                if book.get("id").and_then(Value::as_str) == Some(book_id)
+                    && contact.get("id").and_then(Value::as_str) == Some(contact_id)
+                    && contact.get("revision").and_then(Value::as_str)
+                        == Some(followup_revision.as_str())
+        )
+    }))
 }
 
 /// (local attachment ID, remote object ID) pairs an envelope must register before upload.
@@ -1311,8 +1414,9 @@ mod tests {
             held_plain_mentions(&client, id),
             "photo intent kept in the held row"
         );
-        // Only the book state is sealed; the photo-bearing upsert is not published photo-less.
-        assert_eq!(client.pending_outbox().unwrap().len(), 1);
+        // The book metadata and names-only revision publish, but the intended full-photo
+        // revision remains held rather than being rewritten photo-less.
+        assert_eq!(client.pending_outbox().unwrap().len(), 2);
         let unavailable = state(&client)["unavailable"].clone();
         assert_eq!(unavailable.as_array().unwrap().len(), 1);
         assert_eq!(unavailable[0]["local_attachment_id"], id.to_string());
@@ -1338,7 +1442,9 @@ mod tests {
             .unwrap();
         client.seal_pending_batch(100).unwrap();
         assert!(held_plain_mentions(&client, id));
-        assert_eq!(client.pending_outbox().unwrap().len(), 1);
+        // The names-only revision still publishes; the reclaimed photo's full revision never
+        // seals or creates a registration for its released remote object.
+        assert_eq!(client.pending_outbox().unwrap().len(), 2);
         assert_eq!(state(&client)["unavailable"][0]["reason"], "reclaimed");
         assert_eq!(state(&client)["registrations"], json!([]));
     }

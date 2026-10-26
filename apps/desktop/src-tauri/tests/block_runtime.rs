@@ -1,8 +1,8 @@
 #![cfg(target_os = "macos")]
 
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use block::ConcreteBlock;

@@ -97,6 +97,39 @@ class SmsCaptureOrchestrationTest {
         assertTrue(summary.more)
     }
 
+    @Test fun cappedProviderConsumesExactlyTheAdmittedHistoryBudget() {
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", true, null, historyUpperBound = 400, descending = true, budget = 200),
+            FakeCore(mutableListOf()),
+            CappedProvider((1L..400L).map(::record)),
+        )
+
+        assertEquals(200, summary.captured)
+        assertTrue(!summary.historyExhausted)
+        assertTrue(!summary.more)
+    }
+
+    @Test fun exactHistorySeedUsesProbeWithoutCapturingBeyondIt() {
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", true, null, historyUpperBound = 100, descending = true, budget = 100),
+            FakeCore(mutableListOf()),
+            CappedProvider((1L..100L).map(::record)),
+        )
+
+        assertEquals(100, summary.captured)
+        assertTrue(summary.historyExhausted)
+    }
+
+    @Test fun acceleratedHistoryRequestsContinuationAfterItsAdmittedPage() {
+        val summary = SmsCapture.run(
+            SmsCapturePlan("shared-generation", true, null, historyUpperBound = 400, descending = true, budget = 200, allowHistoryContinuation = true),
+            FakeCore(mutableListOf()),
+            CappedProvider((1L..400L).map(::record)),
+        )
+
+        assertTrue(summary.more)
+    }
+
     @Test fun tenSecondBudgetStopsBeforeAnUnprocessedRow() {
         val times = ArrayDeque(listOf(0L, 10_000_000_000L))
         val summary = SmsCapture.run(
@@ -386,14 +419,22 @@ class SmsCaptureOrchestrationTest {
     private fun record(id: Long) = SmsProviderRecord(id, 1, 1, "+15551234", "body", 1000, 1001, 1, true, true, null, null)
     private fun acquisition(id: String, providerId: Long) = SmsAcquisition(id, SmsAcquisitionInput("shared-generation", SimRoutes.routeId(1), providerId.toString(), "1", true, "+15551234", emptyList(), "body", false, 1000, 1001, null), SmsAcquisitionState.PENDING, null)
 
-    private class FakeProvider(private val rows: List<SmsProviderRecord>) : SmsCaptureProvider {
-        override fun page(afterId: Long, limit: Int) = SmsProviderPage(rows.filter { it.id > afterId }.take(limit), rows.lastOrNull()?.id ?: afterId)
-        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage {
+    private open class FakeProvider(private val rows: List<SmsProviderRecord>) : SmsCaptureProvider {
+        override open fun page(afterId: Long, limit: Int) = SmsProviderPage(rows.filter { it.id > afterId }.take(limit), rows.lastOrNull()?.id ?: afterId)
+        override open fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int): SmsProviderPage {
             val ceiling = cursor ?: upperBound
-            val records = rows.filter { it.id <= ceiling && it.id > (floor ?: 0L) }.sortedByDescending { it.id }.take(limit)
+            val records = rows.filter { row ->
+                (if (cursor == null) row.id <= ceiling else row.id < ceiling) && row.id > (floor ?: 0L)
+            }.sortedByDescending { it.id }.take(limit)
             return SmsProviderPage(records, records.lastOrNull()?.id ?: ceiling)
         }
         override fun read(id: Long) = rows.firstOrNull { it.id == id }
+    }
+
+    private class CappedProvider(rows: List<SmsProviderRecord>) : FakeProvider(rows) {
+        override fun page(afterId: Long, limit: Int) = super.page(afterId, minOf(limit, 50))
+        override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+            super.descendingPage(cursor, upperBound, floor, minOf(limit, 50))
     }
 
     private class FakeCore(private val calls: MutableList<String>, private val pending: List<SmsAcquisition> = emptyList()) : SmsCaptureCore {

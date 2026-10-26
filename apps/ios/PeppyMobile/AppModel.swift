@@ -122,6 +122,7 @@ final class AppModel {
         await run(.idle) { try await $0.open() }
         if status.identity == nil { serverReachability = .unknown }
         await reconcileWakeRegistration()
+        await refreshContacts()
     }
 
     func importCredential(from result: Result<URL, any Error>) async {

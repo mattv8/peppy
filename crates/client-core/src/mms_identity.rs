@@ -6,6 +6,21 @@ use peppy_protocol::EnvelopePurpose;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeSet;
 
+const LATEST_MMS_SQL: &str = "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.transport')='mms' ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1";
+const LATEST_CONTEXTUAL_MMS_SQL: &str = "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.mms_context') IS NOT NULL ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1";
+
+pub(crate) fn install_query_indexes(conn: &rusqlite::Connection) -> Result<(), Error> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS messages_latest_mms
+           ON messages(conversation_id,sort_at_ms DESC,local_order DESC)
+           WHERE json_extract(payload,'$.transport')='mms';
+         CREATE INDEX IF NOT EXISTS messages_latest_mms_context
+           ON messages(conversation_id,sort_at_ms DESC,local_order DESC)
+           WHERE json_extract(payload,'$.mms_context') IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
 impl Client {
     /// Stores an accepted detected or manually confirmed own address for a SIM and publishes one encrypted metadata
     /// event. It never changes carrier state or existing conversation identity.
@@ -65,27 +80,37 @@ impl Client {
             .optional()?)
     }
 
-    /// Reply recipients for the latest MMS in a conversation. Incoming group replies require a
-    /// confirmed own address for the immutable message's source SIM.
+    /// Reply recipients for the latest MMS in a conversation.
     pub fn mms_reply_context(
         &self,
         conversation_id: ConversationId,
     ) -> Result<MmsReplyContext, Error> {
         let s = self.lock()?;
-        let payload: Option<crate::MessagePayload> = s.conn.query_row(
-            "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.transport')='mms' ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
-            params![conversation_id.to_string()],
-            |row| row.get::<_, String>(0),
-        ).optional()?.map(|json| crate::decode(json.as_bytes())).transpose()?;
+        let payload: Option<crate::MessagePayload> = s
+            .conn
+            .query_row(
+                LATEST_MMS_SQL,
+                params![conversation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| crate::decode(json.as_bytes()))
+            .transpose()?;
         let Some(payload) = payload.filter(|payload| payload.transport == Transport::Mms) else {
             return Err(Error::NotFound);
         };
         // Locally created outgoing replies have no provider source; retain the latest immutable
         // incoming/contextual source in this conversation for own-address confirmation.
-        let contextual: Option<crate::MessagePayload> = s.conn.query_row(
-            "SELECT payload FROM messages WHERE conversation_id=? AND json_extract(payload,'$.mms_context') IS NOT NULL ORDER BY sort_at_ms DESC,local_order DESC LIMIT 1",
-            params![conversation_id.to_string()], |row| row.get::<_, String>(0),
-        ).optional()?.map(|json| crate::decode(json.as_bytes())).transpose()?;
+        let contextual: Option<crate::MessagePayload> = s
+            .conn
+            .query_row(
+                LATEST_CONTEXTUAL_MMS_SQL,
+                params![conversation_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| crate::decode(json.as_bytes()))
+            .transpose()?;
         let identity = payload
             .mms_context
             .as_ref()
@@ -109,6 +134,7 @@ impl Client {
                 .optional()?,
             None => None,
         };
+        let sender = payload.sender_address.clone();
         let candidates = match payload.direction {
             crate::Direction::Incoming => payload
                 .sender_address
@@ -119,45 +145,41 @@ impl Client {
             // insert-address-token), never a reply recipient.
             crate::Direction::Outgoing => payload.recipients,
         };
+        let region = crate::conversation_match::identity_region(&s.conn)?;
         let mut unique_keys = BTreeSet::new();
         let unique = candidates
             .into_iter()
-            .filter(|address| unique_keys.insert(address_key(address)))
+            .filter(|address| {
+                unique_keys.insert(crate::conversation_match::canonical_address(
+                    address,
+                    Some(&region),
+                ))
+            })
             .collect::<Vec<_>>();
         let group = unique.len() > 1;
-        if payload.direction == crate::Direction::Incoming && group {
-            let blocked_reason = if own.is_none() {
-                Some(
-                    "This phone hasn't detected its number for this SIM. Open Peppy on the phone to detect or enter it.",
-                )
-            } else if !unique.iter().any(|address| {
-                own.as_deref()
-                    .is_some_and(|own| same_own_address(own, address))
-            }) {
-                Some(
-                    "This SIM's saved number isn't among this group's participants. Check the number on this phone.",
-                )
-            } else {
-                None
-            };
-            if let Some(reason) = blocked_reason {
-                return Ok(MmsReplyContext {
-                    recipients: Vec::new(),
-                    blocked_reason: Some(reason.into()),
-                    subject: payload.subject,
-                });
-            }
-        }
-        let recipients = unique
-            .into_iter()
-            .filter(|address| {
-                own.as_deref()
-                    .is_none_or(|own| !same_own_address(own, address))
+        let confirmed_own = own.as_deref().filter(|own| {
+            unique.iter().any(|address| {
+                crate::conversation_match::confirmed_own_address(own, address, Some(&region))
             })
-            .collect();
+        });
+        let recipients = match confirmed_own {
+            Some(own) => unique
+                .into_iter()
+                .filter(|address| {
+                    !crate::conversation_match::confirmed_own_address(own, address, Some(&region))
+                })
+                .collect(),
+            None if payload.direction == crate::Direction::Incoming
+                && group
+                && unique.len() == 2
+                && sender.is_some() =>
+            {
+                vec![sender.unwrap()]
+            }
+            None => unique,
+        };
         Ok(MmsReplyContext {
             recipients,
-            blocked_reason: None,
             subject: payload.subject,
         })
     }
@@ -208,9 +230,6 @@ fn validate_subscription_id(subscription_id: &str) -> Result<(), Error> {
 }
 
 pub(crate) fn same_own_address(own: &str, participant: &str) -> bool {
-    if address_key(own) == address_key(participant) {
-        return true;
-    }
     let own = own.trim();
     let participant = participant.trim();
     if own.starts_with('+') && participant.starts_with('+') {
@@ -255,19 +274,75 @@ fn phone_digits(address: &str) -> Option<String> {
     Some(address.chars().filter(|c| c.is_ascii_digit()).collect())
 }
 
-fn address_key(address: &str) -> String {
-    let trimmed = address.trim();
-    let digits: String = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
-    // Only remove presentation punctuation for an already unambiguous phone number.
-    if trimmed.starts_with('+')
-        && !digits.is_empty()
-        && (7..=15).contains(&digits.len())
-        && trimmed
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '+' | ' ' | '-' | '(' | ')' | '.'))
-    {
-        format!("+{digits}")
-    } else {
-        trimmed.to_owned()
+#[cfg(test)]
+#[path = "mms_reply_query_budget.rs"]
+mod query_budget_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClientConfig, DatabaseKey, MessageId, MmsContext, SourceSequence, VaultId};
+    use peppy_domain::MessageRecord;
+
+    #[test]
+    fn incoming_group_without_sender_replies_to_all_participants() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let conversation_id = ConversationId::new();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("reply.db"),
+                vault_id: VaultId::new(),
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[31; 32]).unwrap(),
+        )
+        .unwrap();
+        let payload = crate::MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id,
+                source_sequence: SourceSequence(1),
+                attachments: vec![],
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: Some("provider-1".into()),
+            sender_address: None,
+            recipients: vec!["+15555550100".into(), "+15555550102".into()],
+            subject: None,
+            body: "Group body".into(),
+            transport: Transport::Mms,
+            direction: crate::Direction::Incoming,
+            imported: false,
+            sent_at_ms: Some(10),
+            ordered_at_ms: None,
+            mms_context: Some(MmsContext {
+                source_generation: "generation-1".into(),
+                subscription_id: "sim-1".into(),
+                provider_thread_id: Some("thread-1".into()),
+            }),
+        };
+        let store = client.lock().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO messages(id,conversation_id,source_device_id,source_sequence,payload,seen,sort_at_ms) VALUES(?,?,?,?,?,0,10)",
+                params![
+                    payload.record.message_id.to_string(),
+                    conversation_id.to_string(),
+                    payload.source_device_id.to_string(),
+                    payload.record.source_sequence.0,
+                    serde_json::to_string(&payload).unwrap(),
+                ],
+            )
+            .unwrap();
+        drop(store);
+
+        assert_eq!(
+            client
+                .mms_reply_context(conversation_id)
+                .unwrap()
+                .recipients,
+            vec!["+15555550100", "+15555550102"]
+        );
     }
 }

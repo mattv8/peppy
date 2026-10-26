@@ -1,11 +1,17 @@
 import "@testing-library/jest-dom/vitest";
+import type { ReactElement } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MediaLightbox } from "./MediaLightbox";
+import { MediaActionsProvider } from "./MediaActionsContext";
 
 const items = ["one", "two"].map((id) => ({ attachment: { id, name: id, mediaType: "image/jpeg", byteSize: 1, state: "ready" as const }, message: { id: `message-${id}`, revision: "1", sender: "self" as const, body: "", timestamp: "2026-01-01T00:00:00.000Z", attachments: [] } }));
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+function renderWithActions(ui: ReactElement) {
+  return render(<MediaActionsProvider publicCopies={{}} onSave={vi.fn().mockResolvedValue("saved")} onPublish={vi.fn().mockResolvedValue(null)} onRetry={vi.fn().mockResolvedValue(undefined)} requestDownload={vi.fn().mockResolvedValue(undefined)} loadOriginal={vi.fn().mockResolvedValue({ state: "pending" })} releaseMedia={vi.fn()} canCopyImage>{ui}</MediaActionsProvider>);
+}
 
 describe("MediaLightbox", () => {
   it("navigates with keys and releases a loaded original on close", async () => {
@@ -35,17 +41,60 @@ describe("MediaLightbox", () => {
     expect(releaseMedia).toHaveBeenCalledWith("one", "blob:late");
   });
 
-  it("lets pending and failed media retry through the injected request operation", async () => {
+  it("shows pending feedback and lets failed media retry through the injected request operation", async () => {
     const requestOriginal = vi.fn().mockResolvedValue({ state: "pending" as const });
     const pending = [{ ...items[0], attachment: { ...items[0].attachment, transfer: "download" as const } }];
     const view = render(<MediaLightbox items={pending} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
     await act(async () => {});
     expect(requestOriginal).toHaveBeenCalledWith("one");
+    expect(screen.getByRole("status")).toHaveTextContent("Downloading from phone…");
     view.unmount();
     render(<MediaLightbox items={[{ ...items[0], attachment: { ...items[0].attachment, state: "failed" } }]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
     await act(async () => {});
-    fireEvent.click(screen.getByRole("button", { name: "Downloading…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(requestOriginal).toHaveBeenCalledTimes(3);
+  });
+
+  it("adds the waiting guidance after fifteen seconds", async () => {
+    vi.useFakeTimers();
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "pending" as const });
+    render(<MediaLightbox items={[{ ...items[0], attachment: { ...items[0].attachment, transfer: "download" as const } }]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn()} />);
+    await act(async () => {});
+    expect(screen.queryByText("Still waiting — make sure your phone is online.")).not.toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(15000); });
+    expect(screen.getByText("Still waiting — make sure your phone is online.")).toBeInTheDocument();
+  });
+
+  it("shows only a spinner while an original is loading", () => {
+    render(<MediaLightbox items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={vi.fn(() => new Promise<never>(() => {}))} checkOriginal={vi.fn()} saveMedia={vi.fn()} />);
+    expect(screen.getByLabelText("Loading image")).toBeInTheDocument();
+    expect(screen.queryByText("Downloading from phone…")).not.toBeInTheDocument();
+  });
+
+  it("keeps a loaded image visible when saving fails", async () => {
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
+    render(<MediaLightbox items={[items[0]]} initialAttachmentId="one" onDismiss={vi.fn()} requestOriginal={requestOriginal} checkOriginal={requestOriginal} saveMedia={vi.fn().mockRejectedValue(new Error("save failed"))} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Save image" }));
+    await act(async () => {});
+    expect(screen.getByRole("img", { name: "one" })).toHaveAttribute("src", "blob:one");
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not save media.");
+    expect(document.querySelector("#lightbox-retry-btn")).not.toBeInTheDocument();
+  });
+
+  it("shows only Save without media actions and adds Link and Copy with a provider", async () => {
+    const requestOriginal = vi.fn().mockResolvedValue({ state: "ready" as const, url: "blob:one" });
+    const properties = { items: [items[0]], initialAttachmentId: "one", onDismiss: vi.fn(), requestOriginal, checkOriginal: requestOriginal, saveMedia: vi.fn() };
+    const view = render(<MediaLightbox {...properties} />);
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Save image" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create public link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy image" })).not.toBeInTheDocument();
+    view.unmount();
+    renderWithActions(<MediaLightbox {...properties} />);
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Create public link" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy image" })).toBeInTheDocument();
   });
 
   it("advances through multiple adjacent pages and disables next at exhaustion", async () => {

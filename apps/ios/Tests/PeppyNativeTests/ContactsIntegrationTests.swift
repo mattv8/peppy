@@ -171,6 +171,20 @@ func sampleContacts(_ count: Int) -> [PlatformContact] {
 @Suite(.serialized) struct ContactsIntegrationTests {
     let passphrase = "io synthetic vault passphrase"
 
+    @Test func contactsPreferencesPreserveUnsetAndExplicitStops() {
+        let defaults = UserDefaults(suiteName: "ContactsIntegrationTests.preferences")!
+        defaults.removePersistentDomain(forName: "ContactsIntegrationTests.preferences")
+        let preferences = UserDefaultsContactsPreferences(defaults: defaults)
+
+        #expect(preferences.load().intent == .unset)
+        preferences.save(ContactsPreferences())
+        #expect(defaults.object(forKey: "contacts.enabled") == nil)
+        preferences.save(ContactsPreferences(intent: .stopped))
+        #expect(preferences.load().intent == .stopped)
+        preferences.save(ContactsPreferences(intent: .on))
+        #expect(preferences.load().intent == .on)
+    }
+
     struct Owner {
         let server: FakeServer
         let deviceId: String

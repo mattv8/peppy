@@ -249,13 +249,18 @@ fn media_pages_do_not_omit_items_when_preview_budget_is_exhausted() {
     }
     let first = session.media_page(conversation.unwrap(), None, 40).unwrap();
     assert_eq!(first.items.len(), 12);
-    let cursor = first.next_cursor.as_ref().map(|cursor| peppy_client_core::MediaCursor {
+    let cursor = first
+        .next_cursor
+        .as_ref()
+        .map(|cursor| peppy_client_core::MediaCursor {
             sort_at_ms: cursor.sort_at_ms.parse().unwrap(),
             local_order: cursor.local_order.parse().unwrap(),
             message_id: cursor.message_id.parse().unwrap(),
             attachment_position: cursor.attachment_position,
         });
-    let second = session.media_page(conversation.unwrap(), cursor.as_ref(), 40).unwrap();
+    let second = session
+        .media_page(conversation.unwrap(), cursor.as_ref(), 40)
+        .unwrap();
     assert_eq!(second.items.len(), 1);
     assert!(second.next_cursor.is_none());
 }
@@ -635,7 +640,7 @@ fn legacy_single_recipient_sms_still_sends_on_sms_only_route() {
 }
 
 #[test]
-fn incoming_group_blocks_unknown_self_then_confirmation_excludes_own_address() {
+fn incoming_group_without_known_self_sends_to_all_participants() {
     let f = fixture();
     let session = open(&f, &f.binding, &[]);
     unlock(&session, &f);
@@ -649,8 +654,10 @@ fn incoming_group_blocks_unknown_self_then_confirmation_excludes_own_address() {
         vec![],
     );
     let before = session.client.mms_reply_context(conversation).unwrap();
-    assert!(before.recipients.is_empty());
-    assert!(before.blocked_reason.is_some());
+    assert_eq!(
+        before.recipients,
+        vec!["+15555550101", "+15555550100", "+15555550102"]
+    );
     let draft_id = session
         .client
         .create_compose_draft(Some(conversation))
@@ -682,22 +689,6 @@ fn incoming_group_blocks_unknown_self_then_confirmation_excludes_own_address() {
         &gateway_id,
         "sim-1",
     );
-    assert_eq!(
-        session.send_draft(&send).unwrap_err().code,
-        "mms-reply-blocked"
-    );
-    assert_eq!(
-        stored_revision(&session, &draft_id.to_string()),
-        draft.revision.to_string()
-    );
-
-    session
-        .client
-        .set_mms_own_address("sim-1", "+15555550100")
-        .unwrap();
-    let after = session.client.mms_reply_context(conversation).unwrap();
-    assert_eq!(after.recipients, vec!["+15555550101", "+15555550102"]);
-    assert!(after.blocked_reason.is_none());
     assert!(session.send_draft(&send).unwrap().accepted);
     assert_eq!(
         session
@@ -708,7 +699,7 @@ fn incoming_group_blocks_unknown_self_then_confirmation_excludes_own_address() {
             .unwrap()
             .payload
             .recipients,
-        after.recipients
+        before.recipients
     );
 }
 
@@ -1399,9 +1390,7 @@ mod real_server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .await
-                .unwrap();
+            axum::serve(listener, router).await.unwrap();
         });
         Server {
             url: format!("http://{address}"),

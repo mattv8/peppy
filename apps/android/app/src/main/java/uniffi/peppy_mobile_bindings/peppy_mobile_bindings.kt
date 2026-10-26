@@ -895,6 +895,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans_with_history_conditions(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_contact_photo(
@@ -1278,6 +1280,8 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_reconciliation(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`observedHighWater`: RustBuffer.ByValue,`liveAnchorFingerprint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`observedHighWater`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans_with_history_conditions(`ptr`: Long,`sourceGeneration`: RustBuffer.ByValue,`providerScope`: RustBuffer.ByValue,`observedHighWater`: RustBuffer.ByValue,`conditions`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_prepare_attachment(`ptr`: Long,`sourcePath`: RustBuffer.ByValue,`mediaType`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1966,6 +1970,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans() and 0xFFFF) != 2209) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_plan_sms_scans_with_history_conditions() and 0xFFFF) != 61012) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_prepare_attachment() and 0xFFFF) != 2885) {
@@ -2921,6 +2928,12 @@ public interface NativeClientInterface {
     fun `planSmsReconciliation`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String, `liveAnchorFingerprint`: kotlin.String?): NativeSmsReconciliationPlan?
     
     fun `planSmsScans`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String): List<NativeSmsScanPlan>
+    
+    /**
+     * Additive adaptive history API. Hosts pass current OS facts; the core persists only
+     * cursor/seed progress, never network or charging state.
+     */
+    fun `planSmsScansWithHistoryConditions`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String, `conditions`: NativeHistoryImportConditions): List<NativeSmsScanPlan>
     
     fun `prepareAttachment`(`sourcePath`: kotlin.String, `mediaType`: kotlin.String, `displayName`: kotlin.String): NativeAttachmentInfo
     
@@ -4564,6 +4577,28 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
         FfiConverterString.lower(`sourceGeneration`),
         FfiConverterString.lower(`providerScope`),
         FfiConverterString.lower(`observedHighWater`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Additive adaptive history API. Hosts pass current OS facts; the core persists only
+     * cursor/seed progress, never network or charging state.
+     */
+    @Throws(MobileBindingsException::class)override fun `planSmsScansWithHistoryConditions`(`sourceGeneration`: kotlin.String, `providerScope`: kotlin.String, `observedHighWater`: kotlin.String, `conditions`: NativeHistoryImportConditions): List<NativeSmsScanPlan> {
+            return FfiConverterSequenceTypeNativeSmsScanPlan.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_plan_sms_scans_with_history_conditions(
+        it,
+        
+        FfiConverterString.lower(`sourceGeneration`),
+        FfiConverterString.lower(`providerScope`),
+        FfiConverterString.lower(`observedHighWater`),
+        FfiConverterTypeNativeHistoryImportConditions.lower(`conditions`),_status)
 }
     }
     )
@@ -8334,6 +8369,47 @@ public object FfiConverterTypeNativeGatewaySettings: FfiConverterRustBuffer<Nati
 
 
 
+/**
+ * Current host conditions used solely to increase text-history capture throughput.
+ */
+data class NativeHistoryImportConditions (
+    var `unmeteredNetwork`: kotlin.Boolean
+    , 
+    var `charging`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeHistoryImportConditions: FfiConverterRustBuffer<NativeHistoryImportConditions> {
+    override fun read(buf: ByteBuffer): NativeHistoryImportConditions {
+        return NativeHistoryImportConditions(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeHistoryImportConditions) = (
+            FfiConverterBoolean.allocationSize(value.`unmeteredNetwork`) +
+            FfiConverterBoolean.allocationSize(value.`charging`)
+    )
+
+    override fun write(value: NativeHistoryImportConditions, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`unmeteredNetwork`, buf)
+            FfiConverterBoolean.write(value.`charging`, buf)
+    }
+}
+
+
+
 data class NativeHostedAccount (
     var `accountId`: kotlin.String
     , 
@@ -9221,6 +9297,9 @@ public object FfiConverterTypeNativeMmsProviderIdentityQuarantine: FfiConverterR
 data class NativeMmsReplyContext (
     var `recipients`: List<kotlin.String>
     , 
+    /**
+     * Deprecated; always None.
+     */
     var `blockedReason`: kotlin.String?
     , 
     var `subject`: kotlin.String?
@@ -10105,6 +10184,8 @@ data class NativeSmsScanPlan (
     var `paused`: kotlin.Boolean
     , 
     var `pendingRecheckCursor`: kotlin.String?
+    , 
+    var `budget`: kotlin.ULong
     
 ){
     
@@ -10131,6 +10212,7 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
         )
     }
 
@@ -10144,7 +10226,8 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterOptionalString.allocationSize(value.`historyUpperBound`) +
             FfiConverterBoolean.allocationSize(value.`historyComplete`) +
             FfiConverterBoolean.allocationSize(value.`paused`) +
-            FfiConverterOptionalString.allocationSize(value.`pendingRecheckCursor`)
+            FfiConverterOptionalString.allocationSize(value.`pendingRecheckCursor`) +
+            FfiConverterULong.allocationSize(value.`budget`)
     )
 
     override fun write(value: NativeSmsScanPlan, buf: ByteBuffer) {
@@ -10158,6 +10241,7 @@ public object FfiConverterTypeNativeSmsScanPlan: FfiConverterRustBuffer<NativeSm
             FfiConverterBoolean.write(value.`historyComplete`, buf)
             FfiConverterBoolean.write(value.`paused`, buf)
             FfiConverterOptionalString.write(value.`pendingRecheckCursor`, buf)
+            FfiConverterULong.write(value.`budget`, buf)
     }
 }
 

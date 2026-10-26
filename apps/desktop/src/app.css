@@ -359,10 +359,6 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-secondary);
   font-size: 11px;
 }
-#reply-blocked-reason {
-  color: var(--peppy-warning-text);
-  font-size: 11px;
-}
 .file-card {
   display: flex;
   flex-wrap: wrap;
@@ -483,7 +479,6 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #unavailable-hint[hidden] { display: none; }
 #gateway-status-hint { margin: 0; color: var(--peppy-text-secondary); font-size: 11px; }
 #gateway-status-hint[hidden] { display: none; }
-#reply-blocked-reason[hidden] { display: none; }
 #draft-recovery {
   display: flex;
   gap: 8px;

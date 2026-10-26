@@ -295,7 +295,7 @@ class GatewaySyncTest : GatewayTestBase() {
     }
 
     @Test
-    fun transientMediaFailureStillUploadsAndDispatchesSmsAfterReceive() {
+    fun transientMediaFailureStillUploadsAndDispatchesSmsWithoutRetryingTheGatewayPass() {
         val client = live()
         client.captureIncoming(NativeIncomingSms(null, "+15550009991", "unrelated envelope", "p-media", false))
         val (commandId, wire) = desktopCommandEnvelope(SimRoutes.routeId(3), "unrelated SMS")
@@ -317,11 +317,78 @@ class GatewaySyncTest : GatewayTestBase() {
 
         val result = sync.run()
 
-        assertNotNull("transient media failure still requests backoff", result.failure)
+        assertNull("media retry is isolated from the productive gateway pass", result.failure)
+        assertFalse("a failed media batch does not enqueue an immediate successor", result.more)
         assertEquals(listOf("media", "dispatch"), phases)
         assertTrue("receive completed before media", requests.any { it.first == "GET /v1/events?after=0&limit=50" })
         assertTrue("unrelated outbox upload is not starved", uploads() >= 1)
         assertEquals(commandId, CallbackIdentity.parse(shadowOf(carrier.calls.single().sent.first()).savedIntent.data)!!.commandId)
+    }
+
+    @Test
+    fun repeatedTransientMediaFailuresDoNotBlockOutboxBacklogProgress() {
+        val client = live()
+        repeat(GatewaySync.OUTBOX_BATCH * 2 + 1) { index ->
+            client.captureIncoming(NativeIncomingSms(null, "+15550009993", "backlog $index", "p-media-$index", false))
+        }
+        var mediaPasses = 0
+        val media = {
+            mediaPasses++
+            MmsTransferResult(false, 0, 0, listOf(MmsTransferFailure("00000000-0000-0000-0000-000000000003", "upload", "transient")))
+        }
+
+        val first = sync(client, media = media).run()
+
+        assertNull(first.failure)
+        assertTrue("upload backlog still requests its bounded successor", first.more)
+        assertEquals(GatewaySync.OUTBOX_BATCH * 2, uploads())
+
+        val second = sync(client, media = media).run()
+
+        assertNull(second.failure)
+        assertEquals(2, mediaPasses)
+        assertEquals(GatewaySync.OUTBOX_BATCH * 2 + 1, uploads())
+        assertTrue(client.pendingOutboxJsonBatch(1_000uL).isEmpty())
+    }
+
+    @Test
+    fun mixedMediaBatchKeepsItsRemainingBacklogWithoutRetryingTheGatewayPass() {
+        val client = live()
+
+        val result = sync(
+            client,
+            media = {
+                MmsTransferResult(
+                    more = true,
+                    uploaded = 0,
+                    downloaded = 1,
+                    failures = listOf(MmsTransferFailure("00000000-0000-0000-0000-000000000004", "upload", "transient")),
+                )
+            },
+        ).run()
+
+        assertNull("the media failure must not retry the productive gateway pass", result.failure)
+        assertTrue("remaining media work retains its bounded successor", result.more)
+    }
+
+    @Test
+    fun failedMediaDownloadsDoNotContinueWithoutTransferProgress() {
+        val client = live()
+
+        val result = sync(
+            client,
+            media = {
+                MmsTransferResult(
+                    more = true,
+                    uploaded = 0,
+                    downloaded = 0,
+                    failures = listOf(MmsTransferFailure("00000000-0000-0000-0000-000000000005", "download", "transient")),
+                )
+            },
+        ).run()
+
+        assertNull("failed media must not retry the productive gateway pass", result.failure)
+        assertFalse("no transfer progress means no immediate successor", result.more)
     }
 
     @Test

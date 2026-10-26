@@ -93,6 +93,8 @@ import { peppyCopy } from "./generated/peppyCopy";
 import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
 import { MediaGrid } from "./media/MediaGrid";
+import { MediaActionsProvider, type SaveOutcome as GallerySaveOutcome } from "./media/MediaActionsContext";
+import { clipboardImageSupported } from "./media/clipboard";
 import { InlineMedia } from "./media/InlineMedia";
 import { MessageText } from "./message-links";
 import { groupMessages } from "./media/grouping";
@@ -622,10 +624,7 @@ function MessageList({
         {groupMessages(conversation.messages).map((group) => {
           const message = group.messages[0];
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} renderAttachmentActions={(attachment) => {
-            const copy = publicCopies[attachment.id];
-            return <details data-gallery-sharing={attachment.id}><summary>Attachment actions</summary>{!copy && <button className="secondary-button" type="button" onClick={() => onPublish(attachment)} aria-label={`Create public link for ${attachment.name}`}>Create public link</button>}{copy && <div className="public-copy" data-public-copy-for={attachment.id}><label>Public link <span className="public-link-warning" role="status"><ShieldAlert size={12} aria-hidden /> Anyone with this link can view this copy</span><input readOnly aria-label={`Public link for ${attachment.name}`} value={copy.url} onFocus={(event) => event.currentTarget.select()} /></label><small>{expiryText(copy.expiresInSeconds)}</small></div>}</details>;
-          }} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} />;
           return (
             <div
               key={message.id}
@@ -2329,8 +2328,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setSending(true);
     setNotice("");
     try {
-      if (active?.replyBlockedReason)
-        return setNotice(`Not sent: ${active.replyBlockedReason}.`);
       const flushed = await store.flush(slotKey);
       if (!flushed.ok)
         return setNotice(
@@ -2343,8 +2340,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const latestConversation = latestSnapshot?.conversations.find(
         (conversation) => conversation.id === current.conversationId,
       );
-      if (latestConversation?.replyBlockedReason)
-        return setNotice(`Not sent: ${latestConversation.replyBlockedReason}.`);
       const latestGateways = latestSnapshot?.gateways ?? [];
       const chosen = resolveRoute(current.content, latestGateways);
       const blocked = routeProblem(
@@ -2423,6 +2418,23 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         setNotice(`Downloading ${attachment.name} before saving.`);
       } else setNotice(`Attachment save: ${errorText(error)}`);
     }
+  };
+  const saveGalleryAttachment = async (attachment: AttachmentView): Promise<GallerySaveOutcome> => {
+    try {
+      if (!await bridge.save_attachment(attachment.id)) return "cancelled";
+      return "saved";
+    } catch (error) {
+      if (errorCode(error) === "media-pending") {
+        pendingSaveIdsRef.current.add(attachment.id);
+        return "pending";
+      }
+      throw error;
+    }
+  };
+  const publishGalleryAttachment = async (attachment: AttachmentView): Promise<PublicCopy | null> => {
+    const copy = await bridge.publish_attachment(attachment.id);
+    if (copy) setPublicCopies((current) => ({ ...current, [attachment.id]: copy }));
+    return copy;
   };
 
   /** Closing never discards an unsaved draft: a failed save keeps the window open. */
@@ -2649,11 +2661,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     mmsRequired && route.kind === "route" && estimateBytes > 0;
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
-  const blockedReason = active?.replyBlockedReason ?? (effectivePendingRecipient ? pendingRecipientReason : problem);
+  const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
   const delayedStatus = route.kind === "route" && gatewayAvailability(route.gateway) === "delayed"
     ? `${route.gateway.name} last synced ${route.gateway.lastSeenAgeSeconds !== undefined ? formatAge(route.gateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.`
     : undefined;
-  const statusActive = Boolean(blockedReason || delayedStatus || mmsLimitShown || notice);
+  const statusActive = Boolean(unavailableReason || delayedStatus || mmsLimitShown || notice);
   const composerResizeHandle = (
     <ResizeHandle
       id="handle-h2"
@@ -2731,8 +2743,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       <Composer
         draft={content.text}
         attachments={attachments}
-        sendSupported={Boolean(slotKey) && !problem && !active?.replyBlockedReason && !effectivePendingRecipient && !sending}
-        unavailableReason={sending ? "sending…" : active?.replyBlockedReason ?? (effectivePendingRecipient ? pendingRecipientReason : problem)}
+        sendSupported={Boolean(slotKey) && !unavailableReason && !sending}
+        unavailableReason={sending ? "sending…" : unavailableReason}
         onDraftChange={(text) => edit({ text })}
         onSend={() => void send()}
         onAddAttachment={slotKey ? () => void addAttachment() : undefined}
@@ -2742,11 +2754,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         bannerSlot={draftFeedback}
         statusSlot={
           <>
-            <p id="reply-blocked-reason" data-reply-blocked role="status" hidden={!active?.replyBlockedReason}>
-              Replies unavailable: {active?.replyBlockedReason}
-            </p>
-            <span id="unavailable-hint" hidden={!blockedReason}>
-              Sending unavailable: {blockedReason}
+            <span id="unavailable-hint" hidden={!unavailableReason}>
+              Sending unavailable: {unavailableReason}
             </span>
             <p id="gateway-status-hint" role="status" hidden={!delayedStatus}>{delayedStatus}</p>
             {mmsLimitShown && route.kind === "route" && (
@@ -2764,7 +2773,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           <GatewaySelector
             gateways={gateways}
             content={content}
-            problem={blockedReason}
+            problem={unavailableReason}
             onSelect={(gateway) =>
               edit({ gatewayId: gateway.id, simId: gateway.simId })
             }
@@ -2823,7 +2832,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
   const messages = (
-    <>
+    <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()}>
       <div id="conversation-tabs" role="tablist" aria-label="Conversation views" onKeyDown={(event) => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         const next = conversationTab === "messages" ? "media" : "messages";
@@ -2868,7 +2877,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         {active && <MediaPanel key={active.id} loadPage={async (cursor) => {
           const page = await bridge.media_page(active.id, cursor as Parameters<typeof bridge.media_page>[1], 40);
           return { items: page.items.map(toGalleryItem), nextCursor: page.nextCursor };
-        }} onOpen={(item) => void openGalleryItem(item)} />}
+        }} onOpen={(item) => void openGalleryItem(item)} refreshKey={mediaStateHint} />}
       </div>}
       {lightboxItems && lightboxAttachmentId && <MediaLightbox items={lightboxItems} initialAttachmentId={lightboxAttachmentId} initialMessageId={lightboxMessageId} onDismiss={() => { setLightboxItems(null); setLightboxAttachmentId(undefined); setLightboxMessageId(undefined); }} requestOriginal={requestOriginal} checkOriginal={checkOriginal} saveMedia={async (id) => { await bridge.save_attachment(id); }} releaseMedia={releaseMedia} hasNextPage={lightboxHasNextPage} hasPreviousPage={lightboxHasPreviousPage} retryKey={mediaStateHint} loadAdjacentPage={async (direction) => {
         const cache = galleryCacheRef.current;
@@ -2891,7 +2900,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         }
         return { items: orderedItems, hasNextPage: Boolean(page.nextCursor), cursor: page.nextCursor };
       }} />}
-    </>
+    </MediaActionsProvider>
   );
   const panelStatus = snapshot
     ? {

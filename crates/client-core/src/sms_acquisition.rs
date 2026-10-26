@@ -112,7 +112,20 @@ pub struct SmsScanPlan {
     pub history_complete: bool,
     pub paused: bool,
     pub pending_recheck_cursor: Option<String>,
+    /// Maximum provider rows this plan may import. Live work always retains its normal bound.
+    pub budget: u64,
 }
+
+/// Volatile host facts used only to size older text-history pages. They are never persisted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryImportConditions {
+    pub unmetered_network: bool,
+    pub charging: bool,
+}
+
+const INITIAL_HISTORY_SEED: i64 = 100;
+const ORDINARY_HISTORY_PAGE: i64 = 50;
+const ACCELERATED_HISTORY_PAGE: i64 = 200;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmsReconciliationPlan {
     pub source_generation: String,
@@ -436,7 +449,7 @@ impl Client {
         if provider_id.parse::<u64>().is_err() {
             return Err(Error::InvalidRequest("SMS checkpoint"));
         }
-        let guard = self.lock()?;
+        let mut guard = self.lock()?;
         let row: Option<DescendingCheckpoint> = guard.conn.query_row("SELECT descending,history_floor,descending_cursor,history_upper_bound FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? AND imported=?", params![generation, subscription, imported], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()?;
         match row {
             Some((true, floor, current, Some(upper))) => {
@@ -446,7 +459,11 @@ impl Client {
                     &upper,
                     provider_id,
                 )? {
-                    guard.conn.execute("UPDATE sms_scan_checkpoints SET descending_cursor=? WHERE source_generation=? AND subscription_id=? AND imported=1", params![provider_id, generation, subscription])?;
+                    let tx = guard
+                        .conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    tx.execute("UPDATE sms_scan_checkpoints SET descending_cursor=?,history_seed_remaining=MAX(history_seed_remaining-1,0) WHERE source_generation=? AND subscription_id=? AND imported=1", params![provider_id, generation, subscription])?;
+                    tx.commit()?;
                 }
             }
             // A corrupt descending scope must fail closed; treating it as an old ascending scope
@@ -466,6 +483,21 @@ impl Client {
         generation: &str,
         scope: &str,
         observed_high_water: &str,
+    ) -> Result<Vec<SmsScanPlan>, Error> {
+        self.plan_sms_scans_with_history_conditions(
+            generation,
+            scope,
+            observed_high_water,
+            HistoryImportConditions::default(),
+        )
+    }
+
+    pub fn plan_sms_scans_with_history_conditions(
+        &self,
+        generation: &str,
+        scope: &str,
+        observed_high_water: &str,
+        conditions: HistoryImportConditions,
     ) -> Result<Vec<SmsScanPlan>, Error> {
         validate_scope(generation, scope)?;
         if observed_high_water.parse::<u64>().is_err() {
@@ -489,7 +521,7 @@ impl Client {
         };
         let outbox_backpressured =
             history_incomplete && crate::history_import::outbox_backpressures_history(&tx)?;
-        let mut statement = tx.prepare("SELECT imported,provider_message_id,history_upper_bound,history_complete,paused_reason,pending_recheck_cursor,descending,history_floor,descending_cursor FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? ORDER BY imported")?;
+        let mut statement = tx.prepare("SELECT imported,provider_message_id,history_upper_bound,history_complete,paused_reason,pending_recheck_cursor,descending,history_floor,descending_cursor,history_seed_remaining FROM sms_scan_checkpoints WHERE source_generation=? AND subscription_id=? ORDER BY imported")?;
         let plans = statement
             .query_map(params![generation, scope], |r| {
                 Ok(SmsScanPlan {
@@ -511,6 +543,18 @@ impl Client {
                     paused: r.get::<_, Option<String>>(4)?.is_some()
                         || (r.get::<_, bool>(0)? && (!gate_open || outbox_backpressured)),
                     pending_recheck_cursor: r.get(5)?,
+                    budget: if r.get::<_, bool>(0)? {
+                        let seed_remaining: i64 = r.get(9)?;
+                        if r.get::<_, bool>(6)? && seed_remaining > 0 {
+                            seed_remaining.min(INITIAL_HISTORY_SEED) as u64
+                        } else if conditions.unmetered_network || conditions.charging {
+                            ACCELERATED_HISTORY_PAGE as u64
+                        } else {
+                            ORDINARY_HISTORY_PAGE as u64
+                        }
+                    } else {
+                        ORDINARY_HISTORY_PAGE as u64
+                    },
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1292,6 +1336,92 @@ mod tests {
             )
             .unwrap();
         assert!(checkpoint.is_empty());
+    }
+
+    #[test]
+    fn initial_history_seed_is_durable_and_accelerates_only_with_host_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+
+        let first = client
+            .plan_sms_scans_with_history_conditions(
+                "install",
+                "scope",
+                "500",
+                HistoryImportConditions::default(),
+            )
+            .unwrap();
+        assert_eq!(first.iter().find(|plan| plan.imported).unwrap().budget, 100);
+
+        for id in (401..=500).rev() {
+            client
+                .set_sms_scan_checkpoint("install", "scope", true, &id.to_string())
+                .unwrap();
+        }
+        let resumed = client
+            .plan_sms_scans_with_history_conditions(
+                "install",
+                "scope",
+                "500",
+                HistoryImportConditions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.iter().find(|plan| plan.imported).unwrap().budget,
+            50
+        );
+
+        let accelerated = client
+            .plan_sms_scans_with_history_conditions(
+                "install",
+                "scope",
+                "500",
+                HistoryImportConditions {
+                    unmetered_network: false,
+                    charging: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            accelerated
+                .iter()
+                .find(|plan| plan.imported)
+                .unwrap()
+                .budget,
+            200
+        );
+        assert_eq!(
+            accelerated
+                .iter()
+                .find(|plan| !plan.imported)
+                .unwrap()
+                .budget,
+            50
+        );
+    }
+
+    #[test]
+    fn legacy_ascending_history_uses_host_adaptive_budget_not_descending_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client(&dir);
+        client.plan_sms_scans("install", "scope", "500").unwrap();
+        client.lock().unwrap().conn.execute(
+            "UPDATE sms_scan_checkpoints SET descending=0 WHERE source_generation='install' AND subscription_id='scope' AND imported=1",
+            [],
+        ).unwrap();
+
+        let plans = client
+            .plan_sms_scans_with_history_conditions(
+                "install",
+                "scope",
+                "500",
+                HistoryImportConditions {
+                    unmetered_network: false,
+                    charging: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(plans.iter().find(|plan| plan.imported).unwrap().budget, 200);
     }
 
     #[test]
