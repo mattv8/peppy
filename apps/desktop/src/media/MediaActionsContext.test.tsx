@@ -18,7 +18,7 @@ function renderActions(props = defaults()) {
   return { props, ...render(<MediaActionsProvider {...props}><Controls /></MediaActionsProvider>) };
 }
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("MediaActionsProvider", () => {
   it("deduplicates in-flight download requests", async () => {
@@ -117,13 +117,32 @@ describe("MediaActionsProvider", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Couldn't copy image");
   });
 
-  it("passes ClipboardItem a promise before the original load resolves", () => {
+  it("does not schedule copy feedback after the provider unmounts", async () => {
+    let rejectLoad!: (error: Error) => void;
+    class Item { constructor(_: Record<string, Promise<Blob>>) {} }
+    vi.stubGlobal("ClipboardItem", Item);
+    vi.stubGlobal("navigator", { clipboard: { write: vi.fn().mockResolvedValue(undefined) } });
+    const props = defaults();
+    props.canCopyImage = true;
+    props.loadOriginal.mockImplementation(() => new Promise((_, reject) => { rejectLoad = reject; }));
+    const { unmount } = renderActions(props);
+    fireEvent.click(screen.getByText("copy image"));
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    unmount();
+
+    await act(async () => { rejectLoad(new Error("late failure")); });
+
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("passes ClipboardItem a promise before the original load resolves", async () => {
     let resolve!: (result: { state: "ready"; url: string }) => void;
     const loadOriginal = vi.fn(() => new Promise<{ state: "ready"; url: string }>((done) => { resolve = done; }));
     const received: Promise<Blob>[] = [];
     class Item { constructor(items: Record<string, Promise<Blob>>) { received.push(items["image/png"]); } }
     vi.stubGlobal("ClipboardItem", Item);
     vi.stubGlobal("navigator", { clipboard: { write: vi.fn().mockResolvedValue(undefined) } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: vi.fn().mockResolvedValue(new Blob([], { type: "image/png" })) }));
     const props = defaults();
     props.canCopyImage = true;
     props.loadOriginal = loadOriginal;
@@ -132,5 +151,7 @@ describe("MediaActionsProvider", () => {
     expect(loadOriginal).toHaveBeenCalledWith(attachment.id);
     expect(received).toHaveLength(1);
     resolve({ state: "ready", url: "https://example.test/image" });
+    await expect(received[0]).resolves.toBeInstanceOf(Blob);
+    expect(props.releaseMedia).toHaveBeenCalledWith(attachment.id, "https://example.test/image");
   });
 });
