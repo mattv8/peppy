@@ -30,6 +30,107 @@ fn provider_input(
     }
 }
 
+fn mms_input(id: &str) -> MmsAcquisitionInput {
+    MmsAcquisitionInput {
+        source: MmsSource {
+            source_generation: "install-1".into(),
+            subscription_id: "sim-1".into(),
+            provider_message_id: id.into(),
+            provider_thread_id: Some("thread-1".into()),
+        },
+        direction: Direction::Incoming,
+        sender_address: Some(ADDRESS.into()),
+        recipients: vec![],
+        subject: None,
+        body: "mms".into(),
+        imported: true,
+        observed_at_ms: 1,
+        transaction_id: None,
+    }
+}
+
+#[test]
+fn pending_sms_and_mms_reservations_preserve_conversation_sequence_order() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "client", &vault), &vault);
+    let conversation = ConversationId::new();
+    let first = client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: ADDRESS.into(),
+            body: "first".into(),
+            provider_message_id: Some("first".into()),
+            imported: false,
+        })
+        .unwrap();
+    let sms = client
+        .begin_sms_acquisition(provider_input("reserved-sms", "sms", Some(2), None))
+        .unwrap();
+    let mms = client
+        .begin_mms_acquisition(mms_input("reserved-mms"))
+        .unwrap();
+    assert_eq!(sms.conversation_id, conversation);
+    assert_eq!(mms.conversation_id, conversation);
+
+    let after_reservations = client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(conversation),
+            sender_address: ADDRESS.into(),
+            body: "after".into(),
+            provider_message_id: Some("after".into()),
+            imported: false,
+        })
+        .unwrap();
+    let completed_sms = client
+        .complete_sms_acquisition(&sms.acquisition_id)
+        .unwrap();
+    let completed_mms = client
+        .complete_mms_acquisition(&mms.acquisition_id)
+        .unwrap();
+
+    let mut sequences = client
+        .messages(conversation)
+        .unwrap()
+        .into_iter()
+        .map(|message| {
+            (
+                message.payload.record.message_id,
+                message.payload.record.source_sequence.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    sequences.sort_unstable_by_key(|(_, sequence)| *sequence);
+    assert_eq!(
+        sequences,
+        vec![
+            (first.message_id, 1),
+            (completed_sms.message_id, 2),
+            (completed_mms.message_id, 3),
+            (after_reservations.message_id, 4),
+        ]
+    );
+
+    let other_conversation = ConversationId::new();
+    let isolated = client
+        .capture_incoming(IncomingSms {
+            conversation_id: Some(other_conversation),
+            sender_address: ADDRESS.into(),
+            body: "isolated".into(),
+            provider_message_id: Some("isolated".into()),
+            imported: false,
+        })
+        .unwrap();
+    assert_eq!(
+        client.messages(other_conversation).unwrap()[0]
+            .payload
+            .record
+            .source_sequence,
+        SourceSequence(1)
+    );
+    assert_eq!(isolated.conversation_id, other_conversation);
+}
+
 #[test]
 fn broadcast_and_provider_capture_share_the_one_to_one_alias() {
     let dir = TempDir::new().unwrap();
