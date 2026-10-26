@@ -833,11 +833,7 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         let id = object.attachment_id;
         match download_one(session, object).await {
             Ok(()) => {
-                session
-                    .previews
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&id);
+                session.invalidate_cached_attachment(&id);
                 changed = true;
             }
             Err(failure) => {

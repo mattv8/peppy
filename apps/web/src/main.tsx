@@ -9,6 +9,7 @@ import { InstanceManagement } from "./InstanceManagement";
 import "./web.css";
 import { startBrowserApplication } from "./browser-startup";
 import type { HostedWebConfig } from "./newhosted-app-auth";
+import { createSingleFlightTrailingScheduler } from "./single-flight-scheduler";
 
 function unsupported(reasons: string[]): void {
   document.getElementById("root")!.innerHTML = `<main id="browser-unsupported" data-browser-screen="browser-unsupported" role="main" aria-label="Browser not supported"><section><h1 id="unsupported-heading" tabindex="-1">This browser isn't supported</h1><p>Peppy requires a recent desktop browser with SharedWorker, WebAssembly, IndexedDB, and Web Locks support.</p><ul data-unsupported-reasons>${reasons.map((reason) => `<li>${reason}</li>`).join("")}</ul></section></main>`;
@@ -56,8 +57,17 @@ function BrowserApp({ bridge, config }: { bridge: BrowserBridge; config: HostedW
   useEffect(() => { bridge.setAccountUrl(accountUrl); }, [accountUrl, bridge]);
 
   useEffect(() => {
-    void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined);
-    return bridge.subscribe(() => { void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined); });
+    const scheduler = createSingleFlightTrailingScheduler(() =>
+      bridge.enrollment_status()
+        .then(({ mode, owner }) => setEnrollment({ mode, owner }))
+        .catch(() => undefined),
+    );
+    scheduler.request();
+    const unsubscribe = bridge.subscribe(scheduler.request);
+    return () => {
+      scheduler.dispose();
+      unsubscribe();
+    };
   }, [bridge]);
 
   if (location.pathname === "/manage") return <InstanceManagement bridge={bridge} accountUrl={accountUrl} />;

@@ -551,6 +551,20 @@ impl UpdateManager {
         Ok(())
     }
 
+    pub fn set_restarting_installed(&self, expected_version: &str) -> BridgeResult<()> {
+        let mut inner = self.0.lock().map_err(|_| BridgeError::host_state())?;
+        if inner.operation != Operation::Idle || inner.installed.as_deref() != Some(expected_version) {
+            return Err(BridgeError::new(
+                "update-busy",
+                "The installed update is no longer ready to restart.",
+            ));
+        }
+        inner.operation = Operation::Installing;
+        inner.status.phase = UpdatePhase::Installing;
+        inner.status.message = Some("Restarting installed update…".into());
+        Ok(())
+    }
+
     /// Record only the irreversible installer attempt. Preparation, drain and
     /// authorization failures leave the verified payload available on relaunch.
     pub fn record_install_attempt(&self, expected_version: &str) -> BridgeResult<()> {
@@ -653,6 +667,15 @@ impl UpdateManager {
             }
             inner.status.message = Some(message.into());
             inner.status.can_restart = inner.staged.is_some() || inner.installed.is_some();
+        }
+    }
+
+    pub fn set_installing_message(&self, message: &str) {
+        if let Ok(mut inner) = self.0.lock() {
+            if inner.operation == Operation::Installing {
+                inner.status.phase = UpdatePhase::Installing;
+                inner.status.message = Some(message.into());
+            }
         }
     }
 
@@ -1082,6 +1105,26 @@ mod tests {
         assert_eq!(status.phase, UpdatePhase::Installed);
         assert_eq!(status.message.as_deref(), Some("restart failed"));
         assert!(status.can_restart);
+    }
+
+    #[test]
+    fn waiting_for_background_work_keeps_the_install_claim() {
+        let manager = UpdateManager(Arc::new(Mutex::new(state())));
+        {
+            let mut inner = manager.0.lock().unwrap();
+            inner.operation = Operation::Installing;
+            inner.status.phase = UpdatePhase::Installing;
+        }
+
+        manager.set_installing_message("Waiting for background work before restarting the update.");
+
+        let inner = manager.0.lock().unwrap();
+        assert_eq!(inner.operation, Operation::Installing);
+        assert_eq!(inner.status.phase, UpdatePhase::Installing);
+        assert_eq!(
+            inner.status.message.as_deref(),
+            Some("Waiting for background work before restarting the update.")
+        );
     }
 
     #[test]

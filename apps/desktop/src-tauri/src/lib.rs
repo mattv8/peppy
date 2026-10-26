@@ -76,7 +76,7 @@ use peppy_desktop_api::compose::DiscardDraftInput;
 #[cfg(target_os = "macos")]
 use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
-use session::{open_session, DraftInput, Notifier, Session, VaultSummary};
+use session::{open_session, DeferredHydration, DraftInput, Notifier, Session, VaultSummary};
 use sync::{blocking, fetch_vault, vault_header};
 
 pub const STATE_EVENT: &str = "peppy://state";
@@ -350,10 +350,18 @@ impl AppState {
     /// The session for the active binding, opened on demand. A session for any other binding is
     /// stopped first, so a client/key opened for one credential is never reused for another.
     pub async fn session(&self) -> BridgeResult<Option<Arc<Session>>> {
-        let _operation = self
+        let operation = self
             .update_safety
             .enter()
             .map_err(|message| BridgeError::new("update-busy", message))?;
+        self.session_admitted(&operation).await
+    }
+
+    /// Opens the active session while an existing operation admission remains held.
+    pub(crate) async fn session_admitted(
+        &self,
+        _operation: &update_safety::OperationGuard,
+    ) -> BridgeResult<Option<Arc<Session>>> {
         let _opening = self.session_open_lock.lock().await;
         let config = self.config()?;
         let Some(binding) = config.active_binding().cloned() else {
@@ -421,15 +429,30 @@ impl AppState {
         Ok(Some(session))
     }
 
+    async fn require_session(&self) -> BridgeResult<Arc<Session>> {
+        self.session().await?.ok_or_else(BridgeError::no_session)
+    }
+
     fn revoke_media_capabilities(&self) {
         if let Ok(mut capabilities) = self.media_capabilities.lock() {
             capabilities.clear();
         }
     }
 
-    async fn require_session(&self) -> BridgeResult<Arc<Session>> {
-        self.session().await?.ok_or_else(BridgeError::no_session)
+    async fn require_session_admitted(
+        &self,
+        operation: &update_safety::OperationGuard,
+    ) -> BridgeResult<Arc<Session>> {
+        self.session_admitted(operation)
+            .await?
+            .ok_or_else(BridgeError::no_session)
     }
+}
+
+/// Opens the current binding for state snapshots, preserving secure-store and session failures.
+#[cfg(test)]
+async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>> {
+    state.session().await
 }
 
 async fn release_media_capabilities(
@@ -545,11 +568,6 @@ fn locked_snapshot(storage_available: bool) -> Snapshot {
     snapshot
 }
 
-/// Opens the current binding for state snapshots, preserving secure-store and session failures.
-async fn snapshot_session(state: &AppState) -> BridgeResult<Option<Arc<Session>>> {
-    state.session().await
-}
-
 /// Loads a snapshot using the same window scope policy as the Tauri command.
 #[cfg(test)]
 async fn load_state_for_window(
@@ -560,7 +578,7 @@ async fn load_state_for_window(
     history_from_message_id: Option<String>,
     origin: Option<String>,
     preferences: NotificationPreferences,
-) -> BridgeResult<(Snapshot, bool)> {
+) -> BridgeResult<(Snapshot, DeferredHydration)> {
     load_state_for_window_with_options(
         state,
         label,
@@ -583,7 +601,7 @@ async fn load_state_for_window_with_options(
     origin: Option<String>,
     preferences: NotificationPreferences,
     metadata_only: bool,
-) -> BridgeResult<(Snapshot, bool)> {
+) -> BridgeResult<(Snapshot, DeferredHydration)> {
     if label == tray::MAIN {
         return blocking(move || {
             session.snapshot_with_metadata_only(
@@ -629,16 +647,17 @@ async fn load_state(
     history_from_message_id: Option<String>,
     metadata_only: Option<bool>,
 ) -> BridgeResult<Snapshot> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     if state.app_locked.load(Ordering::Acquire) {
         return Ok(locked_snapshot(
             state.app_lock_storage_available.load(Ordering::Acquire),
         ));
     }
     let origin = state.config()?.origin;
-    let Some(session) = snapshot_session(&state).await? else {
+    let Some(session) = state.session_admitted(&operation).await? else {
         return Ok(empty_snapshot(origin));
     };
+    session.consume_deferred_follow_up();
     let preferences = state.notifications.preferences();
     let (mut snapshot, deferred) = load_state_for_window_with_options(
         &state,
@@ -668,8 +687,8 @@ async fn load_state(
         startup_supported: cfg!(any(target_os = "macos", target_os = "windows")),
         background: startup::background_requested(std::env::args()),
     });
-    if deferred {
-        session.notify();
+    if session.schedule_deferred_follow_up(deferred) {
+        session.notify_deferred_follow_up();
     }
     start_search_index_driver(app, session);
     Ok(snapshot)
@@ -823,12 +842,12 @@ async fn search_local(
     state: State<'_, AppState>,
     input: peppy_desktop_api::LocalSearchRequestView,
 ) -> BridgeResult<peppy_desktop_api::LocalSearchPageView> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     if state.app_locked.load(Ordering::Acquire) {
         return Err(BridgeError::new("app-locked", "Peppy is locked."));
     }
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let search_session = session.clone();
     let page = blocking(move || {
         search_session
@@ -850,12 +869,12 @@ async fn advance_search_index(
     state: State<'_, AppState>,
     input: Option<peppy_desktop_api::AdvanceSearchIndexInputView>,
 ) -> BridgeResult<peppy_desktop_api::SearchIndexProgressView> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     if state.app_locked.load(Ordering::Acquire) {
         return Err(BridgeError::new("app-locked", "Peppy is locked."));
     }
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let budget_rows = input.and_then(|input| input.budget_rows);
     let index_session = session.clone();
     let progress = blocking(move || {
@@ -878,12 +897,12 @@ async fn load_message_window(
     state: State<'_, AppState>,
     input: peppy_desktop_api::MessageWindowRequestView,
 ) -> BridgeResult<peppy_desktop_api::MessageWindowView<dto::MessageView>> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     if state.app_locked.load(Ordering::Acquire) {
         return Err(BridgeError::new("app-locked", "Peppy is locked."));
     }
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let history_session = session.clone();
     let result = blocking(move || history_session.message_window(input)).await?;
     if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
@@ -1031,11 +1050,11 @@ async fn load_history(
     conversation_id: String,
     before_message_id: String,
 ) -> BridgeResult<HistoryPage> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     if state.app_locked.load(Ordering::Acquire) {
         return Err(BridgeError::new("app-locked", "Peppy is locked."));
     }
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let scoped_conversation = if window.label() == tray::MAIN {
         ConversationId::from_str(&conversation_id)
             .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?
@@ -1061,7 +1080,7 @@ async fn configure_server(
     state: State<'_, AppState>,
     origin: String,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let origin = origin::validate_origin(&origin)?;
     let _import = state.import_lock.lock().await;
@@ -1077,11 +1096,11 @@ async fn configure_server(
     let updated = state.update_config(|config| config.select_origin(&origin))?;
     let preserve_heads = previous.active_binding() == updated.active_binding();
     state.close_session_preserving_heads(preserve_heads).await;
-    if let Err(error) = state.session().await {
+    if let Err(error) = state.session_admitted(&operation).await {
         let rollback = previous.clone();
         let _ = state.update_config(|config| *config = rollback);
         state.close_session_preserving_heads(preserve_heads).await;
-        let _ = state.session().await;
+        let _ = state.session_admitted(&operation).await;
         return Err(error);
     }
     if let Some(permit) = permit {
@@ -1097,9 +1116,9 @@ async fn configure_server(
 async fn activate_native_credential(
     app: &tauri::AppHandle,
     state: &AppState,
+    operation: &update_safety::OperationGuard,
     bytes: zeroize::Zeroizing<Vec<u8>>,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(state)?;
     let credential = Arc::new(parse_credential(&bytes)?);
     drop(bytes);
     let _import = state.import_lock.lock().await;
@@ -1112,7 +1131,7 @@ async fn activate_native_credential(
     let result = async {
         state.update_config(|config| config.select_origin(&credential.origin))?;
         verify_import(state, &credential).await?;
-        activate_import_locked(state, credential.clone()).await
+        activate_import_locked(state, credential.clone(), Some(operation)).await
     }
     .await;
     if let Err(error) = result {
@@ -1173,12 +1192,13 @@ async fn activate_import(
     credential: Arc<credentials::ImportedCredential>,
 ) -> BridgeResult<()> {
     let _import = state.import_lock.lock().await;
-    activate_import_locked(state, credential).await
+    activate_import_locked(state, credential, None).await
 }
 
 async fn activate_import_locked(
     state: &AppState,
     credential: Arc<credentials::ImportedCredential>,
+    operation: Option<&update_safety::OperationGuard>,
 ) -> BridgeResult<()> {
     // Re-checked under the lock: the origin may have changed while the credential was verified.
     check_configured_origin(state, &credential)?;
@@ -1203,11 +1223,18 @@ async fn activate_import_locked(
         config.active = Some(binding.clone());
     })?;
     state.close_session_preserving_heads(preserve_heads).await;
-    if let Err(error) = state.session().await {
+    let open_session = match operation {
+        Some(operation) => state.session_admitted(operation).await,
+        None => state.session().await,
+    };
+    if let Err(error) = open_session {
         let rollback = previous.clone();
         let _ = state.update_config(|config| *config = rollback);
         state.close_session_preserving_heads(preserve_heads).await;
-        let _ = state.session().await;
+        let _ = match operation {
+            Some(operation) => state.session_admitted(operation).await,
+            None => state.session().await,
+        };
         return Err(error);
     }
     Ok(())
@@ -1219,9 +1246,9 @@ async fn unlock_sync(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let vault = fetch_vault(
         &session.api,
         &session.binding.vault_id,
@@ -1244,7 +1271,7 @@ async fn unlock_sync(
     )
     .await;
     if result.is_ok() {
-        if let Ok(current) = state.require_session().await {
+        if let Ok(current) = state.require_session_admitted(&operation).await {
             if Arc::ptr_eq(&current, &session) && current.binding == session.binding {
                 let _ = enrollment::save_verified_vault_secret_if_empty(
                     &*state.store,
@@ -1459,8 +1486,8 @@ async fn save_draft(
             .clone()
             .ok_or_else(BridgeError::no_session)?
     } else {
-        let _operation = admit_update_operation(&state)?;
-        let session = state.require_session().await?;
+        let operation = admit_update_operation(&state)?;
+        let session = state.require_session_admitted(&operation).await?;
         return save_draft_for_window(&state, window.label(), session, input).await;
     };
     save_draft_for_window(&state, window.label(), session, input).await
@@ -1473,9 +1500,9 @@ async fn discard_draft(
     state: State<'_, AppState>,
     input: DiscardDraftInput,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let conversation_id = input.conversation_id.clone();
     blocking(move || session.discard_draft(&input)).await?;
     if let Err(error) = heads_runtime::forget_deleted_conversation(&app, &conversation_id) {
@@ -1540,8 +1567,8 @@ async fn send_draft(
     state: State<'_, AppState>,
     input: DraftInput,
 ) -> BridgeResult<SendResultView> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     send_draft_for_window(&state, window.label(), session, input).await
 }
 
@@ -1551,7 +1578,7 @@ async fn mark_seen(
     state: State<'_, AppState>,
     visible_message_ids: Vec<String>,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     // A composer must never acknowledge another conversation's messages. The
     // UI supplies message IDs rather than a conversation ID, so resolve each
     // one through the scoped native session before applying the acknowledgement.
@@ -1564,7 +1591,7 @@ async fn mark_seen(
             "Messages can only be marked seen from a visible focused window.",
         ));
     }
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let conversation = if window.label() == tray::MAIN {
         None
     } else {
@@ -1581,22 +1608,22 @@ async fn mark_seen(
 
 #[tauri::command]
 async fn list_contact_books(state: State<'_, AppState>) -> BridgeResult<Vec<serde_json::Value>> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::list_books(&session)).await
 }
 
 #[tauri::command]
 async fn list_devices(state: State<'_, AppState>) -> BridgeResult<devices::DeviceRosterView> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     devices::list(&session).await
 }
 
 #[tauri::command]
 async fn revoke_device(state: State<'_, AppState>, device_id: String) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     devices::revoke(&session, &device_id).await
 }
 
@@ -1607,8 +1634,8 @@ async fn list_contacts(
     query: Option<String>,
     offset: Option<u32>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::list_contacts(&session, &book_id, query.as_deref(), offset)).await
 }
 
@@ -1619,8 +1646,8 @@ async fn search_contact_recipients(
     query: String,
     source_device_id: Option<String>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::search_recipients(&session, &query, source_device_id.as_deref()))
         .await
 }
@@ -1628,8 +1655,8 @@ async fn search_contact_recipients(
 /// Latches a contact projection repair; the live loop runs one fenced snapshot.
 #[tauri::command]
 async fn request_contact_repair(state: State<'_, AppState>) -> BridgeResult<serde_json::Value> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::request_repair(&session)).await
 }
 
@@ -1638,8 +1665,8 @@ async fn request_contact_sync(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<serde_json::Value> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::request_sync(&session, &book_id)).await
 }
 
@@ -1648,8 +1675,8 @@ async fn get_contact_sync_request(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<serde_json::Value> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::sync_request_status(&session, &book_id)).await
 }
 
@@ -1659,8 +1686,8 @@ async fn list_contact_edits(
     state: State<'_, AppState>,
     book_id: Option<String>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::list_edits(&session, book_id.as_deref())).await
 }
 
@@ -1671,8 +1698,8 @@ async fn pick_contact_photo(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<Option<serde_json::Value>> {
-    let _operation = admit_update_operation(&state)?;
-    state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    state.require_session_admitted(&operation).await?;
     let Some(path) = dialogs::pick_file(&app, "Choose a contact photo").await? else {
         return Ok(None);
     };
@@ -1683,8 +1710,8 @@ async fn pick_contact_photo(
 
 #[tauri::command]
 async fn forget_contact_book(state: State<'_, AppState>, book_id: String) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::forget_book(&session, &book_id)).await
 }
 
@@ -1693,8 +1720,8 @@ async fn submit_contact_edit(
     state: State<'_, AppState>,
     input: serde_json::Value,
 ) -> BridgeResult<serde_json::Value> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::submit(&session, &input)).await
 }
 
@@ -1703,8 +1730,8 @@ async fn list_restorable_contacts(
     state: State<'_, AppState>,
     book_id: String,
 ) -> BridgeResult<Vec<serde_json::Value>> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::restorable(&session, &book_id)).await
 }
 
@@ -1714,8 +1741,8 @@ async fn restore_contact(
     book_id: String,
     contact_id: String,
 ) -> BridgeResult<serde_json::Value> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || contacts::restore(&session, &book_id, &contact_id)).await
 }
 
@@ -1724,8 +1751,8 @@ async fn pick_attachments(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> BridgeResult<Vec<dto::AttachmentView>> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     let paths = dialogs::pick_files(&app, "Attach files (encrypted before upload)").await?;
     if paths.len() > 10 {
         return Err(BridgeError::new(
@@ -1861,8 +1888,8 @@ async fn retry_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let s = session.clone();
     blocking(move || s.retry_attachment(&id)).await?;
@@ -1877,8 +1904,8 @@ async fn save_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<bool> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
@@ -2053,8 +2080,8 @@ async fn request_attachment_download(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
@@ -2070,8 +2097,8 @@ async fn media_page(
     cursor: Option<MediaCursorInput>,
     limit: Option<usize>,
 ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
     if window.label() != tray::MAIN {
@@ -2100,8 +2127,8 @@ async fn media_page_around(
     message_id: Option<String>,
     limit: Option<usize>,
 ) -> BridgeResult<peppy_desktop_api::MediaPageAroundView> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
     let attachment = AttachmentId::from_str(&attachment_id)
@@ -2137,8 +2164,8 @@ async fn media_page_newer(
     cursor: MediaCursorInput,
     limit: Option<usize>,
 ) -> BridgeResult<peppy_desktop_api::MediaPageView> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-request", "The conversation ID is invalid."))?;
     if window.label() != tray::MAIN {
@@ -2162,8 +2189,8 @@ async fn open_media(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<OpenMediaView> {
-    let _operation = admit_update_operation(&state)?;
-    let session = state.require_session().await?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
     check_attachment_window_scope(&state, &session, &window, &id).await?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
@@ -2938,7 +2965,8 @@ mod media_protocol_tests {
     #[test]
     fn window_teardown_keeps_media_lease_while_update_restart_is_reserved() {
         let harness = ProtocolHarness::new(b"reserved");
-        let reservation = harness.state.update_safety.reserve().unwrap();
+        let reservation =
+            tauri::async_runtime::block_on(harness.state.update_safety.reserve_async()).unwrap();
 
         tauri::async_runtime::block_on(release_media_capabilities(
             &harness.state,
@@ -3024,9 +3052,9 @@ async fn publish_attachment(
     state: State<'_, AppState>,
     id: String,
 ) -> BridgeResult<Option<PublicCopyView>> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     let s = session.clone();
@@ -3172,7 +3200,7 @@ async fn create_public_copy(
 }
 
 async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&app.state::<AppState>())?;
+    let operation = admit_update_operation(&app.state::<AppState>())?;
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     let state = app.state::<AppState>();
     let conversation = match conversation {
@@ -3180,7 +3208,7 @@ async fn new_composer(app: tauri::AppHandle, conversation: Option<String>) -> Br
             BridgeError::new("invalid-conversation", "The conversation ID is invalid.")
         })?,
         None => {
-            let session = state.require_session().await?;
+            let session = state.require_session_admitted(&operation).await?;
             blocking(move || {
                 session
                     .client
@@ -3214,9 +3242,9 @@ async fn dismiss_notification(
     state: State<'_, AppState>,
     target: NotificationTarget,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let s = session.clone();
     blocking(move || s.client.dismiss_notification(target).map_err(core_error)).await?;
     session.notify();
@@ -3229,9 +3257,9 @@ async fn dismiss_all_notifications(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let s = session.clone();
     blocking(move || s.client.dismiss_all_notifications().map_err(core_error)).await?;
     session.notify();
@@ -3247,9 +3275,9 @@ async fn set_app_muted(
     app_name: String,
     muted: bool,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     let s = session.clone();
     blocking(move || {
         s.client
@@ -3267,9 +3295,9 @@ async fn mark_notifications_seen(
     state: State<'_, AppState>,
     targets: Vec<NotificationTarget>,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    let session = state.require_session().await?;
+    let session = state.require_session_admitted(&operation).await?;
     blocking(move || {
         session
             .client
@@ -3354,12 +3382,12 @@ async fn popout_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> BridgeResult<heads_runtime::PopoutResult> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
     let _window_permit = lifecycle::permit_window_creation(&app)?;
     let conversation = ConversationId::from_str(&conversation_id)
         .map_err(|_| BridgeError::new("invalid-conversation", "The conversation ID is invalid."))?;
-    let _ = state.require_session().await?;
+    let _ = state.require_session_admitted(&operation).await?;
     heads_runtime::popout(&app, conversation).await
 }
 
@@ -3479,6 +3507,7 @@ async fn restart_for_update(
             &state,
             &version,
             restart_in_background(main_window_visible(&app)),
+            true,
         )
         .await?;
         match never {}
@@ -3514,22 +3543,20 @@ async fn install_staged_update(
         return Err(error);
     }
     let bytes = staged.verified_bytes()?;
-    let permit = lifecycle::prepare_update(app).await?;
+    let permit =
+        lifecycle::prepare_update(app, intent == updates::install::InstallIntent::User).await?;
     state.updates.set_installing(&staged.update.version)?;
     state.updates.emit(app);
     if !sync::drain_all(std::time::Duration::from_secs(30)).await {
         // Keep the reservation until every active and retired supervisor has completed.
         // Releasing it earlier would permit a new session while old storage work remains live.
         let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
-            let state = app.state::<AppState>();
-            state.updates.install_failed(
-                "Background work finished. Restart the verified update when ready.",
-            );
-            state.updates.emit(&app);
-            drop(permit);
-        });
+        tauri::async_runtime::spawn(wait_for_background_work(
+            app,
+            permit,
+            "Waiting for background work before restarting the update.",
+            "Background work finished. Restart the verified update when ready.",
+        ));
         return Err(BridgeError::new(
             "update-busy",
             "Peppy is still finishing background work.",
@@ -3573,6 +3600,26 @@ async fn install_staged_update(
     install_guard.finish();
     state.allow_exit.store(true, Ordering::Release);
     app.restart();
+}
+
+async fn wait_for_background_work(
+    app: tauri::AppHandle,
+    permit: lifecycle::UpdatePermit,
+    waiting_message: &'static str,
+    final_message: &'static str,
+) {
+    let state = app.state::<AppState>();
+    loop {
+        state.updates.set_installing_message(waiting_message);
+        state.updates.emit(&app);
+        if sync::drain_all(std::time::Duration::from_secs(30)).await {
+            state.updates.install_failed(final_message);
+            state.updates.emit(&app);
+            drop(permit);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3706,19 +3753,19 @@ async fn restart_into_installed(
     state: &AppState,
     version: &str,
     background: bool,
+    wait_foroperations: bool,
 ) -> BridgeResult<std::convert::Infallible> {
-    let permit = lifecycle::prepare_update(app).await?;
+    let permit = lifecycle::prepare_update(app, wait_foroperations).await?;
+    state.updates.set_restarting_installed(version)?;
+    state.updates.emit(app);
     if !sync::drain_all(std::time::Duration::from_secs(30)).await {
         let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            while !sync::drain_all(std::time::Duration::from_secs(30)).await {}
-            let state = app.state::<AppState>();
-            state.updates.install_failed(
-                "Background work finished. Restart the installed update when ready.",
-            );
-            state.updates.emit(&app);
-            drop(permit);
-        });
+        tauri::async_runtime::spawn(wait_for_background_work(
+            app,
+            permit,
+            "Waiting for background work before restarting the installed update.",
+            "Background work finished. Restart the installed update when ready.",
+        ));
         return Err(BridgeError::new(
             "update-busy",
             "Peppy is still finishing background work.",
@@ -3768,6 +3815,7 @@ async fn restart_after_external_package_update(
         state,
         &installed,
         restart_in_background(main_window_visible(app)),
+        false,
     )
     .await
     .map(|never| match never {})
@@ -3776,6 +3824,7 @@ async fn restart_after_external_package_update(
 fn activate_main(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        tray::show_main(&app);
         #[cfg(target_os = "macos")]
         if let Some(state) = app.try_state::<AppState>() {
             let current_version = state.updates.status().current_version;
@@ -3787,7 +3836,7 @@ fn activate_main(app: &tauri::AppHandle) {
                     state.updates.emit(&app);
                 }
                 if state.updates.activation_should_restart(&version) {
-                    match restart_into_installed(&app, &state, &version, false).await {
+                    match restart_into_installed(&app, &state, &version, false, false).await {
                         Ok(never) => match never {},
                         Err(error) => {
                             eprintln!("peppy: installed-update restart failed: {}", error.code)
@@ -3796,7 +3845,6 @@ fn activate_main(app: &tauri::AppHandle) {
                 }
             }
         }
-        tray::show_main(&app);
     });
 }
 
@@ -3992,6 +4040,7 @@ pub fn run() {
                                 &state,
                                 &version,
                                 restart_in_background(main_window_visible(&update_handle)),
+                                false,
                             )
                             .await
                             {
@@ -4010,23 +4059,39 @@ pub fn run() {
             // history/snapshot replay into banners.
             let banner_handle = app.handle().clone();
             app.listen(STATE_EVENT, move |_| {
+                let settings = banner_handle.state::<AppState>().notifications.clone();
+                if !settings.request_banner_drain() {
+                    return;
+                }
                 let handle = banner_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let state = handle.state::<AppState>();
-                    let Ok(_operation) = admit_update_operation(&state) else {
-                        return;
-                    };
-                    let Ok(Some(session)) = state.session().await else {
-                        return;
-                    };
-                    let settings = state.notifications.clone();
-                    let drain_handle = handle.clone();
-                    let more = blocking(move || {
-                        notifications::drain_banner_candidates(&drain_handle, &session, &settings)
-                    })
-                    .await;
-                    if matches!(more, Ok(true)) {
-                        let _ = handle.emit(STATE_EVENT, ());
+                    loop {
+                        let state = handle.state::<AppState>();
+                        let more = match admit_update_operation(&state) {
+                            Ok(operation) => match state.session_admitted(&operation).await {
+                                Ok(Some(session)) => {
+                                    let drain_handle = handle.clone();
+                                    let settings = settings.clone();
+                                    blocking(move || {
+                                        notifications::drain_banner_candidates(
+                                            &drain_handle,
+                                            &session,
+                                            &settings,
+                                        )
+                                    })
+                                    .await
+                                }
+                                _ => Ok(false),
+                            },
+                            Err(_) => Ok(false),
+                        };
+                        // `true` means this bounded drain acknowledged candidates and more remain.
+                        if matches!(more, Ok(true)) {
+                            let _ = handle.emit(STATE_EVENT, ());
+                        }
+                        if !settings.finish_banner_drain() {
+                            break;
+                        }
                     }
                 });
             });
@@ -4056,6 +4121,7 @@ pub fn run() {
                                     &state,
                                     version,
                                     restart_in_background(main_window_visible(&app)),
+                                    true,
                                 )
                                 .await
                                 .map(|never| match never {}),
@@ -4112,10 +4178,10 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                let Ok(_operation) = admit_update_operation(&state) else {
+                let Ok(operation) = admit_update_operation(&state) else {
                     return;
                 };
-                let _ = state.session().await;
+                let _ = state.session_admitted(&operation).await;
             });
             Ok(())
         })

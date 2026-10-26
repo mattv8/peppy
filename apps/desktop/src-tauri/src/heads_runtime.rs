@@ -424,15 +424,16 @@ fn schedule_refresh(app: &AppHandle) {
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let Ok(_operation) = crate::admit_update_operation(&app.state::<AppState>()) else {
-            if let Ok(mut state) = runtime(&app).state.lock() {
-                state.refreshing = false;
-                state.queued = false;
-            }
-            return;
-        };
         loop {
-            refresh(&app).await;
+            let state = app.state::<AppState>();
+            let Ok(_operation) = crate::admit_update_operation(&state) else {
+                if let Ok(mut runtime_state) = runtime(&app).state.lock() {
+                    runtime_state.refreshing = false;
+                }
+                return;
+            };
+            refresh(&app, &_operation).await;
+            drop(_operation);
             let again = {
                 let runtime = runtime(&app);
                 let Ok(mut state) = runtime.state.lock() else {
@@ -457,7 +458,7 @@ fn schedule_refresh(app: &AppHandle) {
     });
 }
 
-async fn refresh(app: &AppHandle) {
+async fn refresh(app: &AppHandle, operation: &crate::update_safety::OperationGuard) {
     let app_state = app.state::<AppState>();
     if app_state
         .app_locked
@@ -477,12 +478,13 @@ async fn refresh(app: &AppHandle) {
             return;
         }
     };
-    let session = match app_state.session().await {
+    let session = match app_state.session_admitted(operation).await {
         Ok(Some(session)) if session.binding == binding => session,
-        _ => {
+        Ok(None) | Ok(Some(_)) => {
             clear_visible(app).await;
             return;
         }
+        Err(_) => return,
     };
     let (token, stale) = match begin_binding(app, binding.clone(), session.clone()) {
         Ok(value) => value,
