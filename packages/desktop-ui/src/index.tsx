@@ -862,6 +862,7 @@ export function ConversationList({
   onCancelDelete,
   deleteConfirmationId,
   deletingId,
+  deleteWarningId,
   loading = false,
 }: {
   conversations: Conversation[];
@@ -872,6 +873,7 @@ export function ConversationList({
   onCancelDelete?(): void;
   deleteConfirmationId?: string;
   deletingId?: string;
+  deleteWarningId?: string;
   loading?: boolean;
 }) {
   return (
@@ -900,6 +902,7 @@ export function ConversationList({
                   type="button"
                   className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}
                   data-delete-conversation-id={c.id}
+                  aria-describedby={isDeleteConfirmation ? deleteWarningId ?? `delete-draft-warning-${c.id}` : undefined}
                   aria-label={`${isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"} for ${c.name}`}
                   title={isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"}
                   disabled={deletingId === c.id}
@@ -917,6 +920,7 @@ export function ConversationList({
                 >
                   {deletingId === c.id ? <Loader size={15} aria-hidden /> : <Trash2 size={16} aria-hidden />}
                 </button>}
+                {isDeleteConfirmation && <span id={deleteWarningId ?? `delete-draft-warning-${c.id}`} role="status">Deleting this draft permanently removes its text and attachments.</span>}
                 {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
               </div>
             </li>;

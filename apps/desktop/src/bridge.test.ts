@@ -5,6 +5,7 @@ const eventMock = vi.hoisted(() => ({
   windowHandlers: new Map<string, (event: { payload: unknown }) => void>(),
   stop: vi.fn(),
   windowStop: vi.fn(),
+  windowListen: vi.fn(),
 }));
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -19,20 +20,23 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
-    listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
-      eventMock.windowHandlers.set(event, handler);
-      return eventMock.windowStop;
-    }),
+    listen: (event: string, handler: (event: { payload: unknown }) => void) =>
+      eventMock.windowListen(event, handler),
   }),
 }));
 
-import { missingHostBridge, tauriBridge } from "./bridge";
+import { fixtureBridge, missingHostBridge, tauriBridge } from "./bridge";
 
 describe("bridge subscriptions", () => {
   beforeEach(() => {
     eventMock.handler = undefined;
     eventMock.stop.mockReset();
     eventMock.windowStop.mockReset();
+    eventMock.windowListen.mockReset();
+    eventMock.windowListen.mockImplementation(async (event: string, handler: (event: { payload: unknown }) => void) => {
+      eventMock.windowHandlers.set(event, handler);
+      return eventMock.windowStop;
+    });
     eventMock.windowHandlers.clear();
   });
 
@@ -40,6 +44,22 @@ describe("bridge subscriptions", () => {
     expect(missingHostBridge.subscribe(() => undefined)).toEqual(expect.any(Function));
     expect(missingHostBridge.subscribe_lifecycle(() => undefined)).toEqual(expect.any(Function));
     expect(missingHostBridge.subscribe_lifecycle_finished(() => undefined)).toEqual(expect.any(Function));
+    expect(missingHostBridge.subscribe_drafts?.(() => undefined)).toEqual(expect.any(Function));
+    expect(fixtureBridge.subscribe_drafts?.(() => undefined)).toEqual(expect.any(Function));
+  });
+
+  it("uses the current webview listener and rejects malformed draft events", async () => {
+    const listener = vi.fn();
+    tauriBridge.subscribe_drafts?.(listener);
+    await vi.waitFor(() => expect(eventMock.windowHandlers.get("peppy://draft")).toEqual(expect.any(Function)));
+    const handler = eventMock.windowHandlers.get("peppy://draft");
+
+    handler?.({ payload: { id: "draft", conversationId: "conversation", text: "text", recipientIds: [], attachmentIds: [], revision: "18446744073709551615" } });
+    handler?.({ payload: { id: "draft", conversationId: "conversation", text: "text", recipientIds: [1], attachmentIds: [], revision: "1" } });
+    handler?.({ payload: { id: "draft", conversationId: "conversation", text: "text", recipientIds: [], attachmentIds: [], revision: "01" } });
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith({ id: "draft", conversationId: "conversation", text: "text", recipientIds: [], attachmentIds: [], revision: "18446744073709551615" });
   });
 
   it("rejects malformed lifecycle payloads before invoking the listener", async () => {
@@ -70,6 +90,18 @@ describe("bridge subscriptions", () => {
   it("safely disposes when the dynamic listener resolves after unmount", async () => {
     const dispose = tauriBridge.subscribe_lifecycle(() => undefined);
     dispose();
+    await vi.waitFor(() => expect(eventMock.windowStop).toHaveBeenCalledOnce());
+  });
+
+  it("disposes a draft listener that registers after its caller unmounts", async () => {
+    let finishRegistration: ((stop: () => void) => void) | undefined;
+    eventMock.windowListen.mockImplementationOnce(() => new Promise((resolve) => {
+      finishRegistration = resolve;
+    }));
+    const dispose = tauriBridge.subscribe_drafts?.(() => undefined);
+    await vi.waitFor(() => expect(eventMock.windowListen).toHaveBeenCalledOnce());
+    dispose?.();
+    finishRegistration?.(eventMock.windowStop);
     await vi.waitFor(() => expect(eventMock.windowStop).toHaveBeenCalledOnce());
   });
 

@@ -45,6 +45,7 @@ describe("draft lifecycle flushing", () => {
     const store = new DraftStore(async () => {
       throw { code: "draft-moved", message: "moved", details: { conversationId: "destination", draftId: "draft-destination", currentRevision: "4" } };
     }, { changed: () => {}, rekeyed: () => {}, unavailable });
+    store.adopt("source", undefined);
     await store.edit("source", { text: "local recovery" });
     expect(unavailable).toHaveBeenCalledWith("source", "destination", expect.stringContaining("Review the retained text"));
     expect(await store.flushAll()).toEqual({ ok: true });
@@ -58,6 +59,7 @@ describe("draft lifecycle flushing", () => {
     const store = new DraftStore(async () => {
       throw { code: "draft-moved", message: "moved", conversationId: "destination" };
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("source", undefined);
     await store.edit("source", { text: "flat detail recovery" });
     expect(store.recoveriesFor("destination")[0]).toMatchObject({
       content: { text: "flat detail recovery" },
@@ -73,6 +75,7 @@ describe("draft lifecycle flushing", () => {
       if (inputs.length === 1) return first.promise;
       return { ...input, id: "draft-destination", revision: "5" };
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("source", undefined);
     const initialSave = store.edit("source", { text: "first" });
     await vi.waitFor(() => expect(inputs).toHaveLength(1));
     const newerSave = store.edit("source", { text: "newer local text" });
@@ -127,6 +130,7 @@ describe("draft lifecycle flushing", () => {
     const store = new DraftStore(async () => {
       throw { code: "not-found", message: "deleted" };
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("source", undefined);
     await store.edit("source", { text: "recover me" });
     expect(store.recoveriesFor()).toEqual([
       expect.objectContaining({ content: expect.objectContaining({ text: "recover me" }) }),
@@ -141,6 +145,7 @@ describe("draft lifecycle flushing", () => {
       if (input.conversationId === "established") throw { code: "draft-moved", conversationId: "destination" };
       return { ...input, id: "draft-established", revision: "1" };
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("established", undefined);
     await store.edit("established", { text: "old reply" });
     store.adopt("established", undefined);
     await expect(store.edit("established", { text: "new reply" })).resolves.toEqual({ ok: true });
@@ -152,6 +157,8 @@ describe("draft lifecycle flushing", () => {
       if (input.conversationId === "destination") throw { message: "offline" };
       return { ...input, id: "draft-destination", conversationId: "destination", revision: "1" };
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("destination", undefined);
+    store.adopt("source", undefined);
     await store.edit("destination", { text: "destination edits" });
     const outcome = await store.edit("source", { text: "source edits" });
     expect(outcome).toEqual({ ok: false, error: expect.stringContaining("retained separately") });
@@ -166,6 +173,8 @@ describe("draft lifecycle flushing", () => {
       if (input.conversationId === "one") throw { message: "first failed" };
       return { id: `draft-${input.conversationId}`, conversationId: input.conversationId, text: input.text, recipientIds: input.recipientIds, attachmentIds: input.attachmentIds, revision: "1" };
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("one", undefined);
+    store.adopt("two", undefined);
     void store.edit("one", { text: "a" });
     void store.edit("two", { text: "b" });
     expect(await store.flushAll()).toEqual({ ok: false, error: "first failed" });
@@ -185,6 +194,7 @@ describe("draft lifecycle flushing", () => {
       active -= 1;
       return saved;
     }, { changed: () => {}, rekeyed: () => {} });
+    store.adopt("one", undefined);
     const firstEdit = store.edit("one", { text: "a" });
     await vi.waitFor(() => expect(inputs).toHaveLength(1));
     const secondEdit = store.edit("one", { text: "b" });
@@ -829,6 +839,8 @@ let lifecycle: ((request: { id: string; action: "quit" | "close" | "collapse" })
 let lifecycleDispose: ReturnType<typeof vi.fn>;
 let lifecycleFinished: ((result: { id: string; ok: boolean }) => void) | undefined;
 let lifecycleFinishedDispose: ReturnType<typeof vi.fn>;
+let draftHint: ((draft: Draft) => void) | undefined;
+let draftDispose: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   const values = new Map<string, string>();
@@ -848,6 +860,8 @@ beforeEach(() => {
   lifecycleDispose = vi.fn();
   lifecycleFinished = undefined;
   lifecycleFinishedDispose = vi.fn();
+  draftHint = undefined;
+  draftDispose = vi.fn();
   vi.spyOn(bridge, "load_state").mockImplementation(async (id) =>
     host.load(id),
   );
@@ -889,6 +903,11 @@ beforeEach(() => {
     hint = listener;
     return () => undefined;
   });
+  const draftBridge = bridge as typeof bridge & { subscribe_drafts(listener: (draft: Draft) => void): () => void };
+  vi.spyOn(draftBridge, "subscribe_drafts").mockImplementation(listener => {
+    draftHint = listener;
+    return draftDispose;
+  });
 });
 afterEach(() => {
   cleanup();
@@ -898,6 +917,60 @@ afterEach(() => {
 });
 
 describe("lazy conversation history", () => {
+  it("adopts a draft payload without loading state again", async () => {
+    render(<App />);
+    await screen.findByLabelText("Message");
+    const loadCount = vi.mocked(bridge.load_state).mock.calls.length;
+
+    await act(async () => draftHint?.({
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "Saved in another window",
+      recipientIds: [],
+      attachmentIds: [],
+      revision: "1",
+    }));
+
+    expect(message()).toHaveValue("Saved in another window");
+    expect(bridge.load_state).toHaveBeenCalledTimes(loadCount);
+  });
+
+  it("does not adopt a locked draft payload into an existing clean slot after unlock", async () => {
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "clean stored text",
+      recipientIds: [],
+      attachmentIds: [],
+      revision: "1",
+    });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("clean stored text"));
+    host.encryption = { state: "locked" };
+    await act(async () => hint?.());
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Search Peppy" })).toBeDisabled());
+
+    await act(async () => draftHint?.({
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "stale locked payload",
+      recipientIds: [],
+      attachmentIds: [],
+      revision: "99",
+    }));
+    host.encryption = { state: "unlocked" };
+    await act(async () => hint?.());
+    await waitFor(() => expect(message()).toHaveValue("clean stored text"));
+    expect(message()).not.toHaveValue("stale locked payload");
+  });
+
+  it("disposes the draft subscription on unmount", async () => {
+    const view = render(<App />);
+    await screen.findByLabelText("Message");
+    view.unmount();
+    expect(draftDispose).toHaveBeenCalledOnce();
+  });
+
   it("coalesces state-event refreshes into one trailing load", async () => {
     const first = deferred<DesktopSnapshot>();
     const second = deferred<DesktopSnapshot>();
@@ -1605,9 +1678,82 @@ describe("new-recipient drafts", () => {
     vi.mocked(bridge.load_state).mockRejectedValue(new Error("Initial state unavailable"));
     render(<App />);
 
-    expect(await screen.findByText("Initial state unavailable")).toHaveAttribute("role", "status");
+    expect(await screen.findByText("Initial state unavailable")).toHaveAttribute("role", "alert");
     expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
+  });
+
+  it("clears an applied refresh failure without dismissing action feedback", async () => {
+    vi.mocked(bridge.load_state).mockRejectedValueOnce(new Error("Initial state unavailable"));
+    render(<App />);
+    await screen.findByRole("alert");
+
+    vi.mocked(bridge.load_state).mockImplementation(async id => host.load(id));
+    const retryRefresh = screen.getByRole("button", { name: "Retry refresh" });
+    retryRefresh.focus();
+    fireEvent.click(retryRefresh);
+    const composer = await screen.findByLabelText("Message");
+    await waitFor(() => expect(document.querySelector('[data-app-notice-source="refresh"]')).toBeNull());
+    await waitFor(() => expect(composer).toHaveFocus());
+
+    vi.mocked(bridge.pick_attachments).mockRejectedValueOnce(new Error("Picker unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
+    const action = await screen.findByTestId("app-notice-action");
+    expect(action).toHaveTextContent("Picker unavailable");
+    expect(action).toHaveAttribute("data-app-notice-severity", "error");
+    expect(within(action).getByRole("alert")).toBeInTheDocument();
+
+    await act(async () => hint?.());
+    expect(screen.getByTestId("app-notice-action")).toHaveTextContent("Picker unavailable");
+
+    const dismiss = within(action).getByRole("button", { name: "Dismiss action notice" });
+    dismiss.focus();
+    fireEvent.click(dismiss);
+    await waitFor(() => expect(composer).toHaveFocus());
+  });
+
+  it("keeps a persistent refresh error when a superseded navigation response succeeds", async () => {
+    const superseded = deferred<DesktopSnapshot>();
+    const queued = deferred<DesktopSnapshot>();
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+
+    vi.mocked(bridge.load_state).mockRejectedValueOnce(new Error("Refresh unavailable"));
+    await act(async () => hint?.());
+    const refreshNotice = () => document.querySelector<HTMLElement>('[data-app-notice-source="refresh"]');
+    await waitFor(() => expect(refreshNotice()).not.toBeNull());
+
+    vi.mocked(bridge.load_state).mockReturnValueOnce(superseded.promise).mockReturnValueOnce(queued.promise);
+    const callsBeforeNavigation = vi.mocked(bridge.load_state).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeNavigation + 1));
+    fireEvent.click(screen.getByRole("button", { name: /Aurora/ }));
+    await act(async () => superseded.resolve(host.load("river")));
+    await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(callsBeforeNavigation + 2));
+
+    const notice = refreshNotice()!;
+    expect(notice).toBeInTheDocument();
+    expect(within(notice).getByRole("button", { name: /^Retry(ing)? refresh$/ })).toBeInTheDocument();
+    expect(within(notice).queryByRole("button", { name: /dismiss/i })).not.toBeInTheDocument();
+    await act(async () => queued.resolve(host.load("aurora")));
+  });
+
+  it("keeps the application banner outside composer windows", async () => {
+    render(<App />);
+    await screen.findByLabelText("Message");
+    vi.mocked(bridge.pick_attachments).mockRejectedValueOnce(new Error("Picker unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
+    const mainBanner = await screen.findByTestId("app-notice-action");
+    expect(document.getElementById("composer-area")).not.toContainElement(mainBanner);
+
+    cleanup();
+    openComposerWindow("aurora");
+    render(<App />);
+    await screen.findByLabelText("Message");
+    vi.mocked(bridge.pick_attachments).mockRejectedValueOnce(new Error("Picker unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
+    const detachedBanner = await screen.findByTestId("app-notice-action");
+    expect(document.getElementById("composer-area")).not.toContainElement(detachedBanner);
   });
 
   it("keeps a new draft's recipient title when the inbox is empty", async () => {
@@ -1633,6 +1779,8 @@ describe("new-recipient drafts", () => {
     fireEvent.click(remove);
     expect(document.getElementById("conversation-delete-draft")).toHaveAccessibleName("Confirm delete draft");
     expect(host.drafts.has("empty-draft")).toBe(true);
+    await act(async () => hint?.());
+    expect(document.getElementById("conversation-delete-draft")).toHaveAccessibleName("Confirm delete draft");
     fireEvent.click(document.getElementById("conversation-delete-draft")!);
     await waitFor(() => expect(host.drafts.has("empty-draft")).toBe(false));
   });
@@ -2071,7 +2219,7 @@ describe("draft durability", () => {
     expect(screen.getByRole("status", { name: "Recoverable unsaved draft" })).toHaveTextContent("late local text");
   });
 
-  it("recovers from a stale-revision conflict by keeping this window's text over the stored revision", async () => {
+  it("requires an explicit reviewed choice before replacing a stale stored draft", async () => {
     host.drafts.set("aurora", {
       id: "draft-aurora",
       conversationId: "aurora",
@@ -2091,13 +2239,98 @@ describe("draft durability", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "changed elsewhere",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review saved draft" }));
+    await screen.findByRole("button", { name: "Replace saved draft with local version" });
+    expect(screen.getByRole("group", { name: "Compare the saved and local drafts before choosing." })).toHaveTextContent("other window");
+    await waitFor(() => expect(document.getElementById("draft-conflict-comparison-title")).toHaveFocus());
+    fireEvent.click(screen.getByRole("button", { name: "Replace saved draft with local version" }));
     await waitFor(() =>
       expect(host.drafts.get("aurora")).toMatchObject({
         text: "mine",
         revision: "3",
       }),
     );
+  });
+
+  it("uses a verified absent saved draft only after review and retains the local version", async () => {
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("stored"));
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "other writer", revision: "2" });
+    type("local version");
+    await screen.findByRole("button", { name: "Review saved draft" });
+    host.drafts.delete("aurora");
+    fireEvent.click(screen.getByRole("button", { name: "Review saved draft" }));
+    await screen.findByRole("button", { name: "Use saved draft" });
+    fireEvent.click(screen.getByRole("button", { name: "Use saved draft" }));
+    await waitFor(() => expect(message()).toHaveValue(""));
+    expect(screen.getByRole("status", { name: "Recoverable unsaved draft" })).toHaveTextContent("local version");
+  });
+
+  it("refuses a mismatched reviewed identity without changing the local draft", async () => {
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("stored"));
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "other writer", revision: "2" });
+    type("local version");
+    await screen.findByRole("button", { name: "Review saved draft" });
+    const mismatched = { ...host.load("aurora"), draft: { id: "draft-river", conversationId: "river", text: "wrong conversation", recipientIds: [], attachmentIds: [], revision: "2" } };
+    vi.mocked(bridge.load_state).mockResolvedValueOnce(mismatched);
+    fireEvent.click(screen.getByRole("button", { name: "Review saved draft" }));
+    expect(await screen.findByText("The saved draft could not be verified. Your local draft remains unchanged.")).toHaveAttribute("role", "status");
+    expect(message()).toHaveValue("local version");
+    expect(screen.queryByRole("button", { name: "Use saved draft" })).not.toBeInTheDocument();
+  });
+
+  it("keeps both conflict choices disabled while use-saved is queued", async () => {
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("stored"));
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "other writer", revision: "2" });
+    type("local version");
+    await screen.findByRole("button", { name: "Review saved draft" });
+    fireEvent.click(screen.getByRole("button", { name: "Review saved draft" }));
+    const useSavedLoad = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValueOnce(useSavedLoad.promise);
+    fireEvent.click(await screen.findByRole("button", { name: "Use saved draft" }));
+    expect(screen.getByRole("button", { name: "Use saved draft" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Saving local draft…" })).toBeDisabled();
+    type("newer local version");
+    useSavedLoad.resolve(host.load("aurora"));
+    await waitFor(() => expect(message()).toHaveValue("newer local version"));
+    expect(screen.getByRole("button", { name: "Review saved draft" })).toBeInTheDocument();
+  });
+
+  it("requires review again when a reviewed stored draft changes or a keep-local save fails", async () => {
+    host.drafts.set("aurora", { id: "draft-aurora", conversationId: "aurora", text: "stored", recipientIds: [], attachmentIds: [], revision: "1" });
+    render(<App />);
+    await waitFor(() => expect(message()).toHaveValue("stored"));
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "other window", revision: "2" });
+    type("mine");
+    expect(await screen.findByRole("alert")).toHaveTextContent("changed elsewhere");
+
+    fireEvent.click(screen.getByRole("button", { name: "Review saved draft" }));
+    await screen.findByRole("button", { name: "Replace saved draft with local version" });
+    host.drafts.set("aurora", { ...host.drafts.get("aurora")!, text: "newer writer", revision: "3" });
+    fireEvent.click(screen.getByRole("button", { name: "Replace saved draft with local version" }));
+    expect(await screen.findByText(/The saved draft changed\. Review it again before choosing\./)).toHaveAttribute("role", "status");
+    expect(screen.getByRole("button", { name: "Review saved draft" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Replace saved draft with local version" })).not.toBeInTheDocument();
+    expect(message()).toHaveValue("mine");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(host.drafts.get("aurora")).toMatchObject({ text: "newer writer", revision: "3" });
+
+    vi.mocked(bridge.save_draft).mockRejectedValueOnce({ code: "stale-draft", message: "The draft changed elsewhere; both versions were kept." } satisfies HostError);
+    fireEvent.click(screen.getByRole("button", { name: "Review saved draft" }));
+    await screen.findByRole("button", { name: "Replace saved draft with local version" });
+    expect(document.querySelector("[data-draft-conflict-comparison]")).toHaveTextContent("newer writer");
+    fireEvent.click(screen.getByRole("button", { name: "Replace saved draft with local version" }));
+    expect(await screen.findByText(/^Draft not saved:/)).toHaveAttribute("role", "status");
+    expect(screen.getByRole("button", { name: "Review saved draft" })).toBeInTheDocument();
+    expect(message()).toHaveValue("mine");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(host.drafts.get("aurora")).toMatchObject({ text: "newer writer", revision: "3" });
+    expect(bridge.send_draft).not.toHaveBeenCalled();
   });
 
   it("retains dirty drafts across live state hints and adopts host changes once clean", async () => {
@@ -2164,6 +2397,28 @@ describe("draft durability", () => {
     await waitFor(() => expect(bridge.load_state).toHaveBeenCalledTimes(2));
     expect(message()).toHaveValue("unsaved");
     expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("shows composer send feedback only in the conversation that produced it", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    await waitFor(() => expect(host.drafts.get("aurora")?.simId).toBe("sim-1"));
+    type("reply to Aurora");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("reply to Aurora"));
+
+    vi.mocked(bridge.send_draft).mockResolvedValueOnce({ accepted: false, status: "failed-before-submit", reason: "Carrier refused the message." });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const feedback = await screen.findByText(/Carrier refused the message\./);
+    expect(feedback).toHaveAttribute("data-composer-feedback", "aurora");
+    expect(document.getElementById("composer-area")).toContainElement(feedback);
+    expect(document.getElementById("app-notice-banner")?.textContent ?? "").not.toContain("Carrier refused the message.");
+
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    await screen.findByText("Hello from River");
+    expect(screen.queryByText(/Carrier refused the message\./)).not.toBeInTheDocument();
+    expect(document.querySelector("[data-composer-feedback]")).toBeNull();
+    expect(bridge.send_draft).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -2638,13 +2893,13 @@ describe("gateway routes", () => {
     expect(host.drafts.get("aurora")?.text).toBe("Keep this draft");
   });
 
-  it("allows delayed and legacy SMS routes while labeling legacy status as unknown", async () => {
+  it("allows delayed and legacy SMS routes without verbose freshness warnings", async () => {
     host.gateways = [{ ...SMS_ONLY, availability: "delayed" }];
     host.drafts.set("aurora", storedDraft({ simId: "sim-1" }));
     render(<App />);
     expect(await screen.findByRole("button", { name: "Send" })).toBeEnabled();
     expect(document.getElementById("gateway-selector")).toHaveAttribute("data-route-state", "delayed");
-    expect(document.getElementById("gateway-status-hint")).toBeVisible();
+    expect(document.getElementById("gateway-selector")).not.toHaveAttribute("aria-describedby");
 
     cleanup();
     host.gateways = [{ ...SMS_ONLY, availability: "unknown" }];
@@ -3114,7 +3369,7 @@ describe("host state display", () => {
     expect(screen.queryByText("Offline — offline")).not.toBeInTheDocument();
   });
 
-  it("retries a rejected visible-row mark after native state refresh", async () => {
+  it("retries a rejected visible-row mark after native state refresh without a refresh alert", async () => {
     const mark = vi.mocked(bridge.mark_seen);
     mark.mockRejectedValueOnce({ message: "Window is hidden." });
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
@@ -3152,7 +3407,7 @@ describe("host state display", () => {
     )!;
     act(() => observed.at(-1)!([{ target: row, isIntersecting: true }]));
     await waitFor(() => expect(mark).toHaveBeenCalledTimes(1));
-    await screen.findByText("Window is hidden.");
+    expect(document.querySelector('[data-app-notice-source="refresh"]')).not.toBeInTheDocument();
     await act(async () => hint?.());
     await waitFor(() => expect(mark).toHaveBeenCalledTimes(2));
     expect(mark).toHaveBeenLastCalledWith(["m-aurora"]);

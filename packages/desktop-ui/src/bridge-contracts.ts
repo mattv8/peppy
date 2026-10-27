@@ -154,6 +154,7 @@ export interface DesktopBridge {
   close_composer(): Promise<void>;
   close_head_panel(): Promise<void>;
   subscribe(listener: () => void): () => void;
+  subscribe_drafts?(listener: (draft: Draft) => void): () => void;
   subscribe_lifecycle(listener: (request: { id: string; action: "quit" | "close" | "collapse" }) => void): () => void;
   subscribe_lifecycle_finished(listener: (result: { id: string; ok: boolean }) => void): () => void;
   acknowledge_lifecycle(id: string, ok: boolean): Promise<void>;
