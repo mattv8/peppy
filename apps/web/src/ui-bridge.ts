@@ -30,3 +30,7 @@ export let bridge: DesktopBridge;
 export function installBrowserBridge(browserBridge: DesktopBridge): void {
   bridge = browserBridge;
 }
+
+export function renewHostedSession(): Promise<void> {
+  return Promise.reject(new Error("Hosted session renewal is unavailable in the browser."));
+}

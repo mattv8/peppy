@@ -452,6 +452,42 @@ impl Session {
         self.mark_seen_scoped(ids, None)
     }
 
+    pub fn mark_all_read(&self) -> BridgeResult<String> {
+        let batches = self.client.unread_message_batches().map_err(core_error)?;
+        self.apply_read_batches(batches, |batch| self.client.mark_read_batch(batch))
+            .map(|changed| changed.to_string())
+            .map_err(core_error)
+    }
+
+    fn apply_read_batches<E>(
+        &self,
+        batches: Vec<Vec<MessageId>>,
+        mut apply: impl FnMut(&[MessageId]) -> Result<u64, E>,
+    ) -> Result<u64, E> {
+        let batch_count = batches.len();
+        let mut changed_total = 0;
+        for (index, batch) in batches.into_iter().enumerate() {
+            match apply(&batch) {
+                Ok(changed) => changed_total += changed,
+                Err(error) => {
+                    if changed_total > 0 {
+                        self.notify();
+                        self.request_work();
+                    }
+                    return Err(error);
+                }
+            }
+            if index + 1 < batch_count {
+                std::thread::yield_now();
+            }
+        }
+        if changed_total > 0 {
+            self.notify();
+            self.request_work();
+        }
+        Ok(changed_total)
+    }
+
     pub fn redirected_conversation(
         &self,
         source: ConversationId,
@@ -1333,6 +1369,133 @@ mod tests {
 
         session.mark_seen_scoped(&[id], Some(conversation)).unwrap();
         assert_eq!(count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn mark_all_read_returns_the_changed_count_and_notifies_only_when_needed() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let count = Arc::new(AtomicUsize::new(0));
+        let notifier_count = count.clone();
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                notifier_count.fetch_add(1, Ordering::Relaxed);
+            }),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        for index in 0..=peppy_client_core::READ_STATE_BATCH_SIZE {
+            session
+                .client
+                .capture_incoming(IncomingSms {
+                    conversation_id: None,
+                    sender_address: format!("+1555555010{index}"),
+                    body: "unread".into(),
+                    provider_message_id: Some(format!("mark-all-read-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+        }
+        count.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            session.mark_all_read().unwrap(),
+            (peppy_client_core::READ_STATE_BATCH_SIZE + 1).to_string()
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                session.work_wake.notified()
+            )
+            .await
+            .is_ok(),
+            "a changed batch wakes the worker once"
+        );
+        assert_eq!(session.mark_all_read().unwrap(), "0");
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                session.work_wake.notified()
+            )
+            .await
+            .is_err(),
+            "an idempotent call must not wake the worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_read_batch_failure_notifies_and_wakes_once_after_a_commit() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let count = Arc::new(AtomicUsize::new(0));
+        let notifier_count = count.clone();
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(move || {
+                notifier_count.fetch_add(1, Ordering::Relaxed);
+            }),
+        )
+        .unwrap();
+        let batches = vec![vec![MessageId::new()], vec![MessageId::new()]];
+        let mut applied_batches = 0;
+
+        assert_eq!(
+            session.apply_read_batches(batches, |_| {
+                applied_batches += 1;
+                if applied_batches == 1 {
+                    Ok(1)
+                } else {
+                    Err("later failure")
+                }
+            }),
+            Err("later failure")
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                session.work_wake.notified()
+            )
+            .await
+            .is_ok(),
+            "a committed first batch wakes the worker"
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                session.work_wake.notified()
+            )
+            .await
+            .is_err(),
+            "a partial failure wakes the worker only once"
+        );
+
+        assert_eq!(
+            session.apply_read_batches(vec![vec![MessageId::new()]], |_| {
+                Err::<u64, _>("first failure")
+            }),
+            Err("first failure")
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                session.work_wake.notified()
+            )
+            .await
+            .is_err(),
+            "a first-batch failure does not wake the worker"
+        );
     }
 
     #[test]

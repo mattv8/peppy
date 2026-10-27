@@ -9,9 +9,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,7 +23,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import dev.peppy.mobile.ui.InfoButton
+import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.HeroBanner
+import dev.peppy.mobile.ui.ScreenBody
+import dev.peppy.mobile.ui.SettingToggleRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -32,16 +35,52 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, onOpenAppFilters: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var accessGranted by remember { mutableStateOf(false) }
     var enabled by remember { mutableStateOf<Boolean?>(null) }
     var wifiOnly by remember { mutableStateOf<Boolean?>(null) }
     var skipSilent by remember { mutableStateOf<Boolean?>(null) }
     var filterSummary by remember { mutableStateOf<NotificationAppFilterSummaryState>(NotificationAppFilterSummaryState.Loading) }
     var testResult by remember { mutableStateOf<NotificationTestCaptureResult?>(null) }
-    val scope = rememberCoroutineScope()
-    val accessLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        onChanged()
+    var consent by remember { mutableStateOf(ConsentGatedToggle()) }
+
+    fun applyEnabled(value: Boolean) {
+        enabled = null
+        scope.launch {
+            val persistedValue = withContext(Dispatchers.IO) {
+                if (value && !NotificationMirrorAccess.granted(context)) {
+                    return@withContext NotificationMirrorPreferences.enabled(context)
+                }
+                NotificationMirrorPreferences.setEnabled(context, value)
+                NotificationMirrorPreferences.enabled(context)
+            }
+            enabled = persistedValue
+            if (persistedValue) {
+                NotificationMirrorService.reconcile()
+                GatewayWork.enqueue(context)
+            } else {
+                NotificationMirrorService.clearPendingCaptures()
+            }
+            consent = consent.cancel()
+            onChanged()
+        }
     }
+
+    fun consumeAccessResult(granted: Boolean) {
+        val transition = consent.accessResult(granted)
+        consent = transition.state
+        if (transition.effect == ConsentEffect.APPLY) applyEnabled(true)
+    }
+
+    val accessLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        scope.launch {
+            accessGranted = withContext(Dispatchers.IO) { NotificationMirrorAccess.granted(context) }
+            consumeAccessResult(accessGranted)
+            onChanged()
+        }
+    }
+    DisposableEffect(Unit) { onDispose { consent = consent.cancel() } }
+
     LaunchedEffect(refresh) {
         accessGranted = NotificationMirrorAccess.granted(context)
         enabled = withContext(Dispatchers.IO) { NotificationMirrorPreferences.enabled(context) }
@@ -57,144 +96,94 @@ internal fun NotificationMirroringSettings(refresh: Int, onChanged: () -> Unit, 
         }
     }
 
-    Section(
-        "notification-mirroring-section",
-        "Notification mirroring",
-        showDivider = false,
-        helpBody = stringResource(R.string.peppy_help_android_notification_mirroring),
-    ) {
-        NotificationMirroringAccessControls(
-            accessGranted = accessGranted,
-            enabled = enabled == true,
-            toggleEnabled = enabled != null,
-            onRequestAccess = { accessLauncher.launch(NotificationMirrorAccess.settingsIntent()) },
-            onEnabledChanged = { value ->
-                // Null disables the control until the write's read-back lands, so taps cannot interleave.
-                enabled = null
-                scope.launch {
-                    val persistedValue = withContext(Dispatchers.IO) {
-                        NotificationMirrorPreferences.setEnabled(context, value)
-                        NotificationMirrorPreferences.enabled(context)
-                    }
-                    enabled = persistedValue
-                    if (persistedValue) { NotificationMirrorService.reconcile(); GatewayWork.enqueue(context) }
-                    else NotificationMirrorService.clearPendingCaptures()
-                }
-            },
+    Column(Modifier.testTag("mirroring-tab-screen")) {
+        HeroBanner(
+            title = stringResource(R.string.peppy_toggle_android_mirroring_hero_title),
+            body = stringResource(R.string.peppy_toggle_android_mirroring_hero_body),
+            tag = "mirroring-hero",
         )
-        if (enabled == true && accessGranted) {
-            Row(
-                Modifier.fillMaxWidth().testTag("notification-mirroring-wifi-row"),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Mirror on WiFi only", style = MaterialTheme.typography.bodyMedium)
-                }
-                InfoButton(
-                    "Mirror on WiFi only",
-                    "Mirror on WiFi only",
-                    stringResource(R.string.peppy_help_android_notification_wifi),
-                    "info-notification-wifi",
-                )
-                Switch(
+        ScreenBody("mirroring-screen-body") {
+        Section("mirroring-section", "Notification mirroring", showDivider = false, helpBody = stringResource(R.string.peppy_help_android_notification_mirroring)) {
+            val effectiveEnabled = enabled == true && accessGranted
+            SettingToggleRow(
+                title = stringResource(R.string.peppy_toggle_android_mirroring_label),
+                checked = enabled == true,
+                enabled = enabled != null && consent.phase == ConsentPhase.IDLE,
+                onCheckedChange = { requested ->
+                    if (requested) consent = consent.requestEnable() else applyEnabled(false)
+                },
+                tag = "notification-mirroring-master-row",
+                subtitle = when {
+                    enabled == true && !accessGranted -> stringResource(R.string.peppy_toggle_android_mirroring_paused_hint)
+                    !accessGranted -> stringResource(R.string.peppy_toggle_android_mirroring_access_hint)
+                    else -> null
+                },
+            )
+            SettingToggleRow(
+                    title = stringResource(R.string.peppy_wifi_only),
                     checked = wifiOnly == true,
-                    enabled = wifiOnly != null,
+                    enabled = effectiveEnabled && wifiOnly != null,
                     onCheckedChange = { value ->
                         wifiOnly = null
-                        scope.launch {
-                            wifiOnly = withContext(Dispatchers.IO) {
-                                GatewayPolicyHost(context).mirroringWifiOnly = value
-                                GatewayPolicyHost(context).mirroringWifiOnly
-                            }
-                        }
+                        scope.launch { wifiOnly = withContext(Dispatchers.IO) { GatewayPolicyHost(context).mirroringWifiOnly = value; GatewayPolicyHost(context).mirroringWifiOnly } }
                     },
-                    modifier = Modifier.testTag("notification-mirroring-wifi-switch"),
-                )
-            }
-            Row(
-                Modifier.fillMaxWidth().testTag("notification-mirroring-skip-silent-row"),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(stringResource(R.string.peppy_skip_silent), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                Switch(
+                    tag = "notification-mirroring-wifi-row",
+                    subtitle = stringResource(R.string.peppy_toggle_android_mirroring_wifi_hint),
+            )
+            SettingToggleRow(
+                    title = stringResource(R.string.peppy_skip_silent),
                     checked = skipSilent == true,
-                    enabled = skipSilent != null,
+                    enabled = effectiveEnabled && skipSilent != null,
                     onCheckedChange = { value ->
                         skipSilent = null
-                        scope.launch {
-                            skipSilent = withContext(Dispatchers.IO) {
-                                GatewayPolicyHost(context).skipSilent = value
-                                GatewayPolicyHost(context).skipSilent
-                            }
-                        }
+                        scope.launch { skipSilent = withContext(Dispatchers.IO) { GatewayPolicyHost(context).skipSilent = value; GatewayPolicyHost(context).skipSilent } }
                     },
-                    modifier = Modifier.testTag("notification-mirroring-skip-silent-switch"),
-                )
-            }
-            NotificationAppFiltersNavRow(filterSummary, onOpenAppFilters)
-            if (filterSummary is NotificationAppFilterSummaryState.Ready) OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        testResult = withContext(Dispatchers.IO) { NotificationMirrorService.captureTest(context) }
-                        if (testResult == NotificationTestCaptureResult.CAPTURED) onChanged()
-                    }
-                },
-                modifier = Modifier.testTag("notification-test-button"),
-            ) { Text("Send test notification") }
-            when (testResult) {
-                NotificationTestCaptureResult.CAPTURED -> Text("Test notification queued for sync.", modifier = Modifier.testTag("notification-test-result"), style = MaterialTheme.typography.bodySmall)
-                NotificationTestCaptureResult.ALREADY_QUEUED -> Text("A test notification is already queued for sync.", modifier = Modifier.testTag("notification-test-result"), style = MaterialTheme.typography.bodySmall)
-                NotificationTestCaptureResult.LOCKED -> Text("Unlock sync before sending a test notification.", modifier = Modifier.testTag("notification-test-result"), style = MaterialTheme.typography.bodySmall)
-                NotificationTestCaptureResult.POLICY_BLOCKED -> Text("Enable notification mirroring and notification access before sending a test notification.", modifier = Modifier.testTag("notification-test-result"), style = MaterialTheme.typography.bodySmall)
-                NotificationTestCaptureResult.ERROR -> Text("Could not create a test notification. Try again.", modifier = Modifier.testTag("notification-test-result"), style = MaterialTheme.typography.bodySmall)
-                null -> Unit
+                    tag = "notification-mirroring-skip-silent-row",
+            )
+            if (effectiveEnabled) NotificationAppFiltersNavRow(filterSummary, onOpenAppFilters)
+            else Text(stringResource(R.string.peppy_toggle_android_mirroring_app_filters_disabled), Modifier.testTag("app-filters-disabled-row"), style = MaterialTheme.typography.bodySmall)
+            if (effectiveEnabled) {
+                if (filterSummary is NotificationAppFilterSummaryState.Ready) OutlinedButton(
+                    onClick = { scope.launch { testResult = withContext(Dispatchers.IO) { NotificationMirrorService.captureTest(context) }; if (testResult == NotificationTestCaptureResult.CAPTURED) onChanged() } },
+                    modifier = Modifier.testTag("notification-test-button"),
+                ) { Text("Send test notification") }
+                NotificationTestResult(testResult)
             }
         }
+        }
     }
+
+    if (consent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
+        title = stringResource(R.string.peppy_toggle_android_mirroring_consent_title),
+        body = stringResource(R.string.peppy_notification_mirroring_disclosure),
+        tag = "mirroring-consent-sheet",
+        disclosureTag = "notification-mirroring-disclosure",
+        confirmLabel = stringResource(R.string.peppy_toggle_android_agree),
+        nextStep = if (accessGranted) null else stringResource(R.string.peppy_toggle_android_mirroring_next_access),
+        onDismiss = { consent = consent.cancel() },
+        onConfirm = {
+            val transition = consent.agree(accessGranted)
+            consent = transition.state
+            when (transition.effect) {
+                ConsentEffect.APPLY -> applyEnabled(true)
+                ConsentEffect.REQUEST_ACCESS -> accessLauncher.launch(NotificationMirrorAccess.settingsIntent())
+                ConsentEffect.NONE -> Unit
+            }
+        },
+    )
 }
 
 @Composable
-internal fun NotificationMirroringAccessControls(
-    accessGranted: Boolean,
-    enabled: Boolean,
-    toggleEnabled: Boolean = true,
-    onRequestAccess: () -> Unit,
-    onEnabledChanged: (Boolean) -> Unit,
-) {
-    Text(
-        stringResource(R.string.peppy_notification_mirroring_disclosure),
-        Modifier.testTag("notification-mirroring-disclosure"),
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    StatusRow("status-notification-access", "Notification access", if (accessGranted) "Granted" else "Not granted")
-    if (!accessGranted) {
-        OutlinedButton(onClick = onRequestAccess, modifier = Modifier.testTag("notification-access-button")) { Text("Grant notification access") }
-        Text(
-            "Peppy needs notification access to mirror app notifications to your desktop. Tap to open Android Settings, then enable Peppy.",
-            style = MaterialTheme.typography.bodySmall,
-        )
+private fun NotificationTestResult(result: NotificationTestCaptureResult?) {
+    val message = when (result) {
+        NotificationTestCaptureResult.CAPTURED -> "Test notification queued for sync."
+        NotificationTestCaptureResult.ALREADY_QUEUED -> "A test notification is already queued for sync."
+        NotificationTestCaptureResult.LOCKED -> "Unlock sync before sending a test notification."
+        NotificationTestCaptureResult.POLICY_BLOCKED -> "Enable notification mirroring and notification access before sending a test notification."
+        NotificationTestCaptureResult.ERROR -> "Could not create a test notification. Try again."
+        null -> return
     }
-    Row(
-        Modifier.fillMaxWidth().testTag("notification-mirroring-master-row"),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text("Mirror app notifications", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        InfoButton(
-            "Mirror app notifications",
-            "Mirror app notifications",
-            stringResource(R.string.peppy_help_android_notification_mirroring_toggle),
-            "info-notification-mirroring-toggle",
-        )
-        Switch(
-            checked = enabled,
-            enabled = accessGranted && toggleEnabled,
-            onCheckedChange = onEnabledChanged,
-            modifier = Modifier.testTag("notification-mirroring-master-switch"),
-        )
-    }
+    Text(message, Modifier.testTag("notification-test-result"), style = MaterialTheme.typography.bodySmall)
 }
 
 /** Launchable apps are an optional inventory; observed apps fill gaps without QUERY_ALL_PACKAGES. */

@@ -9,6 +9,50 @@ public enum ContactsSyncIntent: Sendable, Equatable {
     case stopped
 }
 
+/// Transient UI-only consent state. It deliberately has no durable storage: an
+/// interrupted permission request must require a new in-app consent action.
+public struct ContactsConsentDecision: Sendable, Equatable {
+    public enum Phase: Sendable, Equatable { case idle, disclosure, awaitingAccess, awaitingSettings, applying }
+    public enum Effect: Sendable, Equatable { case none, requestAccess, apply, openSettings }
+
+    public private(set) var phase: Phase = .idle
+    public init() {}
+
+    public mutating func requestEnable() {
+        guard phase == .idle else { return }
+        phase = .disclosure
+    }
+
+    public mutating func agree(access: ContactsAccess) -> Effect {
+        guard phase == .disclosure else { return .none }
+        switch access {
+        case .full, .limited: phase = .applying; return .apply
+        case .notDetermined: phase = .awaitingAccess; return .requestAccess
+        case .denied: phase = .awaitingSettings; return .openSettings
+        case .restricted: phase = .idle; return .none
+        }
+    }
+
+    /// Consumes the one permission result. Later unrelated access changes do
+    /// not apply a previous request.
+    public mutating func accessResult(granted: Bool) -> Effect {
+        guard phase == .awaitingAccess else { return .none }
+        phase = granted ? .applying : .idle
+        return granted ? .apply : .none
+    }
+
+    /// A Settings return is valid only for the explicit denied flow that opened it.
+    /// It is consumed once so an unrelated later permission change cannot opt in.
+    public mutating func settingsAccessResult(granted: Bool) -> Effect {
+        guard phase == .awaitingSettings else { return .none }
+        phase = granted ? .applying : .idle
+        return granted ? .apply : .none
+    }
+
+    public mutating func finish() { phase = .idle }
+    public mutating func cancel() { phase = .idle }
+}
+
 /// Native-only contact preference: the user's local intent. Books, policy, the new-contact account,
 /// revisions, item IDs, scan checkpoints, history tokens and the edit ledger live in the Rust core.
 public struct ContactsPreferences: Sendable, Equatable {

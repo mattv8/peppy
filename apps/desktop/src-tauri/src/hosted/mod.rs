@@ -11,10 +11,12 @@ use crate::{
     AppState,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use peppy_hosted_api::{routes, IdentityProvider, NativeAuthConfigResponse};
+use peppy_hosted_api::{
+    routes, IdentityProvider, NativeAuthConfigResponse, SESSION_LIFETIME_SECONDS,
+};
 use peppy_hosted_client::{
     hosted_login_request, hosted_session_request, parse_hosted_account, parse_hosted_login_attempt,
-    parse_hosted_session, prepare, restore, HostedProvisioning,
+    parse_hosted_session, parse_hosted_session_renewal, prepare, restore, HostedProvisioning,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,6 +42,8 @@ const CHECKPOINT_PREFIX: &str = "hosted-provisioning:";
 const PENDING_SECRET_PREFIX: &str = "hosted-pending-secret:v1:";
 const RECOVERY_INDEX_PREFIX: &str = "hosted-provisioning-index:v1:";
 const MAX_PENDING_SECRET_BYTES: usize = 16 * 1024;
+const RENEWAL_SUCCESS_INTERVAL_SECONDS: u64 = 15 * 60;
+const RENEWAL_FAILURE_RETRY_SECONDS: u64 = 30;
 
 /// Managed by L8 with `app.manage(HostedState::default())`.
 #[derive(Default)]
@@ -47,6 +51,8 @@ pub struct HostedState {
     session: Mutex<Option<HostedSessionRecord>>,
     provisioning: Mutex<()>,
     sign_in_generation: AtomicU64,
+    renewal: Mutex<()>,
+    last_renewal_failure_at: Mutex<Option<u64>>,
     /// Tests send requests to a local fake server while keeping an HTTPS credential origin.
     #[cfg(test)]
     base_override: std::sync::Mutex<Option<String>>,
@@ -75,6 +81,12 @@ pub(crate) async fn enrollment_account_session(
                 "Sign in again to Peppy Hosted before enrolling.",
             )
         })?;
+    if session.expires_at_unix <= now_unix() {
+        return Err(BridgeError::new(
+            "hosted-session-required",
+            "Sign in again to Peppy Hosted before enrolling.",
+        ));
+    }
     Ok(Zeroizing::new(session.bearer.to_string()))
 }
 
@@ -460,6 +472,105 @@ async fn authenticated(
     read_response(response).await
 }
 
+async fn renew_session(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+) -> BridgeResult<()> {
+    let _renewal = hosted.renewal.lock().await;
+    let generation = hosted.sign_in_generation.load(Ordering::SeqCst);
+    let session = match load_session_from_store(store, hosted, origin).await {
+        Ok(session) => session,
+        Err(error) => {
+            *hosted.last_renewal_failure_at.lock().await = Some(now_unix());
+            return Err(error);
+        }
+    };
+    let Some(session) = session else {
+        *hosted.last_renewal_failure_at.lock().await = Some(now_unix());
+        return Err(BridgeError::new(
+            "hosted-session-required",
+            "Sign in again to Peppy Hosted.",
+        ));
+    };
+    let now = now_unix();
+    if session.expires_at_unix.saturating_sub(now)
+        > u64::from(SESSION_LIFETIME_SECONDS).saturating_sub(RENEWAL_SUCCESS_INTERVAL_SECONDS)
+    {
+        return Ok(());
+    }
+    if hosted
+        .last_renewal_failure_at
+        .lock()
+        .await
+        .is_some_and(|failed_at| now.saturating_sub(failed_at) < RENEWAL_FAILURE_RETRY_SECONDS)
+    {
+        return Ok(());
+    }
+
+    let base = hosted.api_base(origin);
+    let client = http(&base)?;
+    let response = client
+        .post(format!("{base}{}", routes::AUTH_SESSION_RENEW))
+        .bearer_auth(&*session.bearer)
+        .send()
+        .await
+        .map_err(|_| BridgeError::new("offline", "Could not reach Peppy Hosted."));
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            *hosted.last_renewal_failure_at.lock().await = Some(now);
+            return Err(error);
+        }
+    };
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if let Err(error) =
+            tombstone_observed_session(store, hosted, origin, &session.bearer, generation).await
+        {
+            *hosted.last_renewal_failure_at.lock().await = Some(now);
+            return Err(error);
+        }
+        *hosted.last_renewal_failure_at.lock().await = Some(now);
+        return Err(BridgeError::new(
+            "hosted-session-required",
+            "Your Peppy Hosted sign-in expired. Sign in again to continue.",
+        ));
+    }
+    let bytes = match read_response(response).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            *hosted.last_renewal_failure_at.lock().await = Some(now);
+            return Err(error.into());
+        }
+    };
+    let expires_in_seconds = match String::from_utf8(bytes)
+        .map_err(|_| invalid_response())
+        .and_then(|body| {
+            parse_hosted_session_renewal(body, session.account_id.clone()).map_err(client_error)
+        }) {
+        Ok(expires) => expires,
+        Err(error) => {
+            *hosted.last_renewal_failure_at.lock().await = Some(now);
+            return Err(error);
+        }
+    };
+    if let Err(error) = replace_observed_session_expiry(
+        store,
+        hosted,
+        origin,
+        &session.bearer,
+        generation,
+        now.saturating_add(u64::from(expires_in_seconds)),
+    )
+    .await
+    {
+        *hosted.last_renewal_failure_at.lock().await = Some(now);
+        return Err(error);
+    }
+    *hosted.last_renewal_failure_at.lock().await = None;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn hosted_account(
     window: tauri::WebviewWindow,
@@ -469,6 +580,17 @@ pub async fn hosted_account(
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     account_view(&*state.store, &hosted, &hosted_origin()?, client_id()).await
+}
+
+#[tauri::command]
+pub async fn hosted_session_renew(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    hosted: tauri::State<'_, HostedState>,
+) -> BridgeResult<()> {
+    let _operation = crate::admit_update_operation(&state)?;
+    crate::require_main(window.label())?;
+    renew_session(&*state.store, &hosted, &hosted_origin()?).await
 }
 
 /// Returns the native-validated Peppy Hosted public origin without accepting renderer input.
@@ -711,10 +833,11 @@ pub(crate) async fn account_view(
     };
     let base = hosted.api_base(origin);
     let client = http(&base)?;
+    let generation = hosted.sign_in_generation.load(Ordering::SeqCst);
     let bytes = match authenticated(&client, &base, routes::ACCOUNT, &session.bearer).await {
         Ok(bytes) => bytes,
         Err(NetError::Revoked) => {
-            tombstone_observed_session(store, hosted, origin, &session.bearer).await?;
+            tombstone_observed_session(store, hosted, origin, &session.bearer, generation).await?;
             return signed_out_view(hosted, origin, configured_client_id).await;
         }
         Err(error) => return Err(error.into()),
@@ -1105,7 +1228,10 @@ async fn session_expired(
     origin: &str,
     observed_bearer: &str,
 ) -> BridgeError {
-    if let Err(error) = tombstone_observed_session(store, hosted, origin, observed_bearer).await {
+    let generation = hosted.sign_in_generation.load(Ordering::SeqCst);
+    if let Err(error) =
+        tombstone_observed_session(store, hosted, origin, observed_bearer, generation).await
+    {
         return error;
     }
     BridgeError::new(
@@ -1120,10 +1246,12 @@ async fn load_session_from_store(
     origin: &str,
 ) -> BridgeResult<Option<HostedSessionRecord>> {
     let mut cached = hosted.session.lock().await;
-    if let Some(value) = cached.as_ref() {
-        if value.expires_at_unix > now_unix() {
-            return Ok(Some(copy_session(value)));
-        }
+    if cached
+        .as_ref()
+        .is_some_and(|value| value.expires_at_unix > now_unix())
+    {
+        let value = cached.as_ref().expect("checked cached session");
+        return Ok(Some(copy_session(value)));
     }
     let key = session_key(origin);
     let Some(bytes) = store.get(&key)? else {
@@ -1134,11 +1262,6 @@ async fn load_session_from_store(
         *cached = None;
         return Ok(None);
     };
-    if record.expires_at_unix <= now_unix() {
-        tombstone(store, &key)?;
-        *cached = None;
-        return Ok(None);
-    }
     *cached = Some(copy_session(&record));
     Ok(Some(record))
 }
@@ -1195,8 +1318,12 @@ async fn tombstone_observed_session(
     hosted: &HostedState,
     origin: &str,
     observed_bearer: &str,
+    observed_generation: u64,
 ) -> BridgeResult<bool> {
     let mut cached = hosted.session.lock().await;
+    if hosted.sign_in_generation.load(Ordering::SeqCst) != observed_generation {
+        return Ok(false);
+    }
     let stored = store.get(&session_key(origin))?;
     let Some(stored) = stored.and_then(|value| decode_session(&value)) else {
         return Ok(false);
@@ -1210,6 +1337,49 @@ async fn tombstone_observed_session(
     }
     tombstone(store, &session_key(origin))?;
     *cached = None;
+    Ok(true)
+}
+
+async fn replace_observed_session_expiry(
+    store: &dyn SecretStore,
+    hosted: &HostedState,
+    origin: &str,
+    observed_bearer: &str,
+    observed_generation: u64,
+    expires_at_unix: u64,
+) -> BridgeResult<bool> {
+    let mut cached = hosted.session.lock().await;
+    if hosted.sign_in_generation.load(Ordering::SeqCst) != observed_generation {
+        return Ok(false);
+    }
+    let Some(stored) = store
+        .get(&session_key(origin))?
+        .and_then(|value| decode_session(&value))
+    else {
+        return Ok(false);
+    };
+    if stored.bearer.as_str() != observed_bearer
+        || cached
+            .as_ref()
+            .is_some_and(|session| session.bearer.as_str() != observed_bearer)
+    {
+        return Ok(false);
+    }
+    let renewed = HostedSessionRecord {
+        account_id: stored.account_id,
+        bearer: Zeroizing::new(observed_bearer.to_owned()),
+        expires_at_unix,
+    };
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(&HostedSessionWire {
+            account_id: renewed.account_id.clone(),
+            bearer: renewed.bearer.to_string(),
+            expires_at_unix: renewed.expires_at_unix,
+        })
+        .map_err(|_| BridgeError::new("host-state", "Could not save the hosted session."))?,
+    );
+    store.set(&session_key(origin), &encoded)?;
+    *cached = Some(renewed);
     Ok(true)
 }
 

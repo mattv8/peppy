@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+/// Rolling inactivity lifetime for hosted account sessions.
+pub const SESSION_LIFETIME_SECONDS: u32 = 2_592_000;
+
 // ============================================================================
 // Enums
 // ============================================================================
@@ -253,6 +256,14 @@ pub struct SessionResponse {
 
 // Intentionally no Debug for SessionResponse (sensitive)
 
+/// Response confirming that an authenticated session remains active.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRenewalResponse {
+    pub account_id: Uuid,
+    pub expires_in_seconds: u32,
+}
+
 // ============================================================================
 // Account DTOs
 // ============================================================================
@@ -352,6 +363,7 @@ pub mod routes {
     pub const AUTH_CONFIG: &str = "/hosted/v1/auth/config";
     pub const AUTH_ATTEMPTS: &str = "/hosted/v1/auth/attempts";
     pub const AUTH_SESSION: &str = "/hosted/v1/auth/session";
+    pub const AUTH_SESSION_RENEW: &str = "/hosted/v1/auth/session/renew";
     pub const ACCOUNT: &str = "/hosted/v1/account";
     pub const BILLING_CHECKOUT: &str = "/hosted/v1/billing/checkout";
     pub const BILLING_PORTAL: &str = "/hosted/v1/billing/portal";
@@ -659,6 +671,26 @@ mod tests {
         assert_eq!(deserialized.account_id, account_id);
     }
 
+    #[test]
+    fn session_renewal_response_roundtrips_without_a_credential() {
+        let account_id = Uuid::new_v4();
+        let response = SessionRenewalResponse {
+            account_id,
+            expires_in_seconds: SESSION_LIFETIME_SECONDS,
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["account_id"], account_id.to_string());
+        assert_eq!(json["expires_in_seconds"], 2_592_000);
+        assert!(json.get("session_token").is_none());
+        assert_eq!(
+            serde_json::from_value::<SessionRenewalResponse>(json)
+                .unwrap()
+                .account_id,
+            account_id
+        );
+    }
+
     // ========================================================================
     // Account DTO Tests
     // ========================================================================
@@ -902,6 +934,7 @@ mod tests {
     fn test_route_constants() {
         assert_eq!(routes::AUTH_ATTEMPTS, "/hosted/v1/auth/attempts");
         assert_eq!(routes::AUTH_SESSION, "/hosted/v1/auth/session");
+        assert_eq!(routes::AUTH_SESSION_RENEW, "/hosted/v1/auth/session/renew");
         assert_eq!(routes::ACCOUNT, "/hosted/v1/account");
         assert_eq!(routes::BILLING_CHECKOUT, "/hosted/v1/billing/checkout");
         assert_eq!(routes::BILLING_PORTAL, "/hosted/v1/billing/portal");

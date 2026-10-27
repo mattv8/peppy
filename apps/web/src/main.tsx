@@ -10,6 +10,7 @@ import "./web.css";
 import { startBrowserApplication } from "./browser-startup";
 import type { HostedWebConfig } from "./newhosted-app-auth";
 import { createSingleFlightTrailingScheduler } from "./single-flight-scheduler";
+import { appSessionRenewal, armHostedSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
 
 function unsupported(reasons: string[]): void {
   document.getElementById("root")!.innerHTML = `<main id="browser-unsupported" data-browser-screen="browser-unsupported" role="main" aria-label="Browser not supported"><section><h1 id="unsupported-heading" tabindex="-1">This browser isn't supported</h1><p>Peppy requires a recent desktop browser with SharedWorker, WebAssembly, IndexedDB, and Web Locks support.</p><ul data-unsupported-reasons>${reasons.map((reason) => `<li>${reason}</li>`).join("")}</ul></section></main>`;
@@ -55,6 +56,12 @@ function BrowserApp({ bridge, config }: { bridge: BrowserBridge; config: HostedW
   const [enrollment, setEnrollment] = useState<{ mode: "community" | "hosted"; owner?: boolean }>();
 
   useEffect(() => { bridge.setAccountUrl(accountUrl); }, [accountUrl, bridge]);
+  useEffect(
+    () => armHostedSessionRenewal(Boolean(config), appSessionRenewal, () => {
+      void bridge.enrollment_status().then(({ mode, owner }) => setEnrollment({ mode, owner })).catch(() => undefined);
+    }),
+    [bridge, config],
+  );
 
   useEffect(() => {
     const scheduler = createSingleFlightTrailingScheduler(() =>
@@ -105,7 +112,10 @@ function boot(): void {
       root.unmount();
       document.getElementById("root")!.replaceChildren();
     }, { once: true });
-    window.addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); }, { once: true });
+    window.addEventListener("pageshow", (event) => {
+      restoreAfterPersistedPageShow(event, appSessionRenewal);
+      if (event.persisted) location.reload();
+    }, { once: true });
   } catch {
     unsupported(["Peppy could not start its browser worker"]);
   }

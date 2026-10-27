@@ -199,6 +199,29 @@ describe("browser host RPC", () => {
     ]);
   });
 
+  it("routes frozen unread batches as a query and each read batch as a mutation", async () => {
+    const session = new FakeSession();
+
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      return [["message-1"]];
+    };
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      session.generation += 1;
+      return "2";
+    };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "unread_message_batches", args: {} }))
+      .resolves.toEqual({ id: 1, ok: true, value: [["message-1"]] });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "mark_read_batch", args: { messageIds: ["message-1"] } }))
+      .resolves.toEqual({ id: 2, ok: true, value: "2" });
+    expect(session.calls).toEqual([
+      { command: "unread_message_batches", args: {}, mutation: false },
+      { command: "mark_read_batch", args: { messageIds: ["message-1"] }, mutation: true },
+    ]);
+  });
+
   it("routes search and bounded history windows as reads and index advancement as a checkpointed mutation", async () => {
     const session = new FakeSession();
     await dispatchBrowserRpc(session, { id: 1, command: "search_local", args: { query: "hello" } });

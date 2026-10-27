@@ -10,7 +10,8 @@ use peppy_hosted_api::enrollment::ClientKind;
 use peppy_hosted_api::{
     AccountResponse, CompleteProvisioningRequest, CompleteProvisioningResponse, IdentityProvider,
     LoginAttemptRequest, LoginAttemptResponse, ProvisioningGrantResponse, ProvisioningRequest,
-    PushConfig, SessionExchangeRequest, SessionResponse,
+    PushConfig, SESSION_LIFETIME_SECONDS, SessionExchangeRequest, SessionRenewalResponse,
+    SessionResponse,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -209,7 +210,7 @@ pub fn parse_hosted_session(json: String) -> Result<HostedSession, HostedClientE
     let value: SessionResponse =
         serde_json::from_str(&json).map_err(|_| HostedClientError::InvalidRequest)?;
     if !hex(&value.session_token, 68, Some("pst_"))
-        || !(1..=86_400).contains(&value.expires_in_seconds)
+        || !(1..=SESSION_LIFETIME_SECONDS).contains(&value.expires_in_seconds)
     {
         return invalid();
     }
@@ -218,6 +219,21 @@ pub fn parse_hosted_session(json: String) -> Result<HostedSession, HostedClientE
         bearer_token: Zeroizing::new(value.session_token),
         expires_in_seconds: value.expires_in_seconds,
     })
+}
+pub fn parse_hosted_session_renewal(
+    json: String,
+    expected_account_id: String,
+) -> Result<u32, HostedClientError> {
+    bounded(&json, MAX_JSON)?;
+    let expected = uuid(&expected_account_id)?;
+    let value: SessionRenewalResponse =
+        serde_json::from_str(&json).map_err(|_| HostedClientError::InvalidRequest)?;
+    if value.account_id != expected
+        || !(1..=SESSION_LIFETIME_SECONDS).contains(&value.expires_in_seconds)
+    {
+        return invalid();
+    }
+    Ok(value.expires_in_seconds)
 }
 pub fn parse_hosted_account(
     json: String,
@@ -628,6 +644,83 @@ mod tests {
             serde_json::json!({"account_id": account, "classification": "new", "entitlement": "none", "access": "read_write"}).to_string(),
             Uuid::new_v4().to_string()
         ).is_err());
+    }
+
+    #[test]
+    fn session_renewal_requires_the_expected_account_and_canonical_lifetime() {
+        let account = Uuid::new_v4();
+        let renewal = serde_json::json!({
+            "account_id": account,
+            "expires_in_seconds": 2_592_000,
+        });
+        assert_eq!(
+            parse_hosted_session_renewal(renewal.to_string(), account.to_string()).unwrap(),
+            2_592_000
+        );
+        assert!(
+            parse_hosted_session_renewal(renewal.to_string(), Uuid::new_v4().to_string()).is_err()
+        );
+        for expires_in_seconds in [0, 2_592_001] {
+            assert!(
+                parse_hosted_session_renewal(
+                    serde_json::json!({
+                        "account_id": account,
+                        "expires_in_seconds": expires_in_seconds,
+                    })
+                    .to_string(),
+                    account.to_string()
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            parse_hosted_session_renewal(
+                serde_json::json!({
+                    "account_id": account,
+                    "expires_in_seconds": 2_592_000,
+                    "session_token": "must_not_be_returned",
+                })
+                .to_string(),
+                account.to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn session_parser_accepts_the_canonical_thirty_day_lifetime() {
+        let account = Uuid::new_v4();
+        assert_eq!(
+            parse_hosted_session(
+                serde_json::json!({
+                    "account_id": account,
+                    "session_token": format!("pst_{}", "a".repeat(64)),
+                    "expires_in_seconds": 2_592_000,
+                })
+                .to_string()
+            )
+            .unwrap()
+            .expires_in_seconds(),
+            2_592_000
+        );
+    }
+
+    #[test]
+    fn initial_session_parser_rejects_lifetimes_outside_the_canonical_range() {
+        let account = Uuid::new_v4();
+        for expires_in_seconds in [0, SESSION_LIFETIME_SECONDS + 1] {
+            assert!(
+                parse_hosted_session(
+                    serde_json::json!({
+                        "account_id": account,
+                        "session_token": format!("pst_{}", "a".repeat(64)),
+                        "expires_in_seconds": expires_in_seconds,
+                    })
+                    .to_string()
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

@@ -2,16 +2,17 @@ package dev.peppy.mobile
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import org.json.JSONArray
 import org.json.JSONObject
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -26,9 +27,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import dev.peppy.mobile.ui.InfoButton
+import dev.peppy.mobile.ui.ConsentSheet
+import dev.peppy.mobile.ui.SettingToggleRow
 import androidx.compose.material3.MaterialTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.Lifecycle
@@ -139,8 +142,8 @@ internal fun MmsSettings(
     context: Context,
     refresh: Int,
     databaseOpen: Boolean,
-    requestPermissions: () -> Unit,
     onChanged: () -> Unit,
+    detailsOnly: Boolean = false,
 ) {
     val preferences = remember { MmsPreferences(context) }
     var enabled by remember(refresh) { mutableStateOf(preferences.enabled) }
@@ -152,42 +155,77 @@ internal fun MmsSettings(
     val route = SimRoutes.current().singleOrNull()
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionRefresh by remember { mutableIntStateOf(0) }
+    var consent by remember { mutableStateOf(ConsentGatedToggle()) }
+    var permissionHint by remember { mutableStateOf<String?>(null) }
+    var permissionDenied by remember { mutableStateOf(false) }
+    val deniedHint = stringResource(R.string.peppy_toggle_android_mms_denied_hint)
+    val smsGuardFailedHint = stringResource(R.string.peppy_toggle_android_sms_guard_failed)
+    val smsPolicyAction = remember(context) {
+        SmsCapturePolicyAction(
+            writeAndRead = { value ->
+                withContext(Dispatchers.IO) {
+                    GatewayPolicyHost(context).smsCaptureEnabled = value
+                    GatewayPolicyHost(context).smsCaptureEnabled == value
+                }
+            },
+            onActivated = {},
+        )
+    }
+    fun consumePermissionResult(grantedAll: Boolean) {
+        if (consent.phase != ConsentPhase.AWAITING_ACCESS) return
+        permissionDenied = !grantedAll
+        val transition = consent.accessResult(grantedAll)
+        consent = transition.state
+        if (transition.effect == ConsentEffect.APPLY) {
+            preferences.enabled = true
+            enabled = preferences.enabled
+            MmsCaptureWork.onPermissionOrForeground(context)
+            onChanged()
+        } else {
+            permissionHint = deniedHint
+        }
+        consent = consent.cancel()
+    }
+    val permissionRequest = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results -> consumePermissionResult(MMS_PERMISSIONS.all { results[it] == true || granted(context, it) }) }
+    val settingsRequest = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+    ) { consumePermissionResult(MMS_PERMISSIONS.all { granted(context, it) }) }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) permissionRefresh++ }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val receiveGranted = permissionRefresh.let { mmsReceiveGranted(context) }
+    DisposableEffect(Unit) { onDispose { consent = consent.cancel() } }
 
     LaunchedEffect(refresh, enabled, databaseOpen) {
         health = withContext(Dispatchers.IO) { loadMmsHealth(context, databaseOpen) }
     }
 
-    Section("mms-settings-section", "MMS") {
+    Section(if (detailsOnly) "mms-details-section" else "mms-settings-section", stringResource(R.string.peppy_toggle_android_mms_title), helpBody = stringResource(R.string.peppy_help_android_mms_wifi)) {
+        if (!detailsOnly) {
         MmsCaptureControls(
-            enabled = enabled,
-            receiveGranted = receiveGranted,
+            enabled = enabled && receiveGranted,
             onEnabledChanged = { value ->
-                preferences.enabled = value
-                enabled = preferences.enabled
-                MmsCaptureWork.onPermissionOrForeground(context)
-                onChanged()
+                if (!value) {
+                    preferences.enabled = false
+                    enabled = preferences.enabled
+                    MmsCaptureWork.onPermissionOrForeground(context)
+                    onChanged()
+                } else consent = consent.requestEnable()
             },
-            onRequestPermissions = requestPermissions,
+            hint = permissionHint,
         )
-        StatusRow("mms-sim-status", "Current SIM", route?.label ?: "No default SMS SIM")
+        }
+        if (detailsOnly) StatusRow("mms-sim-status", "Current SIM", route?.label ?: "No default SMS SIM")
+        if (detailsOnly) {
         OwnNumberSettings(context, databaseOpen, route)
-        Row(Modifier.fillMaxWidth().testTag("mms-wifi-only-row"), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column(Modifier.weight(1f)) {
-                Text(stringResource(R.string.peppy_media_wifi_only))
-            }
-            InfoButton(
-                topic = stringResource(R.string.peppy_media_wifi_only),
+        }
+        if (!detailsOnly) {
+            SettingToggleRow(
                 title = stringResource(R.string.peppy_media_wifi_only),
-                body = stringResource(R.string.peppy_help_android_mms_wifi),
-                tag = "info-mms-wifi",
-            )
-            Switch(
                 checked = mediaWifiOnly == true,
                 enabled = mediaWifiOnly != null,
                 onCheckedChange = { value ->
@@ -199,9 +237,10 @@ internal fun MmsSettings(
                         }
                     }
                 },
-                modifier = Modifier.testTag("mms-wifi-only-switch"),
+                tag = "mms-wifi-only-row",
             )
         }
+        if (detailsOnly) {
         OutlinedButton(
             onClick = { MmsCaptureWork.refresh(context); onChanged() },
             enabled = enabled && receiveGranted,
@@ -229,28 +268,66 @@ internal fun MmsSettings(
             health.reasons.forEach { Text(it, Modifier.testTag("mms-health-reason"), style = MaterialTheme.typography.bodySmall) }
             health.transferReasons.forEach { Text("Transfer $it", Modifier.testTag("mms-transfer-health-reason"), style = MaterialTheme.typography.bodySmall) }
         }
+        }
     }
+    if (consent.phase == ConsentPhase.DISCLOSURE) ConsentSheet(
+        title = stringResource(R.string.peppy_toggle_android_mms_consent_title),
+        body = stringResource(R.string.peppy_mms_capture_disclosure),
+        tag = "mms-consent-sheet",
+        onDismiss = { consent = consent.cancel() },
+        onConfirm = {
+            val continueRequest = {
+                val transition = consent.agree(receiveGranted)
+                consent = transition.state
+                if (transition.effect == ConsentEffect.REQUEST_ACCESS) {
+                    val activity = context.contextActivity()
+                    val needsSettings = permissionDenied && MMS_PERMISSIONS.any {
+                        !granted(context, it) && activity?.shouldShowRequestPermissionRationale(it) == false
+                    }
+                    if (needsSettings) {
+                        settingsRequest.launch(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+                    } else permissionRequest.launch(MMS_PERMISSIONS)
+                }
+                if (transition.effect == ConsentEffect.APPLY) {
+                    preferences.enabled = true
+                    enabled = preferences.enabled
+                    MmsCaptureWork.onPermissionOrForeground(context)
+                    onChanged()
+                }
+            }
+            // READ_SMS can activate the existing SMS policy. Fail closed before asking for MMS.
+            if (!mmsReceiveGranted(context) && !smsReadGranted(context)) {
+                scope.launch {
+                    try {
+                        val inactive = smsPolicyAction.prepareFreshReadGrant(readGranted = false, requestAccess = continueRequest)
+                        if (!inactive) {
+                            consent = consent.cancel()
+                            permissionHint = smsGuardFailedHint
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        consent = consent.cancel()
+                        permissionHint = smsGuardFailedHint
+                    }
+                }
+            } else continueRequest()
+        },
+        confirmLabel = stringResource(R.string.peppy_toggle_android_agree),
+        nextStep = if (receiveGranted) null else stringResource(R.string.peppy_toggle_android_mms_next) +
+            if (!smsReadGranted(context)) "\n\n" + stringResource(R.string.peppy_toggle_android_mms_sms_stays_off) else "",
+        disclosureTag = "mms-capture-disclosure",
+    )
 }
 
 @Composable
 internal fun MmsCaptureControls(
     enabled: Boolean,
-    receiveGranted: Boolean,
     onEnabledChanged: (Boolean) -> Unit,
-    onRequestPermissions: () -> Unit,
+    hint: String?,
 ) {
-    Text(
-        stringResource(R.string.peppy_mms_capture_disclosure),
-        Modifier.testTag("mms-capture-disclosure"),
-        style = MaterialTheme.typography.bodyMedium,
+    SettingToggleRow(
+        stringResource(R.string.peppy_toggle_android_mms_title), enabled, true, onEnabledChanged, "mms-enable-row",
+        hint ?: stringResource(R.string.peppy_toggle_android_mms_provider_hint),
     )
-    Row(Modifier.fillMaxWidth().testTag("mms-enable-row"), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text("Enable MMS capture", Modifier.weight(1f))
-        InfoButton("Enable MMS capture", "Enable MMS capture", stringResource(R.string.peppy_help_android_mms_capture), "info-mms-capture")
-        Switch(enabled, onEnabledChanged, modifier = Modifier.testTag("mms-enable-switch"))
-    }
-    StatusRow("mms-permission-status", "MMS read permission", if (receiveGranted) "Allowed" else "Not allowed")
-    if (!receiveGranted) {
-        OutlinedButton(onClick = onRequestPermissions, modifier = Modifier.testTag("mms-permission-button")) { Text("Allow MMS permissions") }
-    }
 }

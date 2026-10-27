@@ -262,6 +262,12 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         assert!(main.contains(&allow(command)));
         assert!(composer.contains(&allow(command)));
     }
+    for command in ["mark_all_read"] {
+        assert!(commands.contains(&command.to_owned()));
+        assert!(handler.contains(&format!("\n        {command},")));
+        assert!(main.contains(&allow(command)));
+        assert!(!composer.contains(&allow(command)));
+    }
     for command in [
         "enrollment_begin_vault_request",
         "enrollment_vault_request_status",
@@ -297,6 +303,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "set_start_at_login",
         "popout_conversation",
         "hide_head",
+        "mark_all_read",
         "hosted_account",
         "hosted_sign_in",
         "hosted_sign_out",
@@ -362,6 +369,29 @@ fn runtime_window_checks_back_the_acl() {
         crate::require_main("composer-any").unwrap_err().code,
         "window-context"
     );
+}
+
+#[test]
+fn mark_all_read_requires_a_visible_focused_main_window() {
+    assert!(crate::require_mark_all_read_window("main", true, false, true).is_ok());
+    assert_eq!(
+        crate::require_mark_all_read_window("composer-any", true, false, true)
+            .unwrap_err()
+            .code,
+        "window-context"
+    );
+    for (visible, minimized, focused) in [
+        (false, false, true),
+        (true, true, true),
+        (true, false, false),
+    ] {
+        assert_eq!(
+            crate::require_mark_all_read_window("main", visible, minimized, focused)
+                .unwrap_err()
+                .code,
+            "window-not-visible"
+        );
+    }
 }
 
 #[test]

@@ -106,6 +106,8 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   send_draft: { coreCommand: "send_draft", mutation: true },
   discard_draft: { coreCommand: "discard_draft", mutation: true },
   mark_seen: { coreCommand: "mark_seen", mutation: true },
+  unread_message_batches: { coreCommand: "unread_message_batches", mutation: false },
+  mark_read_batch: { coreCommand: "mark_read_batch", mutation: true },
   evict_attachment_ciphertext: { coreCommand: "evict_attachment_ciphertext", mutation: true },
   dismiss_notification: { coreCommand: "dismiss_notification", mutation: true },
   dismiss_all_notifications: { coreCommand: "dismiss_all_notifications", mutation: true },

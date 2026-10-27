@@ -18,7 +18,10 @@ class AndroidSmsCarrier(private val context: Context) : SmsCarrier {
     private fun manager(subscriptionId: Int): SmsManager =
         subscriptionSmsManager(context, subscriptionId)
 
-    override fun divide(subscriptionId: Int, body: String): List<String> = manager(subscriptionId).divideMessage(body)
+    override fun divide(subscriptionId: Int, body: String): List<String> {
+        val manager = manager(subscriptionId)
+        return SmsSegmentation.divide(body) { manager.divideMessage(it) }
+    }
 
     override fun send(subscriptionId: Int, destination: String, parts: List<String>, sent: List<PendingIntent>, delivered: List<PendingIntent>) {
         val manager = manager(subscriptionId)
