@@ -2234,13 +2234,15 @@ describe("draft durability", () => {
     await waitFor(() => expect(message()).toHaveValue(""));
   });
 
-  it("does not resend when send reports a moved draft and retains the text for review", async () => {
+  it("hydrates the moved destination before replacing its draft with retained content", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
     await chooseGateway(SMS_ONLY);
     type("send only after review");
     await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("send only after review"));
     host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
+    const navigationLoad = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValueOnce(navigationLoad.promise);
     vi.mocked(bridge.send_draft).mockRejectedValueOnce({
       code: "draft-moved",
       message: "moved",
@@ -2254,6 +2256,155 @@ describe("draft durability", () => {
     fireEvent.click(screen.getByRole("button", { name: "Replace draft with retained content" }));
     await waitFor(() => expect(host.drafts.get("river")?.text).toBe("send only after review"));
     expect(host.drafts.get("river")?.text).not.toContain("\n\n");
+    await act(async () => navigationLoad.resolve(host.load("river")));
+  });
+
+  it("restores retained content from the source conversation recovery card", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("restore from source");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("restore from source"));
+    host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(message()).toHaveValue("destination hello"));
+    fireEvent.click(screen.getByRole("button", { name: /Aurora/ }));
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+
+    fireEvent.click(within(recovery).getByRole("button", { name: "Replace draft with retained content" }));
+
+    await waitFor(() => expect(host.drafts.get("river")?.text).toBe("restore from source"));
+  });
+
+  it("applies a deferred retained-content restore across an ordinary background refresh", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("restore after refresh");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("restore after refresh"));
+    host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    await waitFor(() => expect(message()).toHaveValue("destination hello"));
+    const recoveryLoad = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValueOnce(recoveryLoad.promise);
+    fireEvent.click(within(recovery).getByRole("button", { name: "Replace draft with retained content" }));
+
+    await act(async () => hint?.());
+    await act(async () => recoveryLoad.resolve(host.load("river")));
+
+    await waitFor(() => expect(host.drafts.get("river")?.text).toBe("restore after refresh"));
+  });
+
+  it("shows destination hydration errors on the source recovery card", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("source feedback");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("source feedback"));
+    host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(message()).toHaveValue("destination hello"));
+    fireEvent.click(screen.getByRole("button", { name: /Aurora/ }));
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    vi.mocked(bridge.load_state).mockRejectedValueOnce(new Error("load failed"));
+
+    fireEvent.click(within(recovery).getByRole("button", { name: "Replace draft with retained content" }));
+
+    const feedback = await screen.findByText(/Retained text was not applied/);
+    expect(feedback).toHaveAttribute("data-composer-feedback", "aurora");
+  });
+
+  it("keeps retained content recoverable and lifecycle unblocked when destination hydration fails", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("recover after failed load");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("recover after failed load"));
+    vi.mocked(bridge.load_state).mockRejectedValue(new Error("load failed"));
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    fireEvent.click(within(recovery).getByRole("button", { name: "Replace draft with retained content" }));
+    await screen.findByText(/Retained text was not applied/);
+    expect(screen.getByRole("status", { name: "Recoverable unsaved draft" })).toHaveTextContent("recover after failed load");
+
+    await act(async () => lifecycle?.({ id: "request-close-after-recovery", action: "close" }));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("request-close-after-recovery", true));
+  });
+
+  it("does not apply retained content when destination hydration redirects", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("recover after redirect");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("recover after redirect"));
+    const redirected = host.load("aurora");
+    vi.mocked(bridge.load_state).mockResolvedValue(redirected);
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    fireEvent.click(within(recovery).getByRole("button", { name: "Replace draft with retained content" }));
+    await screen.findByText(/Retained text was not applied/);
+    expect(screen.getByRole("status", { name: "Recoverable unsaved draft" })).toHaveTextContent("recover after redirect");
+
+    await act(async () => lifecycle?.({ id: "request-close-after-redirect", action: "close" }));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("request-close-after-redirect", true));
+  });
+
+  it("drops a destination recovery load after the active session changes", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    await chooseGateway(SMS_ONLY);
+    type("recover in original session");
+    await waitFor(() => expect(host.drafts.get("aurora")?.text).toBe("recover in original session"));
+    host.drafts.set("river", { id: "draft-river", conversationId: "river", text: "destination hello", recipientIds: [], attachmentIds: [], revision: "1" });
+    vi.mocked(bridge.send_draft).mockRejectedValueOnce({
+      code: "draft-moved",
+      message: "moved",
+      details: { conversationId: "river", draftId: "draft-river", currentRevision: "4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const recovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
+    await waitFor(() => expect(message()).toHaveValue("destination hello"));
+    const recoveryLoad = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValueOnce(recoveryLoad.promise);
+    fireEvent.click(within(recovery).getByRole("button", { name: "Replace draft with retained content" }));
+
+    host.connection = { ...host.connection, origin: "https://other-session.test" };
+    await act(async () => hint?.());
+    await waitFor(() => expect(document.getElementById("connection-status")).toHaveTextContent("Connected"));
+    await act(async () => recoveryLoad.resolve({ ...host.load("river"), connection: { state: "connected", origin: "https://example.test" } }));
+    expect(host.drafts.get("river")?.text).toBe("destination hello");
+    expect(screen.getByRole("status", { name: "Recoverable unsaved draft" })).toHaveTextContent("recover in original session");
+
+    await act(async () => lifecycle?.({ id: "request-close-after-session-change", action: "close" }));
+    await waitFor(() => expect(bridge.acknowledge_lifecycle).toHaveBeenCalledWith("request-close-after-session-change", true));
   });
 
   it("shows destinationless late-save recovery with copy and restore actions", async () => {

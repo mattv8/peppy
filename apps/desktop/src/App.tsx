@@ -115,6 +115,7 @@ import {
   isLocalDraftKey,
   shouldConfirmPostFlushDelete,
   type DraftContent,
+  type DraftRecovery,
   type DraftSlot,
   type SaveOutcome,
 } from "./drafts/DraftStore";
@@ -1293,6 +1294,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [searchTargetId, setSearchTargetId] = useState<string>();
   const searchReadGate = useRef(false);
   const navigationGeneration = useRef(0);
+  const recoveryRestoreSequence = useRef(0);
   const latestRequiredConversationRef = useRef<string | undefined>(undefined);
   const previousSearchSessionKeyRef = useRef("");
   const activateSearchHitHandlerRef = useRef<(hit: LocalSearchHit) => void>(() => undefined);
@@ -2313,6 +2315,47 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     void startNewMessage();
   };
 
+  const restoreRecovery = async (recovery: DraftRecovery, feedbackKey: string) => {
+    const destination = recovery.destination;
+    if (!destination) return;
+    const requestSequence = ++recoveryRestoreSequence.current;
+    const sessionKey = currentSearchSessionKey();
+    const initialSlot = store.get(destination);
+    const initialGeneration = initialSlot?.generation;
+    const initialRevision = initialSlot?.revision;
+    try {
+      const state = await bridge.load_state(destination);
+      if (
+        !mountedRef.current ||
+        requestSequence !== recoveryRestoreSequence.current ||
+        sessionKey !== currentSearchSessionKey() ||
+        !store.recoveriesFor(destination).some((candidate) => candidate.id === recovery.id)
+      ) return;
+      const currentSlot = store.get(destination);
+      const slotChanged = initialSlot
+        ? currentSlot !== initialSlot || currentSlot.generation !== initialGeneration || currentSlot.revision !== initialRevision
+        : Boolean(currentSlot && (isDirty(currentSlot) || currentSlot.id !== state.draft?.id || currentSlot.revision !== (state.draft?.revision ?? "0")));
+      if (
+        slotChanged ||
+        state.activeConversationId !== destination ||
+        (state.draft && state.draft.conversationId !== destination)
+      ) {
+        setComposerNotice(feedbackKey, "Retained text was not applied because the destination draft changed or could not be verified.");
+        return;
+      }
+      store.adopt(destination, state.draft);
+      const outcome = await store.edit(destination, recovery.content);
+      if (outcome.ok) store.discardRecovery(recovery.id);
+      else setComposerNotice(feedbackKey, `Retained text was not applied: ${outcome.error}`);
+    } catch (error) {
+      if (
+        mountedRef.current &&
+        requestSequence === recoveryRestoreSequence.current &&
+        sessionKey === currentSearchSessionKey()
+      ) setComposerNotice(feedbackKey, `Retained text was not applied: ${errorText(error)}`);
+    }
+  };
+
   const retrySave = async () => {
     const current = store.get(slotKey);
     if (!current) return;
@@ -2863,10 +2906,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         <p>{recovery.message}</p>
         {recovery.content.text && <pre>{recovery.content.text}</pre>}
         {recovery.destination ? <button className="secondary-button" type="button" onClick={() => {
-          void store.edit(recovery.destination!, recovery.content).then(outcome => {
-            if (outcome.ok) store.discardRecovery(recovery.id);
-            else setComposerNotice(slotKey, `Retained text was not applied: ${outcome.error}`);
-          });
+          void restoreRecovery(recovery, slotKey);
          }}>Replace draft with retained content</button> : <button className="secondary-button" type="button" onClick={() => {
           const { key } = store.createNew();
           setNewComposeKey(key);
