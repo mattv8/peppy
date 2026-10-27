@@ -1048,6 +1048,24 @@ describe("lazy conversation history", () => {
       },
       {
         ...incoming,
+        id: "m-failed",
+        sender: "self",
+        body: "Failed",
+        status: "failed-confirmed",
+        statusAt: "1788435180000",
+        attachments: [],
+      },
+      {
+        ...incoming,
+        id: "m-unknown",
+        sender: "self",
+        body: "Unknown",
+        status: "unknown",
+        statusAt: "1788435180000",
+        attachments: [],
+      },
+      {
+        ...incoming,
         id: "m-sent-without-status-time",
         sender: "self",
         body: "Sent without a status time",
@@ -1095,8 +1113,15 @@ describe("lazy conversation history", () => {
     expect(sentMeta).toHaveAttribute("data-status", "sent");
     expect(sentMeta).toHaveTextContent(formatDateTime("1788435180000")!);
     expect(sentMeta).not.toHaveTextContent(formatDateTime("1788435100000")!);
+    expect(within(sentMeta).getByRole("img", { name: "Sent" })).toHaveAttribute("title", "Sent");
+    expect(sentMeta.querySelector(".message-meta-separator")).not.toBeInTheDocument();
     expect(document.querySelector('[data-message-meta="m-queued"] time')).not.toBeInTheDocument();
-    expect(document.querySelector('[data-message-meta="m-sent-without-status-time"] time')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-meta="m-queued"]')).toHaveTextContent("Queued locally");
+    expect(document.querySelector('[data-message-meta="m-failed"]')).toHaveTextContent("Failed");
+    expect(document.querySelector('[data-message-meta="m-unknown"]')).toHaveTextContent("Unknown delivery state — not retried");
+    const sentWithoutTime = document.querySelector<HTMLElement>('[data-message-meta="m-sent-without-status-time"]')!;
+    expect(sentWithoutTime.querySelector("time")).not.toBeInTheDocument();
+    expect(sentWithoutTime).toHaveTextContent("Sent");
     expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveTextContent(formatDateTime("1788435180000")!);
     expect(document.querySelector('[data-message-meta="m-provider-history"] time')).toHaveAttribute("dateTime", isoDateTime("1788435180000")!);
     expect(document.querySelector('[data-message-meta="m-invalid"]')).not.toBeInTheDocument();
@@ -1105,6 +1130,36 @@ describe("lazy conversation history", () => {
     expect(screen.queryByText(/Participants:/)).not.toBeInTheDocument();
     expect(incomingBubble.querySelector('[data-attachment-id="photo-1"]')).toBeInTheDocument();
     expect(document.querySelector('[data-message-id="m-attachment-only"] p')).not.toBeInTheDocument();
+  });
+
+  it("uses icon-only progress receipts when their status time is valid", async () => {
+    const incoming = host.conversations[0].messages[0];
+    const cases = [
+      ["gateway-persisted", "Received by phone"],
+      ["preparing", "Preparing"],
+      ["submitted", "Submitted"],
+    ] as const;
+    host.conversations[0].messages.push(...cases.map(([status], index) => ({
+      ...incoming,
+      id: `m-${status}`,
+      sender: "self" as const,
+      body: status,
+      status,
+      statusAt: String(1788435180000 + index),
+      attachments: [],
+    })));
+    render(<App />);
+
+    for (const [status, label] of cases) {
+      const meta = await waitFor(() => {
+        const element = document.querySelector<HTMLElement>(`[data-message-meta="m-${status}"]`);
+        if (!element) throw new Error(`Missing ${status} receipt metadata`);
+        return element;
+      });
+      expect(within(meta).getByRole("img", { name: label })).toHaveAttribute("title", label);
+      expect(meta).not.toHaveTextContent(label);
+      expect(meta.querySelector(".message-meta-separator")).not.toBeInTheDocument();
+    }
   });
 
   it("retains only valid loaded image previews across an anchored state refresh", async () => {
@@ -2199,6 +2254,97 @@ describe("composer window", () => {
     await waitFor(() => expect(document.getElementById("desktop-titlebar")).toBeInTheDocument());
     expect(message()).toHaveValue("preserve while converting");
   });
+  it("shows the draft's selected route as a read-only head pill", async () => {
+    host.gateways = [{ ...SMS_ONLY, availability: "delayed", lastSeenAgeSeconds: 120 }, { ...MMS_SIM, availability: "connected" }];
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "",
+      recipientIds: [],
+      attachmentIds: [],
+      gatewayId: "gw-phone",
+      simId: "sim-2",
+      revision: "1",
+    });
+    openComposerWindow("aurora", true);
+    render(<App />);
+
+    const pill = await waitFor(() => {
+      const element = document.getElementById("head-panel-route");
+      if (!element) throw new Error("Missing head route pill");
+      return element;
+    });
+    expect(pill).toHaveAttribute("title", "Phone: choose this phone and SIM in the main window.");
+    expect(pill).toHaveAttribute("data-gateway-availability", "connected");
+    expect(pill).toHaveTextContent("SIM 2");
+    expect(pill).toHaveTextContent("Online");
+    expect(pill.querySelector("[aria-hidden]")).not.toBeInTheDocument();
+    expect(document.getElementById("head-panel-route-description")).toHaveTextContent("Phone, SIM 2. Phone and SIM are selected in the main window.");
+    expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
+  });
+  it("points no-route and stale head recovery to the main window", async () => {
+    openComposerWindow("aurora", true);
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No SIM chosen"));
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("choose a phone and SIM in the main window");
+
+    cleanup();
+    host.gateways = [SMS_ONLY];
+    host.drafts.set("aurora", {
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "",
+      recipientIds: [],
+      attachmentIds: [],
+      gatewayId: "gw-phone",
+      simId: "sim-9",
+      revision: "1",
+    });
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("SIM unavailable"));
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("the selected phone/SIM is no longer reported; choose another route in the main window");
+
+    cleanup();
+    host.gateways = [];
+    host.drafts.clear();
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No phone"));
+    expect(document.getElementById("unavailable-hint")).toHaveTextContent("no phone is configured");
+  });
+  it("renders each supported head route state without a picker", async () => {
+    const selectedDraft = (simId: string) => ({
+      id: "draft-aurora",
+      conversationId: "aurora",
+      text: "",
+      recipientIds: [],
+      attachmentIds: [],
+      gatewayId: "gw-phone",
+      simId,
+      revision: "1",
+    });
+    const cases: Array<{ gateways: GatewayView[]; draft?: Draft; label: string }> = [
+      { gateways: [{ ...SMS_ONLY, availability: "connected" }], label: "SIM 1 · Online" },
+      { gateways: [{ ...SMS_ONLY, availability: "delayed", lastSeenAgeSeconds: 120 }], label: "SIM 1 · Seen 2m ago" },
+      { gateways: [{ ...SMS_ONLY, availability: "delayed" }], label: "SIM 1 · Last seen" },
+      { gateways: [{ ...SMS_ONLY, availability: "offline" }], label: "SIM 1 · Not responding" },
+      { gateways: [SMS_ONLY, MMS_SIM], label: "No SIM chosen" },
+      { gateways: [], label: "No phone" },
+      { gateways: [{ ...SMS_ONLY, availability: "no_sms_sim" }], label: "No SMS SIM" },
+      { gateways: [{ ...SMS_ONLY, availability: "unknown" }], label: "SIM 1 · Status unknown" },
+      { gateways: [SMS_ONLY], draft: selectedDraft("sim-9"), label: "SIM unavailable" },
+    ];
+
+    for (const routeCase of cases) {
+      cleanup();
+      host.gateways = routeCase.gateways;
+      host.drafts.clear();
+      if (routeCase.draft) host.drafts.set("aurora", routeCase.draft);
+      openComposerWindow("aurora", true);
+      render(<App />);
+      await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent(routeCase.label.replace(" · ", "·")));
+      expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
+    }
+  });
   it("closes a head panel only after its draft flushes", async () => {
     openComposerWindow("aurora", true);
     render(<App />);
@@ -2250,22 +2396,12 @@ describe("composer window", () => {
     await waitFor(() => expect(bridge.close_composer).toHaveBeenCalledTimes(2));
   });
 
-  it("dismisses the phone picker with Escape before collapsing the head panel", async () => {
+  it("collapses a head panel on Escape without a route picker", async () => {
     openComposerWindow("aurora", true);
     render(<App />);
-    const phone = await screen.findByRole("combobox", { name: "Phone" });
-    const textarea = message();
-    textarea.focus();
-    fireEvent.click(phone);
-    expect(await screen.findByRole("listbox")).toBeInTheDocument();
-    expect(document.activeElement).toBe(phone);
-
-    await act(async () => { fireEvent.keyDown(document.activeElement!, { key: "Escape" }); });
-
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    expect(bridge.close_composer).not.toHaveBeenCalled();
-    expect(bridge.save_draft).not.toHaveBeenCalled();
-    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(document.getElementById("head-panel-route")).toHaveTextContent("No SIM chosen"));
+    expect(screen.queryByRole("combobox", { name: "Phone" })).not.toBeInTheDocument();
+    fireEvent.keyDown(message(), { key: "Escape" });
     await waitFor(() => expect(bridge.close_composer).toHaveBeenCalledOnce());
   });
 

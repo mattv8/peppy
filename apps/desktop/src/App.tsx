@@ -299,6 +299,14 @@ type RouteChoice =
 
 function gatewayAvailability(gateway: GatewayView): GatewayAvailability { return gateway.availability ?? "unknown"; }
 function formatAge(seconds: number): string { return seconds < 60 ? "under a minute" : seconds < 3_600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3_600)}h`; }
+function simLabels(gateways: GatewayView[]): Map<string, string> {
+  const labels = new Map<string, string>();
+  gateways.filter((gateway) => gateway.simId).forEach((gateway, index) => {
+    const key = routeKey(gateway.id, gateway.simId);
+    if (!labels.has(key)) labels.set(key, `SIM ${index + 1}`);
+  });
+  return labels;
+}
 function availabilityLabel(gateway: GatewayView): string {
   switch (gatewayAvailability(gateway)) {
     case "delayed": return gateway.lastSeenAgeSeconds !== undefined ? `Last seen ${formatAge(gateway.lastSeenAgeSeconds)} ago` : "Last seen";
@@ -310,7 +318,7 @@ function availabilityLabel(gateway: GatewayView): string {
     case "unsupported_platform": return "Can't send SMS";
     case "capabilities_unknown": case "unknown": return "Status unknown";
     case "connected": return "Connected";
-    default: return "";
+    default: return "Status unknown";
   }
 }
 function availabilityProblem(gateway: GatewayView): string | undefined {
@@ -404,11 +412,7 @@ function GatewaySelector({
   onSelect(gateway: GatewayView): void;
 }) {
   const route = resolveRoute(content, gateways);
-  const simLabels = new Map<string, string>();
-  gateways.filter(gateway => gateway.simId).forEach((gateway, index) => {
-    const key = routeKey(gateway.id, gateway.simId);
-    if (!simLabels.has(key)) simLabels.set(key, `SIM ${index + 1}`);
-  });
+  const labels = simLabels(gateways);
   const value =
     route.kind === "route"
       ? routeKey(route.gateway.id, route.gateway.simId)
@@ -421,7 +425,7 @@ function GatewaySelector({
     );
     if (gateway) onSelect(gateway);
   };
-  const simLabel = (gateway: GatewayView) => gateway.simId ? (simLabels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : "No SMS SIM";
+  const simLabel = (gateway: GatewayView) => gateway.simId ? (labels.get(routeKey(gateway.id, gateway.simId)) ?? gateway.simId) : "No SMS SIM";
   const selectedGateway = route.kind === "route" ? route.gateway : undefined;
   const selectedAvailability = selectedGateway && gatewayAvailability(selectedGateway);
   const statusHint = selectedGateway && selectedAvailability === "delayed" ? `${selectedGateway.name} last synced ${selectedGateway.lastSeenAgeSeconds !== undefined ? formatAge(selectedGateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.` : undefined;
@@ -463,6 +467,40 @@ function GatewaySelector({
   );
 }
 
+function headRoutePresentation(route: RouteChoice, gateways: GatewayView[]): { sim?: string; state: string; label: string } {
+  if (route.kind === "none") {
+    const state = gateways.length ? "No SIM chosen" : "No phone";
+    return { state, label: state };
+  }
+  if (route.kind === "stale") return { state: "SIM unavailable", label: "SIM unavailable" };
+  const simLabel = simLabels(gateways).get(routeKey(route.gateway.id, route.gateway.simId)) ?? route.gateway.simId;
+  if (gatewayAvailability(route.gateway) === "no_sms_sim") return { state: "No SMS SIM", label: "No SMS SIM" };
+  let state: string;
+  switch (gatewayAvailability(route.gateway)) {
+    case "connected": state = "Online"; break;
+    case "delayed": state = route.gateway.lastSeenAgeSeconds === undefined ? "Last seen" : `Seen ${formatAge(route.gateway.lastSeenAgeSeconds)} ago`; break;
+    case "offline": state = "Not responding"; break;
+    default: state = availabilityLabel(route.gateway);
+  }
+  return { sim: simLabel, state, label: `${simLabel} · ${state}` };
+}
+
+function HeadRoutePill({ content, gateways }: { content: DraftContent; gateways: GatewayView[] }) {
+  const route = resolveRoute(content, gateways);
+  const { sim, state, label } = headRoutePresentation(route, gateways);
+  const tooltip = route.kind === "route"
+    ? `${route.gateway.name}: choose this phone and SIM in the main window.`
+    : "Choose a phone and SIM in the main window.";
+  const description = route.kind === "route"
+    ? `${route.gateway.name}, ${sim ?? state}. Phone and SIM are selected in the main window.`
+    : "Choose a phone and SIM in the main window.";
+  return <section id="head-panel-route-section" aria-label="Phone and SIM" aria-describedby="head-panel-route-description" data-route-state={route.kind === "route" ? gatewayAvailability(route.gateway) : route.kind}>
+    <span id="head-panel-route" className="head-panel-route" title={tooltip} data-gateway-availability={route.kind === "route" ? gatewayAvailability(route.gateway) : undefined}>{sim && <span data-head-route-sim>{sim}</span>}{sim && <span data-head-route-separator>·</span>}<span data-head-route-state>{state}</span></span>
+    <span id="head-panel-route-description" className="visually-hidden">{description}</span>
+    <span className="visually-hidden" role="status" aria-live="polite">{label}</span>
+  </section>;
+}
+
 function DraftRecovery({ error, onRetry }: { error: string; onRetry(): void }) {
   return (
     <section id="draft-recovery" role="alert" aria-label="Unsaved draft">
@@ -484,11 +522,16 @@ function MessageMeta({ message }: { message: MessageView }) {
   const deliveryConfirmed = message.status === "delivery-confirmed";
   const deliveryLabel = deliveryTimeFallback ? "Delivery confirmed; sent time shown because delivery time is unavailable" : deliveryTimeUnavailable ? "Delivery confirmed; time unavailable" : "Delivery confirmed";
   const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
+  const compactStatus = message.status && ["gateway-persisted", "preparing", "submitted", "sent"].includes(message.status);
+  const statusLabel = message.status ? STATUS_LABEL[message.status] : undefined;
+  const validTime = Boolean(formattedTime && isoTime);
+  const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
   if (!message.status && !formattedTime) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
-    {!deliveryConfirmed && message.status && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />}{STATUS_LABEL[message.status]}</span>}
-    {!deliveryConfirmed && message.status && formattedTime && <span className="message-meta-separator" aria-hidden>·</span>}
-    {formattedTime && isoTime && <time dateTime={isoTime}>{formattedTime}</time>}
+    {!deliveryConfirmed && message.status && (!compactStatus || !validTime) && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
+    {!deliveryConfirmed && message.status && !compactStatus && validTime && <span className="message-meta-separator" aria-hidden>·</span>}
+    {validTime && <time dateTime={isoTime}>{formattedTime}</time>}
+    {!deliveryConfirmed && compactStatus && validTime && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
   </div>;
@@ -2662,6 +2705,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const pendingRecipientReason = "finish adding the recipient before sending";
   const effectivePendingRecipient = pendingRecipient && isNewConversation;
   const unavailableReason = effectivePendingRecipient ? pendingRecipientReason : problem;
+  const mainWindowRouteRecovery = headPanel && !effectivePendingRecipient && (
+    (route.kind === "none" && gateways.length > 0) || route.kind === "stale"
+  );
+  const composerUnavailableReason = mainWindowRouteRecovery
+    ? `${unavailableReason} in the main window`
+    : unavailableReason;
   const delayedStatus = route.kind === "route" && gatewayAvailability(route.gateway) === "delayed"
     ? `${route.gateway.name} last synced ${route.gateway.lastSeenAgeSeconds !== undefined ? formatAge(route.gateway.lastSeenAgeSeconds) : "recently"} ago. Message will wait for the phone to wake up.`
     : undefined;
@@ -2744,7 +2793,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         draft={content.text}
         attachments={attachments}
         sendSupported={Boolean(slotKey) && !unavailableReason && !sending}
-        unavailableReason={sending ? "sending…" : unavailableReason}
+        unavailableReason={sending ? "sending…" : composerUnavailableReason}
         onDraftChange={(text) => edit({ text })}
         onSend={() => void send()}
         onAddAttachment={slotKey ? () => void addAttachment() : undefined}
@@ -2755,9 +2804,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         statusSlot={
           <>
             <span id="unavailable-hint" hidden={!unavailableReason}>
-              Sending unavailable: {unavailableReason}
+              Sending unavailable: {composerUnavailableReason}
             </span>
-            <p id="gateway-status-hint" role="status" hidden={!delayedStatus}>{delayedStatus}</p>
+            <p id="gateway-status-hint" role={headPanel ? undefined : "status"} hidden={!delayedStatus}>{delayedStatus}</p>
             {mmsLimitShown && route.kind === "route" && (
               <span className="mms-limit" data-mms-limit-source={route.gateway.mmsLimitSource ?? "fallback"}>
                 {fileSize(estimateBytes)} used · {fileSize(route.gateway.mmsMaxBytes ?? 300 * 1024)} limit ({route.gateway.mmsLimitSource === "carrier" ? "carrier" : "fallback"}) · up to {Math.min(route.gateway.mmsMaxRecipients ?? 20, 20)} recipients
@@ -2769,7 +2818,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         composerUserSized={composerHeight !== null}
         maxAutoGrowHeight={maxAutoGrowHeight}
         platform={platform}
-        gatewaySlot={snapshot ? (
+        gatewaySlot={snapshot ? (headPanel ? (
+          <HeadRoutePill content={content} gateways={gateways} />
+        ) : (
           <GatewaySelector
             gateways={gateways}
             content={content}
@@ -2778,7 +2829,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               edit({ gatewayId: gateway.id, simId: gateway.simId })
             }
           />
-        ) : null}
+        )) : null}
       />
     </section>
   );
