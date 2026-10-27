@@ -295,6 +295,8 @@ impl BrowserCore {
             "discard_draft" => self.discard_draft(args_value(raw_args)?),
             "send_draft" => self.send_draft(args_value(raw_args)?),
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
+            "unread_message_batches" => self.unread_message_batches(args_value(raw_args)?),
+            "mark_read_batch" => self.mark_read_batch(args_value(raw_args)?),
             _ if media::handles(command) => self.media_command(command, args_value(raw_args)?),
             _ if contacts::handles(command) => {
                 self.contacts_command(command, args_value(raw_args)?)
@@ -676,6 +678,29 @@ impl BrowserCore {
         }
         Ok(json!({}))
     }
+    fn unread_message_batches(&self, args: Value) -> Result<Value, Failure> {
+        no_args(args)?;
+        self.client()?
+            .unread_message_batches()
+            .map(|batches| {
+                json!(
+                    batches
+                        .into_iter()
+                        .map(|batch| batch
+                            .into_iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                )
+            })
+            .map_err(core)
+    }
+    fn mark_read_batch(&self, args: Value) -> Result<Value, Failure> {
+        self.client()?
+            .mark_read_batch(&message_ids(args)?)
+            .map(|count| json!(count.to_string()))
+            .map_err(core)
+    }
     pub(crate) fn safe_worker_file(&self, name: &str) -> Result<PathBuf, Failure> {
         let path = Path::new(name);
         if path
@@ -725,6 +750,21 @@ fn args_value(raw: Option<&RawValue>) -> Result<Value, Failure> {
     raw.map_or(Ok(Value::Null), |raw| {
         serde_json::from_str(raw.get()).map_err(|_| invalid())
     })
+}
+fn no_args(args: Value) -> Result<(), Failure> {
+    match args {
+        Value::Null => Ok(()),
+        Value::Object(values) if values.is_empty() => Ok(()),
+        _ => Err(invalid()),
+    }
+}
+fn message_ids(args: Value) -> Result<Vec<MessageId>, Failure> {
+    args.get("messageIds")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?
+        .iter()
+        .map(|id| MessageId::from_str(id.as_str().ok_or_else(invalid)?).map_err(|_| invalid()))
+        .collect()
 }
 pub(crate) fn attachment_id(args: &Value) -> Result<AttachmentId, Failure> {
     AttachmentId::from_str(
@@ -877,6 +917,73 @@ mod tests {
             core.dispatch(r#"{"command":"pairing"}"#)
                 .contains("unknown-command")
         );
+    }
+
+    #[test]
+    fn unread_batches_and_read_batch_dispatch_through_the_bounded_core_api() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = VaultId::new();
+        let device = DeviceId::new();
+        let mut core = BrowserCore::new(root.path().to_path_buf());
+        open(&mut core, vault, device, [7; 32]);
+        let profile = KeyProfile::new(vault.0, 1).unwrap();
+        let header = create_vault_check_header(
+            &derive_root_key("passphrase", &profile).unwrap(),
+            profile.clone(),
+        )
+        .unwrap();
+        value(&core.dispatch(
+            &json!({"command":"unlock","args":{"profile":profile,"header":header,"passphrase":"passphrase"}}).to_string(),
+        ));
+        let message = core
+            .client()
+            .unwrap()
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550101".into(),
+                body: "unread".into(),
+                provider_message_id: Some("mark-all-read".into()),
+                imported: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            value(&core.dispatch(r#"{"command":"unread_message_batches","args":{}}"#)),
+            json!([[message.message_id.to_string()]])
+        );
+        assert_eq!(
+            value(&core.dispatch(
+                &json!({"command":"mark_read_batch","args":{"messageIds":[message.message_id.to_string()]}}).to_string(),
+            )),
+            json!("1")
+        );
+        assert_eq!(
+            value(&core.dispatch(
+                &json!({"command":"mark_read_batch","args":{"messageIds":[message.message_id.to_string()]}}).to_string(),
+            )),
+            json!("0")
+        );
+        let rejected: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"unread_message_batches","args":{"unexpected":true}}"#),
+        )
+        .unwrap();
+        assert_eq!(rejected["ok"], false);
+        assert_eq!(rejected["error"]["code"], "invalid-request");
+        let invalid_id: Value = serde_json::from_str(
+            &core.dispatch(r#"{"command":"mark_read_batch","args":{"messageIds":["not-an-id"]}}"#),
+        )
+        .unwrap();
+        assert_eq!(invalid_id["ok"], false);
+        assert_eq!(invalid_id["error"]["code"], "invalid-request");
+        let oversized = (0..1001)
+            .map(|_| MessageId::new().to_string())
+            .collect::<Vec<_>>();
+        let oversized: Value = serde_json::from_str(&core.dispatch(
+            &json!({"command":"mark_read_batch","args":{"messageIds":oversized}}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(oversized["ok"], false);
+        assert_eq!(oversized["error"]["code"], "core");
     }
 
     #[test]

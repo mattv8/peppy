@@ -26,6 +26,7 @@
     "allow-discard-draft",
     "allow-send-draft",
     "allow-mark-seen",
+    "allow-mark-all-read",
     "allow-pick-attachments",
     "allow-retry-attachment",
     "allow-save-attachment",

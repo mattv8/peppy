@@ -55,6 +55,60 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("sums frozen unread batches after each checkpointed batch acknowledgement", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const marked = bridge.mark_all_read();
+
+    expect(port.sent).toEqual([{ id: 1, command: "unread_message_batches", args: {} }]);
+    port.reply({ id: 1, ok: true, value: [["message-1"], ["message-2"]] });
+    await vi.waitFor(() => expect(port.sent[1]).toEqual({ id: 2, command: "mark_read_batch", args: { messageIds: ["message-1"] } }));
+    port.reply({ id: 2, ok: true, value: "1" });
+    await vi.waitFor(() => expect(port.sent[2]).toEqual({ id: 3, command: "mark_read_batch", args: { messageIds: ["message-2"] } }));
+    port.reply({ id: 3, ok: true, value: "2" });
+    await expect(marked).resolves.toBe("3");
+    bridge.dispose();
+  });
+
+  it("returns zero without a batch mutation when the frozen selection is empty", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const marked = bridge.mark_all_read();
+
+    port.reply({ id: 1, ok: true, value: [] });
+    await expect(marked).resolves.toBe("0");
+    expect(port.sent).toEqual([{ id: 1, command: "unread_message_batches", args: {} }]);
+    bridge.dispose();
+  });
+
+  it("stops after a failed batch without resending earlier batches", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const marked = bridge.mark_all_read();
+
+    port.reply({ id: 1, ok: true, value: [["message-1"], ["message-2"]] });
+    await vi.waitFor(() => expect(port.sent[1]).toEqual({ id: 2, command: "mark_read_batch", args: { messageIds: ["message-1"] } }));
+    port.reply({ id: 2, ok: true, value: "1" });
+    await vi.waitFor(() => expect(port.sent[2]).toEqual({ id: 3, command: "mark_read_batch", args: { messageIds: ["message-2"] } }));
+    port.reply({ id: 3, ok: false, error: { code: "core", message: "failed" } });
+    await expect(marked).rejects.toMatchObject({ code: "core" });
+    expect(port.sent).toHaveLength(3);
+    bridge.dispose();
+  });
+
+  it("rejects a malformed batch acknowledgement without repeating the batch", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const marked = bridge.mark_all_read();
+
+    port.reply({ id: 1, ok: true, value: [["message-1"]] });
+    await vi.waitFor(() => expect(port.sent[1]).toEqual({ id: 2, command: "mark_read_batch", args: { messageIds: ["message-1"] } }));
+    port.reply({ id: 2, ok: true, value: "01" });
+    await expect(marked).rejects.toMatchObject({ code: "unavailable" });
+    expect(port.sent).toHaveLength(2);
+    bridge.dispose();
+  });
+
   it("forwards flat metadata and search/history bridge contracts", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);
@@ -701,6 +755,28 @@ describe("BrowserBridge", () => {
     const rejection = expect(request).rejects.toMatchObject({ code: "timeout" });
     await vi.advanceTimersByTimeAsync(1);
     await rejection;
+    vi.useRealTimers();
+  });
+
+  it("uses a fresh timeout for each read batch and stops at a timed-out later batch", async () => {
+    vi.useFakeTimers();
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort, 100);
+    const marked = bridge.mark_all_read();
+
+    port.reply({ id: 1, ok: true, value: [["message-1"], ["message-2"]] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(port.sent[1]).toMatchObject({ command: "mark_read_batch" });
+    await vi.advanceTimersByTimeAsync(99);
+    port.reply({ id: 2, ok: true, value: "1" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(port.sent[2]).toMatchObject({ command: "mark_read_batch", args: { messageIds: ["message-2"] } });
+    const rejection = expect(marked).rejects.toMatchObject({ code: "timeout" });
+    await vi.advanceTimersByTimeAsync(100);
+
+    await rejection;
+    expect(port.sent).toHaveLength(3);
+    bridge.dispose();
     vi.useRealTimers();
   });
 

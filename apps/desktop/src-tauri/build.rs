@@ -17,6 +17,7 @@ const COMMANDS: &[&str] = &[
     "discard_draft",
     "send_draft",
     "mark_seen",
+    "mark_all_read",
     "pick_attachments",
     "retry_attachment",
     "save_attachment",

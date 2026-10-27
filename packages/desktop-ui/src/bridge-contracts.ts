@@ -127,6 +127,8 @@ export interface DesktopBridge {
   /** `accepted` means durably queued in the local encrypted outbox; `revision` is the stored draft revision afterwards. */
   send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: MessageStatus; reason?: string; revision?: string }>;
   mark_seen(visibleMessageIds: string[]): Promise<void>;
+  /** Actual number changed, encoded as a canonical unsigned decimal string. */
+  mark_all_read(): Promise<string>;
   dismiss_notification(target: NotificationTarget): Promise<void>;
   dismiss_all_notifications(): Promise<void>;
   set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void>;

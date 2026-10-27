@@ -92,6 +92,7 @@ import { isTauriUpdateHost, useUpdateActivity } from "./updates";
 import { connectionText, isServerUnreachable, statusSummary, statusTone, syncStatusText } from "./status";
 import { ServerOfflineAnnouncement, ServerOfflineBanner } from "./ServerOfflineBanner";
 import { AppNoticeBanner, type AppNotice } from "./AppNoticeBanner";
+import { MarkAllReadAction } from "./MarkAllReadAction";
 import { peppyCopy } from "./generated/peppyCopy";
 import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
@@ -3170,6 +3171,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               searchContacts={snapshot ? (query) => searchRecipientSuggestions(query) : undefined}
             />
             {navigationPosition === "side-rail" && <button
+              id="new-message"
               aria-label="New message"
               title="New message"
               data-action="new-message"
@@ -3177,6 +3179,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             >
               <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden />
             </button>}
+            <MarkAllReadAction
+              key={currentSearchSessionKey()}
+              unreadCount={snapshot?.conversations.reduce((total, conversation) => total + conversation.unread, 0) ?? 0}
+              enabled={snapshot?.encryption.state === "unlocked" && !appLock?.locked}
+              markAllRead={() => bridge.mark_all_read()}
+              refresh={() => refresh()}
+              onFocusFallback={() => (document.getElementById("new-message") ?? document.querySelector<HTMLElement>("#thread-list-toolbar input"))?.focus()}
+            />
           </div>
             <ConversationList
             conversations={conversations}

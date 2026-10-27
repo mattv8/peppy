@@ -100,6 +100,8 @@ pub const MMS_CONTENT_VERSION: u32 = 3;
 pub const MAX_SNAPSHOT_PAGE: usize = 500;
 /// Records per staged snapshot generation.
 pub const MAX_SNAPSHOT_RECORDS: u64 = 100_000;
+/// Maximum read acknowledgements committed in one transaction.
+pub const READ_STATE_BATCH_SIZE: usize = MAX_SEAL_BATCH;
 /// Input bytes per snapshot page (typed records count their canonical JSON).
 pub const MAX_SNAPSHOT_PAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Stored bytes per staged generation (oversize records are kept as small digest markers).
@@ -2759,6 +2761,71 @@ impl Client {
         Ok(true)
     }
 
+    /// Freezes the IDs currently unread in batches that keep later writes bounded.
+    pub fn unread_message_batches(&self) -> Result<Vec<Vec<MessageId>>, Error> {
+        let store = self.lock()?;
+        let mut query = store.conn.prepare("SELECT id FROM messages WHERE seen=0")?;
+        let ids = query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let message_ids = ids
+            .iter()
+            .map(|id| parse(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(message_ids
+            .chunks(READ_STATE_BATCH_SIZE)
+            .map(<[MessageId]>::to_vec)
+            .collect())
+    }
+
+    /// Marks requested unread messages seen and queues one encrypted `ReadState` for each change.
+    pub fn mark_read_batch(&self, message_ids: &[MessageId]) -> Result<u64, Error> {
+        if message_ids.len() > READ_STATE_BATCH_SIZE {
+            return Err(Error::InvalidRequest(
+                "read-state batch exceeds the maximum size",
+            ));
+        }
+        if message_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut requested = HashSet::with_capacity(message_ids.len());
+        let mut unread = Vec::with_capacity(message_ids.len());
+        for &message_id in message_ids {
+            if requested.insert(message_id)
+                && tx
+                    .query_row(
+                        "SELECT seen FROM messages WHERE id=?",
+                        params![message_id.to_string()],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    == Some(false)
+            {
+                unread.push(message_id);
+            }
+        }
+        for message_id in &unread {
+            record_seen(&tx, *message_id)?;
+            enqueue_without_sealing(
+                &tx,
+                &ctx,
+                EnvelopePurpose::Event,
+                None,
+                None,
+                &PrivatePayload::ReadState {
+                    message_id: *message_id,
+                },
+            )?;
+        }
+        seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
+        tx.commit()?;
+        Ok(unread.len() as u64)
+    }
+
     pub fn unread_count(&self, conversation_id: ConversationId) -> Result<u64, Error> {
         let count: i64 = self.lock()?.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND seen=0",
@@ -5416,6 +5483,21 @@ fn enqueue(
     route: Option<&GatewayRoute>,
     payload: &PrivatePayload,
 ) -> Result<(EnvelopeId, u64), Error> {
+    let result = enqueue_without_sealing(conn, ctx, purpose, command_id, route, payload)?;
+    seal_pending(conn, ctx, MAX_SEAL_BATCH)?;
+    Ok(result)
+}
+
+/// Allocates the durable producer sequence and envelope ID and stores the private payload.
+/// The caller performs sealing when batching multiple records in one transaction.
+fn enqueue_without_sealing(
+    conn: &Connection,
+    ctx: &Ctx,
+    purpose: EnvelopePurpose,
+    command_id: Option<CommandId>,
+    route: Option<&GatewayRoute>,
+    payload: &PrivatePayload,
+) -> Result<(EnvelopeId, u64), Error> {
     // Capture compaction before the caller projects this event locally. Deferred sealing must
     // never inspect a row whose source sequence has already become its own sequence. Contact
     // producers fail closed here (before any row exists) unless compaction is ready.
@@ -5491,7 +5573,6 @@ fn enqueue(
         }
     }
     contact_media::on_enqueue(conn, ctx.vault_id, payload)?;
-    seal_pending(conn, ctx, MAX_SEAL_BATCH)?;
     Ok((envelope_id, sequence))
 }
 
@@ -10936,5 +11017,149 @@ mod tests {
             cache_only.seal_phone_handoff(&sender, &context),
             Err(Error::KeysUnavailable)
         ));
+    }
+
+    #[test]
+    fn mark_read_batch_rolls_back_after_an_injected_second_read_state_failure() {
+        use peppy_crypto::create_vault_check_header;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("mark-all-read-rollback.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let first = client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "first".into(),
+                provider_message_id: Some("first".into()),
+                imported: false,
+            })
+            .unwrap();
+        client
+            .capture_incoming(IncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "second".into(),
+                provider_message_id: Some("second".into()),
+                imported: false,
+            })
+            .unwrap();
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TRIGGER fail_second_read_state BEFORE INSERT ON outbox
+                     WHEN NEW.plain LIKE '%read_state%'
+                      AND (SELECT COUNT(*) FROM outbox WHERE plain LIKE '%read_state%') >= 1
+                     BEGIN SELECT RAISE(ABORT, 'injected read-state failure'); END;",
+                )
+                .unwrap();
+        }
+
+        let batch = client.unread_message_batches().unwrap().remove(0);
+        assert_eq!(client.mark_read_batch(&batch), Err(Error::Database));
+        assert_eq!(client.unread_count(first.conversation_id).unwrap(), 2);
+        let store = client.lock().unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM seen_messages", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM outbox WHERE plain LIKE '%read_state%'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn mark_read_batch_failure_keeps_earlier_batches_committed_for_explicit_retry() {
+        use peppy_crypto::create_vault_check_header;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let vault_id = VaultId::new();
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("mark-read-batch-retry.db"),
+                vault_id,
+                device_id: DeviceId::new(),
+            },
+            DatabaseKey::new(&[9; 32]).unwrap(),
+        )
+        .unwrap();
+        client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let mut conversation_id = None;
+        for index in 0..=READ_STATE_BATCH_SIZE {
+            let captured = client
+                .capture_incoming(IncomingSms {
+                    conversation_id: None,
+                    sender_address: "+15555550100".into(),
+                    body: "message".into(),
+                    provider_message_id: Some(format!("message-{index}")),
+                    imported: false,
+                })
+                .unwrap();
+            conversation_id = Some(captured.conversation_id);
+        }
+        let batches = client.unread_message_batches().unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            client.mark_read_batch(&batches[0]).unwrap(),
+            READ_STATE_BATCH_SIZE as u64
+        );
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TRIGGER fail_read_state BEFORE INSERT ON outbox
+                     WHEN NEW.plain LIKE '%read_state%'
+                     BEGIN SELECT RAISE(ABORT, 'injected read-state failure'); END;",
+                )
+                .unwrap();
+        }
+        assert_eq!(client.mark_read_batch(&batches[1]), Err(Error::Database));
+        assert_eq!(client.unread_count(conversation_id.unwrap()).unwrap(), 1);
+        {
+            let store = client.lock().unwrap();
+            store
+                .conn
+                .execute_batch("DROP TRIGGER fail_read_state;")
+                .unwrap();
+        }
+
+        let retry = client.unread_message_batches().unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(client.mark_read_batch(&retry[0]).unwrap(), 1);
+        assert!(client.unread_message_batches().unwrap().is_empty());
     }
 }

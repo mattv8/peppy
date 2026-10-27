@@ -214,6 +214,22 @@ pub fn require_main(label: &str) -> BridgeResult<()> {
     }
 }
 
+fn require_mark_all_read_window(
+    label: &str,
+    visible: bool,
+    minimized: bool,
+    focused: bool,
+) -> BridgeResult<()> {
+    require_main(label)?;
+    if !visible || minimized || !focused {
+        return Err(BridgeError::new(
+            "window-not-visible",
+            "Messages can only be marked read from a visible focused window.",
+        ));
+    }
+    Ok(())
+}
+
 /// A composer may follow only a move that was returned to this same window in its active session.
 fn effective_composer_conversation(
     state: &AppState,
@@ -1691,6 +1707,22 @@ async fn mark_seen(
         )?
     };
     blocking(move || session.mark_seen_scoped(&visible_message_ids, conversation)).await
+}
+
+#[tauri::command]
+async fn mark_all_read(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<String> {
+    require_mark_all_read_window(
+        window.label(),
+        window.is_visible().unwrap_or(false),
+        window.is_minimized().unwrap_or(true),
+        window.is_focused().unwrap_or(false),
+    )?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || session.mark_all_read()).await
 }
 
 #[tauri::command]
@@ -4373,6 +4405,7 @@ pub fn run() {
         discard_draft,
         send_draft,
         mark_seen,
+        mark_all_read,
         pick_attachments,
         retry_attachment,
         save_attachment,

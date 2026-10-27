@@ -70,6 +70,20 @@ function unsupported(method: string): Promise<never> {
   return Promise.reject(new BrowserBridgeError("unsupported", `${method} is unavailable in the browser.`));
 }
 
+function unreadMessageBatches(value: unknown): string[][] {
+  if (!Array.isArray(value) || value.some(batch => !Array.isArray(batch) || batch.length === 0 || batch.some(id => typeof id !== "string"))) {
+    throw new BrowserBridgeError("unavailable", "The browser worker returned invalid unread message batches.");
+  }
+  return value as string[][];
+}
+
+function canonicalChangedCount(value: unknown): string {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new BrowserBridgeError("unavailable", "The browser worker returned an invalid changed count.");
+  }
+  return value;
+}
+
 function secretDialog(options: { id: string; title: string; description: string; confirm: string; fields: EnrollmentSecretField[]; setupMode?: "open" | "protected"; errorMessage?: string }): Promise<Record<string, string> | null> {
   activeSecretDialog?.();
   return new Promise((resolve) => {
@@ -427,6 +441,14 @@ export class BrowserBridge implements DesktopBridge {
   public send_draft(input: SendDraftInput): Promise<{ accepted: boolean; status: "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown"; reason?: string; revision?: string }> { return this.call("send_draft", { input }); }
   public discard_draft(input: { id: string; conversationId: string; expectedRevision: string }): Promise<void> { return this.call("discard_draft", { input }); }
   public mark_seen(visibleMessageIds: string[]): Promise<void> { return this.call("mark_seen", { visibleMessageIds }); }
+  public async mark_all_read(): Promise<string> {
+    const batches = unreadMessageBatches(await this.call("unread_message_batches"));
+    let changed = 0n;
+    for (const messageIds of batches) {
+      changed += BigInt(canonicalChangedCount(await this.call("mark_read_batch", { messageIds })));
+    }
+    return changed.toString();
+  }
   public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
   public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }
   public set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void> { return this.call("set_app_muted", { sourceDeviceId, packageName, appName, muted }); }

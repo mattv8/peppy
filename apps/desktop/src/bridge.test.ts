@@ -115,6 +115,7 @@ describe("bridge subscriptions", () => {
     await tauriBridge.enrollment_rotate_phone("shared_secret");
     await tauriBridge.enrollment_cancel_phone();
     await tauriBridge.reveal_vault_secret();
+    await tauriBridge.mark_all_read();
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
@@ -125,6 +126,7 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(7, "enrollment_rotate_phone", { method: "shared_secret" });
     expect(invokeMock).toHaveBeenNthCalledWith(8, "enrollment_cancel_phone", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(9, "reveal_vault_secret", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(10, "mark_all_read", undefined);
   });
 });
 
@@ -134,6 +136,13 @@ describe("fixture draft saves", () => {
   beforeEach(async () => {
     vi.resetModules();
     ({ fixtureBridge } = await import("./bridge"));
+  });
+
+  it("marks every fixture conversation unread count once", async () => {
+    expect(await fixtureBridge.mark_all_read()).toBe("2");
+    expect(await fixtureBridge.mark_all_read()).toBe("0");
+    const state = await fixtureBridge.load_state();
+    expect(state.conversations.every(conversation => conversation.unread === 0)).toBe(true);
   });
 
   it("reuses one blank draft without overwriting its content", async () => {

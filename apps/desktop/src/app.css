@@ -53,6 +53,8 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   display: none;
 }
 #thread-list-toolbar {
+  position: relative;
+  flex-wrap: wrap;
   min-height: var(--peppy-toolbar-height);
   display: flex;
   gap: 4px;
@@ -147,6 +149,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .notif-app-filter-label small { color: var(--peppy-text-muted); font-size: 11px; }
 #settings-view h3 { margin: 8px 0 0; color: var(--peppy-text-strong); font-size: 13px; }
 #thread-list-toolbar > button,
+#mark-all-read,
 .header-actions button {
   width: 28px;
   height: 28px;
@@ -162,6 +165,62 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .header-actions button:hover {
   background: var(--peppy-surface-hover);
 }
+#mark-all-read-boundary {
+  display: contents;
+}
+#mark-all-read-confirmation {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 4px);
+  right: 4px;
+  left: 4px;
+  inline-size: auto;
+  max-inline-size: calc(100% - 8px);
+  padding: 8px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-control-radius);
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-primary);
+  box-shadow: var(--peppy-shadow-floating);
+}
+#mark-all-read-confirmation p {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+#mark-all-read-confirmation div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+#thread-list-action-notice {
+  flex: 1 0 100%;
+  order: 2;
+  margin: 0;
+  padding: 0 4px 4px;
+  color: var(--peppy-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+#thread-list-action-notice:empty {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+#thread-list-action-notice[role="alert"] {
+  color: var(--peppy-error-text);
+}
+#mark-all-read:hover:not(:disabled) {
+  background: var(--peppy-surface-hover);
+}
+#mark-all-read:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+@media (forced-colors: active) { #mark-all-read-confirmation { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }
 .header-actions #conversation-delete-draft { color: var(--peppy-text-secondary); }
 .header-actions #conversation-delete-draft.confirming,
 .header-actions #conversation-delete-draft:hover { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
