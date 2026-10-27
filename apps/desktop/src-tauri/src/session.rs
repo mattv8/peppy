@@ -710,6 +710,7 @@ impl Session {
                         preview_url: None,
                         transfer: Some("download"),
                         retryable: None,
+                        media_hold: None,
                         media_meta: None,
                     };
                 };
@@ -755,7 +756,11 @@ impl Session {
                         }
                     };
                 }
-                let mut attachment = dto::attachment_view(&info, errors.get(&id).cloned(), None);
+                let mut attachment = dto::snapshot_attachment_view(
+                    &info,
+                    errors.get(&id).cloned(),
+                    self.client.deferred_media_status(id),
+                );
                 if let Some(metadata) = media_metadata {
                     let mut media_meta = dto::media_metadata_view(metadata);
                     if let Some(thumbnail) = media_meta.thumbnail.as_mut() {
@@ -844,7 +849,8 @@ impl Session {
             .client
             .media_page(conversation, cursor, limit.min(MAX_PREVIEWS_PER_SNAPSHOT))
             .map_err(core_error)?;
-        let mut view = peppy_desktop_api::media_page_view(page);
+        let mut view = peppy_desktop_api::media_page_view_with_media_status(&self.client, page)
+            .map_err(core_error)?;
         let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
         for item in &mut view.items {
             let Some(thumbnail) = item
@@ -910,7 +916,8 @@ impl Session {
                 .media_page_around(conversation, attachment, limit),
         }
         .map_err(core_error)?;
-        Ok(peppy_desktop_api::media_page_around_view(page))
+        peppy_desktop_api::media_page_around_view_with_media_status(&self.client, page)
+            .map_err(core_error)
     }
 
     pub fn media_page_newer(
@@ -929,7 +936,7 @@ impl Session {
             .client
             .media_page_newer(conversation, cursor, limit)
             .map_err(core_error)?;
-        Ok(peppy_desktop_api::media_page_view(page))
+        peppy_desktop_api::media_page_view_with_media_status(&self.client, page).map_err(core_error)
     }
 
     /// Builds the sanitized UI snapshot and reports deferred preview hydration progress.

@@ -396,3 +396,135 @@ fn reopen_clears_only_fulfilled_legacy_demand_and_keeps_pending_request() {
     );
     assert!(reopened.attachment_download_requested(pending).unwrap());
 }
+
+#[test]
+fn gateway_cleanup_bootstrap_advances_a_fixed_attachment_rowid_window() {
+    let dir = TempDir::new().unwrap();
+    let vault = vault();
+    let (_, client) = client(&dir, "cleanup-bootstrap", &vault);
+    for number in 0..(super::MAX_GATEWAY_MMS_CLEANUP_BATCH + 1) {
+        let attachment = prepare(
+            &client,
+            &dir,
+            &format!("legacy-{number}.png"),
+            b"legacy ciphertext",
+        );
+        client
+            .mark_attachment_uploaded(attachment, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+    }
+
+    assert_eq!(
+        client.cleanup_uploaded_gateway_mms_ciphertext(1).unwrap(),
+        super::GatewayMmsCleanup::default()
+    );
+    let (first_cursor, first_finished): (i64, bool) = client
+        .lock()
+        .unwrap()
+        .conn
+        .query_row(
+            "SELECT attachment_rowid,finished FROM gateway_mms_cleanup_bootstrap WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(first_cursor, super::MAX_GATEWAY_MMS_CLEANUP_BATCH as i64);
+    assert!(!first_finished);
+
+    client.cleanup_uploaded_gateway_mms_ciphertext(1).unwrap();
+    client.cleanup_uploaded_gateway_mms_ciphertext(1).unwrap();
+    let (finished_cursor, finished): (i64, bool) = client
+        .lock()
+        .unwrap()
+        .conn
+        .query_row(
+            "SELECT attachment_rowid,finished FROM gateway_mms_cleanup_bootstrap WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(finished);
+    assert_eq!(
+        finished_cursor,
+        (super::MAX_GATEWAY_MMS_CLEANUP_BATCH + 1) as i64
+    );
+
+    client.cleanup_uploaded_gateway_mms_ciphertext(1).unwrap();
+    let cursor_after_empty_tail: i64 = client
+        .lock()
+        .unwrap()
+        .conn
+        .query_row(
+            "SELECT attachment_rowid FROM gateway_mms_cleanup_bootstrap WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cursor_after_empty_tail, finished_cursor);
+}
+
+#[test]
+fn fulfilled_gateway_mms_marker_allows_normal_lru_thumbnail_eviction() {
+    let dir = TempDir::new().unwrap();
+    let vault = vault();
+    let (_, source) = client(&dir, "marker-source", &vault);
+    let (_, receiver) = client(&dir, "marker-receiver", &vault);
+    let original = prepare(&source, &dir, "marker-original.png", b"original");
+    let thumbnail = prepare(&source, &dir, "marker-thumbnail.png", b"thumbnail");
+    download(&source, &receiver, original, &dir);
+    download(&source, &receiver, thumbnail, &dir);
+    mark_v3_original(&receiver, original, Some(thumbnail));
+    receiver
+        .lock()
+        .unwrap()
+        .conn
+        .execute(
+            "INSERT INTO gateway_mms_media_evictions(attachment_id,marked_at,unlinked_at) VALUES(?,?,?)",
+            params![thumbnail.to_string(), 1_i64, 1_i64],
+        )
+        .unwrap();
+
+    super::trim_to_budget_for_test(&receiver, 0).unwrap();
+    assert_eq!(
+        receiver.attachment_info(thumbnail).unwrap().state,
+        AttachmentState::PendingDownload,
+        "the fulfilled marker makes the rehydrated preview normal LRU cache content"
+    );
+}
+
+#[test]
+fn carrier_transaction_rehydrates_an_evicted_uploaded_copy() {
+    let dir = TempDir::new().unwrap();
+    let vault = vault();
+    let (_, client) = client(&dir, "carrier-rehydrate", &vault);
+    let attachment = prepare(&client, &dir, "carrier.png", b"carrier source");
+    client
+        .mark_attachment_uploaded(attachment, &uuid::Uuid::new_v4().to_string())
+        .unwrap();
+    let cipher = client.native_cipher_file(attachment).unwrap();
+    client
+        .lock()
+        .unwrap()
+        .conn
+        .execute(
+            "INSERT INTO gateway_mms_media_evictions(attachment_id,marked_at,unlinked_at) VALUES(?,?,?)",
+            params![attachment.to_string(), 1_i64, 1_i64],
+        )
+        .unwrap();
+    fs::remove_file(cipher).unwrap();
+
+    let mut store = client.lock().unwrap();
+    let tx = store
+        .conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(super::request_gateway_mms_rehydration_in(&tx, attachment).unwrap());
+    tx.commit().unwrap();
+    drop(store);
+
+    assert_eq!(
+        client.attachment_info(attachment).unwrap().state,
+        AttachmentState::PendingDownload
+    );
+    assert!(client.attachment_download_requested(attachment).unwrap());
+}

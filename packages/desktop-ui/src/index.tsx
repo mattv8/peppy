@@ -77,6 +77,7 @@ export {
   FileText,
   FlaskConical,
   Image,
+  ImageDown,
   ImageOff,
   Link,
   Loader2,
@@ -97,6 +98,7 @@ export {
   User,
   UserPlus,
   Users,
+  WifiOff,
   X,
 } from "lucide-react";
 

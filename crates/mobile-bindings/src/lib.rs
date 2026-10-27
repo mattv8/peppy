@@ -4,11 +4,12 @@
 use peppy_client_core::{
     AttachmentInfo, AttachmentState, Captured, CipherObject, Client, ClientConfig,
     ComposeDraftUpdate, DatabaseKey, DeviceId, Error as CoreError, GatewayHostFacts,
-    GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms, KeyProfile,
-    MAX_SEAL_BATCH, Message, MmsAcquisitionInput, MmsAcquisitionState, MmsBackfillPause,
-    MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckRequest, MmsBackfillScanPlan,
-    MmsBeginOutcome, MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine,
-    MmsSource, NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
+    GatewayMmsCleanup, GatewayPlatform, GatewaySettings, HistoryImportConditions, IncomingSms,
+    KeyProfile, MAX_SEAL_BATCH, Message, MmsAcquisitionInput, MmsAcquisitionState,
+    MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck, MmsBackfillRecheckConditions,
+    MmsBackfillRecheckOutcome, MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBeginOutcome,
+    MmsLegacyBackfillState, MmsPreviewState, MmsProviderIdentityQuarantine, MmsSource,
+    NativeKeyCache, NotificationCapture, NotificationCaptureOutcome, NotificationTarget,
     PermitBlock, PermitDecision, ReceivedCommand, SendResult, SmsAcquisitionInput,
     SmsAcquisitionState, SmsHistoryStatus, SmsReconciliationPlan, SmsScanPlan, SmsSource,
     Transport, VaultCheckHeader, VaultId,
@@ -213,6 +214,7 @@ pub struct NativeMmsSource {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum NativeMmsBackfillPause {
+    AbsoluteRecoveryCapacity,
     RecoveryCapacity,
     LocalCapacity,
     RemoteStorage,
@@ -227,6 +229,23 @@ pub enum NativeMmsBackfillPhase {
 pub enum NativeMmsBackfillDirection {
     Incoming,
     Outgoing,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NativeMmsBackfillRecheckOutcome {
+    Verified,
+    Progress,
+    UnchangedUnavailable,
+    UnchangedPartUnavailable,
+    TransientFailure,
+    ProviderChanged,
+    AwaitingProvider,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeMmsBackfillRecheckConditions {
+    pub charging: bool,
+    pub capacity_changed: bool,
+    pub explicit_refresh: bool,
+    pub provider_changed: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsLegacyBackfillState {
@@ -260,14 +279,17 @@ pub struct NativeMmsBackfillScanPlan {
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsBackfillRecheckRequest {
+    pub acquisition_id: String,
     pub provider_message_id: String,
     pub direction: NativeMmsBackfillDirection,
+    pub state: NativeMmsAcquisitionState,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsBackfillRecheck {
     pub requests: Vec<NativeMmsBackfillRecheckRequest>,
     pub cursor: Option<String>,
     pub budget: u64,
+    pub continuation_due: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct NativeMmsAcquisitionInput {
@@ -529,6 +551,14 @@ pub struct NativeCipherObject {
     pub ciphertext_bytes: u64,
     pub ciphertext_sha256: String,
     pub remote_object_id: Option<String>,
+}
+
+/// Bounded Android-only cleanup of finalized gateway MMS capture ciphertext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct NativeGatewayMmsCleanup {
+    pub marked: u32,
+    pub unlinked: u32,
+    pub pending_unlink: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -898,6 +928,14 @@ fn cipher_view(object: CipherObject) -> NativeCipherObject {
     }
 }
 
+fn gateway_mms_cleanup_view(value: GatewayMmsCleanup) -> NativeGatewayMmsCleanup {
+    NativeGatewayMmsCleanup {
+        marked: value.marked,
+        unlinked: value.unlinked,
+        pending_unlink: value.pending_unlink,
+    }
+}
+
 fn send_result(result: NativeSendResult) -> SendResult {
     match result {
         NativeSendResult::Submitted => SendResult::Submitted,
@@ -1182,6 +1220,9 @@ fn mms_state_view(state: MmsAcquisitionState) -> NativeMmsAcquisitionState {
 }
 fn mms_backfill_pause_view(value: MmsBackfillPause) -> NativeMmsBackfillPause {
     match value {
+        MmsBackfillPause::AbsoluteRecoveryCapacity => {
+            NativeMmsBackfillPause::AbsoluteRecoveryCapacity
+        }
         MmsBackfillPause::RecoveryCapacity => NativeMmsBackfillPause::RecoveryCapacity,
         MmsBackfillPause::LocalCapacity => NativeMmsBackfillPause::LocalCapacity,
         MmsBackfillPause::RemoteStorage => NativeMmsBackfillPause::RemoteStorage,
@@ -1205,6 +1246,39 @@ fn mms_backfill_direction_view(value: peppy_client_core::Direction) -> NativeMms
     match value {
         peppy_client_core::Direction::Incoming => NativeMmsBackfillDirection::Incoming,
         peppy_client_core::Direction::Outgoing => NativeMmsBackfillDirection::Outgoing,
+    }
+}
+fn mms_backfill_recheck_conditions(
+    value: NativeMmsBackfillRecheckConditions,
+) -> MmsBackfillRecheckConditions {
+    MmsBackfillRecheckConditions {
+        charging: value.charging,
+        capacity_changed: value.capacity_changed,
+        explicit_refresh: value.explicit_refresh,
+        provider_changed: value.provider_changed,
+    }
+}
+fn mms_backfill_recheck_outcome(
+    value: NativeMmsBackfillRecheckOutcome,
+) -> MmsBackfillRecheckOutcome {
+    match value {
+        NativeMmsBackfillRecheckOutcome::Verified => MmsBackfillRecheckOutcome::Verified,
+        NativeMmsBackfillRecheckOutcome::Progress => MmsBackfillRecheckOutcome::Progress,
+        NativeMmsBackfillRecheckOutcome::UnchangedUnavailable => {
+            MmsBackfillRecheckOutcome::UnchangedUnavailable
+        }
+        NativeMmsBackfillRecheckOutcome::UnchangedPartUnavailable => {
+            MmsBackfillRecheckOutcome::UnchangedPartUnavailable
+        }
+        NativeMmsBackfillRecheckOutcome::TransientFailure => {
+            MmsBackfillRecheckOutcome::TransientFailure
+        }
+        NativeMmsBackfillRecheckOutcome::ProviderChanged => {
+            MmsBackfillRecheckOutcome::ProviderChanged
+        }
+        NativeMmsBackfillRecheckOutcome::AwaitingProvider => {
+            MmsBackfillRecheckOutcome::AwaitingProvider
+        }
     }
 }
 fn mms_backfill_status_view(
@@ -1279,8 +1353,10 @@ fn mms_backfill_recheck_request_view(
     value: MmsBackfillRecheckRequest,
 ) -> NativeMmsBackfillRecheckRequest {
     NativeMmsBackfillRecheckRequest {
+        acquisition_id: value.acquisition_id,
         provider_message_id: value.provider_message_id,
         direction: mms_backfill_direction_view(value.direction),
+        state: mms_state_view(value.state),
     }
 }
 fn mms_backfill_recheck_view(value: MmsBackfillRecheck) -> NativeMmsBackfillRecheck {
@@ -1292,6 +1368,7 @@ fn mms_backfill_recheck_view(value: MmsBackfillRecheck) -> NativeMmsBackfillRech
             .collect(),
         cursor: value.cursor,
         budget: value.budget as u64,
+        continuation_due: value.continuation_due,
     }
 }
 fn mms_acquisition_view(item: peppy_client_core::MmsAcquisition) -> NativeMmsAcquisition {
@@ -1894,6 +1971,39 @@ impl NativeClient {
         })
         .map(mms_backfill_recheck_view)
     }
+    pub fn mms_backfill_due_rechecks(
+        &self,
+        generation: String,
+        scope: String,
+        now_ms: i64,
+        conditions: NativeMmsBackfillRecheckConditions,
+    ) -> Result<NativeMmsBackfillRecheck, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.mms_backfill_due_rechecks(
+                &generation,
+                &scope,
+                now_ms,
+                mms_backfill_recheck_conditions(conditions),
+            )
+        })
+        .map(mms_backfill_recheck_view)
+    }
+    pub fn record_mms_backfill_recheck_outcome(
+        &self,
+        acquisition_id: String,
+        now_ms: i64,
+        outcome: NativeMmsBackfillRecheckOutcome,
+        conditions: NativeMmsBackfillRecheckConditions,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.record_mms_backfill_recheck_outcome(
+                &acquisition_id,
+                now_ms,
+                mms_backfill_recheck_outcome(outcome),
+                mms_backfill_recheck_conditions(conditions),
+            )
+        })
+    }
     pub fn request_mms_recheck(
         &self,
         generation: String,
@@ -1962,6 +2072,62 @@ impl NativeClient {
     }
     pub fn mms_pending_media_bytes(&self) -> Result<u64, MobileBindingsError> {
         with_client(&self.client, Client::mms_pending_media_bytes)
+    }
+    /// Supplies transient Android network facts for deferred gateway MMS media selection.
+    pub fn enable_deferred_gateway_media(
+        &self,
+        wifi_connected: bool,
+        media_wifi_only: bool,
+    ) -> Result<(), MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.enable_deferred_gateway_media(wifi_connected, media_wifi_only)
+        })
+    }
+
+    pub fn record_gateway_media_failure(
+        &self,
+        attachment_id: String,
+        reason: String,
+    ) -> Result<bool, MobileBindingsError> {
+        let id = parse_id(&attachment_id)?;
+        with_client(&self.client, |client| {
+            client.record_gateway_media_failure(id, &reason)
+        })
+    }
+
+    pub fn record_recovery_snapshot_capacity(
+        &self,
+        high_water_cursor: String,
+        record_count: u64,
+    ) -> Result<(), MobileBindingsError> {
+        let cursor = parse_cursor(high_water_cursor)?;
+        with_client(&self.client, |client| {
+            client.record_recovery_snapshot_capacity(cursor, record_count)
+        })
+    }
+    /// Returns the core-filtered upload set for this Android gateway pass.
+    pub fn pending_gateway_media_uploads(
+        &self,
+    ) -> Result<Vec<NativeCipherObject>, MobileBindingsError> {
+        with_client(&self.client, Client::pending_gateway_media_uploads)
+            .map(|items| items.into_iter().map(cipher_view).collect())
+    }
+
+    pub fn pending_gateway_media_downloads(
+        &self,
+    ) -> Result<Vec<NativeCipherObject>, MobileBindingsError> {
+        with_client(&self.client, Client::pending_gateway_media_downloads)
+            .map(|objects| objects.into_iter().map(cipher_view).collect())
+    }
+    /// Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
+    pub fn cleanup_uploaded_gateway_mms_ciphertext(
+        &self,
+        limit: u32,
+    ) -> Result<NativeGatewayMmsCleanup, MobileBindingsError> {
+        with_client(&self.client, |client| {
+            client.cleanup_uploaded_gateway_mms_ciphertext(limit)
+        })
+        .map(gateway_mms_cleanup_view)
     }
     pub fn set_mms_own_address(
         &self,

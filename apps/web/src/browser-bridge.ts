@@ -490,6 +490,7 @@ export class BrowserBridge implements DesktopBridge {
   }
   public retry_attachment(id: string): Promise<void> { return this.call("retry_attachment", { id }); }
   public request_attachment_download(id: string): Promise<void> { return this.call("request_attachment_download", { id }); }
+  public media_sync_request(attachmentIds: string[]): Promise<void> { return this.call("media_sync_request", { attachmentIds }); }
   public media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage> { return this.call("media_page", { conversationId, cursor, limit }); }
   public media_page_around(conversationId: string, attachmentId: string, messageId?: string, limit?: number): ReturnType<DesktopBridge["media_page_around"]> { return this.call("media_page_around", { conversationId, attachmentId, messageId, limit }); }
   public media_page_newer(conversationId: string, cursor: MediaCursor, limit?: number): Promise<MediaPage> { return this.call("media_page_newer", { conversationId, cursor, limit }); }

@@ -155,7 +155,7 @@ RCS requires a verified carrier or OEM integration and is not available in this 
 
 Android can delay background sync in Doze or battery saver. Force-stopping Peppy pauses capture until you open it again. Some one-time-code texts may not reach companion apps.</string>
     <string name="peppy_help_android_mms_capture">Captures MMS after your phone\'s messaging app downloads it.</string>
-    <string name="peppy_help_android_mms_wifi">Applies to encrypted media uploads and downloads. WiFi only uses the active WiFi connection; Ethernet and cellular (even unlimited plans) are not included.</string>
+    <string name="peppy_help_android_mms_wifi">Live messages and small encrypted previews may sync over mobile data. Originals and imported history wait for Wi-Fi unless you choose Sync image in a conversation. Downloads needed to send a message are not delayed. Wi-Fi means an active Wi-Fi connection, not Ethernet or unlimited cellular.</string>
     <string name="peppy_help_android_own_number">Needed only so replies to group MMS threads exclude this phone.</string>
     <string name="peppy_help_android_notification_mirroring">Upgrade your other Peppy clients before enabling mirroring. Notification history is retained like messages and shares the vault\'s 100,000-record recovery limit. Mute noisy apps to limit growth.</string>
     <string name="peppy_help_android_notification_mirroring_toggle">Send app notifications to your desktop. Off by default.</string>
@@ -218,7 +218,7 @@ Android can delay background sync in Doze or battery saver. Force-stopping Peppy
     <string name="peppy_app_filters_no_match">No matching apps.</string>
     <string name="peppy_app_filters_save_error">Could not save the app filter. Unlock sync and try again.</string>
     <string name="peppy_app_filters_load_error">Could not load app filters. Try again.</string>
-    <string name="peppy_media_wifi_only">Transfer media on Wi-Fi only</string>
+    <string name="peppy_media_wifi_only">Wait for Wi-Fi for original media and history</string>
     <string name="peppy_account">Account</string>
     <string name="peppy_settings">Settings</string>
     <string name="peppy_devices">Devices</string>

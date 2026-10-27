@@ -7,11 +7,11 @@ import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicLong
 
 internal enum class SyncTraceEvent(val code: Long) {
-    OBSERVER_HINT(1), OBSERVER_DISPATCH(2), CAPTURE_ENQUEUE(3), CAPTURE_START(4), CAPTURE_END(5), CAPTURE_RETRY(6), CAPTURE_CONTINUATION(7), CAPTURE_PLAN(8), CAPTURE_SUMMARY(9), PROVIDER_QUERY(10), NATIVE_OPEN(11), GATEWAY_ENQUEUE(12), GATEWAY_START(13), GATEWAY_END(14), GATEWAY_PHASE(15), HTTP_REQUEST(16), OUTBOX_ACK(17), CAPTURE_PROGRESS(18), NATIVE_CALL(19), GATEWAY_PROGRESS(20), CONTACT_PROGRESS(21), SOCKET_STATE(22), NOTIFICATION_PROGRESS(23), DIAGNOSTIC_STATE(24),
+    OBSERVER_HINT(1), OBSERVER_DISPATCH(2), CAPTURE_ENQUEUE(3), CAPTURE_START(4), CAPTURE_END(5), CAPTURE_RETRY(6), CAPTURE_CONTINUATION(7), CAPTURE_PLAN(8), CAPTURE_SUMMARY(9), PROVIDER_QUERY(10), NATIVE_OPEN(11), GATEWAY_ENQUEUE(12), GATEWAY_START(13), GATEWAY_END(14), GATEWAY_PHASE(15), HTTP_REQUEST(16), OUTBOX_ACK(17), CAPTURE_PROGRESS(18), NATIVE_CALL(19), GATEWAY_PROGRESS(20), CONTACT_PROGRESS(21), SOCKET_STATE(22), NOTIFICATION_PROGRESS(23), DIAGNOSTIC_STATE(24), MMS_CAPTURE_PASS(25),
 }
 
 internal enum class SyncTraceField(val code: Long) {
-    TRACE_ID(1), PARENT_ID(2), ENQUEUED_MS(3), DELAY_MS(4), ATTEMPT(5), DURATION_MS(6), CPU_MS(7), SUCCESS(8), SOURCE(9), CAPTURED(10), PENDING(11), UNAVAILABLE(12), PAUSED(13), MORE(14), PROVIDER_ERROR(15), CORE_ERROR(16), IMPORTED(17), ROWS(18), COUNT(19), PHASE(20), METHOD(21), ROUTE(22), STATUS(23), REQUEST_BYTES(24), RESPONSE_BYTES(25), COLD(26), OUTCOME(28), REASON(29), PROCESSED(30), ADVANCED(31), WRAPPED(32), BUDGET_EXHAUSTED(33), DROPPED(34), ENABLED(35), STAGE(36), REMAINING(37), BACKFILL_PENDING(38), READY(39),
+    TRACE_ID(1), PARENT_ID(2), ENQUEUED_MS(3), DELAY_MS(4), ATTEMPT(5), DURATION_MS(6), CPU_MS(7), SUCCESS(8), SOURCE(9), CAPTURED(10), PENDING(11), UNAVAILABLE(12), PAUSED(13), MORE(14), PROVIDER_ERROR(15), CORE_ERROR(16), IMPORTED(17), ROWS(18), COUNT(19), PHASE(20), METHOD(21), ROUTE(22), STATUS(23), REQUEST_BYTES(24), RESPONSE_BYTES(25), COLD(26), OUTCOME(28), REASON(29), PROCESSED(30), ADVANCED(31), WRAPPED(32), BUDGET_EXHAUSTED(33), DROPPED(34), ENABLED(35), STAGE(36), REMAINING(37), BACKFILL_PENDING(38), READY(39), PROVIDER_READS(40), PROVIDER_FAILURES(41), PAGE_QUERIES(42), PROVIDER_DURATION_MS(43), PROVIDER_CPU_MS(44),
 }
 
 internal object SyncDiagnosticStage { const val SMS_LIVE = 1L; const val SMS_HISTORY = 2L; const val SMS_RECHECK = 3L; const val SMS_RECONCILIATION = 4L; const val MMS = 5L; const val GATEWAY = 6L; const val CONTACT_FULL = 7L; const val CONTACT_INCREMENTAL = 8L; const val SOCKET = 9L; const val NOTIFICATION = 10L }
@@ -115,6 +115,52 @@ internal object SyncDiagnostics {
         } catch (error: Throwable) {
             recordStageMeasurement(event, stage, start, startCpu, succeeded = false, current)
             throw error
+        }
+    }
+
+    /** Records timing in finally, preserving a capture failure exactly as it was observed. */
+    internal fun <T> measureWithFields(
+        event: SyncTraceEvent,
+        fields: () -> Array<Pair<SyncTraceField, Long>>,
+        block: () -> T,
+    ): T {
+        val current = configuration
+        if (!current.enabled) return block()
+        val start = runCatching(current.clock).getOrNull()
+        val startCpu = runCatching(current.cpuMs).getOrNull()
+        var succeeded = false
+        return try {
+            block().also { succeeded = true }
+        } finally {
+            if (start != null && startCpu != null) {
+                runCatching {
+                    record(
+                        event,
+                        SyncTraceField.DURATION_MS to (current.clock() - start),
+                        SyncTraceField.CPU_MS to (current.cpuMs() - startCpu),
+                        SyncTraceField.SUCCESS to if (succeeded) 1 else 0,
+                        *fields(),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Accumulates provider timing without emitting a record for each provider operation. */
+    internal fun <T> measureProvider(onMeasured: (durationMs: Long, cpuMs: Long) -> Unit, block: () -> T): T =
+        measureAccumulated(onMeasured, block)
+
+    internal fun <T> measureAccumulated(onMeasured: (durationMs: Long, cpuMs: Long) -> Unit, block: () -> T): T {
+        val current = configuration
+        if (!current.enabled) return block()
+        val start = runCatching(current.clock).getOrNull()
+        val startCpu = runCatching(current.cpuMs).getOrNull()
+        return try {
+            block()
+        } finally {
+            if (start != null && startCpu != null) {
+                runCatching { onMeasured(current.clock() - start, current.cpuMs() - startCpu) }
+            }
         }
     }
 

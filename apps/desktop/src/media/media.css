@@ -8,4 +8,5 @@
 #media-tab-loading, #media-tab-content { flex: 1; min-height: 0; }
 #media-tab-content { overflow-y: auto; padding: 16px 16px calc(var(--composer-overlay-height, 120px) + var(--composer-gutter)); }
 [data-media-grid] { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+[data-media-held-hint] { margin: 0 0 8px; color: var(--peppy-text-secondary); font-size: 12px; }
 @media (max-width: 600px) { [data-media-grid] { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; } }

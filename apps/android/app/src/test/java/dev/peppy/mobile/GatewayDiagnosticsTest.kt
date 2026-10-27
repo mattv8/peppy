@@ -19,6 +19,22 @@ import java.io.IOException
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class GatewayDiagnosticsTest {
+    @Test fun cleanupReportsOnlyBoundedNumericCountsAndHonorsDiagnosticsOptOut() {
+        val traces = mutableListOf<String>()
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, traces::add) {
+            BackgroundDiagnostics.mmsCleanup(3, 2, 1)
+        }
+        assertEquals(1, traces.size)
+        val fields = traces.single().split(' ').associate { token -> token.substringBefore('=') to token.substringAfter('=') }
+        assertEquals("20", fields[SyncTraceField.PHASE.code.toString()])
+        assertEquals("3", fields[SyncTraceField.COUNT.code.toString()])
+        assertEquals("2", fields[SyncTraceField.PROCESSED.code.toString()])
+        assertEquals("1", fields[SyncTraceField.PENDING.code.toString()])
+        SyncDiagnostics.withTestConfiguration(false, { error("clock") }, { error("cpu") }, traces::add) {
+            BackgroundDiagnostics.mmsCleanup(3, 2, 1)
+        }
+        assertEquals(1, traces.size)
+    }
     @Test fun diagnosticsRequestCarriesParentOnlyWhenEnabled() {
         SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, {}) {
             assertEquals(42L, GatewayWork.createRequest(false, diagnosticParent = 42L).workSpec.input.getLong(GatewayWork.DIAGNOSTIC_PARENT, 0L))

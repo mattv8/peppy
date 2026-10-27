@@ -665,6 +665,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func capturePlatformContactsJson(inputJson: String) throws  -> String
     
     /**
+     * Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
+     */
+    func cleanupUploadedGatewayMmsCiphertext(limit: UInt32) throws  -> NativeGatewayMmsCleanup
+    
+    /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
     func compactionBackfillStepJson(limit: UInt32) throws  -> String
@@ -724,6 +729,11 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
      * to completion; the underlying store closes once the last one finishes.
      */
     func dispose() throws 
+    
+    /**
+     * Supplies transient Android network facts for deferred gateway MMS media selection.
+     */
+    func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool) throws 
     
     func evictAttachmentCiphertext(attachmentId: String) throws  -> Bool
     
@@ -794,6 +804,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func mmsAcquisitions(limit: UInt64) throws  -> [NativeMmsAcquisition]
     
+    func mmsBackfillDueRechecks(generation: String, scope: String, nowMs: Int64, conditions: NativeMmsBackfillRecheckConditions) throws  -> NativeMmsBackfillRecheck
+    
     func mmsBackfillRecheckRequests(generation: String, scope: String) throws  -> NativeMmsBackfillRecheck
     
     func mmsBackfillStatus(generation: String, scope: String) throws  -> NativeMmsBackfillStatus
@@ -839,6 +851,13 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func pendingDownloads() throws  -> [NativeCipherObject]
     
+    func pendingGatewayMediaDownloads() throws  -> [NativeCipherObject]
+    
+    /**
+     * Returns the core-filtered upload set for this Android gateway pass.
+     */
+    func pendingGatewayMediaUploads() throws  -> [NativeCipherObject]
+    
     func pendingNotificationDismissals(limit: UInt64) throws  -> [NativeNotificationDismissal]
     
     func pendingOutboxJson() throws  -> [String]
@@ -880,6 +899,12 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     func receiveCursor() throws  -> String
     
     func reconcileContactApply(inputJson: String) throws  -> String
+    
+    func recordGatewayMediaFailure(attachmentId: String, reason: String) throws  -> Bool
+    
+    func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions) throws 
+    
+    func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64) throws 
     
     func recordSendResult(commandId: String, result: NativeSendResult) throws  -> String
     
@@ -1255,6 +1280,19 @@ open func capturePlatformContactsJson(inputJson: String)throws  -> String  {
 }
     
     /**
+     * Deletes only durable-finalized Android gateway MMS capture copies in a bounded batch.
+     */
+open func cleanupUploadedGatewayMmsCiphertext(limit: UInt32)throws  -> NativeGatewayMmsCleanup  {
+    return try  FfiConverterTypeNativeGatewayMmsCleanup_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * One bounded compaction frontier backfill step (readiness JSON plus `processed`).
      */
 open func compactionBackfillStepJson(limit: UInt32)throws  -> String  {
@@ -1466,6 +1504,19 @@ open func dispose()throws   {try rustCallWithError(FfiConverterTypeMobileBinding
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeclient_dispose(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Supplies transient Android network facts for deferred gateway MMS media selection.
+     */
+open func enableDeferredGatewayMedia(wifiConnected: Bool, mediaWifiOnly: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_enable_deferred_gateway_media(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(wifiConnected),
+        FfiConverterBool.lower(mediaWifiOnly),uniffiCallStatus
     )
 }
 }
@@ -1733,6 +1784,19 @@ open func mmsAcquisitions(limit: UInt64)throws  -> [NativeMmsAcquisition]  {
 })
 }
     
+open func mmsBackfillDueRechecks(generation: String, scope: String, nowMs: Int64, conditions: NativeMmsBackfillRecheckConditions)throws  -> NativeMmsBackfillRecheck  {
+    return try  FfiConverterTypeNativeMmsBackfillRecheck_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_mms_backfill_due_rechecks(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(generation),
+        FfiConverterString.lower(scope),
+        FfiConverterInt64.lower(nowMs),
+        FfiConverterTypeNativeMmsBackfillRecheckConditions_lower(conditions),uniffiCallStatus
+    )
+})
+}
+    
 open func mmsBackfillRecheckRequests(generation: String, scope: String)throws  -> NativeMmsBackfillRecheck  {
     return try  FfiConverterTypeNativeMmsBackfillRecheck_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -1928,6 +1992,27 @@ open func pendingDownloads()throws  -> [NativeCipherObject]  {
 })
 }
     
+open func pendingGatewayMediaDownloads()throws  -> [NativeCipherObject]  {
+    return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_gateway_media_downloads(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Returns the core-filtered upload set for this Android gateway pass.
+     */
+open func pendingGatewayMediaUploads()throws  -> [NativeCipherObject]  {
+    return try  FfiConverterSequenceTypeNativeCipherObject.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_pending_gateway_media_uploads(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func pendingNotificationDismissals(limit: UInt64)throws  -> [NativeNotificationDismissal]  {
     return try  FfiConverterSequenceTypeNativeNotificationDismissal.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -2073,6 +2158,39 @@ open func reconcileContactApply(inputJson: String)throws  -> String  {
         FfiConverterString.lower(inputJson),uniffiCallStatus
     )
 })
+}
+    
+open func recordGatewayMediaFailure(attachmentId: String, reason: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_gateway_media_failure(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(attachmentId),
+        FfiConverterString.lower(reason),uniffiCallStatus
+    )
+})
+}
+    
+open func recordMmsBackfillRecheckOutcome(acquisitionId: String, nowMs: Int64, outcome: NativeMmsBackfillRecheckOutcome, conditions: NativeMmsBackfillRecheckConditions)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_mms_backfill_recheck_outcome(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(acquisitionId),
+        FfiConverterInt64.lower(nowMs),
+        FfiConverterTypeNativeMmsBackfillRecheckOutcome_lower(outcome),
+        FfiConverterTypeNativeMmsBackfillRecheckConditions_lower(conditions),uniffiCallStatus
+    )
+}
+}
+    
+open func recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: UInt64)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_record_recovery_snapshot_capacity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(highWaterCursor),
+        FfiConverterUInt64.lower(recordCount),uniffiCallStatus
+    )
+}
 }
     
 open func recordSendResult(commandId: String, result: NativeSendResult)throws  -> String  {
@@ -4647,6 +4765,67 @@ public func FfiConverterTypeNativeGatewayHostFacts_lower(_ value: NativeGatewayH
 }
 
 
+/**
+ * Bounded Android-only cleanup of finalized gateway MMS capture ciphertext.
+ */
+public struct NativeGatewayMmsCleanup: Equatable, Hashable {
+    public var marked: UInt32
+    public var unlinked: UInt32
+    public var pendingUnlink: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(marked: UInt32, unlinked: UInt32, pendingUnlink: UInt32) {
+        self.marked = marked
+        self.unlinked = unlinked
+        self.pendingUnlink = pendingUnlink
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeGatewayMmsCleanup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeGatewayMmsCleanup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeGatewayMmsCleanup {
+        return
+            try NativeGatewayMmsCleanup(
+                marked: FfiConverterUInt32.read(from: &buf), 
+                unlinked: FfiConverterUInt32.read(from: &buf), 
+                pendingUnlink: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeGatewayMmsCleanup, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.marked, into: &buf)
+        FfiConverterUInt32.write(value.unlinked, into: &buf)
+        FfiConverterUInt32.write(value.pendingUnlink, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGatewayMmsCleanup_lift(_ buf: RustBuffer) throws -> NativeGatewayMmsCleanup {
+    return try FfiConverterTypeNativeGatewayMmsCleanup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeGatewayMmsCleanup_lower(_ value: NativeGatewayMmsCleanup) -> RustBuffer {
+    return FfiConverterTypeNativeGatewayMmsCleanup.lower(value)
+}
+
+
 public struct NativeGatewayPolicyDecision: Equatable, Hashable {
     public var captureNotification: Bool
     public var captureSms: Bool
@@ -5518,13 +5697,15 @@ public struct NativeMmsBackfillRecheck: Equatable, Hashable {
     public var requests: [NativeMmsBackfillRecheckRequest]
     public var cursor: String?
     public var budget: UInt64
+    public var continuationDue: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(requests: [NativeMmsBackfillRecheckRequest], cursor: String?, budget: UInt64) {
+    public init(requests: [NativeMmsBackfillRecheckRequest], cursor: String?, budget: UInt64, continuationDue: Bool) {
         self.requests = requests
         self.cursor = cursor
         self.budget = budget
+        self.continuationDue = continuationDue
     }
 
     
@@ -5545,7 +5726,8 @@ public struct FfiConverterTypeNativeMmsBackfillRecheck: FfiConverterRustBuffer {
             try NativeMmsBackfillRecheck(
                 requests: FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.read(from: &buf), 
                 cursor: FfiConverterOptionString.read(from: &buf), 
-                budget: FfiConverterUInt64.read(from: &buf)
+                budget: FfiConverterUInt64.read(from: &buf), 
+                continuationDue: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5553,6 +5735,7 @@ public struct FfiConverterTypeNativeMmsBackfillRecheck: FfiConverterRustBuffer {
         FfiConverterSequenceTypeNativeMmsBackfillRecheckRequest.write(value.requests, into: &buf)
         FfiConverterOptionString.write(value.cursor, into: &buf)
         FfiConverterUInt64.write(value.budget, into: &buf)
+        FfiConverterBool.write(value.continuationDue, into: &buf)
     }
 }
 
@@ -5572,15 +5755,81 @@ public func FfiConverterTypeNativeMmsBackfillRecheck_lower(_ value: NativeMmsBac
 }
 
 
-public struct NativeMmsBackfillRecheckRequest: Equatable, Hashable {
-    public var providerMessageId: String
-    public var direction: NativeMmsBackfillDirection
+public struct NativeMmsBackfillRecheckConditions: Equatable, Hashable {
+    public var charging: Bool
+    public var capacityChanged: Bool
+    public var explicitRefresh: Bool
+    public var providerChanged: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(providerMessageId: String, direction: NativeMmsBackfillDirection) {
+    public init(charging: Bool, capacityChanged: Bool, explicitRefresh: Bool, providerChanged: Bool) {
+        self.charging = charging
+        self.capacityChanged = capacityChanged
+        self.explicitRefresh = explicitRefresh
+        self.providerChanged = providerChanged
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeMmsBackfillRecheckConditions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeMmsBackfillRecheckConditions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheckConditions {
+        return
+            try NativeMmsBackfillRecheckConditions(
+                charging: FfiConverterBool.read(from: &buf), 
+                capacityChanged: FfiConverterBool.read(from: &buf), 
+                explicitRefresh: FfiConverterBool.read(from: &buf), 
+                providerChanged: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeMmsBackfillRecheckConditions, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.charging, into: &buf)
+        FfiConverterBool.write(value.capacityChanged, into: &buf)
+        FfiConverterBool.write(value.explicitRefresh, into: &buf)
+        FfiConverterBool.write(value.providerChanged, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeMmsBackfillRecheckConditions_lift(_ buf: RustBuffer) throws -> NativeMmsBackfillRecheckConditions {
+    return try FfiConverterTypeNativeMmsBackfillRecheckConditions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeMmsBackfillRecheckConditions_lower(_ value: NativeMmsBackfillRecheckConditions) -> RustBuffer {
+    return FfiConverterTypeNativeMmsBackfillRecheckConditions.lower(value)
+}
+
+
+public struct NativeMmsBackfillRecheckRequest: Equatable, Hashable {
+    public var acquisitionId: String
+    public var providerMessageId: String
+    public var direction: NativeMmsBackfillDirection
+    public var state: NativeMmsAcquisitionState
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(acquisitionId: String, providerMessageId: String, direction: NativeMmsBackfillDirection, state: NativeMmsAcquisitionState) {
+        self.acquisitionId = acquisitionId
         self.providerMessageId = providerMessageId
         self.direction = direction
+        self.state = state
     }
 
     
@@ -5599,14 +5848,18 @@ public struct FfiConverterTypeNativeMmsBackfillRecheckRequest: FfiConverterRustB
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheckRequest {
         return
             try NativeMmsBackfillRecheckRequest(
+                acquisitionId: FfiConverterString.read(from: &buf), 
                 providerMessageId: FfiConverterString.read(from: &buf), 
-                direction: FfiConverterTypeNativeMmsBackfillDirection.read(from: &buf)
+                direction: FfiConverterTypeNativeMmsBackfillDirection.read(from: &buf), 
+                state: FfiConverterTypeNativeMmsAcquisitionState.read(from: &buf)
         )
     }
 
     public static func write(_ value: NativeMmsBackfillRecheckRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.acquisitionId, into: &buf)
         FfiConverterString.write(value.providerMessageId, into: &buf)
         FfiConverterTypeNativeMmsBackfillDirection.write(value.direction, into: &buf)
+        FfiConverterTypeNativeMmsAcquisitionState.write(value.state, into: &buf)
     }
 }
 
@@ -8465,6 +8718,7 @@ public func FfiConverterTypeNativeMmsBackfillDirection_lower(_ value: NativeMmsB
 
 public enum NativeMmsBackfillPause: Equatable, Hashable {
     
+    case absoluteRecoveryCapacity
     case recoveryCapacity
     case localCapacity
     case remoteStorage
@@ -8489,11 +8743,13 @@ public struct FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .recoveryCapacity
+        case 1: return .absoluteRecoveryCapacity
         
-        case 2: return .localCapacity
+        case 2: return .recoveryCapacity
         
-        case 3: return .remoteStorage
+        case 3: return .localCapacity
+        
+        case 4: return .remoteStorage
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8503,16 +8759,20 @@ public struct FfiConverterTypeNativeMmsBackfillPause: FfiConverterRustBuffer {
         switch value {
         
         
-        case .recoveryCapacity:
+        case .absoluteRecoveryCapacity:
             writeInt(&buf, Int32(1))
         
         
-        case .localCapacity:
+        case .recoveryCapacity:
             writeInt(&buf, Int32(2))
         
         
-        case .remoteStorage:
+        case .localCapacity:
             writeInt(&buf, Int32(3))
+        
+        
+        case .remoteStorage:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -8604,6 +8864,107 @@ public func FfiConverterTypeNativeMmsBackfillPhase_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeNativeMmsBackfillPhase_lower(_ value: NativeMmsBackfillPhase) -> RustBuffer {
     return FfiConverterTypeNativeMmsBackfillPhase.lower(value)
+}
+
+
+
+
+public enum NativeMmsBackfillRecheckOutcome: Equatable, Hashable {
+    
+    case verified
+    case progress
+    case unchangedUnavailable
+    case unchangedPartUnavailable
+    case transientFailure
+    case providerChanged
+    case awaitingProvider
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NativeMmsBackfillRecheckOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeMmsBackfillRecheckOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = NativeMmsBackfillRecheckOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeMmsBackfillRecheckOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .verified
+        
+        case 2: return .progress
+        
+        case 3: return .unchangedUnavailable
+        
+        case 4: return .unchangedPartUnavailable
+        
+        case 5: return .transientFailure
+        
+        case 6: return .providerChanged
+        
+        case 7: return .awaitingProvider
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NativeMmsBackfillRecheckOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .verified:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .progress:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unchangedUnavailable:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unchangedPartUnavailable:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .transientFailure:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .providerChanged:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .awaitingProvider:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeMmsBackfillRecheckOutcome_lift(_ buf: RustBuffer) throws -> NativeMmsBackfillRecheckOutcome {
+    return try FfiConverterTypeNativeMmsBackfillRecheckOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeMmsBackfillRecheckOutcome_lower(_ value: NativeMmsBackfillRecheckOutcome) -> RustBuffer {
+    return FfiConverterTypeNativeMmsBackfillRecheckOutcome.lower(value)
 }
 
 
@@ -10484,6 +10845,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_capture_platform_contacts_json() != 12407) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_cleanup_uploaded_gateway_mms_ciphertext() != 13469) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_compaction_backfill_step_json() != 57580) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10542,6 +10906,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_dispose() != 18253) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_enable_deferred_gateway_media() != 47618) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_evict_attachment_ciphertext() != 53494) {
@@ -10616,6 +10983,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_acquisitions() != 23295) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_backfill_due_rechecks() != 10528) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_mms_backfill_recheck_requests() != 60907) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10673,6 +11043,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_downloads() != 40625) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_gateway_media_downloads() != 2095) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_gateway_media_uploads() != 42509) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_pending_notification_dismissals() != 22332) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10707,6 +11083,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_reconcile_contact_apply() != 31555) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_gateway_media_failure() != 28910) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_mms_backfill_recheck_outcome() != 33966) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_recovery_snapshot_capacity() != 22677) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_record_send_result() != 45880) {

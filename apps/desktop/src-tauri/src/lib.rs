@@ -89,6 +89,7 @@ const MAX_OPEN_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_INLINE_MEDIA_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MEDIA_RANGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONCURRENT_MEDIA_READS: usize = 2;
+const MAX_MEDIA_SYNC_ATTACHMENTS: usize = 32;
 
 struct MediaReadBudget {
     available: Mutex<usize>,
@@ -178,6 +179,7 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "retry_attachment",
     "save_attachment",
     "request_attachment_download",
+    "media_sync_request",
     "media_page",
     "media_page_around",
     "media_page_newer",
@@ -2205,6 +2207,45 @@ async fn request_attachment_download(
     let attachment = AttachmentId::from_str(&id)
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     demand_attachment_if_needed(&session, attachment).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn media_sync_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    attachment_ids: Vec<String>,
+) -> BridgeResult<()> {
+    if !(1..=MAX_MEDIA_SYNC_ATTACHMENTS).contains(&attachment_ids.len()) {
+        return Err(BridgeError::new(
+            "invalid-request",
+            "Choose between one and 32 attachments to sync.",
+        ));
+    }
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    for id in &attachment_ids {
+        check_attachment_window_scope(&state, &session, &window, id).await?;
+    }
+    let attachments = attachment_ids
+        .iter()
+        .map(|id| {
+            AttachmentId::from_str(id).map_err(|_| {
+                BridgeError::new("invalid-attachment", "The attachment ID is invalid.")
+            })
+        })
+        .collect::<BridgeResult<Vec<_>>>()?;
+    let client = session.client.clone();
+    let report = blocking(move || {
+        client
+            .request_mms_media_sync(&attachments)
+            .map_err(core_error)
+    })
+    .await?;
+    if !report.requested.is_empty() {
+        session.request_work();
+        session.notify();
+    }
     Ok(())
 }
 
@@ -4410,6 +4451,7 @@ pub fn run() {
         retry_attachment,
         save_attachment,
         request_attachment_download,
+        media_sync_request,
         media_page,
         media_page_around,
         media_page_newer,

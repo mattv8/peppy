@@ -19,6 +19,7 @@
     "allow-retry-attachment",
     "allow-save-attachment",
     "allow-request-attachment-download",
+    "allow-media-sync-request",
     "allow-media-page",
     "allow-media-page-around",
     "allow-media-page-newer",

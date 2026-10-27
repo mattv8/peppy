@@ -14,6 +14,7 @@ const MAX_CONTACT_ADDRESSES = 500;
 const MAX_PREVIEWS_PER_SNAPSHOT = 32;
 const MAX_PREVIEWS_PER_HISTORY_PAGE = 12;
 const MAX_INLINE_MEDIA_BYTES = 32 * 1024 * 1024;
+const MAX_MEDIA_SYNC_ATTACHMENTS = 32;
 const OWNER_NAME = "peppy-browser-v1";
 const SEARCH_INDEX_DELAY_MS = 1_000;
 const SEARCH_INDEX_MAX_RETRIES = 3;
@@ -129,6 +130,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   search_local: { coreCommand: "search_local", mutation: false },
   advance_search_index: { coreCommand: "advance_search_index", mutation: true },
   load_message_window: { coreCommand: "load_message_window", mutation: false },
+  media_sync_request: { coreCommand: "media_sync_request", mutation: true },
 };
 
 const NATIVE_ONLY = new Set([
@@ -255,10 +257,17 @@ function secretString(args: Record<string, unknown>, key: string): string | unde
 function coreArgs(command: string, args: Record<string, unknown>): Record<string, unknown> {
   const wrapper = command === "save_draft" || command === "send_draft" || command === "discard_draft" || command === "submit_contact_edit" ? "input"
     : command === "set_notification_preferences" ? "preferences" : undefined;
+  if (command === "media_sync_request") return { attachmentIds: mediaSyncAttachmentIds(args) };
   if (!wrapper) return args;
   const value = args[wrapper];
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw { code: "invalid-request" };
   return value as Record<string, unknown>;
+}
+
+function mediaSyncAttachmentIds(args: Record<string, unknown>): string[] {
+  const attachmentIds = args.attachmentIds;
+  if (!Array.isArray(attachmentIds) || attachmentIds.length < 1 || attachmentIds.length > MAX_MEDIA_SYNC_ATTACHMENTS || attachmentIds.some(id => typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id))) throw { code: "invalid-request" };
+  return attachmentIds;
 }
 
 /** Dispatches a renderer request without exposing a generic Rust command or worker-private APIs. */
@@ -729,16 +738,18 @@ export class BrowserWorkerHost {
       await this.stop("closed");
       return;
     }
-    const mutationChanged = command !== "advance_search_index" && command !== undefined && INVOCATIONS[command]?.mutation && (response.ok || (!response.ok && response.error.code === "draft-moved"));
+    const mediaSyncNoop = command === "media_sync_request" && response.ok && !mediaSyncRequestAccepted(response.value);
+    const mutationChanged = command !== "advance_search_index" && command !== undefined && INVOCATIONS[command]?.mutation && !mediaSyncNoop && (response.ok || (!response.ok && response.error.code === "draft-moved"));
     const successfulSideEffect = response.ok && (command === "unlock" || command === "publish_attachment" || command === "retry_attachment");
-    if (mutationChanged || successfulSideEffect || generation !== this.visibleGeneration()) {
+    const generationChanged = generation !== this.visibleGeneration();
+    if (mutationChanged || successfulSideEffect || generationChanged) {
       this.changed();
       if (command === "unlock") {
         await this.dependencies.network?.start();
         void this.startSearchIndexWhenReady();
       }
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
-      if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
+      if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "media_sync_request" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
     }
     if (response.ok && command === "search_local") {
       this.recordSearchIndexState(response.value);
@@ -987,6 +998,12 @@ export class BrowserWorkerHost {
     if (failure) throw failure;
   }
 
+}
+
+function mediaSyncRequestAccepted(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && Array.isArray((value as Record<string, unknown>).requested)
+    && (value as { requested: unknown[] }).requested.length > 0;
 }
 
 function deviceRoster(value: unknown, currentDeviceId: string): Record<string, unknown> {

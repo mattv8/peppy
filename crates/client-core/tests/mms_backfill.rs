@@ -529,6 +529,99 @@ fn completed_rows_recheck_and_enriched_repeats_remain_known_sources() {
 }
 
 #[test]
+fn completed_verification_clears_stale_backoff_and_advances_its_claim() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "completed-verified", &vault), &vault);
+    client
+        .plan_mms_backfill_scans("phone-install", "sim-1", "10")
+        .unwrap();
+    let acquisition = client.begin_mms_acquisition(input("10")).unwrap();
+    client
+        .complete_mms_acquisition(&acquisition.acquisition_id)
+        .unwrap();
+    let conditions = MmsBackfillRecheckConditions {
+        charging: true,
+        ..Default::default()
+    };
+
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            10,
+            MmsBackfillRecheckOutcome::TransientFailure,
+            conditions,
+        )
+        .unwrap();
+    let claimed = client
+        .mms_backfill_due_rechecks("phone-install", "sim-1", 11, conditions)
+        .unwrap();
+    assert_eq!(
+        claimed.requests[0].acquisition_id,
+        acquisition.acquisition_id
+    );
+
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            12,
+            MmsBackfillRecheckOutcome::Verified,
+            conditions,
+        )
+        .unwrap();
+    assert!(
+        client
+            .mms_backfill_due_rechecks("phone-install", "sim-1", 13, conditions)
+            .unwrap()
+            .requests
+            .is_empty(),
+        "resolving the claim advances the completed sweep"
+    );
+
+    let repeated = client
+        .mms_backfill_due_rechecks(
+            "phone-install",
+            "sim-1",
+            14,
+            MmsBackfillRecheckConditions {
+                explicit_refresh: true,
+                ..conditions
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        repeated.requests[0].acquisition_id,
+        acquisition.acquisition_id
+    );
+    client
+        .record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            15,
+            MmsBackfillRecheckOutcome::Verified,
+            conditions,
+        )
+        .unwrap();
+}
+
+#[test]
+fn verification_does_not_relabel_pending_provider_failures() {
+    let dir = TempDir::new().unwrap();
+    let vault = Vault::new();
+    let client = unlocked(&config(&dir, "pending-not-verified", &vault), &vault);
+    let acquisition = client.begin_mms_acquisition(input("10")).unwrap();
+
+    assert_eq!(
+        client.record_mms_backfill_recheck_outcome(
+            &acquisition.acquisition_id,
+            10,
+            MmsBackfillRecheckOutcome::Verified,
+            MmsBackfillRecheckConditions::default(),
+        ),
+        Err(Error::InvalidRequest("MMS completed verification"))
+    );
+}
+
+#[test]
 fn paused_rechecks_include_existing_backlog_and_fairly_mix_completed_rows() {
     let dir = TempDir::new().unwrap();
     let vault = Vault::new();
@@ -834,5 +927,19 @@ fn blocked_rows_do_not_disagree_with_pending_only_admission_capacity() {
     assert_eq!(
         client.begin_mms_acquisition(input("pending-overflow")),
         Err(Error::MmsAcquisitionLimit)
+    );
+    assert_eq!(
+        client
+            .request_mms_recheck("phone-install", "sim-1", 32)
+            .unwrap(),
+        0,
+        "manual retry must not exceed the bounded pending partition"
+    );
+    assert_eq!(
+        client
+            .mms_backfill_status("phone-install", "sim-1")
+            .unwrap()
+            .pending_count,
+        MAX_MMS_ACQUISITIONS as u64
     );
 }

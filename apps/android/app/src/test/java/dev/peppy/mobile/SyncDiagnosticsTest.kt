@@ -129,6 +129,56 @@ class SyncDiagnosticsTest : GatewayTestBase() {
         }
     }
 
+    @Test fun providerMeasurementAccumulatesInjectedTimingWithoutChangingResults() {
+        var duration = -1L
+        var cpu = -1L
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L).iterator()::next, listOf(3L, 11L).iterator()::next, { error("sink") }) {
+            assertEquals("result", SyncDiagnostics.measureProvider({ elapsed, threadCpu -> duration = elapsed; cpu = threadCpu }) { "result" })
+        }
+
+        assertEquals(30L, duration)
+        assertEquals(8L, cpu)
+
+        SyncDiagnostics.withTestConfiguration(true, { error("clock") }, { error("cpu") }, { error("sink") }) {
+            assertEquals("unchanged", SyncDiagnostics.measureProvider({ _, _ -> error("callback") }) { "unchanged" })
+        }
+    }
+
+    @Test fun providerMeasurementRethrowsTheOriginalFailureWhenTimingOrCallbackFails() {
+        val failure = IllegalStateException("original")
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, { error("sink") }) {
+            try {
+                SyncDiagnostics.measureProvider({ _, _ -> error("callback") }) { throw failure }
+                fail("expected original failure")
+            } catch (caught: IllegalStateException) {
+                assertTrue(caught === failure)
+            }
+        }
+    }
+
+    @Test fun mmsPassMeasurementRecordsThreadCpuAndPreservesTheOriginalFailure() {
+        val events = mutableListOf<String>()
+        val failure = IllegalStateException("original")
+
+        SyncDiagnostics.withTestConfiguration(true, listOf(10L, 40L, 50L).iterator()::next, listOf(3L, 11L).iterator()::next, events::add) {
+            try {
+                SyncDiagnostics.measureWithFields(SyncTraceEvent.MMS_CAPTURE_PASS, { arrayOf(SyncTraceField.ROWS to 2L) }) {
+                    throw failure
+                }
+                fail("expected original failure")
+            } catch (caught: IllegalStateException) {
+                assertTrue(caught === failure)
+            }
+        }
+
+        val event = traceFields(events.single())
+        assertEquals(SyncTraceEvent.MMS_CAPTURE_PASS.code, event.getValue("event"))
+        assertEquals(30L, event.getValue(SyncTraceField.DURATION_MS.code.toString()))
+        assertEquals(8L, event.getValue(SyncTraceField.CPU_MS.code.toString()))
+        assertEquals(0L, event.getValue(SyncTraceField.SUCCESS.code.toString()))
+        assertEquals(2L, event.getValue(SyncTraceField.ROWS.code.toString()))
+    }
+
     @Test fun gatewayWorkerRetainsSameSessionDiagnosticMetadataAndMeasuresQueueDelay() {
         WorkManagerTestInitHelper.initializeTestWorkManager(
             context,

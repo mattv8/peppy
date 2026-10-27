@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefCallback } from "react";
-import { ChevronLeft, ChevronRight } from "@peppy/desktop-ui";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefCallback } from "react";
+import { ChevronLeft, ChevronRight, WifiOff } from "@peppy/desktop-ui";
 import { groupMessages, type GalleryAttachment, type GalleryMessage, type MessageGroup } from "./grouping";
-import { MediaTile } from "./MediaTile";
-import { demandTarget } from "./mediaState";
+import { MediaSyncButton, MediaTile, useReturnedToHoldGeneration, type SyncState } from "./MediaTile";
+import { demandTarget, holdNoteText, originalPending, originalView } from "./mediaState";
+import { useMediaActions } from "./MediaActionsContext";
 import "./media.css";
 import "./media-carousel.css";
 
@@ -15,14 +16,26 @@ export type MediaGridProps = {
 };
 
 function Carousel({ group, onOpen }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"] }) {
+  const carouselRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const bodyRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const slideRefs = useRef<Array<HTMLDivElement | null>>([]);
   const visibleSlideIndexes = useRef(new Set<number>());
   const [activeIndex, setActiveIndex] = useState(0);
   const [scrollState, setScrollState] = useState({ previous: false, next: false });
+  const [groupSyncState, setGroupSyncState] = useState<SyncState>("idle");
+  const groupControlFocused = useRef(false);
   const total = group.attachments.length;
+  const pendingAttachments = group.attachments.filter(({ attachment }) => originalPending(attachment));
+  const requestableAttachments = pendingAttachments.filter(({ attachment }) => originalView(attachment).phase === "held");
+  const allHeld = total >= 2 && pendingAttachments.length === total;
+  const previousAllHeld = useRef(allHeld);
+  const holdNoteId = `media-group-hold-note-${group.id}`;
+  const actions = useMediaActions();
   const bodyRefCallbacks = useMemo(() => Array.from({ length: total }, (_, index) => (element: HTMLButtonElement | null) => { bodyRefs.current[index] = element; }), [total]);
+  const resetGeneration = useReturnedToHoldGeneration(group.attachments.map(({ attachment }) => ({ id: attachment.id, phase: originalView(attachment).phase })));
+  const groupResetKey = `${group.attachments.map(({ attachment }) => attachment.id).join(",")}#${resetGeneration}`;
+  useEffect(() => { if (resetGeneration) setGroupSyncState("idle"); }, [resetGeneration]);
 
   useEffect(() => {
     const track = trackRef.current;
@@ -66,6 +79,15 @@ function Carousel({ group, onOpen }: { group: MessageGroup; onOpen: MediaGridPro
     return () => observer.disconnect();
   }, [total]);
 
+  useLayoutEffect(() => {
+    if (previousAllHeld.current && !allHeld && groupControlFocused.current) {
+      const target = carouselRef.current?.querySelector<HTMLButtonElement>("[data-original-sync-button]") ?? bodyRefs.current.find(Boolean) ?? carouselRef.current;
+      target?.focus();
+    }
+    previousAllHeld.current = allHeld;
+    groupControlFocused.current = false;
+  }, [allHeld]);
+
   const moveFocus = (index: number, direction: -1 | 1) => {
     for (let candidate = index + direction; candidate >= 0 && candidate < total; candidate += direction) {
       const target = bodyRefs.current[candidate];
@@ -83,19 +105,23 @@ function Carousel({ group, onOpen }: { group: MessageGroup; onOpen: MediaGridPro
     track.scrollBy({ left: direction * (track.clientWidth - 56), behavior: reducedMotion ? "auto" : "smooth" });
   };
 
-  return <div data-media-carousel role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
+  const noteState = groupSyncState === "requesting" ? "requesting" : requestableAttachments.length === 0 ? "queued" : groupSyncState;
+  const groupStatus = holdNoteText(noteState, Boolean(actions?.canRequestMediaSync), pendingAttachments.find(({ attachment }) => attachment.error)?.attachment.error);
+  const groupLabel = requestableAttachments.length ? `Sync ${requestableAttachments.length} images` : "Requested";
+  return <><div ref={carouselRef} tabIndex={-1} data-media-carousel data-sync-owner={allHeld ? "group" : undefined} data-sync={groupSyncState} role="region" aria-roledescription="carousel" aria-label={`Images, ${total} total`} data-slide-count={total} data-has-peek={total >= 4 || undefined} data-can-scroll-prev={scrollState.previous || undefined} data-can-scroll-next={scrollState.next || undefined}>
     <div ref={trackRef} className="carousel-track">
       {group.attachments.map(({ attachment, message }, index) => <div key={`${message.id}:${attachment.id}`} ref={(element) => { slideRefs.current[index] = element; }} data-media-slide data-slide-index={index} role="group" aria-roledescription="slide" aria-label={`${index + 1} of ${total}`}>
-        <MediaTile attachment={attachment} message={message} variant="slide" label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
+        <MediaTile attachment={attachment} message={message} variant="slide" label={`Photo, ${index + 1} of ${total}`} onOpen={() => onOpen({ attachment, message })} suppressHeldControl={allHeld} prefetchIds={[group.attachments[index + 1] ? demandTarget(group.attachments[index + 1].attachment) : undefined]} bodyRef={bodyRefCallbacks[index]} onBodyKeyDown={(event) => {
           if (event.key === "ArrowLeft" && moveFocus(index, -1)) event.preventDefault();
           if (event.key === "ArrowRight" && moveFocus(index, 1)) event.preventDefault();
         }} />
       </div>)}
     </div>
+    {allHeld && <MediaSyncButton attachmentIds={(requestableAttachments.length ? requestableAttachments : pendingAttachments).map(({ attachment }) => attachment.id)} label={groupLabel} ariaLabel={`${groupLabel} using mobile data if needed`} retryAriaLabel={`Request again ${pendingAttachments.length} images using mobile data if needed`} describedBy={holdNoteId} initialState={requestableAttachments.length ? undefined : "queued"} resetKey={groupResetKey} className="carousel-sync" dataAttributes={{ "data-group-sync": group.id }} onFocus={() => { groupControlFocused.current = true; }} onBlur={() => { groupControlFocused.current = false; }} onStateChange={setGroupSyncState} />}
     {scrollState.previous && <button type="button" className="carousel-chevron carousel-chevron-previous" aria-label="Previous images" onClick={() => scrollByPage(-1)}><ChevronLeft size={18} aria-hidden="true" /></button>}
     {scrollState.next && <button type="button" className="carousel-chevron carousel-chevron-next" aria-label="Next images" onClick={() => scrollByPage(1)}><ChevronRight size={18} aria-hidden="true" /></button>}
     <span className="carousel-counter" aria-hidden="true">{activeIndex + 1} / {total}</span>
-  </div>;
+  </div>{allHeld && <p id={holdNoteId} data-group-hold-note aria-live="off"><WifiOff size={12} aria-hidden="true" />{groupStatus}</p>}</>;
 }
 
 function Group({ group, onOpen, renderMessageMeta, messageRef, renderCaption }: { group: MessageGroup; onOpen: MediaGridProps["onOpen"]; renderMessageMeta?: MediaGridProps["renderMessageMeta"]; messageRef?: MediaGridProps["messageRef"]; renderCaption?: MediaGridProps["renderCaption"] }) {

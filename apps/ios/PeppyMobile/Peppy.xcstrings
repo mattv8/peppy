@@ -1486,7 +1486,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Applies to encrypted media uploads and downloads. WiFi only uses the active WiFi connection; Ethernet and cellular (even unlimited plans) are not included."
+            "value": "Live messages and small encrypted previews may sync over mobile data. Originals and imported history wait for Wi-Fi unless you choose Sync image in a conversation. Downloads needed to send a message are not delayed. Wi-Fi means an active Wi-Fi connection, not Ethernet or unlimited cellular."
           }
         }
       }
@@ -2116,7 +2116,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Transfer media on Wi-Fi only"
+            "value": "Wait for Wi-Fi for original media and history"
           }
         }
       }

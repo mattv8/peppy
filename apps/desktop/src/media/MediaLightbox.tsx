@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, Download, formatDateTime, ImageOff, Link, Loader2, Modal, RotateCw, X } from "@peppy/desktop-ui";
 import type { MediaPageItem } from "./MediaPanel";
 import { type MediaResult, useMediaActions } from "./MediaActionsContext";
-import { previewUrl, usablePreview } from "./mediaState";
+import { originalPending, previewUrl, usablePreview } from "./mediaState";
 import "./media-lightbox.css";
 
 export type MediaLightboxProps = {
@@ -30,8 +30,9 @@ function isMediaPending(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "media-pending";
 }
 export function MediaLightbox({ items: initialItems, initialAttachmentId, initialMessageId, onDismiss, requestOriginal, checkOriginal, saveMedia, releaseMedia, loadAdjacentPage, hasNextPage = false, hasPreviousPage = false, retryKey }: MediaLightboxProps) {
-  const [items, setItems] = useState(initialItems);
-  const [index, setIndex] = useState(() => Math.max(0, initialItems.findIndex(item => item.attachment.id === initialAttachmentId && (!initialMessageId || item.message.id === initialMessageId))));
+  const openableInitialItems = initialItems.filter((item) => !originalPending(item.attachment));
+  const [items, setItems] = useState(openableInitialItems);
+  const [index, setIndex] = useState(() => Math.max(0, openableInitialItems.findIndex(item => item.attachment.id === initialAttachmentId && (!initialMessageId || item.message.id === initialMessageId))));
   const [url, setUrl] = useState<string>(); const [pending, setPending] = useState(false); const [loadError, setLoadError] = useState<string>(); const [actionError, setActionError] = useState<string>(); const [saving, setSaving] = useState(false); const [savePending, setSavePending] = useState(false); const [paging, setPaging] = useState(false); const [previousExhausted, setPreviousExhausted] = useState(!hasPreviousPage); const [nextExhausted, setNextExhausted] = useState(!hasNextPage);
   const requestVersion = useRef(0); const requested = useRef(false); const itemsRef = useRef(items); itemsRef.current = items;
   const actions = useMediaActions();
@@ -41,12 +42,12 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
   const [stillWaiting, setStillWaiting] = useState(false);
   const item = items[index];
   const request = async () => {
-    if (!item) return;
+    if (!item || originalPending(item.attachment)) return;
     const target = item.attachment.id; const version = ++requestVersion.current; requested.current = true; setLoadError(undefined);
     try { const result = await requestOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPending(false); setUrl(result.url); } else setPending(true); } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
   };
   const check = async () => {
-    if (!item) return;
+    if (!item || originalPending(item.attachment)) return;
     const target = item.attachment.id; const version = ++requestVersion.current;
     try { const result = await checkOriginal(target); if (version !== requestVersion.current) { if (result.state === "ready") releaseMedia?.(target, result.url); } else if (result.state === "ready") { setPending(false); setUrl(result.url); } } catch { if (version === requestVersion.current) setLoadError("Could not load media."); }
   };
@@ -70,8 +71,9 @@ export function MediaLightbox({ items: initialItems, initialAttachmentId, initia
       for (let emptyPages = 0; emptyPages < 10; emptyPages += 1) {
         const page = await loadAdjacentPage(direction);
         if (!page) return;
-        if (page.items.length) {
-          if (offset < 0) { setItems(current => [...page.items, ...current]); setIndex(page.items.length - 1); setPreviousExhausted(!page.hasNextPage); } else { const oldLength = itemsRef.current.length; setItems(current => [...current, ...page.items]); setIndex(oldLength); setNextExhausted(!page.hasNextPage); }
+        const openableItems = page.items.filter((candidate) => !originalPending(candidate.attachment));
+        if (openableItems.length) {
+          if (offset < 0) { setItems(current => [...openableItems, ...current]); setIndex(openableItems.length - 1); setPreviousExhausted(!page.hasNextPage); } else { const oldLength = itemsRef.current.length; setItems(current => [...current, ...openableItems]); setIndex(oldLength); setNextExhausted(!page.hasNextPage); }
           return;
         }
         if (!page.hasNextPage) { if (offset < 0) setPreviousExhausted(true); else setNextExhausted(true); return; }

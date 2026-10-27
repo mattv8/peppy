@@ -14,10 +14,16 @@ pub const RETAINED_DOWNLOAD_CIPHERTEXT_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 const EVICTABLE_AVAILABLE_PREDICATE: &str = r#"
     a.state = 'available'
     AND NOT EXISTS (SELECT 1 FROM attachment_demand d WHERE d.attachment_id = a.attachment_id)
-    AND NOT EXISTS (SELECT 1 FROM message_media_meta m WHERE m.thumbnail_attachment_id = a.attachment_id)
-    AND NOT EXISTS (
-        SELECT 1 FROM mms_acquisition_parts p
-        WHERE p.attachment_id = a.attachment_id OR p.thumbnail_attachment_id = a.attachment_id
+    AND (
+        EXISTS (SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id AND e.unlinked_at IS NOT NULL)
+        OR NOT EXISTS (SELECT 1 FROM message_media_meta m WHERE m.thumbnail_attachment_id = a.attachment_id)
+    )
+    AND (
+        EXISTS (SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id AND e.unlinked_at IS NOT NULL)
+        OR NOT EXISTS (
+            SELECT 1 FROM mms_acquisition_parts p
+            WHERE p.attachment_id = a.attachment_id OR p.thumbnail_attachment_id = a.attachment_id
+        )
     )
     AND NOT EXISTS (SELECT 1 FROM compose_drafts d WHERE instr(d.attachment_ids, a.attachment_id) > 0)
     AND NOT EXISTS (
@@ -30,9 +36,12 @@ const EVICTABLE_AVAILABLE_PREDICATE: &str = r#"
           AND l.historical = 0
           AND (attempt.command_id IS NULL OR attempt.state IN ('attempt_recorded', 'submitted_to_os', 'outcome_unknown'))
     )
-    AND NOT (
-        a.plaintext_bytes <= 2097152
-        AND NOT EXISTS (SELECT 1 FROM message_media_meta m WHERE m.attachment_id = a.attachment_id)
+    AND (
+        EXISTS (SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id AND e.unlinked_at IS NOT NULL)
+        OR NOT (
+            a.plaintext_bytes <= 2097152
+            AND NOT EXISTS (SELECT 1 FROM message_media_meta m WHERE m.attachment_id = a.attachment_id)
+        )
     )
     AND NOT EXISTS (SELECT 1 FROM contact_photo_received p WHERE p.attachment_id = a.attachment_id)
     AND NOT EXISTS (SELECT 1 FROM contact_photo_attachments p WHERE p.attachment_id = a.attachment_id)
@@ -57,6 +66,61 @@ const EVICTABLE_AVAILABLE_PREDICATE: &str = r#"
     )
 "#;
 
+const MAX_GATEWAY_MMS_CLEANUP_BATCH: usize = 100;
+
+const GATEWAY_MMS_CLEANUP_ELIGIBLE: &str = r#"
+    a.state = 'uploaded'
+    AND a.remote_object_id IS NOT NULL
+    AND EXISTS (
+        SELECT 1
+        FROM mms_acquisition_parts p
+        JOIN mms_acquisitions acquisition ON acquisition.acquisition_id = p.acquisition_id
+        WHERE (p.attachment_id = a.attachment_id OR p.thumbnail_attachment_id = a.attachment_id)
+          AND acquisition.state = 'complete'
+    )
+    AND NOT EXISTS (SELECT 1 FROM attachment_demand d WHERE d.attachment_id = a.attachment_id)
+    AND NOT EXISTS (SELECT 1 FROM compose_drafts d WHERE instr(d.attachment_ids, a.attachment_id) > 0)
+    AND NOT EXISTS (
+        SELECT 1
+        FROM contact_photo_received p
+        WHERE p.attachment_id = a.attachment_id
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM contact_photo_attachments p
+        WHERE p.attachment_id = a.attachment_id
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM contact_photo_references r
+        WHERE r.attachment_id = a.attachment_id
+          AND (r.retain_until IS NULL OR r.retain_until > CAST(strftime('%s', 'now') AS INTEGER))
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM contact_photo_registrations r
+        WHERE r.attachment_id = a.attachment_id AND r.acknowledged = 0
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM outbox_attachments oa
+        JOIN outbox o ON o.envelope_id = oa.envelope_id
+        WHERE oa.attachment_id = a.attachment_id
+          AND o.state IN ('unsealed', 'queued')
+    )
+"#;
+
+/// Bounded result of removing Android gateway MMS capture ciphertext.
+///
+/// `pending_unlink` is nonzero after an unlink failure. The durable marker remains, so a later
+/// call retries it without re-scanning all uploaded attachments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GatewayMmsCleanup {
+    pub marked: u32,
+    pub unlinked: u32,
+    pub pending_unlink: u32,
+}
+
 /// Per-open-store lease state. This is deliberately not persisted.
 #[derive(Default)]
 pub(crate) struct MediaCacheState {
@@ -64,6 +128,24 @@ pub(crate) struct MediaCacheState {
 }
 
 impl Client {
+    /// Marks and removes a bounded batch of uploaded Android gateway MMS capture copies.
+    ///
+    /// This deliberately retains attachment metadata, file keys, and remote IDs. A durable marker
+    /// is committed before unlinking, so a failed unlink is retried by the next bounded call.
+    /// Only the Android gateway binding may invoke this API.
+    pub fn cleanup_uploaded_gateway_mms_ciphertext(
+        &self,
+        limit: u32,
+    ) -> Result<GatewayMmsCleanup, Error> {
+        let limit = usize::try_from(limit).map_err(|_| Error::InvalidRequest("cleanup limit"))?;
+        if !(1..=MAX_GATEWAY_MMS_CLEANUP_BATCH).contains(&limit) {
+            return Err(Error::InvalidRequest("cleanup limit"));
+        }
+
+        let mut store = self.lock()?;
+        cleanup_uploaded_gateway_mms(&mut store, limit)
+    }
+
     /// Records one process-local user of locally readable ciphertext.
     ///
     /// Every successful retain must be balanced with `release_attachment_ciphertext`.
@@ -130,6 +212,27 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
         );
         CREATE INDEX IF NOT EXISTS media_cache_entries_lru
             ON media_cache_entries(last_access, attachment_id);
+        CREATE TABLE IF NOT EXISTS gateway_mms_media_evictions(
+            attachment_id TEXT PRIMARY KEY,
+            marked_at INTEGER NOT NULL,
+            unlinked_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS gateway_mms_media_evictions_pending
+            ON gateway_mms_media_evictions(marked_at, attachment_id)
+            WHERE unlinked_at IS NULL;
+        CREATE TABLE IF NOT EXISTS gateway_mms_cleanup_queue(
+            attachment_id TEXT PRIMARY KEY,
+            retry_order INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS gateway_mms_cleanup_queue_order
+            ON gateway_mms_cleanup_queue(retry_order, attachment_id);
+        CREATE TABLE IF NOT EXISTS gateway_mms_cleanup_bootstrap(
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            attachment_rowid INTEGER NOT NULL,
+            finished INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO gateway_mms_cleanup_bootstrap(id,attachment_rowid,finished)
+        VALUES(1,0,0);
         "#,
     )?;
     conn.execute(
@@ -153,13 +256,312 @@ pub(crate) fn initialize(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
+/// Enqueues one recently uploaded candidate without walking attachment history. Call after the
+/// upload state and remote ID commit; quiescence is rechecked by the bounded cleanup worker.
+pub(crate) fn enqueue_gateway_mms_cleanup_candidate(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<(), Error> {
+    let candidate: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachments a WHERE a.attachment_id=? AND a.state='uploaded' AND a.remote_object_id IS NOT NULL AND EXISTS(SELECT 1 FROM mms_acquisition_parts p WHERE p.attachment_id=a.attachment_id OR p.thumbnail_attachment_id=a.attachment_id))",
+        [attachment_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if candidate {
+        enqueue_gateway_mms_cleanup_id(conn, attachment_id)?;
+    }
+    Ok(())
+}
+
+/// Enqueues MMS attachments registered on a newly acknowledged envelope. The caller must invoke
+/// this in the acknowledgement transaction after the state change.
+pub(crate) fn enqueue_acknowledged_gateway_mms_cleanup(
+    conn: &Connection,
+    envelope_id: &str,
+) -> Result<(), Error> {
+    let mut statement = conn.prepare(
+        "SELECT oa.attachment_id FROM outbox_attachments oa JOIN attachments a ON a.attachment_id=oa.attachment_id WHERE oa.envelope_id=? AND a.state='uploaded' AND a.remote_object_id IS NOT NULL AND EXISTS(SELECT 1 FROM mms_acquisition_parts p WHERE p.attachment_id=a.attachment_id OR p.thumbnail_attachment_id=a.attachment_id)",
+    )?;
+    let attachment_ids = statement
+        .query_map([envelope_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for attachment_id in attachment_ids {
+        enqueue_gateway_mms_cleanup_id(conn, attachment_id.parse().map_err(|_| Error::Database)?)?;
+    }
+    Ok(())
+}
+
+/// Returns whether an attachment's local ciphertext was deliberately evicted by gateway MMS
+/// cleanup. Callers must treat a marked `uploaded` attachment as remote-only even though
+/// `uploaded` remains its durable upload state.
+pub(crate) fn gateway_mms_ciphertext_evicted(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e JOIN attachments a ON a.attachment_id=e.attachment_id WHERE e.attachment_id=? AND a.state='uploaded')",
+        [attachment_id.to_string()],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Moves a deliberately evicted upload into the existing explicit-download flow.
+///
+/// The marker remains so thumbnail eagerness cannot re-download it on every gateway pass. The
+/// caller must add the explicit demand before `pending_downloads` is queried.
+pub(crate) fn request_gateway_mms_rehydration(
+    store: &mut Store,
+    attachment_id: AttachmentId,
+) -> Result<bool, Error> {
+    let tx = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let changed = request_gateway_mms_rehydration_in(&tx, attachment_id)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Uses the caller's transaction to make an evicted gateway capture available to an active carrier
+/// command. The caller must remain responsible for rejecting historical and retired commands.
+pub(crate) fn request_gateway_mms_rehydration_in(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<bool, Error> {
+    let marked: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM gateway_mms_media_evictions WHERE attachment_id=?)",
+        [attachment_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !marked {
+        return Ok(false);
+    }
+    let changed = conn.execute(
+        "UPDATE attachments SET state='pending_download' WHERE attachment_id=? AND state='uploaded' AND remote_object_id IS NOT NULL",
+        [attachment_id.to_string()],
+    )?;
+    if changed != 0 {
+        conn.execute(
+            "INSERT INTO attachment_demand(attachment_id,requested_at) VALUES(?,CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(attachment_id) DO NOTHING",
+            [attachment_id.to_string()],
+        )?;
+        conn.execute(
+            "UPDATE gateway_mms_media_evictions SET unlinked_at=NULL WHERE attachment_id=?",
+            [attachment_id.to_string()],
+        )?;
+    }
+    Ok(changed != 0)
+}
+
 /// Called after verified downloaded ciphertext becomes available, while the Store lock is held.
 pub(crate) fn record_installed_attachment(
     store: &mut Store,
     attachment_id: AttachmentId,
 ) -> Result<(), Error> {
     record_installed_access(store, attachment_id)?;
+    if mark_gateway_mms_rehydration_fulfilled(store, attachment_id)? {
+        return Ok(());
+    }
     trim_store(store, RETAINED_DOWNLOAD_CIPHERTEXT_BUDGET_BYTES)
+}
+
+fn cleanup_uploaded_gateway_mms(
+    store: &mut Store,
+    limit: usize,
+) -> Result<GatewayMmsCleanup, Error> {
+    let mut result = GatewayMmsCleanup::default();
+    bootstrap_gateway_mms_cleanup_queue(&mut store.conn)?;
+    let mut attachment_ids = marked_gateway_mms_evictions(&store.conn, limit)?;
+    let remaining = limit.saturating_sub(attachment_ids.len());
+    for attachment_id in queued_gateway_mms_cleanup_candidates(store, remaining)? {
+        if mark_gateway_mms_eviction(store, attachment_id)? {
+            result.marked = result.marked.checked_add(1).ok_or(Error::Database)?;
+            attachment_ids.push(attachment_id);
+        } else {
+            rotate_gateway_mms_cleanup_candidate(&store.conn, attachment_id)?;
+        }
+    }
+
+    for attachment_id in attachment_ids {
+        if store.media_cache.leases.contains_key(&attachment_id) {
+            result.pending_unlink = result
+                .pending_unlink
+                .checked_add(1)
+                .ok_or(Error::Database)?;
+            continue;
+        }
+        match std::fs::remove_file(media::cipher_path(&store.media_dir, attachment_id)) {
+            Ok(()) => {
+                record_gateway_mms_unlink(store, attachment_id)?;
+                result.unlinked = result.unlinked.checked_add(1).ok_or(Error::Database)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                record_gateway_mms_unlink(store, attachment_id)?;
+                result.unlinked = result.unlinked.checked_add(1).ok_or(Error::Database)?;
+            }
+            Err(_) => {
+                result.pending_unlink = result
+                    .pending_unlink
+                    .checked_add(1)
+                    .ok_or(Error::Database)?;
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn marked_gateway_mms_evictions(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<AttachmentId>, Error> {
+    let mut statement = conn.prepare(
+        &format!(
+            "SELECT e.attachment_id FROM gateway_mms_media_evictions e JOIN attachments a ON a.attachment_id=e.attachment_id WHERE e.unlinked_at IS NULL AND {GATEWAY_MMS_CLEANUP_ELIGIBLE} ORDER BY e.marked_at, e.attachment_id LIMIT ?"
+        ),
+    )?;
+    statement
+        .query_map([limit as i64], |row| row.get::<_, String>(0))?
+        .map(|row| row?.parse().map_err(|_| Error::Database))
+        .collect()
+}
+
+fn queued_gateway_mms_cleanup_candidates(
+    store: &Store,
+    limit: usize,
+) -> Result<Vec<AttachmentId>, Error> {
+    let mut statement = store.conn.prepare(
+        "SELECT attachment_id FROM gateway_mms_cleanup_queue ORDER BY retry_order,attachment_id LIMIT ?",
+    )?;
+    statement
+        .query_map([limit as i64], |row| row.get::<_, String>(0))?
+        .map(|row| row?.parse().map_err(|_| Error::Database))
+        .filter(|id| match id {
+            Ok(id) => !store.media_cache.leases.contains_key(id),
+            Err(_) => true,
+        })
+        .collect()
+}
+
+fn mark_gateway_mms_eviction(
+    store: &mut Store,
+    attachment_id: AttachmentId,
+) -> Result<bool, Error> {
+    if store.media_cache.leases.contains_key(&attachment_id) {
+        return Ok(false);
+    }
+    let tx = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let eligible: bool = tx.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM attachments a WHERE a.attachment_id=? AND {GATEWAY_MMS_CLEANUP_ELIGIBLE})"
+        ),
+        [attachment_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if !eligible {
+        tx.commit()?;
+        return Ok(false);
+    }
+    let marked = tx.execute(
+        "INSERT OR IGNORE INTO gateway_mms_media_evictions(attachment_id,marked_at) VALUES(?,CAST(strftime('%s','now') AS INTEGER)*1000)",
+        [attachment_id.to_string()],
+    )?;
+    tx.commit()?;
+    if marked != 0 {
+        store.conn.execute(
+            "DELETE FROM gateway_mms_cleanup_queue WHERE attachment_id=?",
+            [attachment_id.to_string()],
+        )?;
+    }
+    Ok(marked != 0)
+}
+
+fn bootstrap_gateway_mms_cleanup_queue(conn: &mut Connection) -> Result<(), Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (cursor, finished): (i64, bool) = tx.query_row(
+        "SELECT attachment_rowid,finished FROM gateway_mms_cleanup_bootstrap WHERE id=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if finished {
+        tx.commit()?;
+        return Ok(());
+    }
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT rowid,attachment_id FROM attachments WHERE rowid>? ORDER BY rowid LIMIT ?",
+        )?;
+        statement
+            .query_map([cursor, MAX_GATEWAY_MMS_CLEANUP_BATCH as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let last_rowid = rows.last().map(|(rowid, _)| *rowid);
+    for (_, attachment_id) in rows {
+        enqueue_gateway_mms_cleanup_candidate(
+            &tx,
+            attachment_id.parse().map_err(|_| Error::Database)?,
+        )?;
+    }
+    match last_rowid {
+        Some(rowid) => tx.execute(
+            "UPDATE gateway_mms_cleanup_bootstrap SET attachment_rowid=? WHERE id=1",
+            [rowid],
+        )?,
+        None => tx.execute(
+            "UPDATE gateway_mms_cleanup_bootstrap SET finished=1 WHERE id=1",
+            [],
+        )?,
+    };
+    tx.commit()?;
+    Ok(())
+}
+
+fn enqueue_gateway_mms_cleanup_id(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO gateway_mms_cleanup_queue(attachment_id,retry_order) VALUES(?,COALESCE((SELECT MAX(retry_order) FROM gateway_mms_cleanup_queue),0)+1) ON CONFLICT(attachment_id) DO NOTHING",
+        [attachment_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn rotate_gateway_mms_cleanup_candidate(
+    conn: &Connection,
+    attachment_id: AttachmentId,
+) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE gateway_mms_cleanup_queue SET retry_order=COALESCE((SELECT MAX(retry_order) FROM gateway_mms_cleanup_queue),0)+1 WHERE attachment_id=?",
+        [attachment_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn record_gateway_mms_unlink(store: &mut Store, attachment_id: AttachmentId) -> Result<(), Error> {
+    store.conn.execute(
+        "UPDATE gateway_mms_media_evictions SET unlinked_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE attachment_id=?",
+        [attachment_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn mark_gateway_mms_rehydration_fulfilled(
+    store: &mut Store,
+    attachment_id: AttachmentId,
+) -> Result<bool, Error> {
+    let fulfilled = store.conn.execute(
+        "UPDATE gateway_mms_media_evictions SET unlinked_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE attachment_id=? AND unlinked_at IS NULL",
+        [attachment_id.to_string()],
+    )?;
+    store.conn.execute(
+        "DELETE FROM gateway_mms_cleanup_queue WHERE attachment_id=?",
+        [attachment_id.to_string()],
+    )?;
+    Ok(fulfilled != 0)
 }
 
 fn record_installed_access(store: &mut Store, attachment_id: AttachmentId) -> Result<(), Error> {
@@ -236,6 +638,9 @@ fn locally_readable_state(
     store: &Store,
     attachment_id: AttachmentId,
 ) -> Result<AttachmentState, Error> {
+    if gateway_mms_ciphertext_evicted(&store.conn, attachment_id)? {
+        return Err(Error::InvalidMedia);
+    }
     let state = crate::attachment_row(&store.conn, attachment_id)?
         .ok_or(Error::NotFound)?
         .state;

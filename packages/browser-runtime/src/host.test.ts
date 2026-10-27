@@ -65,6 +65,23 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
+  it("allows one bounded deferred-media batch as a checkpointed mutation", async () => {
+    const session = new FakeSession();
+    const attachmentIds = [
+      "00000000-0000-0000-0000-000000000001",
+      "00000000-0000-0000-0000-000000000002",
+    ];
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "media_sync_request", args: { attachmentIds } }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "media_sync_request", args: { attachmentIds: [] } }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid-request" } });
+
+    expect(session.calls).toEqual([
+      { command: "media_sync_request", args: { attachmentIds }, mutation: true },
+    ]);
+  });
+
     it("checkpoints media demand and cache release instead of exposing generic core dispatch", async () => {
     const session = new FakeSession();
     const id = "00000000-0000-0000-0000-000000000001";
@@ -530,6 +547,36 @@ describe("browser host RPC", () => {
     await eventually(() => attached.messages.some(message => typeof message === "object" && message !== null && "id" in message && message.id === 2));
     expect(wake).toHaveBeenCalledTimes(1);
     expect(attached.messages.filter(message => JSON.stringify(message) === JSON.stringify({ event: "changed" }))).toHaveLength(1);
+  });
+
+  it("wakes only after a committed deferred-media batch accepts an attachment", async () => {
+    const session = new FakeSession();
+    const attachmentIds = ["00000000-0000-0000-0000-000000000001"];
+    const events: string[] = [];
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      session.generation += 1;
+      return { requested: attachmentIds, alreadyRequested: [] };
+    };
+    const wake = vi.fn(() => events.push("wake"));
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      network: { start: async () => undefined, stop: async () => undefined, wake } as unknown as import("./host.js").BrowserNetwork,
+    });
+    const attached = port();
+    const postMessage = attached.postMessage;
+    attached.postMessage = message => {
+      postMessage(message);
+      if (typeof message === "object" && message !== null && "id" in message && message.id === 1) events.push("ack");
+    };
+    await host.attach(attached);
+
+    attached.emit({ id: 1, command: "media_sync_request", args: { attachmentIds } });
+    await eventually(() => wake.mock.calls.length === 1);
+
+    expect(session.calls).toContainEqual({ command: "media_sync_request", args: { attachmentIds }, mutation: true });
+    expect(events).toEqual(["ack", "wake"]);
   });
 
   it("forwards history pages as a read-only core request", async () => {

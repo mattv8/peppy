@@ -10,6 +10,7 @@ use std::{
 };
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_MEDIA_SYNC_ATTACHMENTS: usize = 32;
 
 fn media_cursor(args: &Value) -> Result<peppy_client_core::MediaCursor, Failure> {
     let cursor = args.get("cursor").ok_or_else(invalid)?;
@@ -53,6 +54,7 @@ pub(super) fn handles(command: &str) -> bool {
             | "media_page_around"
             | "media_page_newer"
             | "request_attachment_download"
+            | "media_sync_request"
             | "evict_attachment_ciphertext"
             | "retain_attachment_ciphertext"
             | "touch_attachment_ciphertext"
@@ -83,6 +85,7 @@ impl BrowserCore {
             "media_page_around" => self.media_page_around(args),
             "media_page_newer" => self.media_page_newer(args),
             "request_attachment_download" => self.request_attachment_download(args),
+            "media_sync_request" => self.media_sync_request(args),
             "evict_attachment_ciphertext" => self.evict_attachment_ciphertext(args),
             "retain_attachment_ciphertext" => self.retain_attachment_ciphertext(args),
             "touch_attachment_ciphertext" => self.touch_attachment_ciphertext(args),
@@ -106,10 +109,11 @@ impl BrowserCore {
     fn attachment_info(&self, args: Value) -> Result<Value, Failure> {
         let id = attachment_id(&args)?;
         let client = self.client()?;
-        let mut view = serde_json::to_value(dto::attachment_view(
+        let mut view = serde_json::to_value(dto::attachment_view_with_media_status(
             &client.attachment_info(id).map_err(core)?,
             None,
             None,
+            client.deferred_media_status(id).map_err(core)?,
         ))
         .map_err(|_| core(CoreError::Database))?;
         let requested = client.attachment_download_requested(id).map_err(core)?;
@@ -166,6 +170,16 @@ impl BrowserCore {
             .request_attachment_download(attachment_id(&args)?)
             .map_err(core)?;
         Ok(json!({}))
+    }
+    fn media_sync_request(&self, args: Value) -> Result<Value, Failure> {
+        let report = self
+            .client()?
+            .request_mms_media_sync(&media_sync_attachment_ids(&args)?)
+            .map_err(core)?;
+        Ok(json!({
+            "requested": report.requested.into_iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "alreadyRequested": report.already_requested.into_iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+        }))
     }
     fn evict_attachment_ciphertext(&self, args: Value) -> Result<Value, Failure> {
         let evicted = self
@@ -234,12 +248,14 @@ impl BrowserCore {
                 })
             })
             .transpose()?;
-        let page = self
-            .client()?
+        let client = self.client()?;
+        let page = client
             .media_page(conversation_id, cursor.as_ref(), limit)
             .map_err(core)?;
-        serde_json::to_value(peppy_desktop_api::media_page_view(page))
-            .map_err(|_| core(CoreError::Database))
+        serde_json::to_value(
+            peppy_desktop_api::media_page_view_with_media_status(client, page).map_err(core)?,
+        )
+        .map_err(|_| core(CoreError::Database))
     }
     fn media_page_around(&self, args: Value) -> Result<Value, Failure> {
         let conversation_id = args
@@ -262,8 +278,11 @@ impl BrowserCore {
             None => client.media_page_around(conversation_id, attachment_id, limit),
         }
         .map_err(core)?;
-        serde_json::to_value(peppy_desktop_api::media_page_around_view(page))
-            .map_err(|_| core(CoreError::Database))
+        serde_json::to_value(
+            peppy_desktop_api::media_page_around_view_with_media_status(client, page)
+                .map_err(core)?,
+        )
+        .map_err(|_| core(CoreError::Database))
     }
     fn media_page_newer(&self, args: Value) -> Result<Value, Failure> {
         let conversation_id = args
@@ -279,8 +298,11 @@ impl BrowserCore {
             .client()?
             .media_page_newer(conversation_id, &cursor, limit)
             .map_err(core)?;
-        serde_json::to_value(peppy_desktop_api::media_page_view(page))
-            .map_err(|_| core(CoreError::Database))
+        let client = self.client()?;
+        serde_json::to_value(
+            peppy_desktop_api::media_page_view_with_media_status(client, page).map_err(core)?,
+        )
+        .map_err(|_| core(CoreError::Database))
     }
     /// Returns an opaque remote ID only to the Worker publication path, never a display DTO.
     fn attachment_remote(&self, args: Value) -> Result<Value, Failure> {
@@ -473,6 +495,21 @@ impl BrowserCore {
         self.safe_worker_file(source)?;
         Ok(path)
     }
+}
+
+fn media_sync_attachment_ids(args: &Value) -> Result<Vec<AttachmentId>, Failure> {
+    let ids = args
+        .get("attachmentIds")
+        .and_then(Value::as_array)
+        .filter(|ids| (1..=MAX_MEDIA_SYNC_ATTACHMENTS).contains(&ids.len()))
+        .ok_or_else(invalid)?;
+    ids.iter()
+        .map(|id| {
+            id.as_str()
+                .ok_or_else(invalid)
+                .and_then(|id| AttachmentId::from_str(id).map_err(|_| invalid()))
+        })
+        .collect()
 }
 
 fn copy_exclusive(source: &Path, output_path: &Path, expected_bytes: u64) -> io::Result<u64> {

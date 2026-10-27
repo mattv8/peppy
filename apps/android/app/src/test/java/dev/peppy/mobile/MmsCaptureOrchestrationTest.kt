@@ -2,8 +2,14 @@ package dev.peppy.mobile
 
 import android.graphics.Bitmap
 import android.net.Uri
+import androidx.test.core.app.ApplicationProvider
+import androidx.work.Data
+import androidx.work.ListenableWorker
+import androidx.work.workDataOf
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -30,6 +36,23 @@ class MmsCaptureOrchestrationTest {
         }
 
         assertTrue(events.any { it.contains("event=${SyncTraceEvent.CAPTURE_PROGRESS.code}") && it.contains("${SyncTraceField.STAGE.code}=${SyncDiagnosticStage.MMS}") && it.contains("${SyncTraceField.PROCESSED.code}=") })
+    }
+
+    @Test fun diagnosticsAggregateProviderWorkWithoutMmsContentOrProviderIdentifiers() {
+        val events = mutableListOf<String>()
+        val sensitive = record(77).copy(subject = "private subject", parts = listOf(
+            MmsProviderPart(991, 0, "text/plain", null, 106, "private body", Uri.parse("content://mms/part/991")),
+        ))
+
+        SyncDiagnostics.withTestConfiguration(true, { 1L }, { 1L }, events::add) {
+            MmsCapture.run(plan(), FakeCore(), FakeProvider(listOf(sensitive)), temp())
+        }
+
+        val passes = events.filter { it.startsWith("event=${SyncTraceEvent.MMS_CAPTURE_PASS.code} ") }
+        assertEquals(1, passes.size)
+        assertTrue(passes.single().contains("${SyncTraceField.PROVIDER_READS.code}="))
+        assertTrue(passes.single().contains("${SyncTraceField.PAGE_QUERIES.code}="))
+        assertTrue(events.none { it.contains("private subject") || it.contains("private body") || it.contains("991") || it.contains("77") })
     }
 
     @Test fun corePlanDrivesLiveAndHistoryProviderScansWithoutPreferenceCheckpoints() {
@@ -267,10 +290,262 @@ class MmsCaptureOrchestrationTest {
         assertEquals(NativeMmsPreviewState.PERMANENTLY_UNAVAILABLE, core.previewStates("ignored")["10"])
     }
 
+    @Test fun providerHintReachesOnlyTheHintedRecheckPassWithoutAddingWork() {
+        val hinted = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)))
+        val periodic = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)))
+
+        val hintedResult = MmsCapture.run(plan().copy(providerChanged = true), hinted, FakeProvider(listOf(record(1))), temp())
+        val periodicResult = MmsCapture.run(plan(), periodic, FakeProvider(listOf(record(1))), temp())
+
+        assertEquals(listOf(true), hinted.dueConditions.map { it.providerChanged })
+        assertEquals(listOf(false), periodic.dueConditions.map { it.providerChanged })
+        assertEquals(periodicResult.more, hintedResult.more)
+        assertEquals(periodicResult.captured, hintedResult.captured)
+    }
+
+    @Test fun providerContentPendingRecheckIsRecordedAsAwaitingProviderWithoutContinuation() {
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)))
+        val pendingRecord = record(1).copy(ready = false, error = "provider_content_pending")
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(pendingRecord)), temp())
+
+        assertEquals(listOf(MmsBackfillRecheckOutcome.AWAITING_PROVIDER), core.recheckOutcomes)
+        assertFalse(result.more)
+    }
+
+    @Test fun failedUnmappedPartCopyRecordsOneUnchangedPartUnavailableOutcome() {
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)), initialReason = "preview_deferred")
+        val provider = FakeProvider(listOf(record(1).copy(parts = listOf(pngPart(10)))), failCopy = true)
+
+        val result = MmsCapture.run(plan(), core, provider, temp())
+
+        assertEquals(listOf(MmsBackfillRecheckOutcome.UNCHANGED_PART_UNAVAILABLE), core.recheckOutcomes)
+        assertFalse(result.more)
+    }
+
+    @Test fun settlingRecheckIsRecordedAsProgressForImmediateFollowup() {
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", true)))
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1))), temp())
+
+        assertEquals(listOf(MmsBackfillRecheckOutcome.PROGRESS), core.recheckOutcomes)
+        assertTrue(result.more)
+    }
+
+    @Test fun directionChangeIsRecordedWithoutForcingAFollowup() {
+        val core = FakeCore(recheckRequests = listOf(MmsBackfillRecheckRequest("1", false)))
+
+        val result = MmsCapture.run(plan(), core, FakeProvider(listOf(record(1))), temp())
+
+        assertEquals(listOf(MmsBackfillRecheckOutcome.PROVIDER_CHANGED), core.recheckOutcomes)
+        assertTrue(core.inputs.isEmpty())
+        assertFalse(result.more)
+    }
+
+    @Test fun completeIdentityRecheckIsVerifiedInsteadOfTransient() {
+        val core = FakeCore(
+            recheckRequests = listOf(MmsBackfillRecheckRequest("1", true, state = MmsBackfillRecheckState.COMPLETE)),
+            initialState = NativeMmsAcquisitionState.COMPLETE,
+        )
+
+        MmsCapture.run(plan(), core, FakeProvider(listOf(record(1))), temp())
+
+        assertEquals(listOf(MmsBackfillRecheckOutcome.VERIFIED), core.recheckOutcomes)
+    }
+
+    @Test fun twoHintsBeforeAPassScheduleOneDebouncedWork() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestHint(sink)
+        scheduler.requestHint(sink)
+
+        assertEquals(listOf(androidx.work.ExistingWorkPolicy.KEEP to true), scheduled)
+    }
+
+    @Test fun normalQueuedPassAbsorbsHintAfterPriorPassCompletes() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestNormal(sink)
+        scheduler.beginPass(managedWork = true)
+        scheduler.finishPass(managedWork = true)
+        scheduler.requestNormal(sink)
+        scheduler.requestHint(sink)
+
+        assertEquals(
+            listOf(
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+            ),
+            scheduled,
+        )
+    }
+
+    @Test fun manualReplacementAbsorbsHintUntilReplacementStarts() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.replace(sink)
+        scheduler.requestHint(sink)
+
+        assertEquals(listOf(androidx.work.ExistingWorkPolicy.REPLACE to false), scheduled)
+    }
+
+    @Test fun hintDuringRunningPassCreatesExactlyOneDelayedSuccessor() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestNormal(sink)
+        scheduler.beginPass(managedWork = true)
+        scheduler.requestHint(sink)
+        scheduler.requestHint(sink)
+        scheduler.requestContinuation(actualMore = true, sink)
+
+        assertEquals(
+            listOf(
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+            ),
+            scheduled,
+        )
+    }
+
+    @Test fun continuationRequiresActualMoreAndKeepsTheExistingDebounce() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestNormal(sink)
+        scheduler.beginPass(managedWork = true)
+        scheduler.requestContinuation(actualMore = false, sink)
+        scheduler.requestContinuation(actualMore = true, sink)
+
+        assertEquals(
+            listOf(
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+            ),
+            scheduled,
+        )
+    }
+
+    @Test fun periodicPassDoesNotClearQueuedOneTimeHint() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestNormal(sink)
+        scheduler.beginPass(managedWork = true)
+        scheduler.requestHint(sink)
+        scheduler.beginPass(managedWork = false)
+        scheduler.requestHint(sink)
+
+        assertEquals(
+            listOf(
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+            ),
+            scheduled,
+        )
+    }
+
+    @Test fun periodicPassRecoversAStaleQueueAfterFailedManagedChain() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestNormal(sink)
+        scheduler.beginPass(managedWork = true)
+        scheduler.requestHint(sink)
+        scheduler.finishPass(managedWork = true)
+        scheduler.beginPass(managedWork = false)
+        scheduler.requestHint(sink)
+
+        assertEquals(
+            listOf(
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+            ),
+            scheduled,
+        )
+    }
+
+    @Test fun retryPassClearsFailedQueuedHintSuccessor() {
+        val scheduler = MmsCaptureHintScheduler()
+        val scheduled = mutableListOf<Pair<androidx.work.ExistingWorkPolicy, Boolean>>()
+        val sink = MmsCaptureScheduleSink { policy, delayed -> scheduled += policy to delayed }
+
+        scheduler.requestNormal(sink)
+        scheduler.beginPass(managedWork = true)
+        scheduler.requestHint(sink)
+        scheduler.finishPass(managedWork = true)
+        scheduler.beginPass(managedWork = true)
+        scheduler.requestHint(sink)
+
+        assertEquals(
+            listOf(
+                androidx.work.ExistingWorkPolicy.KEEP to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+                androidx.work.ExistingWorkPolicy.APPEND_OR_REPLACE to true,
+            ),
+            scheduled,
+        )
+    }
+
+    @Test fun managedDataRecognizesHeadOneTimeRequestsButNotEmptyPeriodicRequests() {
+        assertTrue(MmsCaptureWork.isManagedData(workDataOf(MmsCaptureWork.MANUAL_RECHECK to false)))
+        assertFalse(MmsCaptureWork.isManagedData(Data.EMPTY))
+    }
+
+    @Test fun durableHintIsConsumedAndFailureRestoresItForTheRetryPass() {
+        val context = hintContext()
+        val input = workDataOf(MmsCaptureWork.MANAGED_WORK to true)
+        MmsCaptureHints.record(context)
+
+        val failed = MmsCaptureWork.runWorkerPass(context, input) { _, _ -> throw IOException("provider unavailable") }
+        var providerChanged = false
+        val retried = MmsCaptureWork.runWorkerPass(context, input) { _, changed ->
+            providerChanged = changed
+            MmsCaptureSummary(0, 0, 0, false)
+        }
+
+        assertEquals(ListenableWorker.Result.retry(), failed)
+        assertEquals(ListenableWorker.Result.success(), retried)
+        assertTrue(providerChanged)
+        assertFalse(MmsCaptureHints.consumeProviderChange(context))
+    }
+
+    @Test fun cancellationRestoresConsumedHintAndPropagates() {
+        val context = hintContext()
+        MmsCaptureHints.record(context)
+        var cancelled = false
+
+        try {
+            MmsCaptureWork.runWorkerPass(context, workDataOf(MmsCaptureWork.MANAGED_WORK to true)) { _, _ ->
+                throw CancellationException("stopped")
+            }
+        } catch (_: CancellationException) {
+            // Structured cancellation remains observable to WorkManager.
+            cancelled = true
+        }
+
+        assertTrue(cancelled)
+        assertTrue(MmsCaptureHints.consumeProviderChange(context))
+    }
+
     private fun pngPart(id: Long) = MmsProviderPart(id, 0, "image/png", "photo.png", null, null, Uri.parse("content://mms/part/$id"))
 
     private fun plan() = MmsCapturePlan("generation", null, false, null, null, false)
     private fun temp() = kotlin.io.path.createTempDirectory("mms-capture-test").toFile()
+    private fun hintContext(): android.content.Context = ApplicationProvider.getApplicationContext<android.content.Context>().also {
+        it.getSharedPreferences(MmsCaptureHints.PREFERENCES, android.content.Context.MODE_PRIVATE).edit().clear().commit()
+    }
     private fun record(id: Long) = MmsProviderRecord(
         id, 4, 7, 1, 1_000, null, "subject", listOf("+15550001"), emptyList(), listOf("+15550002"), emptyList(),
         132, null, listOf(MmsProviderPart(id * 10, 0, "text/plain", null, 106, "body", Uri.parse("content://mms/part/$id"))), true, null,
@@ -315,6 +590,7 @@ class MmsCaptureOrchestrationTest {
         initialPreviewStates: Map<String, NativeMmsPreviewState> = emptyMap(),
         var pendingBytes: Long = 0,
         private val initialReason: String = "settling",
+        private val initialState: NativeMmsAcquisitionState = NativeMmsAcquisitionState.PENDING,
     ) : MmsCaptureCore {
         var migrations = 0
         val reasons = mutableListOf<String?>()
@@ -341,12 +617,20 @@ class MmsCaptureOrchestrationTest {
             if (phase == MmsBackfillPhase.LIVE) liveCursor = providerId
         }
         override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean { if (exhausted) finished += bound; return exhausted }
-        override fun rechecks(generation: String, scope: String) = MmsBackfillRecheck(recheckRequests, 50)
+        val dueConditions = mutableListOf<MmsBackfillRecheckConditions>()
+        val recheckOutcomes = mutableListOf<MmsBackfillRecheckOutcome>()
+        override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck {
+            dueConditions += conditions
+            return MmsBackfillRecheck(recheckRequests, 50, continuationDue = recheckRequests.isNotEmpty())
+        }
+        override fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) {
+            recheckOutcomes += outcome
+        }
         override fun begin(input: NativeMmsAcquisitionInput): NativeMmsBeginOutcome {
             inputs += input
             if (input.source.providerMessageId in failBeginProviderIds) error("core unavailable")
             val acquisition = acquisitions.getOrPut(input.source.providerMessageId) {
-                NativeMmsAcquisition("acq-${input.source.providerMessageId}", "conversation", input, NativeMmsAcquisitionState.PENDING, initialReason, emptyList())
+                NativeMmsAcquisition("acq-${input.source.providerMessageId}", "conversation", input, initialState, initialReason, emptyList())
             }
             return if (input.source.providerMessageId in quarantinedProviderIds) {
                 NativeMmsBeginOutcome.Quarantined(NativeMmsProviderIdentityQuarantine(input.source, input.incoming, "ambiguous"))
