@@ -197,10 +197,12 @@ class GatewaySync(
     private val contacts: () -> Boolean = { false },
     /** Contact photo reference registration/reclaim; must precede outbox upload. */
     private val contactPhotos: () -> Boolean = { false },
+    /** Android-only bounded cleanup after finalized outbox work. */
+    private val cleanupMmsCiphertext: () -> Unit = {},
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private enum class GatewayPhase(val code: Long) {
-        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19),
+        RECOVERY_WITHDRAW(1), CAPABILITIES(2), COMPACTION_CAPABILITY(3), BOOTSTRAP(4), BOOTSTRAP_DRAIN(5), DRAIN_BEFORE_RECEIVE(6), RECEIVE(7), DRAIN_AFTER_RECEIVE(8), CONTACT_REPAIR(9), NOTIFICATION_RECONCILE(10), NOTIFICATION_DISMISSALS(11), NOTIFICATION_TEST_DISMISSALS(12), CONTACTS(13), MEDIA(14), CONTACT_PHOTOS(15), UPLOAD(16), DISPATCH(17), FINAL_CONTACT_PHOTOS(18), FINAL_UPLOAD(19), MMS_CLEANUP(BackgroundDiagnostics.MMS_CLEANUP_PHASE),
     }
     class PassResult(val more: Boolean, val failure: Exception?)
 
@@ -262,6 +264,7 @@ class GatewaySync(
         // Envelopes sealed during the first upload may have produced new photo registrations.
         if (mayPrepare() && state.phase == SyncPhase.LIVE) phase(GatewayPhase.FINAL_CONTACT_PHOTOS) { contactPhotos() }
         if (mayEmit()) phase(GatewayPhase.FINAL_UPLOAD) { upload() }
+        if (mayEmit()) phase(GatewayPhase.MMS_CLEANUP) { cleanupMmsCiphertext(); false }
         if (diagnosticsEnabled) BackgroundDiagnostics.gateway(received, snapshotReceived, progressed, uploaded, snapshotRemaining, contactReadiness)
         return PassResult(more, failure)
     }
@@ -391,15 +394,23 @@ class GatewaySync(
             client.setServerCompactionState(false, false)
             return
         }
+        var capacityCut: JSONObject? = null
         val readinessJson = try {
             val cut = JSONObject(checkBody(response))
             val state = snapshotCompactionState(cut)
             val readiness = client.setServerCompactionState(state.generation != null, state.active)
+            capacityCut = cut
             if (state.generation != null) snapshotForRepair = cut
             readiness
         } catch (error: Exception) {
             client.setServerCompactionState(false, false)
             throw error
+        }
+        // Local admission bookkeeping must not revoke an independently verified server capability.
+        runCatching {
+            capacityCut?.let { cut -> client.recordRecoverySnapshotCapacity(cut.getString("high_water_cursor"), cut.getString("record_count").toULong()) }
+        }.onFailure {
+            SyncDiagnostics.record(SyncTraceEvent.NATIVE_CALL, SyncTraceField.PHASE to GatewayPhase.COMPACTION_CAPABILITY.code, SyncTraceField.CORE_ERROR to 1L)
         }
         // The returned readiness is diagnostic-only. Its parsing cannot change the capability
         // result, trigger the failure fallback above, or alter this pass's outcome.
@@ -672,27 +683,38 @@ class GatewaySyncWorker(context: Context, params: WorkerParameters) : CoroutineW
             },
             capabilities = SimRoutes.capabilityReport(routes, sendGranted, mmsEnabled, mmsReceiveGranted, session.client.mmsContentVersion()) { MmsLimits.forSubscription(applicationContext, it) },
             media = {
-                // Media transfer is intentionally separate from SMS/MMS acquisition and text sync.
-                if (hostPolicy.decision(smsAvailable = sendGranted)?.transferMedia == true) {
-                    val http = GatewayHttp(session.origin, session.bearerToken)
-                    val tracked = ContactPhotoTransfer(session.client, http).trackedUploadIds()
-                    val remoteQuota = MmsRemoteQuota(applicationContext, session.client)
-                    MmsMediaTransfer(
-                        session.client,
-                        http,
-                        applicationContext.noBackupFilesDir,
-                        { it in tracked },
-                        remoteQuota.uploadsAllowed(http),
-                        { remoteQuota.pause() },
-                        { remoteQuota.confirmUploadCapacity() },
-                    ).run()
-                        .also { MmsTransferHealth(applicationContext).record(it.failures) }
-                } else {
-                    MmsTransferResult(more = false, uploaded = 0, downloaded = 0, failures = emptyList())
-                }
+                // Core filters uploads per object; downloads remain eligible for carrier commands.
+                val http = GatewayHttp(session.origin, session.bearerToken)
+                val tracked = ContactPhotoTransfer(session.client, http).trackedUploadIds()
+                val remoteQuota = MmsRemoteQuota(applicationContext, session.client)
+                session.client.enableDeferredGatewayMedia(
+                    GatewayPolicyHost.onWifi(applicationContext),
+                    hostPolicy.mediaWifiOnly,
+                )
+                MmsMediaTransfer(
+                    session.client,
+                    http,
+                    applicationContext.noBackupFilesDir,
+                    { it in tracked },
+                    remoteQuota.uploadsAllowed(http),
+                    { remoteQuota.pause() },
+                    { remoteQuota.confirmUploadCapacity() },
+                    { session.client.pendingGatewayMediaUploads() },
+                    { session.client.pendingGatewayMediaDownloads() },
+                ).run()
+                    .also { result ->
+                        MmsTransferHealth(applicationContext).record(result.failures)
+                        result.failures.filter { it.operation == "upload" }.forEach { failure ->
+                            runCatching { session.client.recordGatewayMediaFailure(failure.attachmentId, failure.reason) }
+                        }
+                    }
             },
             contacts = { ContactSyncHost.pass(applicationContext, session) },
             contactPhotos = { ContactPhotoTransfer(session.client, GatewayHttp(session.origin, session.bearerToken)).run() },
+            cleanupMmsCiphertext = {
+                val result = session.client.cleanupUploadedGatewayMmsCiphertext(16u)
+                BackgroundDiagnostics.mmsCleanup(result.marked.toLong(), result.unlinked.toLong(), result.pendingUnlink.toLong())
+            },
         )
         val result = try {
             sync.run()

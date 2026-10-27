@@ -8,7 +8,7 @@ import android.content.Intent
 class MmsNotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (!isMmsWapPush(intent)) return
-        MmsCaptureWork.enqueue(context.applicationContext)
+        MmsCaptureWork.enqueueProviderHint(context.applicationContext)
     }
 
     companion object {

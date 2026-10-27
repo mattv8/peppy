@@ -847,6 +847,9 @@ impl Client {
                 params![envelope_id.to_string(), thumbnail_id.to_string()],
             )?;
         }
+        if !input.imported {
+            crate::deferred_media::register_capture(&tx, message_id, envelope_id)?;
+        }
         tx.execute(
             "UPDATE mms_acquisitions SET state='complete',reason=NULL WHERE acquisition_id=?",
             params![id],
@@ -1412,7 +1415,7 @@ pub(crate) fn pending_acquisition_capacity_reached(
 
 fn pending_media_bytes(conn: &rusqlite::Connection) -> Result<u64, Error> {
     let bytes: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(a.plaintext_bytes),0) FROM attachments a WHERE a.state != 'uploaded' AND a.attachment_id IN (SELECT attachment_id FROM mms_acquisition_parts UNION SELECT thumbnail_attachment_id FROM mms_acquisition_parts WHERE thumbnail_attachment_id IS NOT NULL)",
+        "SELECT COALESCE(SUM(a.plaintext_bytes),0) FROM attachments a WHERE a.state != 'uploaded' AND NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND a.attachment_id IN (SELECT attachment_id FROM mms_acquisition_parts UNION SELECT thumbnail_attachment_id FROM mms_acquisition_parts WHERE thumbnail_attachment_id IS NOT NULL)",
         [], |row| row.get(0),
     )?;
     u64::try_from(bytes).map_err(|_| Error::Database)

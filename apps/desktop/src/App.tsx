@@ -97,6 +97,8 @@ import { peppyCopy } from "./generated/peppyCopy";
 import { MediaLightbox } from "./media/MediaLightbox";
 import { MediaPanel, type MediaPageItem as GalleryMediaPageItem } from "./media/MediaPanel";
 import { MediaGrid } from "./media/MediaGrid";
+import { MediaTile } from "./media/MediaTile";
+import { originalPending } from "./media/mediaState";
 import { MediaActionsProvider, type SaveOutcome as GallerySaveOutcome } from "./media/MediaActionsContext";
 import { clipboardImageSupported } from "./media/clipboard";
 import { InlineMedia } from "./media/InlineMedia";
@@ -695,6 +697,7 @@ function MessageList({
                 {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
                 {message.attachments.map((file) => {
                   const copy = publicCopies[file.id];
+                  if (originalPending(file)) return <MediaTile key={file.id} attachment={file} message={message} variant="single" onOpen={() => onOpenMedia({ attachment: file, message })} />;
                   const shareable =
                     file.state === "ready" && file.mediaType.startsWith("image/");
                   if (file.mediaType.startsWith("video/") || file.mediaType.startsWith("audio/")) return <InlineMedia key={file.id} attachment={file} requestOriginal={requestOriginal} checkOriginal={checkOriginal} releaseMedia={releaseMedia} retryKey={mediaRetryKey} />;
@@ -3030,7 +3033,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
   const messages = (
-    <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()}>
+    <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()}>
       <div id="conversation-tabs" role="tablist" aria-label="Conversation views" onKeyDown={(event) => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         const next = conversationTab === "messages" ? "media" : "messages";

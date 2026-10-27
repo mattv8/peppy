@@ -30,11 +30,13 @@ mod contact_state;
 mod contact_sync_requests;
 mod contacts;
 mod conversation_match;
+mod deferred_media;
 mod gateway_settings;
 mod history_import;
 mod local_search;
 mod media;
 mod media_cache;
+pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 mod media_paging;
 mod mms;
 mod mms_backfill;
@@ -51,6 +53,7 @@ use media::STREAM_VERSION;
 pub use media::{
     AttachmentInfo, AttachmentState, CipherObject, MediaDescriptor, NativePlaintextFile,
 };
+pub use media_cache::GatewayMmsCleanup;
 pub use media_paging::MediaPageAround;
 pub use mms::{
     MAX_MMS_ACQUISITIONS, MAX_PENDING_MMS_MEDIA_BYTES, MmsAcquisition, MmsAcquisitionInput,
@@ -58,7 +61,8 @@ pub use mms::{
     MmsProviderIdentityQuarantine, MmsReplyContext, MmsSource,
 };
 pub use mms_backfill::{
-    MAX_MMS_BACKFILL_RECHECK, MmsBackfillPause, MmsBackfillPhase, MmsBackfillRecheck,
+    MAX_MMS_BACKFILL_RECHECK, MMS_COMPLETED_RECHECK_REST_MS, MmsBackfillPause, MmsBackfillPhase,
+    MmsBackfillRecheck, MmsBackfillRecheckConditions, MmsBackfillRecheckOutcome,
     MmsBackfillRecheckRequest, MmsBackfillScanPlan, MmsBackfillStatus, MmsLegacyBackfillState,
 };
 use peppy_crypto::FileKey;
@@ -292,6 +296,27 @@ pub enum Direction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivatePayload {
+    MmsDeferredPreview {
+        message: MessagePayload,
+        originals: Vec<DeferredOriginal>,
+        media_meta: Vec<MmsMediaMeta>,
+    },
+    MmsMediaBinding {
+        message_id: MessageId,
+        source_device_id: DeviceId,
+        attachment: MediaDescriptor,
+    },
+    MmsMediaDemand {
+        message_id: MessageId,
+        source_gateway_id: DeviceId,
+        attachment_ids: Vec<AttachmentId>,
+    },
+    MmsMediaFailure {
+        message_id: MessageId,
+        source_device_id: DeviceId,
+        attachment_id: AttachmentId,
+        reason: String,
+    },
     Message(MessagePayload),
     SendCommand {
         message: MessagePayload,
@@ -2236,23 +2261,41 @@ impl Client {
 
     /// Records server acceptance of one sealed outbox envelope. Idempotent.
     pub fn ack_outbox(&self, envelope_id: EnvelopeId) -> Result<(), Error> {
-        let s = self.lock()?;
-        let changed = s.conn.execute(
+        let mut s = self.lock()?;
+        let tx = s
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let was_queued: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outbox WHERE envelope_id=? AND state='queued')",
+            [envelope_id.to_string()],
+            |r| r.get(0),
+        )?;
+        let changed = tx.execute(
             "UPDATE outbox SET state='acknowledged' WHERE envelope_id=? AND state IN ('queued','acknowledged')",
             params![envelope_id.to_string()],
         )?;
         if changed == 0 {
             // Muting can purge a post already in an HTTP batch. Its late acceptance must
             // not fail the shared SMS upload pass; retain only its non-content identity.
-            let purged_notification: bool = s.conn.query_row(
+            let purged_notification: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM outbox_notification_posts p WHERE p.envelope_id=? AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.envelope_id=p.envelope_id))",
                 params![envelope_id.to_string()], |r| r.get(0),
             )?;
             if purged_notification {
+                tx.commit()?;
                 return Ok(());
             }
             return Err(Error::NotFound);
         }
+        media_cache::enqueue_acknowledged_gateway_mms_cleanup(&tx, &envelope_id.to_string())?;
+        if was_queued {
+            mms_backfill::record_recovery_ack(&tx)?;
+        }
+        tx.execute(
+            "DELETE FROM mms_deferred_candidates WHERE envelope_id=?",
+            [envelope_id.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3118,7 +3161,7 @@ impl Client {
         }
         let store = self.lock()?;
         let mut query = store.conn.prepare(
-            "SELECT attachment_id FROM attachments WHERE state IN ('pending_upload','uploaded','available') AND (?1 IS NULL OR attachment_id>?1) ORDER BY attachment_id LIMIT ?2",
+            "SELECT attachment_id FROM attachments a WHERE state IN ('pending_upload','uploaded','available') AND NOT (state='uploaded' AND EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id)) AND (?1 IS NULL OR attachment_id>?1) ORDER BY attachment_id LIMIT ?2",
         )?;
         let rows = query.query_map(
             params![after.map(|id| id.to_string()), limit as i64],
@@ -3152,7 +3195,7 @@ impl Client {
     pub fn pending_downloads(&self) -> Result<Vec<CipherObject>, Error> {
         self.cipher_objects(
             &format!(
-                "SELECT attachment_id FROM attachments WHERE state='pending_download' AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))) ORDER BY rowid",
+                "SELECT attachment_id FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
                 contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
             ),
         )
@@ -3179,9 +3222,12 @@ impl Client {
 
     /// Durably opts a remote original into the core-owned download queue.
     pub fn request_attachment_download(&self, attachment_id: AttachmentId) -> Result<(), Error> {
-        let guard = self.lock()?;
+        let mut guard = self.lock()?;
         if attachment_row(&guard.conn, attachment_id)?.is_none() {
             return Err(Error::NotFound);
+        }
+        if media_cache::request_gateway_mms_rehydration(&mut guard, attachment_id)? {
+            return Ok(());
         }
         guard.conn.execute(
             "INSERT INTO attachment_demand(attachment_id,requested_at) VALUES(?,CAST(strftime('%s','now') AS INTEGER)*1000) ON CONFLICT(attachment_id) DO NOTHING",
@@ -3203,7 +3249,9 @@ impl Client {
     pub fn native_cipher_file(&self, attachment_id: AttachmentId) -> Result<PathBuf, Error> {
         let s = self.lock()?;
         let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
-        if !row.state.is_local() {
+        if !row.state.is_local()
+            || media_cache::gateway_mms_ciphertext_evicted(&s.conn, attachment_id)?
+        {
             return Err(Error::InvalidMedia);
         }
         Ok(media::cipher_path(&s.media_dir, attachment_id))
@@ -3220,20 +3268,27 @@ impl Client {
             .map_err(|_| Error::InvalidRequest("remote object id"))?
             .to_string();
         let mut guard = self.lock()?;
-        let row = attachment_row(&guard.conn, attachment_id)?.ok_or(Error::NotFound)?;
-        match (row.state, row.remote_object_id) {
-            (AttachmentState::PendingUpload, _) => {
-                guard.conn.execute(
-                    "UPDATE attachments SET state=?,remote_object_id=? WHERE attachment_id=?",
-                    params![
-                        AttachmentState::Uploaded.code(),
-                        remote,
-                        attachment_id.to_string()
-                    ],
-                )?;
+        {
+            let (conn, ctx) = guard.parts();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let row = attachment_row(&tx, attachment_id)?.ok_or(Error::NotFound)?;
+            match (row.state, row.remote_object_id) {
+                (AttachmentState::PendingUpload, _) => {
+                    tx.execute(
+                        "UPDATE attachments SET state=?,remote_object_id=? WHERE attachment_id=?",
+                        params![
+                            AttachmentState::Uploaded.code(),
+                            remote,
+                            attachment_id.to_string()
+                        ],
+                    )?;
+                }
+                (_, Some(existing)) if existing == remote => {}
+                _ => return Err(Error::Conflict),
             }
-            (_, Some(existing)) if existing == remote => {}
-            _ => return Err(Error::Conflict),
+            deferred_media::on_uploaded(&tx, &ctx, attachment_id)?;
+            media_cache::enqueue_gateway_mms_cleanup_candidate(&tx, attachment_id)?;
+            tx.commit()?;
         }
         seal_with_store(&mut guard)
     }
@@ -3304,22 +3359,34 @@ impl Client {
         &self,
         attachment_id: AttachmentId,
     ) -> Result<NativePlaintextFile, Error> {
-        let (root, vault_id, row) = {
-            let s = self.lock()?;
-            let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
-            (s.media_dir.clone(), s.config.vault_id, row)
-        };
-        if !row.state.is_local() {
-            return Err(Error::InvalidMedia);
+        self.retain_attachment_ciphertext(attachment_id)?;
+        let result = (|| {
+            let (root, vault_id, row, evicted) = {
+                let s = self.lock()?;
+                let row = attachment_row(&s.conn, attachment_id)?.ok_or(Error::NotFound)?;
+                let evicted = media_cache::gateway_mms_ciphertext_evicted(&s.conn, attachment_id)?;
+                (s.media_dir.clone(), s.config.vault_id, row, evicted)
+            };
+            if !row.state.is_local() || evicted {
+                return Err(Error::InvalidMedia);
+            }
+            media::open_plaintext(
+                &root,
+                attachment_id,
+                &row.file_key()?,
+                &media::media_aad(vault_id, attachment_id),
+                row.plaintext_bytes,
+                self.0.clone(),
+            )
+        })();
+        let released = self.release_attachment_ciphertext(attachment_id);
+        match result {
+            Ok(file) => {
+                released?;
+                Ok(file)
+            }
+            Err(error) => Err(error),
         }
-        media::open_plaintext(
-            &root,
-            attachment_id,
-            &row.file_key()?,
-            &media::media_aad(vault_id, attachment_id),
-            row.plaintext_bytes,
-            self.0.clone(),
-        )
     }
 
     /// Seals up to `limit` locked/held outbox rows (implicit sealing is capped at
@@ -3362,6 +3429,7 @@ impl Client {
         let tx = guard
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mms_backfill::record_snapshot_capacity(&tx, high_water.0, record_count)?;
         if active_generation(&tx)?.is_some_and(|g| g.published) {
             return Err(Error::InvalidRequest(
                 "previous snapshot is still draining; call apply_pending",
@@ -4720,6 +4788,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
     }
     mms_backfill::initialize(conn)?;
     media_cache::initialize(conn)?;
+    deferred_media::initialize(conn)?;
     initialize_battery_lookup_indexes(conn)?;
     mms_identity::install_query_indexes(conn)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5029,6 +5098,10 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
         "message"
             | "send_command"
             | "mms_message"
+            | "mms_deferred_preview"
+            | "mms_media_binding"
+            | "mms_media_demand"
+            | "mms_media_failure"
             | "send_mms_command"
             | "send_status"
             | "read_state"
@@ -5080,6 +5153,83 @@ fn apply_record(
         other => (other, Vec::new(), Vec::new()),
     };
     match (envelope.purpose, payload) {
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::MmsMediaFailure {
+                message_id,
+                source_device_id,
+                attachment_id,
+                reason,
+            },
+        ) => {
+            if let Some(reason) = deferred_media::apply_failure(
+                conn,
+                producer,
+                source_device_id,
+                message_id,
+                attachment_id,
+                &reason,
+                envelope.producer_sequence.0,
+            )? {
+                return Ok(Some(reason));
+            }
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::MmsDeferredPreview {
+                message,
+                originals,
+                media_meta,
+            },
+        ) => {
+            if let Some(reason) = deferred_media::apply_preview(
+                conn,
+                producer,
+                &message,
+                &originals,
+                &media_meta,
+                historical,
+            )? {
+                return Ok(Some(reason));
+            }
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::MmsMediaBinding {
+                message_id,
+                source_device_id,
+                attachment,
+            },
+        ) => {
+            if let Some(reason) = deferred_media::apply_binding(
+                conn,
+                producer,
+                message_id,
+                source_device_id,
+                &attachment,
+            )? {
+                return Ok(Some(reason));
+            }
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::MmsMediaDemand {
+                message_id,
+                source_gateway_id,
+                attachment_ids,
+            },
+        ) => {
+            if let Some(reason) = deferred_media::apply_demand(
+                conn,
+                ctx,
+                message_id,
+                source_gateway_id,
+                &attachment_ids,
+                historical,
+            )? {
+                return Ok(Some(reason));
+            }
+        }
         (EnvelopePurpose::Event, PrivatePayload::Message(message)) => {
             if !valid_message(&message, producer)
                 || !media_matches(&message, &media)
@@ -5087,7 +5237,8 @@ fn apply_record(
             {
                 return Ok(Some(Q::InvalidPayload));
             }
-            if !store_remote_media(conn, &media)?
+            if !deferred_media::bind_from_message(conn, &message, &media)?
+                || !store_remote_media(conn, &media)?
                 || !store_remote_media(conn, &thumbnail_descriptors(&media_meta))?
             {
                 return Ok(Some(Q::PayloadConflict));
@@ -5138,6 +5289,10 @@ fn apply_record(
                 // Only a currently eligible, live gateway needs original media to execute.
                 if !historical && !retired {
                     for descriptor in &media {
+                        media_cache::request_gateway_mms_rehydration_in(
+                            conn,
+                            descriptor.attachment_id,
+                        )?;
                         conn.execute(
                             "INSERT OR IGNORE INTO attachment_demand(attachment_id,requested_at) VALUES(?,0)",
                             params![descriptor.attachment_id.to_string()],
@@ -5577,6 +5732,15 @@ fn enqueue_without_sealing(
 }
 
 fn payload_attachment_ids(payload: &PrivatePayload) -> Vec<AttachmentId> {
+    if let PrivatePayload::MmsDeferredPreview { media_meta, .. } = payload {
+        return thumbnail_descriptors(media_meta)
+            .iter()
+            .map(|d| d.attachment_id)
+            .collect();
+    }
+    if let PrivatePayload::MmsMediaBinding { attachment, .. } = payload {
+        return vec![attachment.attachment_id];
+    }
     let (message, thumbnails) = match payload {
         PrivatePayload::MmsMessage {
             message,
@@ -6955,8 +7119,9 @@ fn localize(
 ) -> Result<(MessagePayload, bool), Error> {
     let mut all_local = true;
     for reference in &mut message.record.attachments {
-        let local =
-            attachment_row(conn, reference.attachment_id)?.is_some_and(|row| row.state.is_local());
+        let local = attachment_row(conn, reference.attachment_id)?
+            .is_some_and(|row| row.state.is_local())
+            && !media_cache::gateway_mms_ciphertext_evicted(conn, reference.attachment_id)?;
         reference.pending = !local;
         all_local &= local;
     }
@@ -7308,6 +7473,79 @@ mod tests {
         assert!(is_known_private_payload_kind("contact_scan_request"));
         assert!(is_known_private_payload_kind("contact_scan_result"));
         assert!(!is_known_private_payload_kind("future_contact_event"));
+    }
+
+    #[test]
+    fn mms_payloads_register_every_cleanup_blocking_attachment_reference() {
+        let original = AttachmentId::new();
+        let preview = AttachmentId::new();
+        let binding = AttachmentId::new();
+        let message = MessagePayload {
+            record: MessageRecord {
+                message_id: MessageId::new(),
+                conversation_id: ConversationId::new(),
+                source_sequence: SourceSequence(1),
+                attachments: vec![AttachmentReference {
+                    attachment_id: original,
+                    pending: false,
+                }],
+            },
+            source_device_id: DeviceId::new(),
+            provider_message_id: None,
+            sender_address: None,
+            recipients: Vec::new(),
+            body: String::new(),
+            subject: None,
+            transport: Transport::Mms,
+            direction: Direction::Incoming,
+            imported: false,
+            sent_at_ms: None,
+            ordered_at_ms: None,
+            mms_context: None,
+        };
+        let descriptor = |attachment_id| MediaDescriptor {
+            attachment_id,
+            remote_object_id: "remote".into(),
+            media_type: "image/png".into(),
+            display_name: "image.png".into(),
+            plaintext_bytes: 1,
+            ciphertext_bytes: 1,
+            ciphertext_sha256: "a".repeat(64),
+            stream_version: media::STREAM_VERSION,
+            file_key: [0; 32],
+        };
+        let metadata = MmsMediaMeta {
+            attachment_id: original,
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail: Some(descriptor(preview)),
+        };
+
+        assert_eq!(
+            payload_attachment_ids(&PrivatePayload::MmsMessage {
+                message: message.clone(),
+                media: Vec::new(),
+                media_meta: vec![metadata.clone()],
+            }),
+            vec![original, preview]
+        );
+        assert_eq!(
+            payload_attachment_ids(&PrivatePayload::MmsDeferredPreview {
+                message: message.clone(),
+                originals: Vec::new(),
+                media_meta: vec![metadata],
+            }),
+            vec![preview]
+        );
+        assert_eq!(
+            payload_attachment_ids(&PrivatePayload::MmsMediaBinding {
+                message_id: message.record.message_id,
+                source_device_id: message.source_device_id,
+                attachment: descriptor(binding),
+            }),
+            vec![binding]
+        );
     }
 
     #[test]

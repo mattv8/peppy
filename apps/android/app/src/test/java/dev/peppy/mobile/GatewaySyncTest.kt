@@ -710,6 +710,26 @@ class GatewaySyncTest : GatewayTestBase() {
         assertFalse(progress.containsKey(SyncTraceField.BACKFILL_PENDING.code.toString()))
     }
 
+    @Test fun capacityBookkeepingFailureDoesNotRevokeVerifiedCompactionReadiness() {
+        val client = live()
+        snapshotCompactionSupported = true
+        snapshotCompactionActive = true
+        val states = mutableListOf<Pair<Boolean, Boolean>>()
+        val bookkeepingFailure = object : NativeClientInterface by client {
+            override fun setServerCompactionState(supported: Boolean, active: Boolean): String {
+                states += supported to active
+                return client.setServerCompactionState(supported, active)
+            }
+            override fun recordRecoverySnapshotCapacity(highWaterCursor: String, recordCount: ULong) {
+                error("test local bookkeeping failure")
+            }
+        }
+        val result = sync(bookkeepingFailure).run()
+        assertNull(result.failure)
+        assertEquals(listOf(true to true), states)
+        assertEquals(1, requests.count { it.first == "GET /v1/snapshot" })
+    }
+
     private fun traceEvent(line: String): Long? = line.split(' ').firstOrNull { it.startsWith("event=") }
         ?.substringAfter('=')?.toLongOrNull()
 

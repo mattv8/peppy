@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { GalleryAttachment, GalleryMessage } from "./grouping";
 import { MediaTile } from "./MediaTile";
-import { tileState } from "./mediaState";
+import { originalPending, tileState } from "./mediaState";
 
 export type MediaPageItem = {
   attachment: GalleryAttachment;
@@ -59,7 +59,7 @@ export function MediaPanel({ loadPage, onOpen, refreshKey }: MediaPanelProps) {
     const version = ++refreshVersion.current;
     const timer = window.setTimeout(() => {
       const loadedItems = itemsRef.current;
-      if (!loadedItems?.some((item) => tileState(item.attachment) !== "ready")) {
+      if (!loadedItems?.some((item) => tileState(item.attachment) !== "ready" || originalPending(item.attachment))) {
         setRefreshing(false);
         return;
       }
@@ -78,7 +78,7 @@ export function MediaPanel({ loadPage, onOpen, refreshKey }: MediaPanelProps) {
         const refreshedByKey = new Map(refreshedItems.map((item) => [itemKey(item), item]));
         setItems((current) => {
           if (!current || current.length !== loadedItems.length) return current;
-          const mergedItems = current.map((item) => tileState(item.attachment) === "ready" ? item : refreshedByKey.get(itemKey(item)) ?? item);
+          const mergedItems = current.map((item) => tileState(item.attachment) === "ready" && !originalPending(item.attachment) ? item : refreshedByKey.get(itemKey(item)) ?? item);
           itemsRef.current = mergedItems;
           return mergedItems;
         });
@@ -96,7 +96,8 @@ export function MediaPanel({ loadPage, onOpen, refreshKey }: MediaPanelProps) {
   if (!items && loading) return <div id="media-tab-loading" role="status" aria-live="polite" data-media-loading>Loading media…</div>;
   return <section id="media-tab-content" data-media-tab aria-busy={loading || refreshing || undefined}>
     {items?.length === 0 && <div id="media-tab-empty" data-media-empty>No media in this conversation.</div>}
-    {items && <div id="media-tab-grid" data-media-grid>{items.map((item) => <MediaTile key={itemKey(item)} attachment={item.attachment} message={item.message} variant="cell" bodyAttributes={{ "data-media-cell": true }} onOpen={() => onOpen(item, items)} />)}</div>}
+    {items?.some((item) => originalPending(item.attachment)) && <p data-media-held-hint>Sync uses mobile data if needed.</p>}
+    {items && <div id="media-tab-grid" data-media-grid>{items.map((item) => <MediaTile key={itemKey(item)} attachment={item.attachment} message={item.message} variant="cell" label={item.attachment.name || "image"} bodyAttributes={{ "data-media-cell": true }} onOpen={() => onOpen(item, items)} />)}</div>}
     <div id="media-tab-pagination" data-media-pagination>
       {error && <div id="media-load-error" role="alert">{error} <button type="button" className="secondary-button" onClick={() => void load(nextCursor)}>Retry</button></div>}
       {nextCursor !== undefined && <button id="media-load-more-btn" type="button" className="secondary-button" disabled={loading} aria-busy={loading || undefined} onClick={() => void load(nextCursor)}>Load more</button>}

@@ -22,6 +22,7 @@ const COMMANDS: &[&str] = &[
     "retry_attachment",
     "save_attachment",
     "request_attachment_download",
+    "media_sync_request",
     "media_page",
     "media_page_around",
     "media_page_newer",

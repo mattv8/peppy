@@ -24,10 +24,12 @@ class MmsMediaTransfer(
     private val uploadsAllowed: Boolean = true,
     private val onVaultQuotaExceeded: () -> Unit = {},
     private val onUploadSucceeded: () -> Unit = {},
+    private val pendingUploads: () -> List<NativeCipherObject> = { client.pendingUploads() },
+    private val pendingDownloads: () -> List<NativeCipherObject> = { client.pendingDownloads() },
 ) {
     fun run(limit: Int = 4): MmsTransferResult {
         val budget = limit.coerceIn(1, MAX_BATCH); val failures = mutableListOf<MmsTransferFailure>(); var uploaded = 0; var downloaded = 0; var attempted = 0
-        val uploads = client.pendingUploads(); val downloads = client.pendingDownloads()
+        val uploads = pendingUploads(); val downloads = pendingDownloads()
         val upBudget = if (uploadsAllowed) (budget + 1) / 2 else 0
         var quotaExceeded = !uploadsAllowed
         for (objectToUpload in uploads.take(upBudget)) {

@@ -2,6 +2,17 @@ package dev.peppy.mobile
 
 /** Numeric, phase-level summaries for background work. */
 internal object BackgroundDiagnostics {
+    const val MMS_CLEANUP_PHASE = 20L
+
+    fun mmsCleanup(marked: Long, unlinked: Long, pending: Long) {
+        SyncDiagnostics.record(
+            SyncTraceEvent.GATEWAY_PROGRESS,
+            SyncTraceField.PHASE to MMS_CLEANUP_PHASE,
+            SyncTraceField.COUNT to marked,
+            SyncTraceField.PROCESSED to unlinked,
+            SyncTraceField.PENDING to pending,
+        )
+    }
     internal data class GatewayReadiness(val ready: Boolean, val backfillPending: Boolean)
 
     /** Parses the readiness JSON already returned by the native compaction-state call. */

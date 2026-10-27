@@ -25,7 +25,7 @@ export type {
 export type ConnectionState = "connected" | "offline" | "missing-native-host" | "error";
 export type MessageStatus = "queued-local" | "server-accepted" | "gateway-persisted" | "preparing" | "submitted" | "sent" | "delivery-confirmed" | "failed-before-submit" | "failed-confirmed" | "unknown";
 export type AttachmentState = "pending" | "uploading" | "failed" | "ready";
-export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaMeta?: MediaMetadataView };
+export type AttachmentView = { id: string; name: string; mediaType: string; byteSize: number; state: AttachmentState; error?: string; previewUrl?: string; transfer?: "upload" | "download"; retryable?: boolean; mediaHold?: "held" | "requested"; mediaMeta?: MediaMetadataView };
 export type MessageView = { id: string; revision: string; sender: "self" | "other"; senderAddress?: string; body: string; timestamp: string; status?: MessageStatus; statusAt?: string; attachments: AttachmentView[]; transport?: "sms" | "mms"; subject?: string; participants?: string[] };
 export type MessageWindow = GeneratedMessageWindow<MessageView>;
 export type MediaCursor = { sortAtMs: string; localOrder: string; messageId: string; attachmentPosition: number };
@@ -140,6 +140,8 @@ export interface DesktopBridge {
   retry_attachment(id: string): Promise<void>;
   save_attachment(id: string): Promise<boolean>;
   request_attachment_download(id: string): Promise<void>;
+  /** Explicit user request to release named held originals using mobile data. */
+  media_sync_request?(attachmentIds: string[]): Promise<void>;
   media_page(conversationId: string, cursor?: MediaCursor, limit?: number): Promise<MediaPage>;
   media_page_around(conversationId: string, attachmentId: string, messageId?: string, limit?: number): Promise<MediaPageAround>;
   media_page_newer(conversationId: string, cursor: MediaCursor, limit?: number): Promise<MediaPage>;

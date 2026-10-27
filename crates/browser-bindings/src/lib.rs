@@ -731,7 +731,11 @@ fn message_view(client: &Client, message: &Message) -> dto::MessageView {
                 .attachment_info(reference.attachment_id)
                 .ok()
                 .map(|info| {
-                    let mut view = dto::attachment_view(&info, None, None);
+                    let mut view = dto::snapshot_attachment_view(
+                        &info,
+                        None,
+                        client.deferred_media_status(info.attachment_id),
+                    );
                     view.media_meta = dto::message_attachment_media_metadata_view(
                         client,
                         message.payload.record.message_id,

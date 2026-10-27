@@ -105,7 +105,8 @@ internal fun mmsHealthFromNative(
     val incomplete = acquisitions.filter { it.state != NativeMmsAcquisitionState.COMPLETE }
     val status = when (backfill.pause) {
         NativeMmsBackfillPause.LOCAL_CAPACITY -> "Paused: phone storage capacity"
-        NativeMmsBackfillPause.RECOVERY_CAPACITY -> "Paused: recovery capacity"
+        NativeMmsBackfillPause.RECOVERY_CAPACITY -> "History paused: recovery capacity"
+        NativeMmsBackfillPause.ABSOLUTE_RECOVERY_CAPACITY -> "Capture paused to keep your vault recoverable"
         NativeMmsBackfillPause.REMOTE_STORAGE -> "History paused: vault storage capacity"
         null -> when {
             !backfill.baselineInitialized -> "Waiting for the first provider scan"

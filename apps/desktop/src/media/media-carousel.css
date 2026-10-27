@@ -1,5 +1,6 @@
 [data-media-message-grid] article { min-width: 0; max-width: min(76%, 620px); }
 [data-media-carousel] { position: relative; width: auto; max-width: 100%; min-width: 0; margin-top: 6px; }
+[data-media-carousel]:has([data-original-sync-button]) .carousel-track { padding-block-end: 34px; }
 .carousel-track { display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; width: 100%; scroll-snap-type: x mandatory; scroll-padding-inline: 0; overscroll-behavior-x: contain; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 [data-media-carousel][data-has-peek] .carousel-track { padding-inline-end: 36px; scroll-padding-inline-end: 36px; }
 .carousel-track::-webkit-scrollbar { display: none; }
@@ -7,13 +8,18 @@
 [data-media-carousel][data-can-scroll-prev] .carousel-track { mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); }
 [data-media-carousel][data-can-scroll-prev][data-can-scroll-next] .carousel-track { mask-image: linear-gradient(to right, transparent, #000 28px calc(100% - 28px), transparent); }
 [data-media-slide] { flex: 0 0 200px; scroll-snap-align: start; }
-.carousel-chevron { position: absolute; top: 50%; z-index: 2; display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid rgba(255,255,255,.18); border-radius: var(--peppy-radius-pill); background: rgba(0,0,0,.55); color: #fff; opacity: 0; transform: translateY(-50%); transition: opacity var(--peppy-duration-base); }
+.carousel-chevron { position: absolute; top: calc(50% - 17px); z-index: 2; display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid rgba(255,255,255,.18); border-radius: var(--peppy-radius-pill); background: rgba(0,0,0,.55); color: #fff; opacity: 0; transform: translateY(-50%); transition: opacity var(--peppy-duration-base); }
 .carousel-chevron:hover { background: rgba(0,0,0,.75); }
 .carousel-chevron:focus-visible { outline: 2px solid #fff; outline-offset: 1px; box-shadow: 0 0 0 4px var(--peppy-focus-ring); }
 [data-media-carousel]:hover .carousel-chevron, [data-media-carousel]:focus-within .carousel-chevron { opacity: 1; }
 .carousel-chevron-previous { left: 6px; }
 .carousel-chevron-next { right: 6px; }
 .carousel-counter { position: absolute; right: 6px; bottom: 6px; padding: 2px 8px; border-radius: var(--peppy-radius-pill); background: rgba(0,0,0,.55); color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
+/* Mixed carousels reserve a 34px footer below the track; chevrons and counter sit there instead of over tiles. */
+[data-media-carousel]:has([data-original-sync-button]) .carousel-chevron { top: auto; bottom: 1px; transform: none; }
+[data-media-carousel]:has([data-original-sync-button]) .carousel-counter { right: auto; bottom: 7px; left: 50%; transform: translateX(-50%); }
+[data-group-hold-note] { display: flex; align-items: center; gap: 4px; margin: 4px 0 0; color: var(--peppy-text-secondary); font-size: 12px; }
+[data-media-carousel][data-sync="error"] + [data-group-hold-note] { color: var(--peppy-warning-text); }
 @media (max-width: 600px) { [data-media-slide] { flex-basis: 160px; } }
-@media (hover: none) { .carousel-chevron { display: none; } }
+@media (hover: none) { .carousel-chevron { display: none; } [data-media-carousel]:focus-within .carousel-chevron { display: grid; } }
 @media (forced-colors: active) { .carousel-chevron, .carousel-counter { border: 1px solid ButtonText; background: Canvas; color: CanvasText; } .carousel-track { mask-image: none !important; } .carousel-chevron:focus-visible { outline: 2px solid Highlight; } }

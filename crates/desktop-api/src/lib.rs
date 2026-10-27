@@ -1,9 +1,9 @@
 //! Sanitized UI view models (the Rust side of `src/bridge.ts`). Only display data is
 //! serialized: no credentials, tokens, keys, file keys, raw paths or core records.
 use peppy_client_core::{
-    AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft, Direction,
-    Error, MediaPage, MediaPageAround, Message, MessageId, MirroredNotification, SendState,
-    Transport,
+    AppFilter, AttachmentId, AttachmentInfo, AttachmentState, Client, ComposeDraft,
+    DeferredMediaStatus, Direction, Error, MediaPage, MediaPageAround, Message, MessageId,
+    MirroredNotification, SendState, Transport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -248,6 +248,9 @@ pub struct AttachmentView {
     pub transfer: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// A deferred original is waiting for the gateway's upload policy or an accepted manual sync.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_hold: Option<&'static str>,
     /// Producer metadata links a ready thumbnail independently from the original's transfer state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_meta: Option<Box<MediaMetadataView>>,
@@ -413,8 +416,125 @@ pub fn attachment_view(
             AttachmentState::Uploaded | AttachmentState::Available => None,
         },
         retryable,
+        media_hold: None,
         media_meta: None,
     }
+}
+
+/// Adds the durable deferred-original state without exposing its selection or transfer internals.
+pub fn attachment_view_with_media_status(
+    info: &AttachmentInfo,
+    error: Option<String>,
+    preview_url: Option<String>,
+    status: Option<DeferredMediaStatus>,
+) -> AttachmentView {
+    let mut view = attachment_view(info, error, preview_url);
+    view.media_hold = match status {
+        Some(DeferredMediaStatus::Retryable { reason }) => {
+            view.error = Some(reason.to_owned());
+            Some("held")
+        }
+        Some(DeferredMediaStatus::Held) => Some("held"),
+        Some(DeferredMediaStatus::UploadQueued) => Some("requested"),
+        Some(DeferredMediaStatus::Available) | None => None,
+    };
+    view
+}
+
+/// A failed snapshot lookup must neither expose an original nor invent a deferred-sync action.
+pub fn snapshot_attachment_view(
+    info: &AttachmentInfo,
+    error: Option<String>,
+    status: Result<Option<DeferredMediaStatus>, Error>,
+) -> AttachmentView {
+    match status {
+        Ok(status) => attachment_view_with_media_status(info, error, None, status),
+        Err(_) => {
+            let mut view = attachment_view(
+                info,
+                Some("Media availability could not be verified. Refresh to try again.".into()),
+                None,
+            );
+            view.state = "failed";
+            view.retryable = Some(false);
+            view
+        }
+    }
+}
+
+/// Converts media pages with the same deferred-original view used by message snapshots.
+pub fn media_page_view_with_media_status(
+    client: &Client,
+    page: MediaPage,
+) -> Result<MediaPageView, Error> {
+    let items = page
+        .items
+        .into_iter()
+        .map(|item| {
+            Ok(MediaPageItemView {
+                message_id: item.message.record.message_id.to_string(),
+                sender_address: (item.message.direction == Direction::Incoming)
+                    .then_some(item.message.sender_address)
+                    .flatten(),
+                timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+                attachment: attachment_view_with_media_status(
+                    &item.attachment,
+                    None,
+                    None,
+                    client.deferred_media_status(item.attachment.attachment_id)?,
+                ),
+                media_meta: item.media_meta.map(media_metadata_view),
+                cursor: cursor_view(item.cursor),
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(MediaPageView {
+        items,
+        next_cursor: page.next_cursor.map(cursor_view),
+    })
+}
+
+/// Converts media-page neighbors with deferred-original status.
+pub fn media_page_around_view_with_media_status(
+    client: &Client,
+    page: MediaPageAround,
+) -> Result<MediaPageAroundView, Error> {
+    fn view_item(
+        client: &Client,
+        item: peppy_client_core::MediaPageItem,
+    ) -> Result<MediaPageItemView, Error> {
+        Ok(MediaPageItemView {
+            message_id: item.message.record.message_id.to_string(),
+            sender_address: (item.message.direction == Direction::Incoming)
+                .then_some(item.message.sender_address)
+                .flatten(),
+            timestamp: positive_ms_to_decimal(item.message.sent_at_ms).unwrap_or_default(),
+            attachment: attachment_view_with_media_status(
+                &item.attachment,
+                None,
+                None,
+                client.deferred_media_status(item.attachment.attachment_id)?,
+            ),
+            media_meta: item.media_meta.map(media_metadata_view),
+            cursor: cursor_view(item.cursor),
+        })
+    }
+
+    Ok(MediaPageAroundView {
+        target: view_item(client, page.target)?,
+        newer: page
+            .newer
+            .into_iter()
+            .map(|item| view_item(client, item))
+            .collect::<Result<Vec<_>, Error>>()?,
+        older: page
+            .older
+            .into_iter()
+            .map(|item| view_item(client, item))
+            .collect::<Result<Vec<_>, Error>>()?,
+        newer_cursor: page.newer_cursor.map(cursor_view),
+        older_cursor: page.older_cursor.map(cursor_view),
+    })
 }
 
 pub fn media_page_view(page: MediaPage) -> MediaPageView {
@@ -598,6 +718,59 @@ mod tests {
         for forbidden in ["ciphertextBytes", "ciphertextSha256", "path", "key"] {
             assert!(value.get(forbidden).is_none(), "serialized {forbidden}");
         }
+    }
+
+    #[test]
+    fn attachment_conversion_exposes_only_sanitized_deferred_hold_states() {
+        let attachment = AttachmentInfo {
+            attachment_id: AttachmentId::new(),
+            media_type: "image/png".into(),
+            display_name: "photo.png".into(),
+            plaintext_bytes: 42,
+            ciphertext_bytes: 99,
+            ciphertext_sha256: "sensitive-ciphertext-digest".into(),
+            state: AttachmentState::PendingUpload,
+        };
+
+        let held = serde_json::to_value(attachment_view_with_media_status(
+            &attachment,
+            None,
+            None,
+            Some(DeferredMediaStatus::Held),
+        ))
+        .unwrap();
+        let requested = serde_json::to_value(attachment_view_with_media_status(
+            &attachment,
+            None,
+            None,
+            Some(DeferredMediaStatus::UploadQueued),
+        ))
+        .unwrap();
+        let available = serde_json::to_value(attachment_view_with_media_status(
+            &attachment,
+            None,
+            None,
+            Some(DeferredMediaStatus::Available),
+        ))
+        .unwrap();
+
+        assert_eq!(held["mediaHold"], "held");
+        assert_eq!(requested["mediaHold"], "requested");
+        assert!(available.get("mediaHold").is_none());
+        assert!(held.get("selection").is_none());
+        let failed_lookup = serde_json::to_value(snapshot_attachment_view(
+            &attachment,
+            None,
+            Err(Error::Database),
+        ))
+        .unwrap();
+        assert_eq!(failed_lookup["state"], "failed");
+        assert_eq!(failed_lookup["retryable"], false);
+        assert!(
+            failed_lookup.get("mediaHold").is_none(),
+            "a failed lookup must not offer an unknown deferred-media request"
+        );
+        assert!(failed_lookup.get("previewUrl").is_none());
     }
 
     #[test]

@@ -133,6 +133,25 @@ class DiagnosticsLogTest {
         assertTrue(snapshots[1].readLines().any { it.startsWith("event=24 ") && it.contains(" 34=") && it.contains(" 35=") })
     }
 
+    @Test fun exportHeaderDocumentsTheAdditiveMmsCapturePassSchema() = runBlocking {
+        var snapshot: File? = null
+        val log = DiagnosticsLog(context, { file -> snapshot = file; android.net.Uri.fromFile(file) }) { _, _, _ -> }
+        log.setEnabled(true)
+
+        assertNotNull(log.export())
+
+        val lines = requireNotNull(snapshot).readLines()
+        val header = lines.first()
+        assertTrue(header.startsWith("schema=2 "))
+        assertTrue(header.contains("25:mms_capture_pass"))
+        assertTrue(header.contains("40:provider_reads"))
+        assertTrue(header.contains("15:mms_recheck_selection_unclassified"))
+        assertTrue(header.contains("9:locked gateway_progress phase=20:mms_cleanup"))
+        assertTrue(header.contains("count=marked,processed=unlinked,pending=pending_unlink"))
+        assertTrue(lines[1].startsWith("event=24 "))
+        assertFalse(lines.any { it.isBlank() })
+    }
+
     @Test fun fullQueueDropsRecordsWithoutBlockingTheProducer() = runBlocking {
         var dropped = 0L
         val writerEntered = CountDownLatch(1)

@@ -16,6 +16,7 @@ export type MediaActionsProviderProps = {
   onPublish(attachment: GalleryAttachment): Promise<PublicCopy | null>;
   onRetry(attachmentId: string): Promise<void>;
   requestDownload(attachmentId: string): Promise<void>;
+  requestMediaSync?(attachmentIds: string[]): Promise<void>;
   loadOriginal(attachmentId: string): Promise<MediaResult>;
   releaseMedia(attachmentId: string, url: string): void;
   canCopyImage: boolean;
@@ -31,6 +32,8 @@ export type MediaActions = {
   copyImage(attachment: GalleryAttachment): void;
   retry(attachment: GalleryAttachment): void;
   requestDownload(attachmentId: string): void;
+  canRequestMediaSync: boolean;
+  requestMediaSync?(attachmentIds: string[]): Promise<void>;
 };
 
 type Status = { text: string; tone: StatusTone; host: Element | null };
@@ -57,9 +60,12 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
   const animationFrame = useRef<number | undefined>(undefined);
   const lastStatusText = useRef("");
   const pendingDownloads = useRef(new Map<string, Promise<void>>());
+  const pendingMediaSyncs = useRef(new Map<string, Promise<void>>());
   const publishingIds = useRef(new Set<string>());
   const requestDownloadHandler = useRef(props.requestDownload);
   requestDownloadHandler.current = props.requestDownload;
+  const mediaSyncHandler = useRef(props.requestMediaSync);
+  mediaSyncHandler.current = props.requestMediaSync;
 
   useEffect(() => {
     mounted.current = true;
@@ -153,6 +159,24 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
     pendingDownloads.current.set(attachmentId, pending);
   }, []);
 
+  const requestMediaSync = useCallback((attachmentIds: string[]) => {
+    const handler = mediaSyncHandler.current;
+    if (!handler) return Promise.reject(new Error("Media sync is unavailable"));
+    const ids = [...new Set(attachmentIds)].sort();
+    const key = ids.join("\u0000");
+    const existing = pendingMediaSyncs.current.get(key);
+    if (existing) return existing;
+    const pending = (async () => {
+      for (let start = 0; start < ids.length; start += 32) await handler(ids.slice(start, start + 32));
+      announce("Requested original from your phone");
+    })().catch((error: unknown) => {
+      announce("Couldn't send sync request", "error");
+      throw error;
+    }).finally(() => pendingMediaSyncs.current.delete(key));
+    pendingMediaSyncs.current.set(key, pending);
+    return pending;
+  }, [announce]);
+
   const actions = useMemo<MediaActions>(() => ({
     save,
     isSaving: (attachmentId) => savingIds.has(attachmentId),
@@ -162,7 +186,9 @@ export function MediaActionsProvider(props: MediaActionsProviderProps): JSX.Elem
     copyImage,
     retry,
     requestDownload,
-  }), [copyImage, props.canCopyImage, props.publicCopies, requestDownload, retry, save, savingIds, shareLink]);
+    canRequestMediaSync: Boolean(props.requestMediaSync),
+    requestMediaSync: props.requestMediaSync ? requestMediaSync : undefined,
+  }), [copyImage, props.canCopyImage, props.publicCopies, props.requestMediaSync, requestDownload, requestMediaSync, retry, save, savingIds, shareLink]);
 
   const statusNode = <div id="media-action-status" role="status" aria-live="polite" aria-atomic="true" data-tone={status.tone}>{status.text}</div>;
   return <MediaActionsContext.Provider value={actions}>{props.children}{createPortal(statusNode, status.host ?? document.body)}</MediaActionsContext.Provider>;

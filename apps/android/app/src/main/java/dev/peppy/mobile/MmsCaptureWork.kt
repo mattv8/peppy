@@ -4,11 +4,14 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.BatteryManager
 import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
+import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ListenableWorker
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -20,6 +23,7 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -28,6 +32,8 @@ import uniffi.peppy_mobile_bindings.NativeMmsAcquisition
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionInput
 import uniffi.peppy_mobile_bindings.NativeMmsAcquisitionState
 import uniffi.peppy_mobile_bindings.NativeMmsBackfillDirection
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillRecheckConditions
+import uniffi.peppy_mobile_bindings.NativeMmsBackfillRecheckOutcome
 import uniffi.peppy_mobile_bindings.NativeMmsBackfillPhase
 import uniffi.peppy_mobile_bindings.NativeMmsBeginOutcome
 import uniffi.peppy_mobile_bindings.NativeMmsPreviewState
@@ -40,8 +46,14 @@ object MmsCaptureWork {
     const val NAME = "peppy-mms-capture"
     const val PERIODIC_NAME = "peppy-mms-capture-periodic"
 
-    fun enqueue(context: Context) = schedule(context, ExistingWorkPolicy.KEEP, delayed = true, manualRecheck = false)
-    fun refresh(context: Context) = schedule(context, ExistingWorkPolicy.REPLACE, delayed = false, manualRecheck = true)
+    fun enqueue(context: Context) = hintScheduler.requestNormal(scheduleSink(context))
+    fun refresh(context: Context) = hintScheduler.replace(scheduleSink(context, manualRecheck = true))
+
+    /** Provider observer and WAP hints bypass unchanged-failure backoff for one coalesced pass. */
+    fun enqueueProviderHint(context: Context) {
+        MmsCaptureHints.record(context)
+        hintScheduler.requestHint(scheduleSink(context))
+    }
 
     /** Starts provider observation and bounded reconciliation after a permission or foreground change. */
     fun onPermissionOrForeground(context: Context) {
@@ -54,7 +66,7 @@ object MmsCaptureWork {
 
     internal fun handleResult(context: Context, result: MmsCaptureSummary) {
         if (result.captured > 0) GatewayWork.enqueueAfterCapture(context)
-        if (result.more) enqueue(context)
+        hintScheduler.requestContinuation(result.more, scheduleSink(context))
     }
 
     fun ensurePeriodic(context: Context) {
@@ -67,24 +79,69 @@ object MmsCaptureWork {
         )
     }
 
-    private fun schedule(context: Context, policy: ExistingWorkPolicy, delayed: Boolean, manualRecheck: Boolean) {
+    private fun schedule(
+        context: Context,
+        name: String,
+        policy: ExistingWorkPolicy,
+        delayed: Boolean,
+        manualRecheck: Boolean,
+        managedWork: Boolean,
+    ) {
         val request = OneTimeWorkRequestBuilder<MmsCaptureWorker>()
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .setInputData(workDataOf(MANUAL_RECHECK to manualRecheck))
+            .setInputData(workDataOf(MANUAL_RECHECK to manualRecheck, MANAGED_WORK to managedWork))
             .apply { if (delayed) setInitialDelay(15, TimeUnit.SECONDS) }
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(NAME, policy, request)
+        WorkManager.getInstance(context).enqueueUniqueWork(name, policy, request)
+    }
+
+    private fun scheduleSink(context: Context, manualRecheck: Boolean = false) = MmsCaptureScheduleSink { policy, delayed ->
+        schedule(context, NAME, policy, delayed, manualRecheck, managedWork = true)
     }
 
     internal const val MANUAL_RECHECK = "manual-mms-recheck"
+    internal const val MANAGED_WORK = "managed-mms-capture-work"
+    internal val hintScheduler = MmsCaptureHintScheduler()
+
+    internal fun isManagedData(inputData: Data): Boolean =
+        if (inputData.keyValueMap.containsKey(MANAGED_WORK)) inputData.getBoolean(MANAGED_WORK, false)
+        else inputData.keyValueMap.containsKey(MANUAL_RECHECK)
+
+    internal fun runWorkerPass(
+        context: Context,
+        inputData: Data,
+        run: (manualRecheck: Boolean, providerChanged: Boolean) -> MmsCaptureSummary,
+    ): ListenableWorker.Result {
+        val managedWork = isManagedData(inputData)
+        hintScheduler.beginPass(managedWork)
+        var consumedHint = false
+        var completed = false
+        try {
+            consumedHint = MmsCaptureHints.consumeProviderChange(context)
+            val result = run(inputData.getBoolean(MANUAL_RECHECK, false), consumedHint)
+            handleResult(context, result)
+            completed = true
+            return ListenableWorker.Result.success()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return ListenableWorker.Result.retry()
+        } finally {
+            try {
+                if (!completed && consumedHint) MmsCaptureHints.record(context)
+            } finally {
+                hintScheduler.finishPass(managedWork)
+            }
+        }
+    }
 }
 
 class MmsCaptureWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = PASS.withLock {
         withContext(Dispatchers.IO) {
-            val result = MmsCapture.run(applicationContext, inputData.getBoolean(MmsCaptureWork.MANUAL_RECHECK, false))
-            MmsCaptureWork.handleResult(applicationContext, result)
-            Result.success()
+            MmsCaptureWork.runWorkerPass(applicationContext, inputData) { manualRecheck, providerChanged ->
+                MmsCapture.run(applicationContext, manualRecheck, providerChanged)
+            }
         }
     }
 
@@ -98,6 +155,8 @@ internal data class MmsCapturePlan(
     val historyBaseline: Long?,
     val recheckCursor: String?,
     val manualRecheck: Boolean,
+    val charging: Boolean = false,
+    val providerChanged: Boolean = false,
 )
 
 internal interface MmsCaptureProvider {
@@ -146,7 +205,7 @@ internal object MmsCapture {
         "preview_unavailable", "part_unavailable", "preview_metadata_unavailable",
     )
 
-    fun run(context: Context, manualRecheck: Boolean = false): MmsCaptureSummary {
+    fun run(context: Context, manualRecheck: Boolean = false, providerChanged: Boolean = false): MmsCaptureSummary {
         val prefs = MmsPreferences(context)
         val eligible = syncOwnNumberForMmsCapture(
             mmsEnabled = prefs.enabled,
@@ -175,6 +234,8 @@ internal object MmsCapture {
             prefs.historyBaseline(),
             prefs.recheckCursor(),
             manualRecheck,
+            charging = context.getSystemService(BatteryManager::class.java)?.isCharging == true,
+            providerChanged = providerChanged,
         )
         return run(plan, NativeCore(native), provider, context.noBackupFilesDir)
     }
@@ -199,71 +260,125 @@ internal object MmsCapture {
         var pending = 0
         var unavailable = 0
         var followup = false
-        val deadline = System.nanoTime() + PASS_BUDGET_NANOS
-        if (plan.manualRecheck) {
-            try {
-                core.requestManualRecheck(plan.generation, PROVIDER_SCOPE, MAX_PENDING_RECHECKS)
-            } catch (_: Exception) {
-                // A reset is best-effort; the existing bounded plan must still run.
+        val diagnostics = MmsPassDiagnostics()
+        fun <T> providerRead(pageQuery: Boolean = false, block: () -> T): T {
+            diagnostics.providerReads++
+            if (pageQuery) diagnostics.pageQueries++
+            return SyncDiagnostics.measureProvider(
+                onMeasured = { durationMs, cpuMs ->
+                    diagnostics.providerDurationMs += durationMs
+                    diagnostics.providerCpuMs += cpuMs
+                },
+            ) {
+                try {
+                    block()
+                } catch (error: Exception) {
+                    diagnostics.providerFailures++
+                    throw error
+                }
             }
         }
-        fun budgetExpired() = System.nanoTime() >= deadline
-        val scanner = MmsBackfillScanner(core)
-        followup = captureTimed(SyncDiagnosticStage.MMS) {
-            scanner.run(
-                plan.generation,
-                PROVIDER_SCOPE,
-                MmsLegacyBackfillState(
-                    plan.historyBaseline?.toString(),
-                    plan.importHistory,
-                    plan.recheckCursor,
-                ),
-                provider.highWater().toString(),
-                scanPage = { backfillPlan ->
-                val result = scan(
-                    core, provider, tempDirectory, plan.generation,
-                    imported = backfillPlan.phase == MmsBackfillPhase.HISTORY,
-                    cursor = backfillPlan.cursor?.toLongOrNull(),
-                    upperBound = if (backfillPlan.phase == MmsBackfillPhase.HISTORY) backfillPlan.historyUpperBound?.toLongOrNull() else null,
-                    descending = backfillPlan.phase == MmsBackfillPhase.HISTORY && backfillPlan.descending,
-                    floor = backfillPlan.historyFloor?.toLongOrNull(),
-                    budget = backfillPlan.budget.coerceIn(1, PAGE),
-                    budgetExpired = ::budgetExpired,
-                )
-                captured += result.captured
-                pending += result.pending
-                unavailable += result.unavailable
-                followup = followup || result.more
-                captureMmsProgress(
-                    rowsQueried = result.rowsQueried,
-                    processed = result.processed,
-                    advanced = result.lastDurableId != null,
-                    budgetExhausted = result.budgetExhausted,
-                    captured = result.captured,
-                    pending = result.pending,
-                    unavailable = result.unavailable,
-                    more = result.more,
-                )
-                MmsBackfillPageResult(result.lastDurableId, result.exhausted, result.more)
-                },
-                recheck = recheck@{ request ->
-                if (budgetExpired()) return@recheck true
-                val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck false
-                val record = provider.read(providerId) ?: return@recheck false
-                val routeId = record.subscriptionId?.takeIf { it >= 0 }?.let(SimRoutes::routeId) ?: return@recheck false
-                val incoming = record.messageType == RETRIEVE_CONF || record.messageType == NOTIFICATION_IND || record.messageBox == INBOX
-                if (incoming != request.incoming) return@recheck false
-                val outcome = try {
-                    process(core, provider, tempDirectory, plan.generation, routeId, record, imported = false, existing = null)
-                } catch (_: Exception) { ProcessResult(durable = true) }
-                captured += outcome.captured
-                pending += outcome.pending
-                unavailable += outcome.unavailable
-                outcome.followup
-                },
-            )
+        val diagnosticProvider = object : MmsCaptureProvider by provider {
+            override fun highWater() = providerRead { provider.highWater() }
+            override fun page(afterId: Long, limit: Int) = providerRead(pageQuery = true) { provider.page(afterId, limit) }
+            override fun descendingPage(cursor: Long?, upperBound: Long, floor: Long?, limit: Int) =
+                providerRead(pageQuery = true) { provider.descendingPage(cursor, upperBound, floor, limit) }
+            override fun read(id: Long) = providerRead { provider.read(id) }
+            override fun readPartText(part: MmsProviderPart, byteLimit: Int) = providerRead { provider.readPartText(part, byteLimit) }
+            override fun copyPart(part: MmsProviderPart, destination: File, byteLimit: Long) =
+                providerRead { provider.copyPart(part, destination, byteLimit) }
         }
-        return MmsCaptureSummary(captured, pending, unavailable, followup)
+        val deadline = System.nanoTime() + PASS_BUDGET_NANOS
+        return captureMmsPass(diagnostics, { followup }) {
+            if (plan.manualRecheck) {
+                try {
+                    core.requestManualRecheck(plan.generation, PROVIDER_SCOPE, MAX_PENDING_RECHECKS)
+                } catch (_: Exception) {
+                    // A reset is best-effort; the existing bounded plan must still run.
+                }
+            }
+            fun budgetExpired() = System.nanoTime() >= deadline
+            val scanner = MmsBackfillScanner(core)
+            val highWater = captureMmsStage(MmsDiagnosticStage.HIGH_WATER) { diagnosticProvider.highWater() }
+            followup = captureTimed(SyncDiagnosticStage.MMS) {
+                scanner.run(
+                    plan.generation,
+                    PROVIDER_SCOPE,
+                    MmsLegacyBackfillState(
+                        plan.historyBaseline?.toString(),
+                        plan.importHistory,
+                        plan.recheckCursor,
+                    ),
+                    highWater.toString(),
+                    System.currentTimeMillis(),
+                    MmsBackfillRecheckConditions(
+                        charging = plan.charging,
+                        capacityChanged = false,
+                        explicitRefresh = plan.manualRecheck,
+                        providerChanged = plan.providerChanged,
+                    ),
+                    scanPage = { backfillPlan ->
+                    val result = scan(
+                        core, diagnosticProvider, tempDirectory, plan.generation,
+                        imported = backfillPlan.phase == MmsBackfillPhase.HISTORY,
+                        cursor = backfillPlan.cursor?.toLongOrNull(),
+                        upperBound = if (backfillPlan.phase == MmsBackfillPhase.HISTORY) backfillPlan.historyUpperBound?.toLongOrNull() else null,
+                        descending = backfillPlan.phase == MmsBackfillPhase.HISTORY && backfillPlan.descending,
+                        floor = backfillPlan.historyFloor?.toLongOrNull(),
+                        budget = backfillPlan.budget.coerceIn(1, PAGE),
+                        budgetExpired = ::budgetExpired,
+                    )
+                    diagnostics.add(result.diagnostics())
+                    captured += result.captured
+                    pending += result.pending
+                    unavailable += result.unavailable
+                    followup = followup || result.more
+                    captureMmsProgress(
+                        rowsQueried = result.rowsQueried,
+                        processed = result.processed,
+                        advanced = result.lastDurableId != null,
+                        budgetExhausted = result.budgetExhausted,
+                        captured = result.captured,
+                        pending = result.pending,
+                        unavailable = result.unavailable,
+                        more = result.more,
+                    )
+                    MmsBackfillPageResult(result.lastDurableId, result.exhausted, result.more)
+                    },
+                    recheck = recheck@{ request ->
+                    if (budgetExpired()) return@recheck null
+                    val providerId = request.providerMessageId.toLongOrNull() ?: return@recheck MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
+                    val record = try { diagnosticProvider.read(providerId) } catch (_: Exception) {
+                        return@recheck MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
+                    } ?: return@recheck MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE
+                    val routeId = record.subscriptionId?.takeIf { it >= 0 }?.let(SimRoutes::routeId)
+                        ?: return@recheck MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE
+                    val incoming = record.messageType == RETRIEVE_CONF || record.messageType == NOTIFICATION_IND || record.messageBox == INBOX
+                    if (incoming != request.incoming) return@recheck MmsBackfillRecheckOutcome.PROVIDER_CHANGED
+                    val outcome = try {
+                        process(core, diagnosticProvider, tempDirectory, plan.generation, routeId, record, imported = false, existing = null)
+                    } catch (_: Exception) { ProcessResult(durable = true) }
+                    captured += outcome.captured
+                    pending += outcome.pending
+                    unavailable += outcome.unavailable
+                    diagnostics.processed++
+                    diagnostics.captured += outcome.captured
+                    diagnostics.pending += outcome.pending
+                    diagnostics.unavailable += outcome.unavailable
+                    when {
+                        outcome.verified -> MmsBackfillRecheckOutcome.VERIFIED
+                        outcome.captured > 0 || outcome.followup -> MmsBackfillRecheckOutcome.PROGRESS
+                        // Carrier content still arriving: the core keeps the fair order and bounded resting schedule.
+                        !record.ready && record.error == "provider_content_pending" -> MmsBackfillRecheckOutcome.AWAITING_PROVIDER
+                        outcome.partUnavailable -> MmsBackfillRecheckOutcome.UNCHANGED_PART_UNAVAILABLE
+                        outcome.unavailable > 0 -> MmsBackfillRecheckOutcome.UNCHANGED_UNAVAILABLE
+                        else -> MmsBackfillRecheckOutcome.TRANSIENT_FAILURE
+                    }
+                    },
+                )
+            }
+            MmsCaptureSummary(captured, pending, unavailable, followup)
+        }
     }
 
     private fun scan(
@@ -279,10 +394,9 @@ internal object MmsCapture {
         budget: Int,
         budgetExpired: () -> Boolean,
     ): ScanResult {
-        val page = if (descending) {
-            provider.descendingPage(cursor, requireNotNull(upperBound), floor, budget)
-        } else {
-            provider.page(cursor ?: 0L, budget)
+        val page = captureMmsStage(MmsDiagnosticStage.SCAN_PAGE) {
+            if (descending) provider.descendingPage(cursor, requireNotNull(upperBound), floor, budget)
+            else provider.page(cursor ?: 0L, budget)
         }
         var captured = 0
         var pending = 0
@@ -364,7 +478,7 @@ internal object MmsCapture {
             is NativeMmsBeginOutcome.Quarantined -> return ProcessResult(true)
         }
         when (acquisition.state) {
-            NativeMmsAcquisitionState.COMPLETE -> return ProcessResult(true)
+            NativeMmsAcquisitionState.COMPLETE -> return ProcessResult(true, verified = true)
             NativeMmsAcquisitionState.UNAVAILABLE -> return ProcessResult(true, unavailable = 1)
             NativeMmsAcquisitionState.BLOCKED -> return ProcessResult(true, pending = 1)
             NativeMmsAcquisitionState.PENDING -> Unit
@@ -409,7 +523,7 @@ internal object MmsCapture {
             is NativeMmsBeginOutcome.Quarantined -> return ProcessResult(true)
         }
         return when (updated.state) {
-            NativeMmsAcquisitionState.COMPLETE -> ProcessResult(true)
+            NativeMmsAcquisitionState.COMPLETE -> ProcessResult(true, verified = true)
             NativeMmsAcquisitionState.UNAVAILABLE -> ProcessResult(true, unavailable = 1)
             NativeMmsAcquisitionState.BLOCKED -> ProcessResult(true, pending = 1)
             NativeMmsAcquisitionState.PENDING -> copyParts(core, provider, tempDirectory, updated, stable)
@@ -520,14 +634,14 @@ internal object MmsCapture {
                 } else {
                     core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "part_unavailable")
                 }
-                return ProcessResult(true, pending = 1)
+                return ProcessResult(true, pending = 1, partUnavailable = mappedAttachmentId == null)
             } finally { temp.delete() }
         }
         if (hasDeferredPreview) {
             core.setState(acquisition.acquisitionId, NativeMmsAcquisitionState.PENDING, "preview_deferred")
             return ProcessResult(true, pending = 1)
         }
-        return try { core.complete(acquisition.acquisitionId); ProcessResult(true, captured = 1) }
+        return try { core.complete(acquisition.acquisitionId); ProcessResult(true, captured = 1, verified = true) }
         catch (_: MobileBindingsException.Conflict) {
             ProcessResult(true)
         }
@@ -586,7 +700,15 @@ internal object MmsCapture {
     private const val UNKNOWN_PROVIDER_DATE_MS = 0L
     private const val UNKNOWN_SUBSCRIPTION = "android-mms-unknown-subscription"
 
-    private data class ProcessResult(val durable: Boolean, val captured: Int = 0, val pending: Int = 0, val unavailable: Int = 0, val followup: Boolean = false)
+    private data class ProcessResult(
+        val durable: Boolean,
+        val captured: Int = 0,
+        val pending: Int = 0,
+        val unavailable: Int = 0,
+        val followup: Boolean = false,
+        val partUnavailable: Boolean = false,
+        val verified: Boolean = false,
+    )
     private data class ScanResult(
         val captured: Int,
         val pending: Int,
@@ -597,6 +719,10 @@ internal object MmsCapture {
         val rowsQueried: Int,
         val processed: Int,
         val budgetExhausted: Boolean,
+    )
+    private fun ScanResult.diagnostics() = MmsCaptureScanDiagnostics(
+        rowsQueried, processed, captured, pending, unavailable,
+        budgetExhausted = budgetExhausted,
     )
 }
 
@@ -628,11 +754,47 @@ private class NativeCore(private val client: NativeClientInterface) : MmsCapture
     override fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean) =
         client.finishMmsBackfillPhase(generation, scope, NativeMmsBackfillPhase.valueOf(phase.name), bound, exhausted)
 
-    override fun rechecks(generation: String, scope: String): MmsBackfillRecheck {
-        val recheck = client.mmsBackfillRecheckRequests(generation, scope)
+    override fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck {
+        return nativeRecheck(client.mmsBackfillDueRechecks(
+            generation,
+            scope,
+            nowMs,
+            NativeMmsBackfillRecheckConditions(
+                conditions.charging,
+                conditions.capacityChanged,
+                conditions.explicitRefresh,
+                conditions.providerChanged,
+            ),
+        ))
+    }
+    private fun nativeRecheck(recheck: uniffi.peppy_mobile_bindings.NativeMmsBackfillRecheck): MmsBackfillRecheck {
         return MmsBackfillRecheck(
-            recheck.requests.map { MmsBackfillRecheckRequest(it.providerMessageId, it.direction == NativeMmsBackfillDirection.INCOMING) },
+            recheck.requests.map {
+                MmsBackfillRecheckRequest(
+                    providerMessageId = it.providerMessageId,
+                    incoming = it.direction == NativeMmsBackfillDirection.INCOMING,
+                    acquisitionId = it.acquisitionId,
+                    state = MmsBackfillRecheckState.valueOf(it.state.name),
+                )
+            },
             recheck.budget.coerceAtMost(Int.MAX_VALUE.toULong()).toInt(),
+            recheck.continuationDue,
+        )
+    }
+    override fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) {
+        client.recordMmsBackfillRecheckOutcome(
+            acquisitionId,
+            nowMs,
+            when (outcome) {
+                MmsBackfillRecheckOutcome.VERIFIED -> NativeMmsBackfillRecheckOutcome.VERIFIED
+                else -> NativeMmsBackfillRecheckOutcome.valueOf(outcome.name)
+            },
+            NativeMmsBackfillRecheckConditions(
+                conditions.charging,
+                conditions.capacityChanged,
+                conditions.explicitRefresh,
+                conditions.providerChanged,
+            ),
         )
     }
     override fun pendingMediaBytes() = client.mmsPendingMediaBytes().toLong()

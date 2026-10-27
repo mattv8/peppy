@@ -1,6 +1,14 @@
 package dev.peppy.mobile
 
 internal enum class MmsBackfillPhase { LIVE, HISTORY, RECHECK }
+internal enum class MmsBackfillRecheckState { PENDING, BLOCKED, UNAVAILABLE, COMPLETE }
+internal enum class MmsBackfillRecheckOutcome { PROGRESS, VERIFIED, UNCHANGED_UNAVAILABLE, UNCHANGED_PART_UNAVAILABLE, TRANSIENT_FAILURE, PROVIDER_CHANGED, AWAITING_PROVIDER }
+internal data class MmsBackfillRecheckConditions(
+    val charging: Boolean,
+    val capacityChanged: Boolean,
+    val explicitRefresh: Boolean,
+    val providerChanged: Boolean,
+)
 
 internal data class MmsLegacyBackfillState(
     val historyBaseline: String?,
@@ -19,8 +27,13 @@ internal data class MmsBackfillScanPlan(
     val historyFloor: String? = null,
 )
 
-internal data class MmsBackfillRecheckRequest(val providerMessageId: String, val incoming: Boolean)
-internal data class MmsBackfillRecheck(val requests: List<MmsBackfillRecheckRequest>, val budget: Int)
+internal data class MmsBackfillRecheckRequest(
+    val providerMessageId: String,
+    val incoming: Boolean,
+    val acquisitionId: String = "",
+    val state: MmsBackfillRecheckState = MmsBackfillRecheckState.PENDING,
+)
+internal data class MmsBackfillRecheck(val requests: List<MmsBackfillRecheckRequest>, val budget: Int, val continuationDue: Boolean = false)
 internal data class MmsBackfillPageResult(val lastDurableId: String?, val exhausted: Boolean, val more: Boolean)
 
 internal interface MmsBackfillCore {
@@ -28,7 +41,8 @@ internal interface MmsBackfillCore {
     fun plans(generation: String, scope: String, observedMaxId: String): List<MmsBackfillScanPlan>
     fun advance(generation: String, scope: String, phase: MmsBackfillPhase, providerId: String)
     fun finish(generation: String, scope: String, phase: MmsBackfillPhase, bound: String, exhausted: Boolean): Boolean
-    fun rechecks(generation: String, scope: String): MmsBackfillRecheck
+    fun dueRechecks(generation: String, scope: String, nowMs: Long, conditions: MmsBackfillRecheckConditions): MmsBackfillRecheck
+    fun recordRecheckOutcome(acquisitionId: String, nowMs: Long, outcome: MmsBackfillRecheckOutcome, conditions: MmsBackfillRecheckConditions) = Unit
 }
 
 /**
@@ -41,20 +55,52 @@ internal class MmsBackfillScanner(private val core: MmsBackfillCore) {
         scope: String,
         legacy: MmsLegacyBackfillState,
         observedMaxId: String,
+        nowMs: Long,
+        recheckConditions: MmsBackfillRecheckConditions,
         scanPage: (MmsBackfillScanPlan) -> MmsBackfillPageResult,
-        recheck: (MmsBackfillRecheckRequest) -> Boolean,
+        recheck: (MmsBackfillRecheckRequest) -> MmsBackfillRecheckOutcome?,
     ): Boolean {
-        core.migrate(generation, scope, legacy)
+        captureMmsStage(MmsDiagnosticStage.MIGRATE) { core.migrate(generation, scope, legacy) }
         var more = false
-        for (plan in core.plans(generation, scope, observedMaxId)) {
+        val plans = captureMmsStage(MmsDiagnosticStage.PLANS) { core.plans(generation, scope, observedMaxId) }
+        SyncDiagnostics.record(
+            SyncTraceEvent.CAPTURE_PROGRESS,
+            SyncTraceField.STAGE to MmsDiagnosticStage.PLANS,
+            SyncTraceField.COUNT to plans.size.toLong(),
+        )
+        for (plan in plans) {
             if (plan.paused) continue
             if (plan.phase == MmsBackfillPhase.RECHECK) {
-                val requests = core.rechecks(generation, scope)
-                var recheckMore = false
-                requests.requests.forEach { request ->
-                    recheckMore = recheck(request) || recheckMore
+                val requests = captureMmsStage(MmsDiagnosticStage.RECHECK_SELECTION_UNCLASSIFIED) {
+                    core.dueRechecks(generation, scope, nowMs, recheckConditions)
                 }
-                more = more || recheckMore
+                SyncDiagnostics.record(
+                    SyncTraceEvent.CAPTURE_PROGRESS,
+                    SyncTraceField.STAGE to MmsDiagnosticStage.RECHECK_SELECTION_UNCLASSIFIED,
+                    SyncTraceField.ROWS to requests.requests.size.toLong(),
+                    SyncTraceField.COUNT to requests.budget.toLong(),
+                )
+                var recheckMore = false
+                var completedSelected = false
+                var actuallyAttempted = 0
+                captureMmsStage(MmsDiagnosticStage.RECHECK_ATTEMPTS) {
+                    requests.requests.forEach { request ->
+                        val outcome = recheck(request) ?: return@forEach
+                        actuallyAttempted++
+                        core.recordRecheckOutcome(request.acquisitionId, nowMs, outcome, recheckConditions)
+                        completedSelected = completedSelected || request.state == MmsBackfillRecheckState.COMPLETE
+                        recheckMore = recheckMore || outcome == MmsBackfillRecheckOutcome.PROGRESS
+                    }
+                }
+                SyncDiagnostics.record(
+                    SyncTraceEvent.CAPTURE_PROGRESS,
+                    SyncTraceField.STAGE to MmsDiagnosticStage.RECHECK_ATTEMPTS,
+                    SyncTraceField.ROWS to requests.requests.size.toLong(),
+                    SyncTraceField.PENDING to requests.requests.count { it.state == MmsBackfillRecheckState.PENDING }.toLong(),
+                    SyncTraceField.COUNT to requests.requests.count { it.state == MmsBackfillRecheckState.COMPLETE }.toLong(),
+                    SyncTraceField.PROCESSED to actuallyAttempted.toLong(),
+                )
+                more = more || recheckMore || (requests.continuationDue && completedSelected && recheckConditions.charging)
                 continue
             }
             if (plan.phase == MmsBackfillPhase.HISTORY && plan.historyComplete) continue

@@ -202,7 +202,7 @@ internal object MmsCaptureLifecycle {
                 debouncer.reset()
                 if (onDispatch != null) onDispatch()
                 else if (MmsPreferences(context).enabled && mmsReceiveGranted(context)) {
-                    MmsCaptureWork.enqueue(context.applicationContext)
+                    MmsCaptureWork.enqueueProviderHint(context.applicationContext)
                     MmsCaptureWork.ensurePeriodic(context.applicationContext)
                 }
             }
