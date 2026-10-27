@@ -189,7 +189,7 @@ struct ContactsSection: View {
 
     var body: some View {
         Section {
-            Toggle(isOn: Binding(get: { model.contacts.enabled }, set: setEnabled)) {
+            Toggle(isOn: Binding(get: { model.contacts.enabled }, set: { setEnabled($0) })) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("peppy.toggle_ios_contacts_title", tableName: "Peppy")
                     Text(model.contacts.enabled
