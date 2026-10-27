@@ -512,6 +512,9 @@ select:focus-visible {
   gap: 2px;
 }
 .conversation-copy b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 14px;
   font-weight: 600;
 }

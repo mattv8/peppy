@@ -182,6 +182,16 @@ describe("desktop UI controls", () => {
     expect(avatar).toHaveAttribute("data-avatar-color");
   });
 
+  it("binds a full long mixed phone and name title to the conversation tooltip", () => {
+    const name = "+1 (202) 555-0147 · Alexandrina Montgomery-Wright and household";
+    render(<ConversationList conversations={[{ id: "long-title", name, preview: "Hi", unread: 0 }]} selectedId="long-title" onSelect={() => {}} />);
+
+    const conversation = screen.getByRole("button", { name: `${name} Hi` });
+    const title = within(conversation).getByText(name);
+    expect(title).toHaveTextContent(name);
+    expect(title).toHaveAttribute("title", name);
+  });
+
   it("offers a cancellable inline delete confirmation only for blank draft rows", () => {
     const onDelete = vi.fn();
     const onCancelDelete = vi.fn();
