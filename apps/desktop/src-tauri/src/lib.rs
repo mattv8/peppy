@@ -4359,6 +4359,7 @@ pub fn run() {
         }
         let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
             hosted::hosted_account,
+            hosted::hosted_session_renew,
             hosted::hosted_origin_url,
             hosted::hosted_sign_in,
             hosted::hosted_sign_out,

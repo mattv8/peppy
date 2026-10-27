@@ -64,6 +64,7 @@
     "allow-popout-conversation",
     "allow-acknowledge-lifecycle",
     "allow-hosted-account",
+    "allow-hosted-session-renew",
     "allow-hosted-origin-url",
     "allow-hosted-sign-in",
     "allow-hosted-sign-out",

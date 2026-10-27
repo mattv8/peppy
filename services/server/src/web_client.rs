@@ -210,9 +210,10 @@ fn is_api_path(path: &str) -> bool {
 
 /// Exact app-host paths forwarded to the API router. Each is matched by path
 /// only; the query is ignored and no prefix or sub-path is forwarded.
-const APP_ENROLLMENT_PATHS: [&str; 5] = [
+const APP_ENROLLMENT_PATHS: [&str; 6] = [
     "/hosted/v1/enrollment/config",
     "/hosted/v1/web/app-session",
+    "/hosted/v1/web/app-session/renew",
     "/hosted/v1/web/app-account",
     "/hosted/v1/web/provisioning",
     "/hosted/v1/web/provisioning/complete",

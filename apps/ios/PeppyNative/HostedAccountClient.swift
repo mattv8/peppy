@@ -10,7 +10,11 @@ public enum HostedAccountClientError: Error, Equatable, Sendable {
 
 /// Actor owning the native hosted-account bearer and encrypted provisioning checkpoint.
 public actor HostedAccountClient {
-    private struct StoredSession: Codable { let accountID: String; let bearer: String; let expiresAt: Date }
+    private struct StoredSession: Codable, Equatable { let accountID: String; let bearer: String; let expiresAt: Date }
+    private static let sessionLifetime: TimeInterval = 2_592_000
+    private static let renewalThrottle: TimeInterval = 15 * 60
+    private static let failedRenewalBackoff: TimeInterval = 60
+    private static let sessionMutationLock = NSLock()
     private let transport: any HTTPTransport
     private let secureStore: any SecureStore
     private let origin: ServerOrigin
@@ -18,6 +22,8 @@ public actor HostedAccountClient {
     private let checkpointKey: String
     private var generation = 0
     private var provisioning = false
+    private var renewalTask: Task<Void, Error>?
+    private var lastFailedRenewal: Date?
 
     public init(transport: any HTTPTransport = URLSessionTransport(), secureStore: any SecureStore = KeychainSecureStore(), origin: String = "https://peppy.pro") throws {
         self.transport = transport; self.secureStore = secureStore
@@ -48,16 +54,28 @@ public actor HostedAccountClient {
         guard response.status == 200 else { throw failure(response) }
         let parsed = try parseHostedSession(json: try json(response.body))
         try Task.checkCancellation()
-        guard expected == generation else { throw CancellationError() }
         let stored = StoredSession(accountID: parsed.accountId(), bearer: parsed.bearerToken(), expiresAt: Date().addingTimeInterval(TimeInterval(parsed.expiresInSeconds())))
-        try secureStore.upsert(sessionKey, try JSONEncoder().encode(stored))
-        guard expected == generation else { try? secureStore.delete(sessionKey); throw CancellationError() }
+        try Self.sessionMutationLock.withLock {
+            guard expected == generation else { throw CancellationError() }
+            try secureStore.upsert(sessionKey, try JSONEncoder().encode(stored))
+        }
+        lastFailedRenewal = nil
         return try await account(using: stored, expectedGeneration: expected)
     }
 
     public func account() async throws -> NativeHostedAccount {
         let stored = try loadSession()
         return try await account(using: stored, expectedGeneration: generation)
+    }
+
+    /// Renews the hosted bearer only after a concrete user action. Foreground lifecycle work must
+    /// not call this method: a local expiry can be skewed or reflect a lost renewal response.
+    public func renewSessionOnUserInteraction() async throws {
+        if let renewalTask { return try await renewalTask.value }
+        let task = Task { try await self.renewObservedSession() }
+        renewalTask = task
+        defer { renewalTask = nil }
+        try await task.value
     }
 
     /// Native-only enrollment authorization. It is deliberately available only
@@ -73,8 +91,11 @@ public actor HostedAccountClient {
         generation &+= 1
         // Capture the session before this actor yields for best-effort revocation.
         // If a newer login is installed during DELETE, it will be preserved because we delete before awaiting.
-        let stored = try? rawSession()
-        try secureStore.delete(sessionKey)
+        let stored = try Self.sessionMutationLock.withLock { () throws -> StoredSession? in
+            let stored = try? rawSession()
+            try secureStore.delete(sessionKey)
+            return stored
+        }
         if let stored { _ = try? await request("DELETE", "/hosted/v1/auth/session", bearer: stored.bearer) }
     }
 
@@ -163,7 +184,10 @@ public actor HostedAccountClient {
         guard session.expiresAt > Date() else { throw HostedAccountClientError.sessionExpired }
         let response = try await request("GET", "/hosted/v1/account", bearer: session.bearer)
         guard expectedGeneration == generation else { throw CancellationError() }
-        if response.status == 401 { try secureStore.delete(sessionKey); throw HostedAccountClientError.sessionExpired }
+        if response.status == 401 {
+            try deleteObservedSession(session, expectedGeneration: expectedGeneration)
+            throw HostedAccountClientError.sessionExpired
+        }
         guard response.status == 200 else { throw failure(response) }
         return try parseHostedAccount(json: try json(response.body), expectedAccountId: session.accountID)
     }
@@ -175,6 +199,51 @@ public actor HostedAccountClient {
     private func loadSession() throws -> StoredSession {
         guard let value = try rawSession(), value.expiresAt > Date() else { throw HostedAccountClientError.sessionExpired }
         return value
+    }
+    private func renewObservedSession() async throws {
+        let now = Date()
+        if let lastFailedRenewal, now.timeIntervalSince(lastFailedRenewal) < Self.failedRenewalBackoff { return }
+        let session: StoredSession
+        do {
+            guard let stored = try rawSession() else { throw HostedAccountClientError.sessionExpired }
+            session = stored
+        } catch {
+            lastFailedRenewal = now
+            throw error
+        }
+        guard session.expiresAt.timeIntervalSince(now) <= Self.sessionLifetime - Self.renewalThrottle else { return }
+
+        let expectedGeneration = generation
+        do {
+            let response = try await request("POST", "/hosted/v1/auth/session/renew", bearer: session.bearer)
+            guard expectedGeneration == generation else { throw CancellationError() }
+            if response.status == 401 {
+                try deleteObservedSession(session, expectedGeneration: expectedGeneration)
+                throw HostedAccountClientError.sessionExpired
+            }
+            guard response.status == 200 else { throw failure(response) }
+            let lifetime = try parseHostedSessionRenewal(json: try json(response.body), expectedAccountId: session.accountID)
+            try Task.checkCancellation()
+            let renewed = StoredSession(
+                accountID: session.accountID,
+                bearer: session.bearer,
+                expiresAt: Date().addingTimeInterval(TimeInterval(lifetime))
+            )
+            try Self.sessionMutationLock.withLock {
+                guard expectedGeneration == generation, try rawSession() == session else { throw CancellationError() }
+                try secureStore.upsert(sessionKey, try JSONEncoder().encode(renewed))
+            }
+            lastFailedRenewal = nil
+        } catch {
+            if expectedGeneration == generation, (try? rawSession()) == session { lastFailedRenewal = now }
+            throw error
+        }
+    }
+    private func deleteObservedSession(_ session: StoredSession, expectedGeneration: Int) throws {
+        try Self.sessionMutationLock.withLock {
+            guard expectedGeneration == generation, try rawSession() == session else { throw CancellationError() }
+            try secureStore.delete(sessionKey)
+        }
     }
     private func request(_ method: String, _ path: String, body: String? = nil, bearer: String? = nil) async throws -> HTTPResponse {
         try Task.checkCancellation()

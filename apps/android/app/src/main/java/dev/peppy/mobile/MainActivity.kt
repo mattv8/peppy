@@ -80,10 +80,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val hostedAccountClient by lazy { HostedAccountClient(AndroidHostedSecureStore(applicationContext)) }
+    private val hostedRenewalScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var foregroundUserInteractionEnabled = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val systemBars = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
@@ -93,11 +99,34 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        foregroundUserInteractionEnabled = true
         // A challenge can expire while the process remains alive; foreground re-enters the
         // serialized relay reconciliation path without doing network work on the activity.
         RelayWakeRuntime.enrollmentChanged(applicationContext)
         SmsCaptureLifecycle.onPermissionOrForeground(applicationContext)
         ContactSyncHost.onPermissionOrForeground(applicationContext)
+    }
+
+    override fun onPause() {
+        foregroundUserInteractionEnabled = false
+        super.onPause()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        if (!foregroundUserInteractionEnabled) return
+        hostedRenewalScope.launch {
+            try {
+                hostedAccountClient.renewAfterUserInteraction()
+            } catch (_: Exception) {
+                // Renewal is silent. A later user interaction retries transient failures.
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        hostedRenewalScope.cancel()
+        super.onDestroy()
     }
 }
 

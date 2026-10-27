@@ -38,6 +38,12 @@ class HostedAccountClientTest {
         var loseComplete = false
         var expireGrant = false
         var beforeSession: (() -> Unit)? = null
+        var beforeRenew: (() -> Unit)? = null
+        var beforeAccount: (() -> Unit)? = null
+        var renewCount = 0
+        var renewResponse = 200
+        var accountResponse = 200
+        var sessionToken = "a"
         var beforeGrant: (() -> Unit)? = null
         var grantCount = 0
         val completeBodies = mutableListOf<String>()
@@ -48,6 +54,9 @@ class HostedAccountClientTest {
                 "/hosted/v1/auth/config" -> HttpResult(200, """{"available_providers":["google"]}""")
                 "/hosted/v1/account" -> {
                     assertNotNull(bearer)
+                    val responseCode = accountResponse
+                    beforeAccount?.invoke()
+                    if (responseCode != 200) return HttpResult(responseCode, """{"error":"unauthorized"}""")
                     HttpResult(200, JSONObject().put("account_id", accountId)
                         .put("classification", if (vaultId == null) "incomplete" else "existing")
                         .put("entitlement", "active").put("access", access)
@@ -63,7 +72,15 @@ class HostedAccountClientTest {
                 "/hosted/v1/auth/session" -> {
                     beforeSession?.invoke()
                     assertEquals(accountId, JSONObject(body).getString("attempt_id"))
-                    HttpResult(200, """{"session_token":"pst_${"a".repeat(64)}","expires_in_seconds":3600,"account_id":"$accountId"}""")
+                    HttpResult(200, """{"session_token":"pst_${sessionToken.repeat(64)}","expires_in_seconds":3600,"account_id":"$accountId"}""")
+                }
+                "/hosted/v1/auth/session/renew" -> {
+                    assertEquals("{}", body)
+                    assertNotNull(bearer)
+                    renewCount++
+                    beforeRenew?.invoke()
+                    if (renewResponse != 200) HttpResult(renewResponse, """{"error":"unauthorized"}""")
+                    else HttpResult(200, """{"account_id":"$accountId","expires_in_seconds":2592000}""")
                 }
                 "/hosted/v1/provisioning" -> {
                     beforeGrant?.invoke(); grantCount++
@@ -163,6 +180,63 @@ class HostedAccountClientTest {
         rejects<HostedFailure> { f.client.completeVault(phrase) }
         assertEquals(0, f.server.grantCount)
         assertArrayEquals(checkpoint, f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+    }
+
+    @Test fun qualifyingInteractionRenewsAnExpiredLocalSession() = runBlocking {
+        val f = Fixture(); f.login()
+        f.now = 3_600_001
+
+        f.client.renewAfterUserInteraction()
+
+        assertEquals(1, f.server.renewCount)
+        val stored = JSONObject(String(f.store.read(HostedAccountClient.SESSION_KEY)!!))
+        assertEquals(3_600_001L + 2_592_000_000L, stored.getLong("expires_at"))
+        f.client.renewAfterUserInteraction()
+        assertEquals(1, f.server.renewCount)
+    }
+
+    @Test fun successfulRenewalCannotOverwriteANewerSameAccountLogin() = runBlocking {
+        val f = Fixture(); f.login(); f.now = 3_600_001
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        f.server.beforeRenew = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        val renewal = async { rejects<kotlinx.coroutines.CancellationException> { f.client.renewAfterUserInteraction() } }
+        withContext(Dispatchers.IO) { assertTrue(entered.await(5, TimeUnit.SECONDS)) }
+        f.server.sessionToken = "b"
+        HostedAccountClient(f.store, f.server) { f.now }.finishGoogleSignIn(f.server.accountId, "provider-token")
+        release.countDown(); renewal.await()
+
+        val stored = JSONObject(String(f.store.read(HostedAccountClient.SESSION_KEY)!!))
+        assertEquals("pst_${"b".repeat(64)}", stored.getString("bearer"))
+    }
+
+    @Test fun successfulRenewalCannotRestoreSessionAfterOtherClientSignsOut() = runBlocking {
+        val f = Fixture(); f.login(); f.client.prepareVault(phrase); f.now = 3_600_001
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        f.server.beforeRenew = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        val renewal = async { rejects<kotlinx.coroutines.CancellationException> { f.client.renewAfterUserInteraction() } }
+        withContext(Dispatchers.IO) { assertTrue(entered.await(5, TimeUnit.SECONDS)) }
+        HostedAccountClient(f.store, f.server) { f.now }.signOut()
+        release.countDown(); renewal.await()
+
+        assertNull(f.store.read(HostedAccountClient.SESSION_KEY))
+        assertNotNull(f.store.read(HostedAccountClient.CHECKPOINT_KEY))
+    }
+
+    @Test fun staleAccount401CannotRemoveANewerSameAccountLogin() = runBlocking {
+        val f = Fixture(); f.login()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        f.server.accountResponse = 401
+        f.server.beforeAccount = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) }
+        val account = async { rejects<HostedFailure> { f.client.account() } }
+        withContext(Dispatchers.IO) { assertTrue(entered.await(5, TimeUnit.SECONDS)) }
+        f.server.beforeAccount = null
+        f.server.sessionToken = "b"
+        f.server.accountResponse = 200
+        HostedAccountClient(f.store, f.server) { f.now }.finishGoogleSignIn(f.server.accountId, "provider-token")
+        release.countDown(); account.await()
+
+        val stored = JSONObject(String(f.store.read(HostedAccountClient.SESSION_KEY)!!))
+        assertEquals("pst_${"b".repeat(64)}", stored.getString("bearer"))
     }
 
     @Test fun lateLoginCannotUndoSignOut() = runBlocking {

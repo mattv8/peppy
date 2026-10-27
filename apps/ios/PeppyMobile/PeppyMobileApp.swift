@@ -44,6 +44,8 @@ struct DeviceView: View {
     @State private var ownerPhoneApprovalHost: OwnerPhoneApprovalHost?
     @State private var showingHostedEnrollment = false
     @State private var enrollmentLoaded = false
+    @State private var hostedAccountClient: HostedAccountClient?
+    @State private var selectedTab = "mirroring"
 
     var body: some View {
         Group {
@@ -213,14 +215,24 @@ struct DeviceView: View {
     }
 
     private var enrolledTabs: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             mirroringTab.tabItem { Label { Text("peppy.mirroring", tableName: "Peppy") } icon: { Image(systemName: "app.badge") } }
                 .accessibilityIdentifier("tab-mirroring")
+                .tag("mirroring")
             smsTab.tabItem { Label { Text("peppy.sms", tableName: "Peppy") } icon: { Image(systemName: "message") } }
                 .accessibilityIdentifier("tab-sms")
+                .tag("sms")
             accountTab.tabItem { Label { Text("peppy.account", tableName: "Peppy") } icon: { Image(systemName: "person.crop.circle") } }
                 .accessibilityIdentifier("tab-account")
+                .tag("account")
         }
+        .onChange(of: selectedTab) { _, _ in recordHostedAccountInteraction() }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0).onEnded { _ in
+                guard scenePhase == .active else { return }
+                recordHostedAccountInteraction()
+            }
+        )
         .sheet(isPresented: $showingSettings) { SettingsView(model: model) }
         .safeAreaInset(edge: .top, spacing: 0) {
             if model.serverReachability == .unavailable {
@@ -313,7 +325,10 @@ struct DeviceView: View {
                     if let count = model.status.conversations { LabeledContent("Conversations", value: "\(count)").accessibilityIdentifier("status-conversations") }
                 }.accessibilityIdentifier("status-section")
                 Section("Session") {
-                    Button("Refresh from server") { Task { await model.refresh() } }
+                    Button("Refresh from server") {
+                        recordHostedAccountInteraction()
+                        Task { await model.refresh() }
+                    }
                         .disabled(model.activity != .idle).accessibilityIdentifier("refresh-enrollment-button")
                     Button("Disconnect this device…", role: .destructive) { confirmingDisconnect = true }
                         .disabled(model.activity != .idle).accessibilityIdentifier("disconnect-button")
@@ -458,6 +473,14 @@ struct DeviceView: View {
                     .padding(4)
             }
         }
+    }
+
+    /// This is called only from visible controls/navigation, never scene lifecycle or sync work.
+    private func recordHostedAccountInteraction() {
+        let client = hostedAccountClient ?? (try? HostedAccountClient())
+        hostedAccountClient = client
+        guard let client else { return }
+        Task { try? await client.renewSessionOnUserInteraction() }
     }
 
     @ViewBuilder private var activityAndError: some View {

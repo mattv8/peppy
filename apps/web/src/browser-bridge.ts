@@ -9,6 +9,7 @@ import type {
 import { peppyCopy } from "../../desktop/src/generated/peppyCopy";
 import { validateAccountUrl } from "./account-navigation";
 import { beginHostedAuthorization, fetchHostedWebConfig } from "./newhosted-app-auth";
+import { appSessionRenewal } from "./app-session-renewal";
 
 type RpcReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: BridgeError };
 type WorkerEvent = { event: "changed" } | { event: "ready"; version: 1 } | { event: "stopped"; reason?: string } | { event: "banner"; candidate: { id: string; title: string; body: string } };
@@ -550,7 +551,7 @@ export class BrowserBridge implements DesktopBridge {
     capturedInviteLink = null;
     return Promise.resolve(inviteLink);
   }
-  public enrollment_sign_out(): Promise<void> { return this.call("enrollment_sign_out"); }
+  public enrollment_sign_out(): Promise<void> { return appSessionRenewal.duringAuthTransition(() => this.call("enrollment_sign_out")); }
   public enrollment_set_hosted_csrf(csrf: string): Promise<void> { return this.call("enrollment_set_hosted_csrf", { csrf }); }
   public enrollment_management(): Promise<InstanceManagement> { return this.call("enrollment_management"); }
   public enrollment_revoke_device(deviceId: string): Promise<InstanceManagement> { return this.call("enrollment_revoke_device", { deviceId }); }
@@ -598,7 +599,7 @@ export class BrowserBridge implements DesktopBridge {
     if (this.enrollmentMode === "hosted") {
       const config = await fetchHostedWebConfig();
       if (!config) throw new BrowserBridgeError("unavailable", "Peppy could not start hosted sign-in.");
-      await beginHostedAuthorization(config);
+      await appSessionRenewal.duringAuthTransition(() => beginHostedAuthorization(config), { persistsUntilUnload: true });
       return this.enrollment_status();
     }
     return this.enrollmentSecretAction("enrollment_sign_in", "browser-enrollment-signin", "Sign in to Peppy", "Enter your account password.", "Sign in", [{ name: "adminPassword", label: "Password", autocomplete: "current-password" }], input);

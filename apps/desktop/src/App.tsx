@@ -64,6 +64,7 @@ import "./settings.css";
 import "./vibrancy.css";
 import {
   bridge,
+  renewHostedSession,
   type AttachmentView,
   type ConversationView,
   type DesktopSnapshot,
@@ -101,6 +102,7 @@ import { groupMessages } from "./media/grouping";
 import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, searchSessionKey as createSearchSessionKey, type DetachedHistory } from "./search/detachedHistory";
 
 import { GatewayPicker } from "./GatewayPicker";
+import { installHostedSessionRenewal } from "./hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
 import {
@@ -1078,6 +1080,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
   useUpdateActivity(!browserHost);
+  useEffect(() => browserHost ? undefined : installHostedSessionRenewal(renewHostedSession), [browserHost]);
   const [composerConversation] = useState(() =>
     typeof window === "undefined"
       ? null

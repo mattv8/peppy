@@ -695,6 +695,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_parse_push_config(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_func_prepare_hosted_provisioning(
@@ -1505,6 +1507,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session_renewal(`json`: RustBuffer.ByValue,`expectedAccountId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_peppy_mobile_bindings_fn_func_parse_push_config(`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_func_prepare_hosted_provisioning(`origin`: RustBuffer.ByValue,`accountId`: RustBuffer.ByValue,`passphrase`: RustBuffer.ByValue,`clientKind`: RustBuffer.ByValue,`deviceName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1670,6 +1674,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() and 0xFFFF) != 62352) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal() and 0xFFFF) != 34969) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() and 0xFFFF) != 51462) {
@@ -12767,6 +12774,19 @@ public object FfiConverterSequenceTypeNativeSmsScanPlan: FfiConverterRustBuffer<
     
         
         FfiConverterString.lower(`json`),_status)
+}
+    )
+    }
+    
+
+    @Throws(MobileBindingsException::class) fun `parseHostedSessionRenewal`(`json`: kotlin.String, `expectedAccountId`: kotlin.String): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session_renewal(
+    
+        
+        FfiConverterString.lower(`json`),
+        FfiConverterString.lower(`expectedAccountId`),_status)
 }
     )
     }

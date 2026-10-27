@@ -412,6 +412,9 @@ export const fixtureBridge: DesktopBridge = {
 };
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>) => (await import("@tauri-apps/api/core")).invoke<T>(command, args);
+export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
+  ? invoke<void>("hosted_session_renew")
+  : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
   media_page_around: (conversationId, attachmentId, messageId, limit) => invoke("media_page_around", { conversationId, attachmentId, messageId, limit }),
   media_page_newer: (conversationId, cursor, limit) => invoke("media_page_newer", { conversationId, cursor, limit }),

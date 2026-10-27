@@ -216,6 +216,26 @@
       ],
       "type": "object"
     },
+    "SessionRenewalResponse": {
+      "additionalProperties": false,
+      "description": "Response confirming that an authenticated session remains active.",
+      "properties": {
+        "account_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "expires_in_seconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "account_id",
+        "expires_in_seconds"
+      ],
+      "type": "object"
+    },
     "StoragePackRequest": {
       "additionalProperties": false,
       "properties": {
@@ -480,6 +500,9 @@
     "session": {
       "$ref": "#/$defs/WebSessionResponse"
     },
+    "session_renewal": {
+      "$ref": "#/$defs/SessionRenewalResponse"
+    },
     "storage_pack_request": {
       "$ref": "#/$defs/StoragePackRequest"
     },
@@ -492,6 +515,7 @@
   },
   "required": [
     "session",
+    "session_renewal",
     "config",
     "account",
     "billing",
@@ -507,6 +531,7 @@
   "type": "object",
   "x-peppy-routes": {
     "account": "/hosted/v1/web/account",
+    "appSessionRenew": "/hosted/v1/web/app-session/renew",
     "authStart": "/hosted/v1/web/auth/{provider}/start",
     "billing": "/hosted/v1/web/billing",
     "cancel": "/hosted/v1/web/billing/cancel",
@@ -520,6 +545,7 @@
     "reconcile": "/hosted/v1/web/billing/reconcile",
     "resume": "/hosted/v1/web/billing/resume",
     "session": "/hosted/v1/web/session",
+    "sessionRenew": "/hosted/v1/web/session/renew",
     "storagePack": "/hosted/v1/web/billing/storage-pack",
     "subscribe": "/hosted/v1/web/billing/subscribe"
   }

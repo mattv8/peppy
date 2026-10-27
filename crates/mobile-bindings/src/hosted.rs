@@ -105,6 +105,14 @@ pub fn parse_hosted_session(
 }
 
 #[uniffi::export]
+pub fn parse_hosted_session_renewal(
+    json: String,
+    expected_account_id: String,
+) -> Result<u32, MobileBindingsError> {
+    hc::parse_hosted_session_renewal(json, expected_account_id).map_err(convert_error)
+}
+
+#[uniffi::export]
 pub fn parse_hosted_account(
     json: String,
     expected_account_id: String,
@@ -353,6 +361,23 @@ mod tests {
             serde_json::json!({"account_id": account, "classification": "new", "entitlement": "none", "access": "read_write"}).to_string(),
             uuid::Uuid::new_v4().to_string()
         ).is_err());
+    }
+
+    #[test]
+    fn session_renewal_wrapper_validates_account_and_lifetime() {
+        let account = uuid::Uuid::new_v4();
+        let renewal = serde_json::json!({
+            "account_id": account,
+            "expires_in_seconds": 2_592_000,
+        });
+        assert_eq!(
+            parse_hosted_session_renewal(renewal.to_string(), account.to_string()).unwrap(),
+            2_592_000
+        );
+        assert!(
+            parse_hosted_session_renewal(renewal.to_string(), uuid::Uuid::new_v4().to_string())
+                .is_err()
+        );
     }
 
     #[test]
