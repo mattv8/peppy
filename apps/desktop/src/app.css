@@ -453,6 +453,8 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   align-items: center;
   gap: 2px;
 }
+.message-meta-status[role="img"] { flex: 0 0 auto; }
+.message-meta time { white-space: nowrap; }
 .message-meta[data-status="failed-before-submit"],
 .message-meta[data-status="failed-confirmed"] { color: var(--peppy-error-text); }
 .message-meta[data-status="unknown"] { color: var(--peppy-warning-text); }
@@ -594,8 +596,16 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #recipient-rail-layer > #draft-recipients {
   pointer-events: auto;
 }
-#gateway-selector { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; max-width: 100%; padding: 4px 8px; font-size: 12px; }
+#gateway-selector, #head-panel-route-section { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; max-width: 100%; padding: 4px 8px; font-size: 12px; }
 #gateway-selector [data-gateway-picker-trigger] { display: flex; width: auto; height: auto; border: 1px solid var(--peppy-border); border-radius: var(--peppy-control-radius, 4px); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); }
+.head-panel-route { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; padding: 2px 6px; border: 1px solid var(--peppy-border); border-radius: var(--peppy-radius-pill, 999px); background: var(--peppy-surface-widget); color: var(--peppy-text-secondary); font-size: 12px; line-height: 1.15; white-space: nowrap; }
+.head-panel-route [data-head-route-sim] { flex: 0 0 auto; color: var(--peppy-text-primary); }
+.head-panel-route [data-head-route-separator] { flex: 0 0 auto; }
+.head-panel-route [data-head-route-state] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.head-panel-route[data-gateway-availability="connected"] [data-head-route-state] { color: var(--peppy-success); }
+.head-panel-route:is([data-gateway-availability="delayed"], [data-gateway-availability="capabilities_unknown"], [data-gateway-availability="unsupported_platform"], [data-gateway-availability="no_sms_sim"], [data-gateway-availability="sms_permission_needed"], [data-gateway-availability="sms_unavailable"]) [data-head-route-state] { color: var(--peppy-warning-text); }
+.head-panel-route:is([data-gateway-availability="unknown"], [data-gateway-availability="offline"], [data-gateway-availability="never_connected"]) [data-head-route-state] { color: var(--peppy-text-muted); }
+@media (forced-colors: active) { .head-panel-route { border-color: CanvasText; } }
 #unavailable-hint { color: var(--peppy-warning-text); }
 #unavailable-hint { margin: 0; color: var(--peppy-warning-text); font-size: 11px; }
 #unavailable-hint[hidden] { display: none; }

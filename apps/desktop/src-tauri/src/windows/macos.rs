@@ -92,6 +92,7 @@ struct HeadViews {
     person: id,
     group: id,
     badge: id,
+    badge_label: id,
 }
 
 #[derive(Default)]
@@ -140,8 +141,15 @@ fn badge_width(unread: u64) -> f64 {
 fn badge_frame(unread: u64) -> NSRect {
     let width = badge_width(unread);
     NSRect::new(
-        NSPoint::new(HEAD_SIZE - width, 0.0),
+        NSPoint::new(41.0 - width / 2.0, 6.0),
         NSSize::new(width, BADGE_HEIGHT),
+    )
+}
+
+fn badge_label_frame(width: f64, label_height: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(0.0, (BADGE_HEIGHT - label_height) / 2.0),
+        NSSize::new(width, label_height),
     )
 }
 
@@ -727,15 +735,18 @@ unsafe fn set_panel_frame(panel: id, frame: &HeadFrame) {
 
 fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option<&HeadGlyph>) {
     unsafe {
-        apply_color(views.circle, views.badge, spec.color);
+        apply_color(views.circle, views.badge, spec.color, &spec.glyph);
         apply_glyph(views, &spec.glyph, previous_glyph);
         let text = if spec.unread >= 100 {
             "99+".to_owned()
         } else {
             spec.unread.to_string()
         };
-        let _: () = msg_send![views.badge, setStringValue: ns_string(&text)];
+        let _: () = msg_send![views.badge_label, setStringValue: ns_string(&text)];
         let _: () = msg_send![views.badge, setFrame: badge_frame(spec.unread)];
+        let _: () = msg_send![views.badge_label, sizeToFit];
+        let natural_frame: NSRect = msg_send![views.badge_label, frame];
+        let _: () = msg_send![views.badge_label, setFrame: badge_label_frame(badge_width(spec.unread), natural_frame.size.height)];
         let _: () = msg_send![views.badge, setHidden: if spec.unread == 0 { YES } else { NO }];
         let label = ns_string(&format!("{}, {} unread messages", spec.label, spec.unread));
         let _: () = msg_send![views.view, setAccessibilityLabel: label];
@@ -743,13 +754,21 @@ fn update_head_content(views: HeadViews, spec: &HeadSpec, previous_glyph: Option
     }
 }
 
-unsafe fn apply_color(circle: id, badge: id, color: [u8; 3]) {
-    let color = srgb_color(color);
-    let color: id = msg_send![color, CGColor];
+unsafe fn apply_color(circle: id, badge: id, color: [u8; 3], glyph: &HeadGlyph) {
+    let circle_color = srgb_color(color);
+    let circle_color: id = msg_send![circle_color, CGColor];
     let circle_layer: id = msg_send![circle, layer];
-    let _: () = msg_send![circle_layer, setBackgroundColor: color];
+    let _: () = msg_send![circle_layer, setBackgroundColor: circle_color];
     let badge_layer: id = msg_send![badge, layer];
-    let _: () = msg_send![badge_layer, setBorderColor: color];
+    let badge_ring = srgb_color(badge_ring_color(glyph, color));
+    let badge_ring: id = msg_send![badge_ring, CGColor];
+    let _: () = msg_send![badge_layer, setBorderColor: badge_ring];
+}
+
+fn badge_ring_color(glyph: &HeadGlyph, color: [u8; 3]) -> [u8; 3] {
+    matches!(glyph, HeadGlyph::Photo(_))
+        .then_some([31, 31, 31])
+        .unwrap_or(color)
 }
 
 unsafe fn apply_glyph(views: HeadViews, glyph: &HeadGlyph, previous: Option<&HeadGlyph>) {
@@ -831,8 +850,13 @@ fn create_head(
         let photo = photo_view();
         let person = person_icon();
         let group = group_icon();
-        let badge = label(badge_frame(spec.unread));
-        style_badge(badge);
+        let badge = NSView::initWithFrame_(NSView::alloc(nil), badge_frame(spec.unread));
+        style_badge_container(badge);
+        let badge_label = label(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(badge_width(spec.unread), BADGE_HEIGHT),
+        ));
+        style_badge_label(badge_label);
         let _: () = msg_send![circle, addSubview: initials];
         let _: () = msg_send![initials, release];
         let _: () = msg_send![circle, addSubview: photo];
@@ -843,6 +867,8 @@ fn create_head(
         let _: () = msg_send![group, release];
         let _: () = msg_send![view, addSubview: circle];
         let _: () = msg_send![circle, release];
+        let _: () = msg_send![badge, addSubview: badge_label];
+        let _: () = msg_send![badge_label, release];
         let _: () = msg_send![view, addSubview: badge];
         let _: () = msg_send![badge, release];
         panel.setContentView_(view);
@@ -861,6 +887,7 @@ fn create_head(
                 person,
                 group,
                 badge,
+                badge_label,
             },
             spec,
             frame: frame.clone(),
@@ -996,7 +1023,7 @@ unsafe fn symbol_icon(name: &str) -> id {
     msg_send![fallback, initWithFrame: frame]
 }
 
-unsafe fn style_badge(badge: id) {
+unsafe fn style_badge_container(badge: id) {
     let _: () = msg_send![badge, setWantsLayer: YES];
     let layer: id = msg_send![badge, layer];
     let red: id = msg_send![class!(NSColor), systemRedColor];
@@ -1004,8 +1031,12 @@ unsafe fn style_badge(badge: id) {
     let _: () = msg_send![layer, setBackgroundColor: red];
     let _: () = msg_send![layer, setCornerRadius: 9.0f64];
     let _: () = msg_send![layer, setBorderWidth: 2.0f64];
+}
+
+unsafe fn style_badge_label(badge_label: id) {
     let font: id = msg_send![class!(NSFont), boldSystemFontOfSize: 10.0f64];
-    let _: () = msg_send![badge, setFont: font];
+    let _: () = msg_send![badge_label, setFont: font];
+    let _: () = msg_send![badge_label, setAccessibilityElement: NO];
 }
 
 unsafe fn ensure_screen_observer() {
@@ -1215,6 +1246,56 @@ mod tests {
         assert!(is_in_circle(NSPoint::new(24.0, 32.0)));
         assert!(!is_in_circle(NSPoint::new(55.0, 55.0)));
         assert!(is_in_circle(NSPoint::new(28.0, 28.0)));
+    }
+
+    #[test]
+    fn badge_frame_centers_each_width_at_the_top_left_center() {
+        for (unread, width) in [(1, 18.0), (10, 22.0), (100, 26.0)] {
+            let frame = badge_frame(unread);
+            assert_eq!(frame.origin.x, 41.0 - width / 2.0);
+            assert_eq!(frame.origin.y, 6.0);
+            assert_eq!((frame.size.width, frame.size.height), (width, BADGE_HEIGHT));
+            assert_eq!(frame.origin.x + frame.size.width / 2.0, 41.0);
+            assert!(is_in_badge(NSPoint::new(41.0, 15.0), unread,));
+        }
+    }
+
+    #[test]
+    fn hidden_badge_is_not_clickable() {
+        assert!(!is_in_badge(NSPoint::new(41.0, 15.0), 0));
+    }
+
+    #[test]
+    fn badge_label_frame_centers_natural_text_heights() {
+        for label_height in [12.0, 14.0] {
+            let frame = badge_label_frame(22.0, label_height);
+            assert_eq!(
+                (frame.origin.x, frame.origin.y),
+                (0.0, (BADGE_HEIGHT - label_height) / 2.0)
+            );
+            assert_eq!((frame.size.width, frame.size.height), (22.0, label_height));
+        }
+    }
+
+    #[test]
+    fn only_photo_badges_use_the_neutral_ring() {
+        let photo = HeadGlyph::Photo(super::super::HeadPhoto {
+            edge: 1,
+            rgba: std::sync::Arc::from([0, 0, 0, 255]),
+        });
+        assert_eq!(badge_ring_color(&photo, [12, 34, 56]), [31, 31, 31]);
+        assert_eq!(
+            badge_ring_color(&HeadGlyph::Initials("P".into()), [12, 34, 56]),
+            [12, 34, 56]
+        );
+        assert_eq!(
+            badge_ring_color(&HeadGlyph::Person, [12, 34, 56]),
+            [12, 34, 56]
+        );
+        assert_eq!(
+            badge_ring_color(&HeadGlyph::Group, [12, 34, 56]),
+            [12, 34, 56]
+        );
     }
     #[test]
     fn cross_monitor_drag_uses_destination_scale_and_negative_work_origin() {
