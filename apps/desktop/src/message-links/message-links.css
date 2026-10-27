@@ -7,14 +7,57 @@
   overflow-wrap: anywhere;
 }
 
+.message-bubble.self .message-text-link {
+  color: inherit;
+}
+
+[data-message-text-link-label],
 [data-message-text-link]::after {
-  content: " → " attr(data-message-text-destination);
-  display: none;
+  display: -webkit-inline-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  max-width: 100%;
+  overflow: hidden;
+  vertical-align: top;
+  text-decoration: inherit;
   overflow-wrap: anywhere;
 }
 
+[data-message-text-link]:hover > [data-message-text-link-label],
+[data-message-text-link]:focus-visible > [data-message-text-link-label] {
+  -webkit-line-clamp: 3;
+}
+
+[data-message-text-link]::after {
+  content: "→ " attr(data-message-text-destination);
+  display: none;
+  -webkit-line-clamp: 3;
+  margin-inline-start: 0.5em;
+}
+
 [data-message-text-link]:focus-visible::after {
-  display: inline;
+  display: -webkit-inline-box;
+}
+
+[data-message-text-link]:focus-visible {
+  outline: 2px solid var(--peppy-focus);
+  outline-offset: 2px;
+}
+
+.message-bubble.self [data-message-text-link]:focus-visible {
+  outline-color: currentColor;
+}
+
+@media (forced-colors: active) {
+  .message-bubble.self .message-text-link {
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+
+  [data-message-text-link]:focus-visible,
+  .message-bubble.self [data-message-text-link]:focus-visible {
+    outline-color: Highlight;
+  }
 }
 
 .message-text-open-failure {

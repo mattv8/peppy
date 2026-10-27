@@ -77,7 +77,7 @@ export function MessageText({ text, onOpenExternal }: MessageTextProps) {
     <span data-message-text>
       {tokens.map((token, index) => token.kind === "text"
         ? <span key={index}>{token.text}</span>
-        : <a key={index} data-message-text-link className="message-text-link" data-message-text-destination={token.href} href={token.href} title={token.href} target="_blank" rel="noopener noreferrer" onClick={event => handleClick(event, token.href)} onAuxClick={event => handleAuxClick(event, token.href)}>{token.text}</a>)}
+        : <a key={index} data-message-text-link className="message-text-link" data-message-text-destination={token.href} href={token.href} title={token.href} target="_blank" rel="noopener noreferrer" onClick={event => handleClick(event, token.href)} onAuxClick={event => handleAuxClick(event, token.href)}><span data-message-text-link-label>{token.text}</span></a>)}
       {currentOpenFailure && (
         <span data-message-text-open-alert className="message-text-open-failure" role="alert">
           Could not open link. <button type="button" className="secondary-button" aria-label="Retry opening link" onClick={() => openExternally(currentOpenFailure.href)}>Retry</button> <button type="button" className="secondary-button" aria-label="Copy link" onClick={() => copyLink(currentOpenFailure.href)}>Copy</button>

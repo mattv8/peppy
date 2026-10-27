@@ -33,6 +33,38 @@ describe("MessageText", () => {
     expect(links[1]).toHaveAttribute("href", "https://example.com/a");
   });
 
+  it("preserves a long URL's full label, accessible name, and destination bindings", () => {
+    const longUrl = `https://example.com/${"a".repeat(1200)}`;
+    const message = `Read ${longUrl} and keep reading.`;
+    const { container } = render(<MessageText text={message} />);
+    const link = screen.getByRole("link", { name: longUrl });
+    const label = link.querySelector("[data-message-text-link-label]");
+
+    expect(container.querySelector("[data-message-text]")).toHaveTextContent(message);
+    expect(label).toHaveTextContent(longUrl);
+    expect(link).toHaveAttribute("href", longUrl);
+    expect(link).toHaveAttribute("title", longUrl);
+    expect(link).toHaveAttribute("data-message-text-destination", longUrl);
+  });
+
+  it("opens the full long URL once for clicks that bubble from its label", () => {
+    const longUrl = `https://example.com/${"a".repeat(1200)}`;
+    const onOpenExternal = vi.fn(async () => undefined);
+    render(<MessageText text={longUrl} onOpenExternal={onOpenExternal} />);
+    const label = screen.getByRole("link", { name: longUrl }).querySelector("[data-message-text-link-label]");
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    const middleClick = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+
+    label!.dispatchEvent(click);
+    label!.dispatchEvent(middleClick);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(middleClick.defaultPrevented).toBe(true);
+    expect(onOpenExternal).toHaveBeenCalledTimes(2);
+    expect(onOpenExternal).toHaveBeenNthCalledWith(1, longUrl);
+    expect(onOpenExternal).toHaveBeenNthCalledWith(2, longUrl);
+  });
+
   it("keeps browser click and middle-click default navigation intact", () => {
     render(<MessageText text="https://example.com" />);
     const link = screen.getByRole("link");
