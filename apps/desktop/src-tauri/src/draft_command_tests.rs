@@ -1,5 +1,5 @@
 use crate::{
-    load_state_for_window, save_draft_for_window,
+    draft_event_target_labels_after_save, load_state_for_window, save_draft_for_window,
     secure_store::MemoryStore,
     send_draft_for_window,
     tests::{fixture_at, gateway, input, open, routed, Fixture, PHRASE},
@@ -337,4 +337,242 @@ async fn normal_autosave_for_window_does_not_notify_or_create_or_move() {
     assert_eq!(session.client.compose_drafts().unwrap().len(), before);
     assert_eq!(saved.id, draft.draft_id.to_string());
     assert_eq!(saved.conversation_id, draft.conversation_id.to_string());
+}
+
+#[tokio::test]
+async fn normal_autosave_targets_main_and_matching_composers_without_broad_notify() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let notifier = {
+        let notifications = notifications.clone();
+        Arc::new(move || {
+            notifications.fetch_add(1, Ordering::Relaxed);
+        })
+    };
+    let session = Arc::new(
+        crate::session::open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            notifier,
+        )
+        .unwrap(),
+    );
+    unlock(&session, &fixture);
+    let draft = session.client.recipientless_compose_draft().unwrap();
+    let conversation = draft.conversation_id.to_string();
+    let state = state(&fixture);
+
+    let saved = save_draft_for_window(
+        &state,
+        crate::tray::MAIN,
+        session.clone(),
+        input(
+            &draft.draft_id.to_string(),
+            &conversation,
+            "autosaved",
+            &[],
+            &draft.revision.to_string(),
+        ),
+    )
+    .await;
+
+    let targets = draft_event_target_labels_after_save(
+        &state,
+        &session,
+        &saved,
+        false,
+        true,
+        [
+            crate::tray::MAIN,
+            &label(&conversation),
+            &label(&uuid::Uuid::new_v4().to_string()),
+        ],
+    );
+    assert_eq!(
+        targets,
+        vec![crate::tray::MAIN.to_owned(), label(&conversation)]
+    );
+    assert_eq!(notifications.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn draft_event_targets_composer_after_move_and_not_unrelated_composer() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let target = incoming(&session, "+15555550100", "history");
+    let source = session.client.recipientless_compose_draft().unwrap();
+    let source_id = source.conversation_id.to_string();
+    let window = label(&source_id);
+    let state = state(&fixture);
+
+    let saved = save_draft_for_window(
+        &state,
+        &window,
+        session.clone(),
+        input(
+            &source.draft_id.to_string(),
+            &source_id,
+            "draft",
+            &["+15555550100"],
+            "0",
+        ),
+    )
+    .await;
+
+    let moved = saved.as_ref().unwrap();
+    assert_eq!(moved.conversation_id, target);
+    let destination = label(&target);
+    let targets = draft_event_target_labels_after_save(
+        &state,
+        &session,
+        &saved,
+        false,
+        true,
+        [
+            crate::tray::MAIN,
+            window.as_str(),
+            destination.as_str(),
+            &label(&uuid::Uuid::new_v4().to_string()),
+        ],
+    );
+    assert_eq!(
+        targets,
+        vec![crate::tray::MAIN.to_owned(), window.clone(), destination]
+    );
+
+    let original = crate::DraftView {
+        id: moved.id.clone(),
+        conversation_id: source_id,
+        text: moved.text.clone(),
+        recipient_ids: moved.recipient_ids.clone(),
+        attachment_ids: moved.attachment_ids.clone(),
+        gateway_id: moved.gateway_id.clone(),
+        sim_id: moved.sim_id.clone(),
+        revision: moved.revision.clone(),
+    };
+    assert_eq!(
+        draft_event_target_labels_after_save(
+            &state,
+            &session,
+            &Ok(original),
+            false,
+            true,
+            [crate::tray::MAIN, window.as_str()],
+        ),
+        vec![crate::tray::MAIN]
+    );
+}
+
+#[tokio::test]
+async fn saved_draft_event_gate_blocks_failures_locked_and_replaced_sessions() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let draft = session.client.recipientless_compose_draft().unwrap();
+    let state = state(&fixture);
+    let saved = save_draft_for_window(
+        &state,
+        crate::tray::MAIN,
+        session.clone(),
+        input(
+            &draft.draft_id.to_string(),
+            &draft.conversation_id.to_string(),
+            "saved",
+            &[],
+            &draft.revision.to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        draft_event_target_labels_after_save(
+            &state,
+            &session,
+            &saved,
+            false,
+            true,
+            [crate::tray::MAIN],
+        ),
+        vec![crate::tray::MAIN]
+    );
+    for (locked, current) in [(true, true), (false, false)] {
+        assert!(draft_event_target_labels_after_save(
+            &state,
+            &session,
+            &saved,
+            locked,
+            current,
+            [
+                crate::tray::MAIN,
+                label(&draft.conversation_id.to_string()).as_str(),
+            ],
+        )
+        .is_empty());
+    }
+    let failed = save_draft_for_window(
+        &state,
+        crate::tray::MAIN,
+        session.clone(),
+        input(
+            &draft.draft_id.to_string(),
+            &draft.conversation_id.to_string(),
+            "stale",
+            &[],
+            "999",
+        ),
+    )
+    .await;
+
+    assert!(failed.is_err());
+    assert!(draft_event_target_labels_after_save(
+        &state,
+        &session,
+        &failed,
+        false,
+        true,
+        [
+            crate::tray::MAIN,
+            label(&draft.conversation_id.to_string()).as_str(),
+        ],
+    )
+    .is_empty());
+}
+
+#[tokio::test]
+async fn poisoned_composer_scope_limits_draft_event_to_main() {
+    let fixture = fixture_at("http://127.0.0.1:9");
+    let session = Arc::new(open(&fixture, &fixture.binding, &[]));
+    unlock(&session, &fixture);
+    let draft = session.client.recipientless_compose_draft().unwrap();
+    let state = state(&fixture);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _scope = state.composer_scopes.lock().unwrap();
+        panic!("poison composer scope");
+    }));
+
+    let saved = session
+        .save_draft(&input(
+            &draft.draft_id.to_string(),
+            &draft.conversation_id.to_string(),
+            "autosaved",
+            &[],
+            &draft.revision.to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        draft_event_target_labels_after_save(
+            &state,
+            &session,
+            &Ok(saved),
+            false,
+            true,
+            [
+                crate::tray::MAIN,
+                label(&draft.conversation_id.to_string()).as_str(),
+            ],
+        ),
+        vec![crate::tray::MAIN]
+    );
 }

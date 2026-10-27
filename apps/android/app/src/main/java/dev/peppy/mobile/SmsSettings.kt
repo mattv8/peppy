@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -51,9 +50,6 @@ internal fun smsHistoryLabel(state: SmsHistoryState): Int = when (state) {
 internal fun SmsSettings(
     context: Context,
     historyState: SmsHistoryState,
-    needsPermissionSettings: Boolean,
-    requestPermission: () -> Unit,
-    openPermissionSettings: () -> Unit,
 ) {
     val readGranted = smsReadGranted(context)
     Section("sms-history-section", stringResource(R.string.peppy_sms_history_title)) {
@@ -67,14 +63,6 @@ internal fun SmsSettings(
             stringResource(R.string.peppy_sms_history_permission_label),
             stringResource(if (readGranted) R.string.peppy_sms_history_allowed else R.string.peppy_sms_history_not_allowed),
         )
-        if (!readGranted) {
-            OutlinedButton(
-                onClick = if (needsPermissionSettings) openPermissionSettings else requestPermission,
-                modifier = Modifier.testTag("sms-read-permission-button"),
-            ) {
-                Text(stringResource(if (needsPermissionSettings) R.string.peppy_sms_history_open_settings else R.string.peppy_sms_history_allow_access))
-            }
-        }
         StatusRow("sms-history-status", stringResource(R.string.peppy_sms_history_status_label), stringResource(smsHistoryLabel(historyState)))
         Column(Modifier.fillMaxWidth().testTag("sms-history-explanation"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(stringResource(R.string.peppy_sms_history_captured_footer), style = MaterialTheme.typography.bodySmall)

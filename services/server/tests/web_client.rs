@@ -62,6 +62,10 @@ fn app_for_config(config: WebClientConfig) -> Router {
             post(|| async { StatusCode::CREATED }).delete(|| async { StatusCode::NO_CONTENT }),
         )
         .route(
+            "/hosted/v1/web/app-session/renew",
+            post(|| async { StatusCode::ACCEPTED }),
+        )
+        .route(
             "/hosted/v1/web/app-account",
             get(|| async { StatusCode::UNAUTHORIZED }),
         )
@@ -253,6 +257,11 @@ async fn app_host_forwards_only_exact_enrollment_paths_with_method_unchanged() {
             "/hosted/v1/web/app-session",
             "DELETE",
             StatusCode::NO_CONTENT,
+        ),
+        (
+            "/hosted/v1/web/app-session/renew",
+            "POST",
+            StatusCode::ACCEPTED,
         ),
         (
             "/hosted/v1/web/app-account",

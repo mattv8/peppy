@@ -611,15 +611,24 @@ fn badge_width(unread: u64) -> f64 {
 }
 
 fn badge_rect(unread: u64, scale: f64) -> RECT {
-    let right = scaled(LOGICAL_SIZE, scale);
-    let bottom = right;
     let width = scaled(badge_width(unread), scale);
     let height = scaled(BADGE_HEIGHT, scale);
+    let center = scaled(41.0, scale);
+    let left = center - width / 2;
+    let top = center - height / 2;
     RECT {
-        left: right - width,
-        top: bottom - height,
-        right,
-        bottom,
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+fn badge_ring_color(has_photo: bool, conversation_color: [u8; 3]) -> [u8; 3] {
+    if has_photo {
+        [0x1f; 3]
+    } else {
+        conversation_color
     }
 }
 
@@ -1040,6 +1049,7 @@ unsafe fn paint(hwnd: HWND) {
     let _ = windows::Win32::Graphics::Gdi::DeleteObject(color_brush.into());
     let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(0xFFFFFF));
+    let has_photo = matches!(&glyph, HeadGlyph::Photo(_));
     match glyph {
         HeadGlyph::Photo(photo) => match photo_bgra {
             Some(bgra) => draw_photo(hdc, circle_size, photo.edge, &bgra),
@@ -1074,7 +1084,7 @@ unsafe fn paint(hwnd: HWND) {
             scaled(BADGE_HEIGHT, dpi_scale),
             scaled(BADGE_HEIGHT, dpi_scale),
         );
-        let ring_color = CreateSolidBrush(colorref(color));
+        let ring_color = CreateSolidBrush(colorref(badge_ring_color(has_photo, color)));
         let _ = FillRgn(hdc, badge, ring_color);
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(badge.into());
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(ring_color.into());
@@ -1139,19 +1149,42 @@ mod tests {
     }
 
     #[test]
-    fn badge_tiers_and_rects_follow_the_fixed_head_canvas() {
+    fn badge_rect_centers_each_tier_at_logical_41_across_dpi_scales() {
         assert_eq!(super::badge_tier(0), 0);
         assert_eq!(super::badge_tier(9), 1);
         assert_eq!(super::badge_tier(10), 2);
         assert_eq!(super::badge_tier(100), 3);
-        let rect = |unread| {
-            let rect = super::badge_rect(unread, 1.0);
-            (rect.left, rect.top, rect.right, rect.bottom)
-        };
-        assert_eq!(rect(1), (38, 38, 56, 56));
-        assert_eq!(rect(10), (34, 38, 56, 56));
-        assert_eq!(rect(100), (30, 38, 56, 56));
+        for (scale, unread, expected) in [
+            (1.0, 1, (32, 32, 50, 50)),
+            (1.0, 10, (30, 32, 52, 50)),
+            (1.0, 100, (28, 32, 54, 50)),
+            (1.25, 1, (40, 40, 63, 63)),
+            (1.25, 10, (37, 40, 65, 63)),
+            (1.25, 100, (35, 40, 68, 63)),
+            (1.5, 1, (49, 49, 76, 76)),
+            (1.5, 10, (46, 49, 79, 76)),
+            (1.5, 100, (43, 49, 82, 76)),
+            (2.0, 1, (64, 64, 100, 100)),
+            (2.0, 10, (60, 64, 104, 100)),
+            (2.0, 100, (56, 64, 108, 100)),
+        ] {
+            let rect = super::badge_rect(unread, scale);
+            assert_eq!(
+                (rect.left, rect.top, rect.right, rect.bottom),
+                expected,
+                "unread {unread} at {scale}x"
+            );
+        }
         assert_eq!(super::badge_text(100), "99+");
+    }
+
+    #[test]
+    fn photo_badges_use_a_neutral_ring() {
+        assert_eq!(super::badge_ring_color(true, [0x24, 0x4a, 0xa3]), [0x1f; 3]);
+        assert_eq!(
+            super::badge_ring_color(false, [0x24, 0x4a, 0xa3]),
+            [0x24, 0x4a, 0xa3]
+        );
     }
 
     #[test]

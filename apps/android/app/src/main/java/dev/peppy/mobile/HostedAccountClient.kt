@@ -19,6 +19,7 @@ import uniffi.peppy_mobile_bindings.hostedSessionRequest
 import uniffi.peppy_mobile_bindings.parseHostedAccount
 import uniffi.peppy_mobile_bindings.parseHostedLoginAttempt
 import uniffi.peppy_mobile_bindings.parseHostedSession
+import uniffi.peppy_mobile_bindings.parseHostedSessionRenewal
 import uniffi.peppy_mobile_bindings.prepareHostedProvisioning
 import uniffi.peppy_mobile_bindings.restoreHostedProvisioning
 
@@ -86,7 +87,11 @@ internal class HostedAccountClient(
         if (generation != stamp.generation) throw kotlinx.coroutines.CancellationException()
     }
     private fun save(stamp: Stamp, key: String, bytes: ByteArray) {
-        try { synchronized(stateLock) { check(stamp); store.write(key, bytes) } }
+        try {
+            if (key == SESSION_KEY) synchronized(sessionMutationLock) {
+                synchronized(stateLock) { check(stamp); store.write(key, bytes) }
+            } else synchronized(stateLock) { check(stamp); store.write(key, bytes) }
+        }
         finally { bytes.fill(0) }
     }
     fun cancelPendingWork() { synchronized(stateLock) { generation++ } }
@@ -112,11 +117,38 @@ internal class HostedAccountClient(
             val session = Session(parsed.accountId(), parsed.bearerToken(), nowMs() + parsed.expiresInSeconds().toLong() * 1_000)
             save(stamp, SESSION_KEY, JSONObject().put("account_id", session.accountId).put("bearer", session.token)
                 .put("expires_at", session.expiresAt).toString().toByteArray())
+            resetRenewalGate()
             account(session, stamp)
         }
     }
 
     suspend fun account(): NativeHostedAccount = operation { account(session(), it) }
+
+    /**
+     * Extends the account session only after a foreground user interaction. Local expiry is
+     * intentionally ignored here so the server can resolve clock skew or a lost prior response.
+     */
+    suspend fun renewAfterUserInteraction() = withContext(Dispatchers.IO) {
+        val job = currentCoroutineContext()[Job]
+        val now = nowMs()
+        if (!beginRenewalAttempt(now) || !renewalLock.tryLock()) return@withContext
+        try {
+            val stamp = synchronized(stateLock) { Stamp(generation, job) }
+            val observed = session(allowExpired = true)
+            if (!renewalDue(observed, now)) return@withContext
+
+            val response = transport.post(SESSION_RENEW_PATH, "{}", observed.token)
+            check(stamp)
+            if (response.code == 401) {
+                removeObservedSession(stamp, observed)
+                throw HostedFailure(HostedFailure.Kind.SESSION_EXPIRED)
+            }
+            val expiresInSeconds = parseHostedSessionRenewal(body(response), observed.accountId)
+            saveRenewedSession(stamp, observed, now + expiresInSeconds.toLong() * 1_000)
+        } finally {
+            renewalLock.unlock()
+        }
+    }
 
     private fun session(allowExpired: Boolean = false): Session {
         val bytes = store.read(SESSION_KEY) ?: throw HostedFailure(HostedFailure.Kind.SESSION_EXPIRED)
@@ -126,6 +158,40 @@ internal class HostedAccountClient(
             if (!allowExpired && nowMs() >= session.expiresAt) throw HostedFailure(HostedFailure.Kind.SESSION_EXPIRED)
             return session
         } finally { bytes.fill(0) }
+    }
+
+    private fun renewalDue(session: Session, now: Long) =
+        now >= session.expiresAt - (SESSION_LIFETIME_MS - RENEWAL_THROTTLE_MS)
+
+    private fun beginRenewalAttempt(now: Long) = synchronized(renewalStateLock) {
+        if (lastRenewalAttemptAtMs != Long.MIN_VALUE && now - lastRenewalAttemptAtMs < RENEWAL_ATTEMPT_BACKOFF_MS) false
+        else { lastRenewalAttemptAtMs = now; true }
+    }
+
+    private fun resetRenewalGate() = synchronized(renewalStateLock) {
+        lastRenewalAttemptAtMs = Long.MIN_VALUE
+    }
+
+    private fun currentSessionMatches(observed: Session): Boolean = try {
+        session(allowExpired = true).let { it.accountId == observed.accountId && it.token == observed.token }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun saveRenewedSession(stamp: Stamp, observed: Session, expiresAt: Long) = synchronized(sessionMutationLock) {
+        synchronized(stateLock) {
+            check(stamp)
+            if (!currentSessionMatches(observed)) throw kotlinx.coroutines.CancellationException()
+            save(stamp, SESSION_KEY, JSONObject().put("account_id", observed.accountId).put("bearer", observed.token)
+                .put("expires_at", expiresAt).toString().toByteArray())
+        }
+    }
+
+    private fun removeObservedSession(stamp: Stamp, observed: Session) = synchronized(sessionMutationLock) {
+        synchronized(stateLock) {
+            check(stamp)
+            if (currentSessionMatches(observed)) store.remove(SESSION_KEY)
+        }
     }
 
     /** Native enrollment transport only; callers must never surface this account session. */
@@ -140,19 +206,23 @@ internal class HostedAccountClient(
         if (nowMs() >= session.expiresAt) throw HostedFailure(HostedFailure.Kind.SESSION_EXPIRED)
         val response = transport.get("/hosted/v1/account", session.token); check(stamp)
         if (response.code == 401) {
-            synchronized(stateLock) { check(stamp); store.remove(SESSION_KEY) }
+            removeObservedSession(stamp, session)
+            resetRenewalGate()
             throw HostedFailure(HostedFailure.Kind.SESSION_EXPIRED)
         }
         return parseHostedAccount(body(response), session.accountId)
     }
 
     suspend fun signOut() = withContext(Dispatchers.IO) {
-        val old = synchronized(stateLock) {
-            generation++
-            val value = try { session(allowExpired = true) } catch (_: Exception) { null }
-            store.remove(SESSION_KEY)
-            value
+        val old = synchronized(sessionMutationLock) {
+            synchronized(stateLock) {
+                generation++
+                val value = try { session(allowExpired = true) } catch (_: Exception) { null }
+                store.remove(SESSION_KEY)
+                value
+            }
         }
+        resetRenewalGate()
         if (old != null) {
             try { transport.delete("/hosted/v1/auth/session", old.token) }
             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -244,5 +314,13 @@ internal class HostedAccountClient(
         const val ORIGIN = "https://peppy.pro"
         const val SESSION_KEY = "hosted-session.v2"
         const val CHECKPOINT_KEY = "hosted-provisioning.v1"
+        private const val SESSION_RENEW_PATH = "/hosted/v1/auth/session/renew"
+        private const val SESSION_LIFETIME_MS = 2_592_000_000L
+        private const val RENEWAL_THROTTLE_MS = 15 * 60 * 1_000L
+        private const val RENEWAL_ATTEMPT_BACKOFF_MS = 60 * 1_000L
+        private val renewalLock = Mutex()
+        private val renewalStateLock = Any()
+        private var lastRenewalAttemptAtMs = Long.MIN_VALUE
+        private val sessionMutationLock = Any()
     }
 }

@@ -59,7 +59,7 @@ semantic Kotlin and Swift names.
 ### Owner phone approval
 
 - Offer **Add phone** only when the `owner` role's vault keys are unlocked,
-  on Android's SMS tab or iOS's Account tab, outside the separate Settings
+  on the Account tab on both platforms, outside the separate Settings
   screen. Hide or disable the entry otherwise. Show the QR, then the locally
   derived SAS with an owner-specific codes-match control (`owner_phone_*` copy,
   not recipient pairing copy) before **Confirm and approve**.
@@ -122,6 +122,36 @@ semantic Kotlin and Swift names.
 
 ## Settings and capability status
 
+- Android uses Mirroring, SMS, Contacts and Account tabs. iOS uses Sync and
+  Account; unavailable SMS/MMS and notification mirroring remain status rows,
+  never actionable toggles. Settings opens from Account, not a toolbar gear.
+  An enrolled but locked Android screen retains a Settings entry for diagnostics
+  and server information; owner actions still require unlocked keys.
+- Feature switches express user intent, not permission grants. Turning a
+  sensitive feature on first opens a Peppy consent bottom sheet with the full
+  relevant disclosure, a Privacy Policy link and scope, and explicit agree and
+  decline actions. Keep the existing SMS/MMS/notification disclosures unchanged.
+  A privacy policy supplements this disclosure; it does not replace it.
+- Declining, dismissing or leaving a consent flow requests nothing and changes
+  nothing. Request OS access only after agreement; enable only after the grant
+  and a successful preference readback. Pending enable intent is local to the
+  current flow: consume denied results too, and cancel on navigation, lock or
+  recreation. A later unrelated Settings grant must not enable a feature.
+- Contacts access alone never starts sync. Preserve existing explicit opt-ins,
+  but an unset intent requires consent even if OS access was already granted.
+  Read access and accepting remote edits are separate choices. Retain the
+  off/confirm/automatic edit policy, writable destinations and approval controls.
+- SMS capture uses the actual read-access and capture-policy state. If send or
+  receive access is incomplete, show that separately rather than hiding active
+  capture behind an off switch. An MMS-only grant of shared SMS read access must
+  not silently enable SMS capture. Turning SMS sync off requires confirmation
+  with its full pending-send/uncertain-outcome caveat.
+- Android's battery switch displays the OS battery-exemption state, refreshed
+  on foreground. An off-state tap explains the trade-off before opening the
+  battery optimization settings list; an on-state tap opens that list directly.
+  Announce that the control opens settings. Do not add the restricted direct
+  exemption-request permission or promise immediate delivery. Handle unavailable
+  OEM settings screens without claiming the exemption changed.
 - Android settings backed by the core (mirroring, WiFi-only, skip silent, SMS
   capture, MMS media WiFi-only) load off the main thread; the control is
   disabled until its value arrives and while a write is in flight, then shows
@@ -151,3 +181,17 @@ The mobile design uses native typography and touch targets with a 4px rhythm,
 not desktop control dimensions. Use the coral graphic brand and semantic coral
 accents; coral is not normal-size text. Follow system light/dark appearance and
 retain opaque readable content when reduced transparency or motion is enabled.
+
+Feature screens use a dark neutral brand band with a static, decorative coral
+phone-to-computer illustration and a short data-flow summary, followed by plain
+setting rows. Pair hero text with the dark scheme's text tokens even in light
+mode; other surfaces follow the system theme. Use real account and sync facts,
+not sample names or counters. Technical status, pending approvals and recovery
+actions remain reachable through detail screens, with a visible root summary
+when attention is needed.
+
+Consent sheets are distinct from system prompts. Full disclosures scroll without
+truncation, and agree/decline actions remain reachable at large text sizes. Use
+native typography and at least 48dp Android / 44pt iOS touch targets. A toggle row
+has one accessible switch action, not nested competing toggle targets. Keep
+coral as graphic emphasis or a paired action fill, not normal-size body text.

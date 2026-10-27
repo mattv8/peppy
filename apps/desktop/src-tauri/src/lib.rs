@@ -82,6 +82,7 @@ use session::{open_session, DeferredHydration, DraftInput, Notifier, Session, Va
 use sync::{blocking, fetch_vault, vault_header};
 
 pub const STATE_EVENT: &str = "peppy://state";
+pub const DRAFT_EVENT: &str = "peppy://draft";
 static TRAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 const MAX_OPEN_MEDIA_CAPABILITIES: usize = 8;
 const MAX_OPEN_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
@@ -211,6 +212,22 @@ pub fn require_main(label: &str) -> BridgeResult<()> {
     } else {
         Err(window_error())
     }
+}
+
+fn require_mark_all_read_window(
+    label: &str,
+    visible: bool,
+    minimized: bool,
+    focused: bool,
+) -> BridgeResult<()> {
+    require_main(label)?;
+    if !visible || minimized || !focused {
+        return Err(BridgeError::new(
+            "window-not-visible",
+            "Messages can only be marked read from a visible focused window.",
+        ));
+    }
+    Ok(())
 }
 
 /// A composer may follow only a move that was returned to this same window in its active session.
@@ -1473,6 +1490,78 @@ async fn save_draft_for_window(
     result
 }
 
+/// Returns only windows allowed to receive a successful saved draft's sanitized view.
+/// Composer windows are restricted to their source conversation or their own
+/// locally observed move for this binding.
+fn draft_event_target_labels_after_save<'a>(
+    state: &AppState,
+    session: &Session,
+    save: &BridgeResult<DraftView>,
+    app_locked: bool,
+    session_current: bool,
+    labels: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    if app_locked || !session_current {
+        return Vec::new();
+    }
+    let Ok(draft) = save else {
+        return Vec::new();
+    };
+    let Ok(conversation) = ConversationId::from_str(&draft.conversation_id) else {
+        return Vec::new();
+    };
+    let Ok(scopes) = state.composer_scopes.lock() else {
+        return labels
+            .into_iter()
+            .filter(|label| *label == tray::MAIN)
+            .map(str::to_owned)
+            .collect();
+    };
+    labels
+        .into_iter()
+        .filter(|label| {
+            if *label == tray::MAIN {
+                return true;
+            }
+            let Some(source) = tray::composer_conversation(label) else {
+                return false;
+            };
+            composer_scope::effective_conversation(
+                source,
+                scopes.get(*label),
+                &session.binding,
+                source,
+            ) == Some(conversation)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn emit_saved_draft(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    session: &Session,
+    save: &BridgeResult<DraftView>,
+    session_current: bool,
+) {
+    let windows = app.webview_windows();
+    for label in draft_event_target_labels_after_save(
+        state,
+        session,
+        save,
+        state.app_locked.load(Ordering::Acquire),
+        session_current,
+        windows.keys().map(String::as_str),
+    ) {
+        if state.app_locked.load(Ordering::Acquire) {
+            break;
+        }
+        if let Ok(draft) = save {
+            let _ = app.emit_to(label, DRAFT_EVENT, draft);
+        }
+    }
+}
+
 #[tauri::command]
 async fn save_draft(
     window: tauri::WebviewWindow,
@@ -1481,19 +1570,30 @@ async fn save_draft(
 ) -> BridgeResult<DraftView> {
     // The lifecycle reservation permits only the already-open session for a captured webview
     // that still owes its update draft flush. It must not create or replace a session.
-    let session = if lifecycle::update_flush_pending(window.app_handle(), window.label()) {
-        state
+    let update_flush = lifecycle::update_flush_pending(window.app_handle(), window.label());
+    let (_operation, session) = if update_flush {
+        let session = state
             .session
             .lock()
             .await
             .clone()
-            .ok_or_else(BridgeError::no_session)?
+            .ok_or_else(BridgeError::no_session)?;
+        (None, session)
     } else {
         let operation = admit_update_operation(&state)?;
         let session = state.require_session_admitted(&operation).await?;
-        return save_draft_for_window(&state, window.label(), session, input).await;
+        (Some(operation), session)
     };
-    save_draft_for_window(&state, window.label(), session, input).await
+    let save = save_draft_for_window(&state, window.label(), session.clone(), input).await;
+    let session_current = save.is_ok() && session_is_current(&state, &session).await;
+    emit_saved_draft(
+        window.app_handle(),
+        &state,
+        &session,
+        &save,
+        session_current,
+    );
+    save
 }
 
 #[tauri::command]
@@ -1607,6 +1707,22 @@ async fn mark_seen(
         )?
     };
     blocking(move || session.mark_seen_scoped(&visible_message_ids, conversation)).await
+}
+
+#[tauri::command]
+async fn mark_all_read(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<String> {
+    require_mark_all_read_window(
+        window.label(),
+        window.is_visible().unwrap_or(false),
+        window.is_minimized().unwrap_or(true),
+        window.is_focused().unwrap_or(false),
+    )?;
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    blocking(move || session.mark_all_read()).await
 }
 
 #[tauri::command]
@@ -4289,6 +4405,7 @@ pub fn run() {
         discard_draft,
         send_draft,
         mark_seen,
+        mark_all_read,
         pick_attachments,
         retry_attachment,
         save_attachment,
@@ -4359,6 +4476,7 @@ pub fn run() {
         }
         let handler: fn(tauri::ipc::Invoke) -> bool = command_handler!(
             hosted::hosted_account,
+            hosted::hosted_session_renew,
             hosted::hosted_origin_url,
             hosted::hosted_sign_in,
             hosted::hosted_sign_out,

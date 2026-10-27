@@ -42,17 +42,16 @@ internal object ContactSyncHost {
         write = granted(context, Manifest.permission.WRITE_CONTACTS),
     )
 
-    /** Reconcile an already-granted read permission only while the app is in the foreground. */
+    /** Reconcile durable explicit consent only; permission changes never create consent. */
     fun onPermissionOrForeground(context: Context): Boolean {
         val app = context.applicationContext
         val prefs = ContactSyncPreferences(app)
         val readGranted = access(app).read
-        val promoted = prefs.promoteGrantedUnset(readGranted)
         val resumed = readGranted && prefs.enabled && !prefs.readAccessGranted
         prefs.readAccessGranted = readGranted
         ensureObserver(app)
-        if (promoted || resumed) GatewayScheduler.schedule(app)
-        return promoted || resumed
+        if (resumed) GatewayScheduler.schedule(app)
+        return resumed
     }
 
     private fun granted(context: Context, permission: String) =

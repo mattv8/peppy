@@ -13,16 +13,109 @@ pub trait SecretStore: Send + Sync {
     fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()>;
 }
 
-fn unavailable() -> BridgeError {
+#[derive(Clone, Copy)]
+enum SecureStoreOperation {
+    AccountRejected,
+    BundledRecordRead,
+    BundledRecordWrite,
+    KeyringEntry,
+    KeyringRead,
+    KeyringReadback,
+    KeyringVerify,
+    KeyringWrite,
+    LegacyRead,
+    LegacyWrite,
+    LockAcquire,
+    LockOpen,
+    LockPermissions,
+    PassthroughRead,
+    PassthroughWrite,
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    PlatformUnsupported,
+    RecordEncode,
+    RecordLimit,
+}
+
+impl SecureStoreOperation {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::AccountRejected => "account-rejected",
+            Self::BundledRecordRead => "bundled-record-read",
+            Self::BundledRecordWrite => "bundled-record-write",
+            Self::KeyringEntry => "keyring-entry",
+            Self::KeyringRead => "keyring-read",
+            Self::KeyringReadback => "keyring-readback",
+            Self::KeyringVerify => "keyring-verify",
+            Self::KeyringWrite => "keyring-write",
+            Self::LegacyRead => "legacy-read",
+            Self::LegacyWrite => "legacy-write",
+            Self::LockAcquire => "lock-acquire",
+            Self::LockOpen => "lock-open",
+            Self::LockPermissions => "lock-permissions",
+            Self::PassthroughRead => "passthrough-read",
+            Self::PassthroughWrite => "passthrough-write",
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            Self::PlatformUnsupported => "platform-unsupported",
+            Self::RecordEncode => "record-encode",
+            Self::RecordLimit => "record-limit",
+        }
+    }
+
+    fn from_unavailable_error(error: &BridgeError) -> Option<Self> {
+        const PREFIX: &str = "OS secure storage is unavailable or denied access during ";
+        const SUFFIX: &str = "; Peppy cannot safely continue.";
+
+        if error.code != "secure-store-unavailable" {
+            return None;
+        }
+        let token = error.message.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+        match token {
+            "account-rejected" => Some(Self::AccountRejected),
+            "bundled-record-read" => Some(Self::BundledRecordRead),
+            "bundled-record-write" => Some(Self::BundledRecordWrite),
+            "keyring-entry" => Some(Self::KeyringEntry),
+            "keyring-read" => Some(Self::KeyringRead),
+            "keyring-readback" => Some(Self::KeyringReadback),
+            "keyring-verify" => Some(Self::KeyringVerify),
+            "keyring-write" => Some(Self::KeyringWrite),
+            "legacy-read" => Some(Self::LegacyRead),
+            "legacy-write" => Some(Self::LegacyWrite),
+            "lock-acquire" => Some(Self::LockAcquire),
+            "lock-open" => Some(Self::LockOpen),
+            "lock-permissions" => Some(Self::LockPermissions),
+            "passthrough-read" => Some(Self::PassthroughRead),
+            "passthrough-write" => Some(Self::PassthroughWrite),
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+            "platform-unsupported" => Some(Self::PlatformUnsupported),
+            "record-encode" => Some(Self::RecordEncode),
+            "record-limit" => Some(Self::RecordLimit),
+            _ => None,
+        }
+    }
+}
+
+fn unavailable(operation: SecureStoreOperation) -> BridgeError {
     BridgeError::new(
         "secure-store-unavailable",
-        "OS secure storage is unavailable or denied access; Peppy cannot safely continue.",
+        format!(
+            "OS secure storage is unavailable or denied access during {}; Peppy cannot safely continue.",
+            operation.token()
+        ),
     )
+}
+
+fn unavailable_from_inner(error: BridgeError, fallback: SecureStoreOperation) -> BridgeError {
+    SecureStoreOperation::from_unavailable_error(&error)
+        .map(unavailable)
+        .unwrap_or_else(|| unavailable(fallback))
 }
 
 #[cfg(any(target_os = "macos", test))]
 mod bundled {
-    use super::{unavailable, BridgeError, BridgeResult, SecretStore, Zeroize, Zeroizing};
+    use super::{
+        unavailable, unavailable_from_inner, BridgeError, BridgeResult, SecretStore,
+        SecureStoreOperation, Zeroize, Zeroizing,
+    };
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Serialize};
     #[cfg(unix)]
@@ -146,12 +239,12 @@ mod bundled {
             Ok(bytes) => bytes,
             Err(_) => {
                 wire.entries.values_mut().for_each(Zeroize::zeroize);
-                return Err(unavailable());
+                return Err(unavailable(SecureStoreOperation::RecordEncode));
             }
         };
         wire.entries.values_mut().for_each(Zeroize::zeroize);
         if bytes.len() > MAX_RECORD_BYTES {
-            return Err(unavailable());
+            return Err(unavailable(SecureStoreOperation::RecordLimit));
         }
         Ok(Zeroizing::new(bytes))
     }
@@ -177,16 +270,21 @@ mod bundled {
             options.read(true).write(true).create(true);
             #[cfg(unix)]
             options.mode(0o600);
-            let file = options.open(&self.lock_path).map_err(|_| unavailable())?;
+            let file = options
+                .open(&self.lock_path)
+                .map_err(|_| unavailable(SecureStoreOperation::LockOpen))?;
             #[cfg(unix)]
             file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|_| unavailable())?;
-            file.lock().map_err(|_| unavailable())?;
+                .map_err(|_| unavailable(SecureStoreOperation::LockPermissions))?;
+            file.lock()
+                .map_err(|_| unavailable(SecureStoreOperation::LockAcquire))?;
             Ok(file)
         }
 
         fn read_fresh(&self, account: &Account) -> BridgeResult<CachedRecord> {
-            match self.inner.get(&account.record_account)? {
+            match self.inner.get(&account.record_account).map_err(|error| {
+                unavailable_from_inner(error, SecureStoreOperation::BundledRecordRead)
+            })? {
                 Some(bytes) => decode_record(&bytes)
                     .map(CachedRecord::Record)
                     .or(Ok(CachedRecord::Poisoned)),
@@ -230,14 +328,22 @@ mod bundled {
                     return Ok(());
                 }
                 if !from_legacy {
-                    match self.inner.get(&format!("db-key:v2:{}", account.scope))? {
+                    match self
+                        .inner
+                        .get(&format!("db-key:v2:{}", account.scope))
+                        .map_err(|error| {
+                            unavailable_from_inner(error, SecureStoreOperation::LegacyRead)
+                        })? {
                         Some(existing) if existing.as_slice() != value => {
                             return Err(database_key_conflict())
                         }
                         Some(_) => {}
                         None => self
                             .inner
-                            .set(&format!("db-key:v2:{}", account.scope), value)?,
+                            .set(&format!("db-key:v2:{}", account.scope), value)
+                            .map_err(|error| {
+                                unavailable_from_inner(error, SecureStoreOperation::LegacyWrite)
+                            })?,
                     }
                 }
             }
@@ -245,7 +351,11 @@ mod bundled {
                 .0
                 .insert(account.field.clone(), Zeroizing::new(value.to_vec()));
             let bytes = encode_record(&record)?;
-            self.inner.set(&account.record_account, &bytes)?;
+            self.inner
+                .set(&account.record_account, &bytes)
+                .map_err(|error| {
+                    unavailable_from_inner(error, SecureStoreOperation::BundledRecordWrite)
+                })?;
             self.cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -257,10 +367,12 @@ mod bundled {
     impl<S: SecretStore> SecretStore for BundledStore<S> {
         fn get(&self, account: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
             if account.starts_with("secrets:") {
-                return Err(unavailable());
+                return Err(unavailable(SecureStoreOperation::AccountRejected));
             }
             let Some(parsed) = parse_account(account) else {
-                return self.inner.get(account);
+                return self.inner.get(account).map_err(|error| {
+                    unavailable_from_inner(error, SecureStoreOperation::PassthroughRead)
+                });
             };
             let (found, poisoned) = {
                 let mut cache = self
@@ -297,7 +409,10 @@ mod bundled {
                     Ok(None)
                 };
             }
-            let legacy = self.inner.get(account)?;
+            let legacy = self
+                .inner
+                .get(account)
+                .map_err(|error| unavailable_from_inner(error, SecureStoreOperation::LegacyRead))?;
             if let Some(value) = &legacy {
                 if !poisoned {
                     let _ = self.write(&parsed, value, true);
@@ -311,11 +426,13 @@ mod bundled {
 
         fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()> {
             if account.starts_with("secrets:") {
-                return Err(unavailable());
+                return Err(unavailable(SecureStoreOperation::AccountRejected));
             }
             match parse_account(account) {
                 Some(parsed) => self.write(&parsed, secret, false),
-                None => self.inner.set(account, secret),
+                None => self.inner.set(account, secret).map_err(|error| {
+                    unavailable_from_inner(error, SecureStoreOperation::PassthroughWrite)
+                }),
             }
         }
     }
@@ -339,22 +456,30 @@ impl KeyringStore {
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl SecretStore for KeyringStore {
     fn get(&self, account: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
-        let entry = keyring::Entry::new(&self.service, account).map_err(|_| unavailable())?;
+        let entry = keyring::Entry::new(&self.service, account)
+            .map_err(|_| unavailable(SecureStoreOperation::KeyringEntry))?;
         match entry.get_secret() {
             Ok(secret) => Ok(Some(Zeroizing::new(secret))),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(unavailable()),
+            Err(_) => Err(unavailable(SecureStoreOperation::KeyringRead)),
         }
     }
     fn set(&self, account: &str, secret: &[u8]) -> BridgeResult<()> {
-        let entry = keyring::Entry::new(&self.service, account).map_err(|_| unavailable())?;
-        entry.set_secret(secret).map_err(|_| unavailable())?;
+        let entry = keyring::Entry::new(&self.service, account)
+            .map_err(|_| unavailable(SecureStoreOperation::KeyringEntry))?;
+        entry
+            .set_secret(secret)
+            .map_err(|_| unavailable(SecureStoreOperation::KeyringWrite))?;
         // Read back so a silently non-persistent store can never be mistaken for success.
-        let stored = Zeroizing::new(entry.get_secret().map_err(|_| unavailable())?);
+        let stored = Zeroizing::new(
+            entry
+                .get_secret()
+                .map_err(|_| unavailable(SecureStoreOperation::KeyringReadback))?,
+        );
         if stored.as_slice() == secret {
             Ok(())
         } else {
-            Err(unavailable())
+            Err(unavailable(SecureStoreOperation::KeyringVerify))
         }
     }
 }
@@ -362,16 +487,16 @@ impl SecretStore for KeyringStore {
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 impl SecretStore for KeyringStore {
     fn get(&self, _: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
-        Err(unavailable())
+        Err(unavailable(SecureStoreOperation::PlatformUnsupported))
     }
     fn set(&self, _: &str, _: &[u8]) -> BridgeResult<()> {
-        Err(unavailable())
+        Err(unavailable(SecureStoreOperation::PlatformUnsupported))
     }
 }
 
 #[cfg(test)]
 mod keyring_store_tests {
-    use super::KeyringStore;
+    use super::{unavailable, KeyringStore, SecureStoreOperation};
 
     #[test]
     fn configured_services_keep_development_credentials_separate() {
@@ -381,6 +506,24 @@ mod keyring_store_tests {
         assert_eq!(production.service, "org.peppy.desktop");
         assert_eq!(development.service, "org.peppy.desktop.dev");
         assert_ne!(production.service, development.service);
+    }
+
+    #[test]
+    fn keyring_diagnostics_use_distinct_fixed_categories() {
+        let entry = unavailable(SecureStoreOperation::KeyringEntry);
+        let read = unavailable(SecureStoreOperation::KeyringRead);
+
+        assert_eq!(entry.code, "secure-store-unavailable");
+        assert_eq!(read.code, "secure-store-unavailable");
+        assert_eq!(
+            entry.message,
+            "OS secure storage is unavailable or denied access during keyring-entry; Peppy cannot safely continue."
+        );
+        assert_eq!(
+            read.message,
+            "OS secure storage is unavailable or denied access during keyring-read; Peppy cannot safely continue."
+        );
+        assert_ne!(entry.message, read.message);
     }
 }
 
@@ -443,6 +586,41 @@ mod bundled_tests {
         }
     }
 
+    struct FailingStore;
+
+    impl SecretStore for FailingStore {
+        fn get(&self, _: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
+            Err(BridgeError::new(
+                "raw-store-error",
+                "private-account-and-raw-error",
+            ))
+        }
+
+        fn set(&self, _: &str, _: &[u8]) -> BridgeResult<()> {
+            Err(BridgeError::new(
+                "raw-store-error",
+                "private-account-and-raw-error",
+            ))
+        }
+    }
+
+    struct CategorizedFailingStore {
+        get_operation: Option<SecureStoreOperation>,
+        set_operation: Option<SecureStoreOperation>,
+    }
+
+    impl SecretStore for CategorizedFailingStore {
+        fn get(&self, _: &str) -> BridgeResult<Option<Zeroizing<Vec<u8>>>> {
+            self.get_operation
+                .map_or_else(|| Ok(None), |operation| Err(unavailable(operation)))
+        }
+
+        fn set(&self, _: &str, _: &[u8]) -> BridgeResult<()> {
+            self.set_operation
+                .map_or_else(|| Ok(()), |operation| Err(unavailable(operation)))
+        }
+    }
+
     fn account(field: &str) -> String {
         if let Some(epoch) = field.strip_prefix("key-cache:") {
             format!("key-cache:v2:{VAULT}:{DEVICE}:{epoch}")
@@ -450,7 +628,7 @@ mod bundled_tests {
             format!("{field}:v2:{VAULT}:{DEVICE}")
         }
     }
-    fn bundled(inner: SharedStore, path: PathBuf) -> BundledStore<SharedStore> {
+    fn bundled<S: SecretStore>(inner: S, path: PathBuf) -> BundledStore<S> {
         BundledStore::new(inner, path)
     }
 
@@ -761,6 +939,84 @@ mod bundled_tests {
             .get(&format!("secrets:v3:{VAULT}:{DEVICE}"))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn diagnostics_classify_failures_without_exposing_private_details() {
+        let directory = tempfile::tempdir().unwrap();
+        let raw_path = directory.path().join("private-lock-path");
+        drop(directory);
+        let raw_path_text = raw_path.to_string_lossy().into_owned();
+        let read_error = bundled(FailingStore, raw_path.clone())
+            .get(&account("credential"))
+            .unwrap_err();
+        let lock_error = bundled(SharedStore::default(), raw_path)
+            .set(&account("credential"), b"value")
+            .unwrap_err();
+
+        assert_eq!(read_error.code, "secure-store-unavailable");
+        assert_eq!(lock_error.code, "secure-store-unavailable");
+        assert_eq!(
+            read_error.message,
+            unavailable(SecureStoreOperation::BundledRecordRead).message
+        );
+        assert_eq!(
+            lock_error.message,
+            unavailable(SecureStoreOperation::LockOpen).message
+        );
+        assert_ne!(read_error.message, lock_error.message);
+        for error in [&read_error, &lock_error] {
+            assert!(!error.message.contains("private-account-and-raw-error"));
+            assert!(!error.message.contains(&raw_path_text));
+        }
+    }
+
+    #[test]
+    fn bundled_store_preserves_recognized_inner_categories_and_redacts_unknown_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let readback = bundled(
+            CategorizedFailingStore {
+                get_operation: Some(SecureStoreOperation::KeyringReadback),
+                set_operation: None,
+            },
+            dir.path().join("readback-lock"),
+        )
+        .get(&account("credential"))
+        .unwrap_err();
+        let write = bundled(
+            CategorizedFailingStore {
+                get_operation: None,
+                set_operation: Some(SecureStoreOperation::KeyringWrite),
+            },
+            dir.path().join("write-lock"),
+        )
+        .set(&account("credential"), b"value")
+        .unwrap_err();
+        let unknown = bundled(FailingStore, dir.path().join("unknown-lock"))
+            .get(&account("credential"))
+            .unwrap_err();
+
+        assert_eq!(
+            readback.message,
+            unavailable(SecureStoreOperation::KeyringReadback).message
+        );
+        assert_eq!(
+            write.message,
+            unavailable(SecureStoreOperation::KeyringWrite).message
+        );
+        assert_eq!(
+            unknown.message,
+            unavailable(SecureStoreOperation::BundledRecordRead).message
+        );
+        assert!(!unknown.message.contains("private-account-and-raw-error"));
+    }
+
+    #[test]
+    fn missing_bundled_entry_remains_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = bundled(SharedStore::default(), dir.path().join("lock"));
+
+        assert!(store.get(&account("credential")).unwrap().is_none());
     }
 
     #[test]

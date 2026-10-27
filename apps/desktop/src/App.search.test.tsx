@@ -362,13 +362,23 @@ describe("App search navigation", () => {
     render(<App hostKind="browser" />);
     await screen.findAllByText("Can you send over the estimate?");
     await activate({ kind: "message", conversationId: "conv-aurora", messageId: "locked-target", title: "Aurora", snippet: "target", timestamp: "1788435180000" });
-    snapshot = { ...snapshot, encryption: { ...snapshot.encryption, state: "locked" } };
+    vi.mocked(bridge.load_state).mockResolvedValueOnce({
+      ...structuredClone(snapshot),
+      connection: { state: "offline", origin: snapshot.connection.origin, errorCode: "app-locked" },
+      encryption: { state: "locked" },
+      conversations: [],
+      notifications: [],
+      activeConversationId: undefined,
+      draft: undefined,
+    });
     await act(async () => subscription?.());
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Search Peppy" })).toBeDisabled());
+    expect(screen.queryAllByText("Can you send over the estimate?")).toHaveLength(0);
 
     await act(async () => around.resolve({ conversationId: "conv-aurora", messages: [message("locked-target")], hasOlder: false, hasNewer: false }));
 
     expect(screen.queryByText("locked-target")).not.toBeInTheDocument();
+    expect(screen.queryAllByText("Can you send over the estimate?")).toHaveLength(0);
     expect(document.getElementById("detached-history-status")).not.toBeInTheDocument();
   });
 

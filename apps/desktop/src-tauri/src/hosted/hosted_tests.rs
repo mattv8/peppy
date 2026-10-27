@@ -32,6 +32,9 @@ struct FakeServerState {
     auth_attempt_calls: usize,
     auth_config_gate: Option<DeferredAuthConfig>,
     account_revoked: bool,
+    renew_response: FakeRenewalResponse,
+    renew_calls: usize,
+    renew_gate: Option<DeferredRenewal>,
     has_vault: bool,
     access: String,
     grant_expired: bool,
@@ -52,8 +55,27 @@ enum FakeAuthConfig {
     Status(u16),
 }
 
+#[derive(Clone, Copy)]
+enum FakeRenewalResponse {
+    Success,
+    Invalid200,
+    Error(StatusCode),
+}
+
+impl Default for FakeRenewalResponse {
+    fn default() -> Self {
+        Self::Success
+    }
+}
+
 #[derive(Clone)]
 struct DeferredAuthConfig {
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone)]
+struct DeferredRenewal {
     reached: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
@@ -66,6 +88,9 @@ impl Default for FakeServerState {
             auth_attempt_calls: 0,
             auth_config_gate: None,
             account_revoked: false,
+            renew_response: FakeRenewalResponse::Success,
+            renew_calls: 0,
+            renew_gate: None,
             has_vault: false,
             access: "read_write".into(),
             grant_expired: false,
@@ -136,6 +161,32 @@ async fn fake_account_handler(
         "operation_id": "550e8400-e29b-41d4-a716-446655440001"
     });
     (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn fake_session_renew_handler(
+    axum::extract::State(state): axum::extract::State<Arc<Mutex<FakeServerState>>>,
+) -> impl IntoResponse {
+    let (response, gate) = {
+        let mut state = state.lock().unwrap();
+        state.renew_calls += 1;
+        (state.renew_response, state.renew_gate.clone())
+    };
+    if let Some(gate) = gate {
+        gate.reached.notify_one();
+        gate.release.notified().await;
+    }
+    match response {
+        FakeRenewalResponse::Success => (
+            StatusCode::OK,
+            Json(json!({
+                "account_id": ACCOUNT,
+                "expires_in_seconds": peppy_hosted_api::SESSION_LIFETIME_SECONDS,
+            })),
+        )
+            .into_response(),
+        FakeRenewalResponse::Invalid200 => (StatusCode::OK, "{not-json").into_response(),
+        FakeRenewalResponse::Error(status) => status.into_response(),
+    }
 }
 
 async fn fake_provisioning_handler(
@@ -271,6 +322,10 @@ async fn start_fake_server(
         .route("/hosted/v1/auth/config", get(fake_auth_config_handler))
         .route("/hosted/v1/auth/attempts", post(fake_auth_attempt_handler))
         .route("/hosted/v1/account", get(fake_account_handler))
+        .route(
+            "/hosted/v1/auth/session/renew",
+            post(fake_session_renew_handler),
+        )
         .route("/hosted/v1/provisioning", post(fake_provisioning_handler))
         .route(
             "/hosted/v1/provisioning/complete",
@@ -776,7 +831,7 @@ async fn matching_401_tombstones_the_observed_session() {
         .unwrap();
 
     assert!(
-        super::tombstone_observed_session(&store, &hosted, HTTPS_ORIGIN, "old-bearer")
+        super::tombstone_observed_session(&store, &hosted, HTTPS_ORIGIN, "old-bearer", 0)
             .await
             .unwrap()
     );
@@ -805,7 +860,7 @@ async fn stale_401_does_not_tombstone_a_new_bearer_for_the_same_account() {
     .unwrap();
 
     assert!(
-        !super::tombstone_observed_session(&store, &hosted, HTTPS_ORIGIN, "old-bearer")
+        !super::tombstone_observed_session(&store, &hosted, HTTPS_ORIGIN, "old-bearer", 0)
             .await
             .unwrap()
     );
@@ -856,6 +911,300 @@ async fn expired_cached_session_is_replaced_by_the_current_stored_session() {
             .as_str(),
         "stored-bearer"
     );
+}
+
+#[tokio::test]
+async fn locally_expired_session_stays_available_for_authoritative_renewal() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    let key = super::session_key(&origin);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "old-bearer", super::now_unix().saturating_sub(1)),
+        )
+        .unwrap();
+
+    super::renew_session(&store, &hosted, &origin)
+        .await
+        .unwrap();
+
+    assert_eq!(server.lock().unwrap().renew_calls, 1);
+    assert!(
+        super::decode_session(&store.get(&key).unwrap().unwrap())
+            .unwrap()
+            .expires_at_unix
+            > super::now_unix()
+    );
+}
+
+#[tokio::test]
+async fn fresh_thirty_day_session_skips_renewal_post() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    store
+        .set(
+            &super::session_key(&origin),
+            &encode_session(
+                ACCOUNT,
+                "fresh-bearer",
+                super::now_unix() + u64::from(peppy_hosted_api::SESSION_LIFETIME_SECONDS),
+            ),
+        )
+        .unwrap();
+
+    super::renew_session(&store, &hosted, &origin)
+        .await
+        .unwrap();
+
+    assert_eq!(server.lock().unwrap().renew_calls, 0);
+}
+
+#[tokio::test]
+async fn concurrent_renewals_share_one_post() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let gate = DeferredRenewal {
+        reached: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let server = Arc::new(Mutex::new(FakeServerState {
+        renew_gate: Some(gate.clone()),
+        ..FakeServerState::default()
+    }));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    store
+        .set(
+            &super::session_key(&origin),
+            &encode_session(ACCOUNT, "old-bearer", super::now_unix() + 1),
+        )
+        .unwrap();
+
+    let first = super::renew_session(&store, &hosted, &origin);
+    tokio::pin!(first);
+    let reached = gate.reached.notified();
+    tokio::pin!(reached);
+    tokio::select! {
+        _ = &mut reached => {}
+        result = &mut first => panic!("first renewal completed before the deferred response: {result:?}"),
+    }
+    let second = super::renew_session(&store, &hosted, &origin);
+    gate.release.notify_one();
+    let (first, second) = tokio::join!(&mut first, second);
+
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(server.lock().unwrap().renew_calls, 1);
+}
+
+#[tokio::test]
+async fn malformed_renewal_response_preserves_bearer_and_uses_failure_backoff() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState {
+        renew_response: FakeRenewalResponse::Invalid200,
+        ..FakeServerState::default()
+    }));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    let key = super::session_key(&origin);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "original-bearer", super::now_unix() + 1),
+        )
+        .unwrap();
+
+    assert_eq!(
+        super::renew_session(&store, &hosted, &origin)
+            .await
+            .unwrap_err()
+            .code,
+        "server-response"
+    );
+    super::renew_session(&store, &hosted, &origin)
+        .await
+        .unwrap();
+
+    assert_eq!(server.lock().unwrap().renew_calls, 1);
+    assert_eq!(
+        super::decode_session(&store.get(&key).unwrap().unwrap())
+            .unwrap()
+            .bearer
+            .as_str(),
+        "original-bearer"
+    );
+}
+
+#[tokio::test]
+async fn renewal_write_failure_preserves_bearer_and_uses_failure_backoff() {
+    let store = ControlledStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState::default()));
+    let (origin, _handle) = start_fake_server(server.clone()).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    let key = super::session_key(&origin);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "original-bearer", super::now_unix() + 1),
+        )
+        .unwrap();
+    store.fail_writes_with_prefix(&key);
+
+    assert_eq!(
+        super::renew_session(&store, &hosted, &origin)
+            .await
+            .unwrap_err()
+            .code,
+        "secure-store-unavailable"
+    );
+    super::renew_session(&store, &hosted, &origin)
+        .await
+        .unwrap();
+
+    assert_eq!(server.lock().unwrap().renew_calls, 1);
+    assert_eq!(
+        super::decode_session(&store.value(&key).unwrap())
+            .unwrap()
+            .bearer
+            .as_str(),
+        "original-bearer"
+    );
+}
+
+#[tokio::test]
+async fn late_renewal_success_cannot_restore_a_signed_out_session() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let gate = DeferredRenewal {
+        reached: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let server = Arc::new(Mutex::new(FakeServerState {
+        renew_gate: Some(gate.clone()),
+        ..FakeServerState::default()
+    }));
+    let (origin, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    let key = super::session_key(&origin);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "old-bearer", super::now_unix() + 1),
+        )
+        .unwrap();
+
+    let renewal = super::renew_session(&store, &hosted, &origin);
+    tokio::pin!(renewal);
+    let reached = gate.reached.notified();
+    tokio::pin!(reached);
+    tokio::select! {
+        _ = &mut reached => {}
+        result = &mut renewal => panic!("renewal completed before the deferred response: {result:?}"),
+    }
+    super::tombstone_session(&store, &hosted, &origin)
+        .await
+        .unwrap();
+    gate.release.notify_one();
+    renewal.await.unwrap();
+
+    assert!(store
+        .get(&key)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
+    assert!(hosted.session.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn late_renewal_success_cannot_overwrite_a_same_account_replacement_bearer() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let gate = DeferredRenewal {
+        reached: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let server = Arc::new(Mutex::new(FakeServerState {
+        renew_gate: Some(gate.clone()),
+        ..FakeServerState::default()
+    }));
+    let (origin, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    let key = super::session_key(&origin);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "old-bearer", super::now_unix() + 1),
+        )
+        .unwrap();
+
+    let renewal = super::renew_session(&store, &hosted, &origin);
+    tokio::pin!(renewal);
+    let reached = gate.reached.notified();
+    tokio::pin!(reached);
+    tokio::select! {
+        _ = &mut reached => {}
+        result = &mut renewal => panic!("renewal completed before the deferred response: {result:?}"),
+    }
+    super::commit_sign_in_session(
+        &store,
+        &hosted,
+        &origin,
+        0,
+        HostedSessionRecord {
+            account_id: ACCOUNT.into(),
+            bearer: Zeroizing::new("replacement-bearer".into()),
+            expires_at_unix: super::now_unix() + 3600,
+        },
+    )
+    .await
+    .unwrap();
+    gate.release.notify_one();
+    renewal.await.unwrap();
+
+    assert_eq!(
+        super::decode_session(&store.get(&key).unwrap().unwrap())
+            .unwrap()
+            .bearer
+            .as_str(),
+        "replacement-bearer"
+    );
+}
+
+#[tokio::test]
+async fn renewal_401_only_tombstones_its_observed_bearer() {
+    let store = MemoryStore::default();
+    let hosted = HostedState::default();
+    let server = Arc::new(Mutex::new(FakeServerState {
+        renew_response: FakeRenewalResponse::Error(StatusCode::UNAUTHORIZED),
+        ..FakeServerState::default()
+    }));
+    let (origin, _handle) = start_fake_server(server).await;
+    hosted.base_override.lock().unwrap().replace(origin.clone());
+    let key = super::session_key(&origin);
+    store
+        .set(
+            &key,
+            &encode_session(ACCOUNT, "old-bearer", super::now_unix() + 1),
+        )
+        .unwrap();
+
+    let error = super::renew_session(&store, &hosted, &origin)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, "hosted-session-required");
+    assert!(store
+        .get(&key)
+        .unwrap()
+        .is_some_and(|value| value.is_empty()));
 }
 
 #[tokio::test]
@@ -2259,8 +2608,14 @@ async fn resume_with_an_expired_saved_grant_requests_a_new_one() {
 
 #[tokio::test]
 async fn expired_hosted_session_requires_sign_in_and_preserves_recovery_data() {
-    let (store, hosted, server, _vault, _account) =
-        resumable_fixture(FakeServerState::default(), false).await;
+    let (store, hosted, server, _vault, _account) = resumable_fixture(
+        FakeServerState {
+            account_revoked: true,
+            ..FakeServerState::default()
+        },
+        false,
+    )
+    .await;
     let expired_at = super::now_unix().saturating_sub(1);
     store
         .set(
@@ -2327,6 +2682,7 @@ async fn expired_hosted_session_requires_sign_in_and_preserves_recovery_data() {
         assert_eq!(server.complete_calls, 0);
     }
 
+    server.lock().unwrap().account_revoked = false;
     store
         .set(
             &super::session_key(HTTPS_ORIGIN),

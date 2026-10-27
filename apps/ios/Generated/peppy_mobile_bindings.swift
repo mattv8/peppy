@@ -10249,6 +10249,15 @@ public func parseHostedSession(json: String)throws  -> NativeHostedSession  {
     )
 })
 }
+public func parseHostedSessionRenewal(json: String, expectedAccountId: String)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_func_parse_hosted_session_renewal(
+        FfiConverterString.lower(json),
+        FfiConverterString.lower(expectedAccountId),uniffiCallStatus
+    )
+})
+}
 public func parsePushConfig(json: String)throws  -> NativePushConfig  {
     return try  FfiConverterTypeNativePushConfig_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
@@ -10380,6 +10389,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session() != 62352) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_func_parse_hosted_session_renewal() != 34969) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_func_parse_push_config() != 51462) {

@@ -120,6 +120,146 @@ import Testing
         #expect(requestCount.value == 0)
     }
 
+    @Test func userInteractionRenewsLocallyExpiredSession() async throws {
+        let store = InMemorySecureStore()
+        let accountID = UUID().uuidString.lowercased()
+        let bearer = "pst_" + String(repeating: "a", count: 64)
+        try store.upsert("hosted-account-session:https://peppy.pro", try JSONEncoder().encode(Stored(accountID: accountID, bearer: bearer, expiresAt: .distantPast)))
+        let requests = Locked([HTTPRequest]())
+        let transport = HostedTransport { request in
+            requests.withValue { $0.append(request) }
+            return response(request, 200, ["account_id": accountID, "expires_in_seconds": 2_592_000])
+        }
+        let client = try HostedAccountClient(transport: transport, secureStore: store)
+
+        try await client.renewSessionOnUserInteraction()
+
+        let request = try #require(requests.value.first)
+        #expect(request.method == "POST")
+        #expect(request.url.path == "/hosted/v1/auth/session/renew")
+        #expect(request.headers["Authorization"] == "Bearer \(bearer)")
+        let renewed = try #require(store.value("hosted-account-session:https://peppy.pro").flatMap { try? JSONDecoder().decode(Stored.self, from: $0) })
+        #expect(renewed.expiresAt > Date())
+    }
+
+    @Test func renewalUnauthorizedDeletesOnlyObservedSession() async throws {
+        let store = InMemorySecureStore()
+        let accountID = UUID().uuidString.lowercased()
+        let original = Stored(accountID: accountID, bearer: "pst_" + String(repeating: "a", count: 64), expiresAt: .distantPast)
+        try store.upsert("hosted-account-session:https://peppy.pro", try JSONEncoder().encode(original))
+        try store.upsert("hosted-provisioning:https://peppy.pro", Data("checkpoint".utf8))
+        let replacement = Stored(accountID: UUID().uuidString.lowercased(), bearer: "pst_" + String(repeating: "b", count: 64), expiresAt: Date(timeIntervalSinceNow: 300))
+        let transport = HostedTransport { request in
+            try! store.upsert("hosted-account-session:https://peppy.pro", try! JSONEncoder().encode(replacement))
+            return .init(status: 401, url: request.url, body: Data())
+        }
+        let client = try HostedAccountClient(transport: transport, secureStore: store)
+
+        await #expect(throws: CancellationError.self) { try await client.renewSessionOnUserInteraction() }
+
+        let saved = try #require(store.value("hosted-account-session:https://peppy.pro").flatMap { try? JSONDecoder().decode(Stored.self, from: $0) })
+        #expect(saved.bearer == replacement.bearer)
+        #expect(store.value("hosted-provisioning:https://peppy.pro") != nil)
+    }
+
+    @Test func userInteractionDoesNotRenewBeforeThrottleWindow() async throws {
+        let store = InMemorySecureStore()
+        let accountID = UUID().uuidString.lowercased()
+        try store.upsert("hosted-account-session:https://peppy.pro", try JSONEncoder().encode(Stored(accountID: accountID, bearer: "pst_" + String(repeating: "a", count: 64), expiresAt: Date(timeIntervalSinceNow: 2_592_000))))
+        let requests = Locked(0)
+        let transport = HostedTransport { request in
+            requests.withValue { $0 += 1 }
+            return .init(status: 503, url: request.url, body: Data())
+        }
+        let client = try HostedAccountClient(transport: transport, secureStore: store)
+
+        try await client.renewSessionOnUserInteraction()
+
+        #expect(requests.value == 0)
+    }
+
+    @Test func concurrentUserInteractionsShareOneRenewal() async throws {
+        let store = InMemorySecureStore()
+        let accountID = UUID().uuidString.lowercased()
+        try store.upsert("hosted-account-session:https://peppy.pro", try JSONEncoder().encode(Stored(accountID: accountID, bearer: "pst_" + String(repeating: "a", count: 64), expiresAt: .distantPast)))
+        let requests = Locked(0)
+        let transport = HostedTransport { request in
+            requests.withValue { $0 += 1 }
+            return response(request, 200, ["account_id": accountID, "expires_in_seconds": 2_592_000])
+        }
+        let client = try HostedAccountClient(transport: SlowTransport(inner: transport), secureStore: store)
+
+        async let first: Void = client.renewSessionOnUserInteraction()
+        async let second: Void = client.renewSessionOnUserInteraction()
+        try await first
+        try await second
+
+        #expect(requests.value == 1)
+    }
+
+    @Test func delayedRenewalCannotRestoreSessionAfterOtherClientSignsOut() async throws {
+        let store = InMemorySecureStore()
+        let accountID = UUID().uuidString.lowercased()
+        let bearer = "pst_" + String(repeating: "a", count: 64)
+        try store.upsert("hosted-account-session:https://peppy.pro", try JSONEncoder().encode(Stored(accountID: accountID, bearer: bearer, expiresAt: .distantPast)))
+        let gate = RenewalGate()
+        let transport = DelayedRenewalTransport(gate: gate) { request in
+            response(request, 200, ["account_id": accountID, "expires_in_seconds": 2_592_000])
+        }
+        let renewingClient = try HostedAccountClient(transport: transport, secureStore: store)
+        let signingOutClient = try HostedAccountClient(transport: transport, secureStore: store)
+
+        let renewal = Task { try await renewingClient.renewSessionOnUserInteraction() }
+        await gate.waitForRenewal()
+        do {
+            try await signingOutClient.signOut()
+            await gate.releaseRenewal()
+        } catch {
+            await gate.releaseRenewal()
+            throw error
+        }
+
+        await #expect(throws: CancellationError.self) { try await renewal.value }
+        #expect(store.value("hosted-account-session:https://peppy.pro") == nil)
+    }
+
+    @Test func delayedRenewalCannotRestoreSessionAfterOtherClientLogsIn() async throws {
+        let store = InMemorySecureStore()
+        let accountID = UUID().uuidString.lowercased()
+        let oldBearer = "pst_" + String(repeating: "a", count: 64)
+        let newBearer = "pst_" + String(repeating: "b", count: 64)
+        try store.upsert("hosted-account-session:https://peppy.pro", try JSONEncoder().encode(Stored(accountID: accountID, bearer: oldBearer, expiresAt: .distantPast)))
+        let gate = RenewalGate()
+        let transport = DelayedRenewalTransport(gate: gate) { request in
+            switch request.url.path {
+            case "/hosted/v1/auth/session/renew":
+                return response(request, 200, ["account_id": accountID, "expires_in_seconds": 2_592_000])
+            case "/hosted/v1/auth/session":
+                return response(request, 200, ["account_id": accountID, "session_token": newBearer, "expires_in_seconds": 2_592_000])
+            case "/hosted/v1/account":
+                return response(request, 200, ["account_id": accountID, "classification": "new", "entitlement": "active", "access": "read_write"])
+            default:
+                return .init(status: 503, url: request.url, body: Data())
+            }
+        }
+        let renewingClient = try HostedAccountClient(transport: transport, secureStore: store)
+        let loginClient = try HostedAccountClient(transport: transport, secureStore: store)
+
+        let renewal = Task { try await renewingClient.renewSessionOnUserInteraction() }
+        await gate.waitForRenewal()
+        do {
+            _ = try await loginClient.finishGoogleSignIn(attemptID: UUID().uuidString.lowercased(), idToken: "test-provider-token")
+            await gate.releaseRenewal()
+        } catch {
+            await gate.releaseRenewal()
+            throw error
+        }
+
+        await #expect(throws: CancellationError.self) { try await renewal.value }
+        let saved = try #require(store.value("hosted-account-session:https://peppy.pro").flatMap { try? JSONDecoder().decode(Stored.self, from: $0) })
+        #expect(saved.bearer == newBearer)
+    }
+
     @Test func signOutDoesNotDeleteNewerLogin() async throws {
         let store = InMemorySecureStore()
         let transport = HostedTransport()
@@ -157,6 +297,57 @@ import Testing
         // The newer login should still be there
         let stored = try #require(store.value("hosted-account-session:https://peppy.pro").flatMap { try? JSONDecoder().decode(Stored.self, from: $0) })
         #expect(stored.accountID != account1)
+    }
+
+    @Test func signOutDeletesCorruptSession() async throws {
+        let store = InMemorySecureStore()
+        try store.upsert("hosted-account-session:https://peppy.pro", Data("corrupt".utf8))
+        let client = try HostedAccountClient(transport: HostedTransport(), secureStore: store)
+
+        try await client.signOut()
+
+        #expect(store.value("hosted-account-session:https://peppy.pro") == nil)
+    }
+
+    @Test func signOutWithoutSessionDoesNotContactServer() async throws {
+        let requests = Locked(0)
+        let transport = HostedTransport { request in
+            requests.withValue { $0 += 1 }
+            return .init(status: 503, url: request.url, body: Data())
+        }
+        let client = try HostedAccountClient(transport: transport, secureStore: InMemorySecureStore())
+
+        try await client.signOut()
+
+        #expect(requests.value == 0)
+    }
+
+    @Test func signOutDeletesUnreadableSession() async throws {
+        let store = SignOutStore(readFailure: true)
+        let client = try HostedAccountClient(transport: HostedTransport(), secureStore: store)
+
+        try await client.signOut()
+
+        #expect(store.deleteCalls == 1)
+    }
+
+    @Test func userInteractionBacksOffBeforeRereadingUnreadableSession() async throws {
+        let store = SignOutStore(readFailure: true)
+        let client = try HostedAccountClient(transport: HostedTransport(), secureStore: store)
+
+        await #expect(throws: ClientError.self) { try await client.renewSessionOnUserInteraction() }
+        try await client.renewSessionOnUserInteraction()
+
+        #expect(store.readCalls == 1)
+    }
+
+    @Test func signOutPropagatesSessionDeleteFailure() async throws {
+        let store = SignOutStore(deleteFailure: true)
+        let client = try HostedAccountClient(transport: HostedTransport(), secureStore: store)
+
+        await #expect(throws: ClientError.self) { try await client.signOut() }
+
+        #expect(store.deleteCalls == 1)
     }
 
     @Test func canceledPrepareVaultCannotMutateCheckpoint() async throws {
@@ -413,5 +604,68 @@ private final class HostedTransport: HTTPTransport, @unchecked Sendable {
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         let reply = lock.withLock { self.reply }
         return reply(request)
+    }
+}
+
+private actor RenewalGate {
+    private var started = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func waitForRenewal() async {
+        if started { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+
+    func holdRenewal() async {
+        started = true
+        startWaiter?.resume()
+        startWaiter = nil
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func releaseRenewal() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private final class DelayedRenewalTransport: HTTPTransport, @unchecked Sendable {
+    let gate: RenewalGate
+    let reply: @Sendable (HTTPRequest) -> HTTPResponse
+
+    init(gate: RenewalGate, reply: @escaping @Sendable (HTTPRequest) -> HTTPResponse) {
+        self.gate = gate
+        self.reply = reply
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        if request.url.path == "/hosted/v1/auth/session/renew" { await gate.holdRenewal() }
+        return reply(request)
+    }
+}
+
+private final class SignOutStore: SecureStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private let readFailure: Bool
+    private let deleteFailure: Bool
+    private(set) var readCalls = 0
+    private(set) var deleteCalls = 0
+
+    init(readFailure: Bool = false, deleteFailure: Bool = false) {
+        self.readFailure = readFailure
+        self.deleteFailure = deleteFailure
+    }
+
+    func read(_ account: String) throws(ClientError) -> Data? {
+        lock.withLock { readCalls += 1 }
+        if readFailure { throw .secureStorage(status: -1) }
+        return nil
+    }
+    func addIfAbsent(_ account: String, _ data: Data) throws(ClientError) -> Bool { true }
+    func upsert(_ account: String, _ data: Data) throws(ClientError) {}
+    func delete(_ account: String) throws(ClientError) {
+        lock.withLock { deleteCalls += 1 }
+        if deleteFailure { throw .secureStorage(status: -1) }
     }
 }
