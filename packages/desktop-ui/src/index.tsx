@@ -887,7 +887,7 @@ export function ConversationList({
                 <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
                   <ContactAvatar {...(c.avatar ?? conversationAvatar({ id: c.id, name: c.name }))} size={36} className="avatar" />
                   <span className="conversation-copy">
-                    <b>{c.name}</b>
+                    <b title={c.name}>{c.name}</b>
                     <small>{c.preview}</small>
                   </span>
                   {c.unread > 0 && (
