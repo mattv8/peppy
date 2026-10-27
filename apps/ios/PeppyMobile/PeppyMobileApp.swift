@@ -32,11 +32,8 @@ struct DeviceView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @State private var passphrase = ""
-    @State private var showingSettings = false
     @State private var confirmingDisconnect = false
     @State private var devicePendingRemoval: DeviceRosterItem?
-    @State private var vaultDeleteText = ""
-    @State private var showingVaultDelete = false
     @State private var showingSelfHosted = false
     @State private var showingSelfHostedEnrollment = false
     @State private var showingPhoneEnrollment = false
@@ -45,7 +42,7 @@ struct DeviceView: View {
     @State private var showingHostedEnrollment = false
     @State private var enrollmentLoaded = false
     @State private var hostedAccountClient: HostedAccountClient?
-    @State private var selectedTab = "mirroring"
+    @State private var selectedTab = "sync"
 
     var body: some View {
         Group {
@@ -216,12 +213,9 @@ struct DeviceView: View {
 
     private var enrolledTabs: some View {
         TabView(selection: $selectedTab) {
-            mirroringTab.tabItem { Label { Text("peppy.mirroring", tableName: "Peppy") } icon: { Image(systemName: "app.badge") } }
-                .accessibilityIdentifier("tab-mirroring")
-                .tag("mirroring")
-            smsTab.tabItem { Label { Text("peppy.sms", tableName: "Peppy") } icon: { Image(systemName: "message") } }
-                .accessibilityIdentifier("tab-sms")
-                .tag("sms")
+            syncTab.tabItem { Label { Text("peppy.toggle_ios_sync_tab", tableName: "Peppy") } icon: { Image(systemName: "arrow.triangle.2.circlepath") } }
+                .accessibilityIdentifier("tab-sync")
+                .tag("sync")
             accountTab.tabItem { Label { Text("peppy.account", tableName: "Peppy") } icon: { Image(systemName: "person.crop.circle") } }
                 .accessibilityIdentifier("tab-account")
                 .tag("account")
@@ -233,7 +227,6 @@ struct DeviceView: View {
                 recordHostedAccountInteraction()
             }
         )
-        .sheet(isPresented: $showingSettings) { SettingsView(model: model) }
         .safeAreaInset(edge: .top, spacing: 0) {
             if model.serverReachability == .unavailable {
                 ServerOfflineBanner(colors: colors)
@@ -241,59 +234,71 @@ struct DeviceView: View {
         }
     }
 
-    private var mirroringTab: some View {
+    private var syncTab: some View {
         NavigationStack {
             Form {
+                Section { NativeHero(title: String(localized: "peppy.toggle_ios_sync_hero_title", table: "Peppy"), detail: String(localized: "peppy.help_ios_contacts_footer", table: "Peppy")) }
+                    .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).accessibilityIdentifier("sync-hero")
+                ContactsSection(model: model)
                 Section {
-                    LabeledContent("Notification mirroring", value: "Unavailable on iOS")
-                        .accessibilityValue("Unavailable")
-                        .accessibilityIdentifier("mirroring-ios-unavailable-row")
-                } header: {
-                    HStack {
-                        Text("Mirroring")
-                        InfoButton(topic: String(localized: "peppy.help_ios_mirroring_title", table: "Peppy"), title: String(localized: "peppy.help_ios_mirroring_title", table: "Peppy"), body: String(localized: "peppy.help_ios_mirroring_unavailable", table: "Peppy"), id: "info-mirroring-ios")
-                        Spacer()
-                    }
-                }.accessibilityIdentifier("mirroring-ios-section")
-            }.formStyle(.grouped).navigationTitle(Text("peppy.mirroring", tableName: "Peppy")).toolbar { settingsButton }
-        }
-    }
-
-    private var smsTab: some View {
-        NavigationStack {
-            Form {
-                syncSection
-                Section {
-                    LabeledContent("iOS carrier messaging", value: "Unavailable")
-                        .accessibilityValue("Unavailable").accessibilityIdentifier("carrier-status-row")
-                    ForEach(Array(model.telephony.blockers.enumerated()), id: \.offset) { index, blocker in
-                        Text(blocker.explanation).accessibilityIdentifier("carrier-blocker-\(index)")
-                    }
+                    NavigationLink { syncDetails } label: { Text("peppy.toggle_ios_sync_details", tableName: "Peppy") }
+                        .accessibilityIdentifier("sync-details-link")
+                    if model.activity == .syncing { ProgressView("Syncing…") }
                     if let pending = model.lastSync?.carrierCommandsNotExecuted, pending > 0 {
-                        Text("\(pending) send request(s) for this device are queued and will not be sent from iOS.")
-                            .accessibilityIdentifier("carrier-pending-commands")
+                        Text("\(pending) send request(s) need attention.")
+                            .foregroundStyle(colors.WarningText).accessibilityIdentifier("carrier-pending-summary")
                     }
                 } header: {
-                    HStack {
-                        Text("Carrier messaging")
-                        InfoButton(topic: String(localized: "peppy.help_ios_carrier_title", table: "Peppy"), title: String(localized: "peppy.help_ios_carrier_title", table: "Peppy"), body: String(localized: "peppy.help_ios_carrier_unavailable", table: "Peppy"), id: "info-carrier-ios")
-                        Spacer()
-                    }
-                }.accessibilityIdentifier("carrier-section")
+                    Text("peppy.toggle_ios_sync_status", tableName: "Peppy")
+                }.accessibilityIdentifier("sync-status-section")
                 Section {
                     LabeledContent("SMS mirroring", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("sms-mirroring-unavailable-row")
                     LabeledContent("MMS capture", value: "Unavailable on iOS")
                         .accessibilityValue("Unavailable").accessibilityIdentifier("mms-unavailable-row")
+                    HStack {
+                        LabeledContent("Notification mirroring", value: "Unavailable on iOS")
+                            .accessibilityValue("Unavailable").accessibilityIdentifier("mirroring-ios-unavailable-row")
+                        InfoButton(topic: String(localized: "peppy.help_ios_mirroring_title", table: "Peppy"), title: String(localized: "peppy.help_ios_mirroring_title", table: "Peppy"), body: String(localized: "peppy.help_ios_mirroring_unavailable", table: "Peppy"), id: "info-mirroring-ios")
+                    }
                 } header: {
                     HStack {
-                        Text("SMS and MMS")
+                        Text("peppy.toggle_ios_unavailable_title", tableName: "Peppy")
                         InfoButton(topic: String(localized: "peppy.help_ios_sms_title", table: "Peppy"), title: String(localized: "peppy.help_ios_sms_title", table: "Peppy"), body: String(localized: "peppy.help_ios_sms_unavailable", table: "Peppy"), id: "info-sms-ios")
                         Spacer()
                     }
+                }.accessibilityIdentifier("ios-unavailable-section")
+                if model.status.identity?.origin == "https://peppy.pro" { relaySection }
+                Link(destination: URL(string: "https://peppy.pro/privacy")!) { Text("peppy.privacy_policy", tableName: "Peppy") }
+                    .accessibilityIdentifier("sync-privacy-policy")
+                Text("peppy.privacy_policy_scope", tableName: "Peppy").font(.footnote)
+            }.formStyle(.grouped).navigationTitle(Text("peppy.toggle_ios_sync_tab", tableName: "Peppy"))
+        }.accessibilityIdentifier("sync-tab-screen")
+    }
+
+    private var syncDetails: some View {
+        Form {
+            syncSection
+            Section {
+                LabeledContent("iOS carrier messaging", value: "Unavailable")
+                    .accessibilityValue("Unavailable").accessibilityIdentifier("carrier-status-row")
+                ForEach(Array(model.telephony.blockers.enumerated()), id: \.offset) { index, blocker in
+                    Text(blocker.explanation).accessibilityIdentifier("carrier-blocker-\(index)")
                 }
-            }.formStyle(.grouped).navigationTitle(Text("peppy.sms", tableName: "Peppy")).toolbar { settingsButton }
-        }.accessibilityIdentifier("sms-tab-screen")
+                if let pending = model.lastSync?.carrierCommandsNotExecuted, pending > 0 {
+                    Text("\(pending) send request(s) for this device are queued and will not be sent from iOS.")
+                        .accessibilityIdentifier("carrier-pending-commands")
+                }
+            } header: {
+                HStack {
+                    Text("Carrier messaging")
+                    InfoButton(topic: String(localized: "peppy.help_ios_carrier_title", table: "Peppy"), title: String(localized: "peppy.help_ios_carrier_title", table: "Peppy"), body: String(localized: "peppy.help_ios_carrier_unavailable", table: "Peppy"), id: "info-carrier-ios")
+                    Spacer()
+                }
+            }.accessibilityIdentifier("carrier-section")
+        }
+        .navigationTitle(Text("peppy.toggle_ios_sync_details", tableName: "Peppy"))
+        .accessibilityIdentifier("sync-details-screen")
     }
 
     private var syncSection: some View {
@@ -313,27 +318,10 @@ struct DeviceView: View {
     private var accountTab: some View {
         NavigationStack {
             Form {
-                Section("Identity") {
-                    if let identity = model.status.identity {
-                        LabeledContent("Server", value: identity.origin).accessibilityIdentifier("status-server")
-                        LabeledContent("Vault", value: identity.vaultId).accessibilityIdentifier("status-vault-id")
-                        LabeledContent("Device", value: identity.deviceId).accessibilityIdentifier("status-device-id")
-                    }
-                    LabeledContent("Role", value: model.status.role ?? "unknown").accessibilityIdentifier("status-role")
-                    LabeledContent("Local database", value: model.status.databaseOpen ? "Open (encrypted)" : "Closed").accessibilityIdentifier("status-database")
-                    LabeledContent("Vault keys", value: model.status.keysUnlocked ? "Unlocked" : "Locked").accessibilityIdentifier("status-keys")
-                    if let count = model.status.conversations { LabeledContent("Conversations", value: "\(count)").accessibilityIdentifier("status-conversations") }
-                }.accessibilityIdentifier("status-section")
-                Section("Session") {
-                    Button("Refresh from server") {
-                        recordHostedAccountInteraction()
-                        Task { await model.refresh() }
-                    }
-                        .disabled(model.activity != .idle).accessibilityIdentifier("refresh-enrollment-button")
-                    Button("Disconnect this device…", role: .destructive) { confirmingDisconnect = true }
-                        .disabled(model.activity != .idle).accessibilityIdentifier("disconnect-button")
-                }
-                devicesSection
+                Section { NativeHero(title: String(localized: "peppy.toggle_ios_account_hero_title", table: "Peppy"), detail: accountFacts) }
+                    .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).accessibilityIdentifier("account-hero")
+                NavigationLink { accountDetails } label: { Text("peppy.devices", tableName: "Peppy") }
+                    .accessibilityIdentifier("account-devices-link")
                 if model.status.role == "owner", model.status.keysUnlocked {
                     Section {
                         Button {
@@ -350,8 +338,12 @@ struct DeviceView: View {
                     }
                     .accessibilityIdentifier("owner-phone-section")
                 }
-                if model.status.identity?.origin == "https://peppy.pro" { relaySection }
-                if model.status.role == "owner" { vaultSection }
+                NavigationLink { SettingsView(model: model) } label: { Text("peppy.settings", tableName: "Peppy") }
+                    .accessibilityIdentifier("account-settings-row")
+                Link(destination: URL(string: "https://peppy.pro/privacy")!) {
+                    Text("peppy.privacy_policy", tableName: "Peppy")
+                }
+                .accessibilityIdentifier("account-privacy-policy")
                 if let identity = model.status.identity, identity.origin == "https://peppy.pro" {
                     Section {
                         Link(destination: URL(string: "https://peppy.pro/account")!) {
@@ -361,7 +353,42 @@ struct DeviceView: View {
                 }
                 if let error = model.lastError { Text(error).foregroundStyle(colors.Error).accessibilityIdentifier("status-error") }
             }
-            .formStyle(.grouped).navigationTitle(Text("peppy.account", tableName: "Peppy")).toolbar { settingsButton }
+            .formStyle(.grouped).navigationTitle(Text("peppy.account", tableName: "Peppy"))
+        }.accessibilityIdentifier("account-tab-screen")
+    }
+
+    private var accountFacts: String {
+        guard let identity = model.status.identity else {
+            return String(localized: "peppy.toggle_ios_account_facts_unknown", table: "Peppy")
+        }
+        return "\(identity.origin)\n\(model.status.role ?? String(localized: "peppy.toggle_ios_role_unknown", table: "Peppy")) · \(identity.deviceId)"
+    }
+
+    private var accountDetails: some View {
+        Form {
+            Section("Identity") {
+                if let identity = model.status.identity {
+                    LabeledContent("Server", value: identity.origin).accessibilityIdentifier("status-server")
+                    LabeledContent("Vault", value: identity.vaultId).accessibilityIdentifier("status-vault-id")
+                    LabeledContent("Device", value: identity.deviceId).accessibilityIdentifier("status-device-id")
+                }
+                LabeledContent("Role", value: model.status.role ?? "unknown").accessibilityIdentifier("status-role")
+                LabeledContent("Local database", value: model.status.databaseOpen ? "Open (encrypted)" : "Closed").accessibilityIdentifier("status-database")
+                LabeledContent("Vault keys", value: model.status.keysUnlocked ? "Unlocked" : "Locked").accessibilityIdentifier("status-keys")
+                if let count = model.status.conversations { LabeledContent("Conversations", value: "\(count)").accessibilityIdentifier("status-conversations") }
+            }.accessibilityIdentifier("status-section")
+            Section("Session") {
+                Button("Refresh from server") {
+                    recordHostedAccountInteraction()
+                    Task { await model.refresh() }
+                }
+                    .disabled(model.activity != .idle).accessibilityIdentifier("refresh-enrollment-button")
+                Button("Disconnect this device…", role: .destructive) { confirmingDisconnect = true }
+                    .disabled(model.activity != .idle).accessibilityIdentifier("disconnect-button")
+            }
+            devicesSection
+        }
+        .formStyle(.grouped).navigationTitle(Text("peppy.devices", tableName: "Peppy"))
             .confirmationDialog("Disconnect this device?", isPresented: $confirmingDisconnect, titleVisibility: .visible) {
                 Button("Disconnect", role: .destructive) { Task { await model.disconnect() } }
                     .accessibilityIdentifier("confirm-disconnect-button")
@@ -378,22 +405,7 @@ struct DeviceView: View {
             } message: {
                 Text("This revokes the selected device's server credential and access.")
             }
-            .sheet(isPresented: $showingVaultDelete) {
-                NavigationStack {
-                    Form {
-                        Section("Type ERASE to confirm") {
-                            TextField("Type ERASE", text: $vaultDeleteText).autocorrectionDisabled()
-                                .accessibilityIdentifier("vault-delete-confirm-field")
-                            Button("Delete vault", role: .destructive) {
-                                Task { await model.deleteVault(); showingVaultDelete = false }
-                            }.disabled(vaultDeleteText != "ERASE" || model.activity != .idle)
-                                .accessibilityIdentifier("vault-delete-final-button")
-                        }
-                    }.navigationTitle("Delete vault?")
-                        .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { showingVaultDelete = false } } }
-                }
-            }
-        }.accessibilityIdentifier("account-tab-screen")
+        .accessibilityIdentifier("account-devices-screen")
     }
 
     private var devicesSection: some View {
@@ -426,10 +438,10 @@ struct DeviceView: View {
             HStack {
                 Text("peppy.wake_status_label", tableName: "Peppy")
                 Spacer()
-                Text(wakeStatusCopy)
+                Text(wakeStatusCopy, tableName: "Peppy")
             }
             .accessibilityIdentifier("relay-wake-status")
-            Text(wakeFooterCopy)
+            Text(wakeFooterCopy, tableName: "Peppy")
                 .font(.footnote).foregroundStyle(.secondary)
                 .accessibilityIdentifier("relay-wake-footer")
         } header: {
@@ -457,23 +469,6 @@ struct DeviceView: View {
         }
     }
 
-    private var vaultSection: some View {
-        Section("Vault") {
-            Button("Delete vault…", role: .destructive) { showingVaultDelete = true }
-                .accessibilityIdentifier("vault-delete-button")
-            Text("Vault deletion permanently removes server data and device access. Local encrypted data remains until uninstalled.")
-                .font(.footnote).foregroundStyle(.secondary)
-        }.accessibilityIdentifier("vault-section")
-    }
-
-    @ToolbarContentBuilder private var settingsButton: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
-            PeppyGlassSurface(colors: colors, cornerRadius: 16) {
-                Button { showingSettings = true } label: { Label { Text("peppy.settings", tableName: "Peppy") } icon: { Image(systemName: "gearshape") } }
-                    .padding(4)
-            }
-        }
-    }
 
     /// This is called only from visible controls/navigation, never scene lifecycle or sync work.
     private func recordHostedAccountInteraction() {
@@ -491,22 +486,12 @@ struct DeviceView: View {
 
 struct SettingsView: View {
     @Bindable var model: AppModel
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @State private var vaultDeleteText = ""
+    @State private var showingVaultDelete = false
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Phone settings") {
-                    LabeledContent("SMS capture", value: "Unavailable on iOS").accessibilityValue("Unavailable")
-                        .accessibilityIdentifier("settings-sms-capture-toggle")
-                    LabeledContent("MMS capture", value: "Unavailable on iOS").accessibilityValue("Unavailable")
-                        .accessibilityIdentifier("settings-mms-capture-toggle")
-                }
-                Section("Mirroring settings") {
-                    LabeledContent("Notification mirroring", value: "Unavailable on iOS").accessibilityValue("Unavailable")
-                        .accessibilityIdentifier("settings-mirroring-toggle")
-                }
+        Form {
                 if model.status.identity?.origin != "https://peppy.pro" {
                     Section("Wake relay") {
                         TextField("Operator relay HTTPS origin", text: $model.relayOrigin)
@@ -517,7 +502,6 @@ struct SettingsView: View {
                             .accessibilityIdentifier("relay-enable-button")
                     }.accessibilityIdentifier("relay-settings-section")
                 }
-                ContactsSection(model: model)
                 Section("About") {
                     LabeledContent("App version", value: "0.1")
                     if let origin = model.status.identity?.origin { LabeledContent("Server", value: origin) }
@@ -528,14 +512,48 @@ struct SettingsView: View {
                     Text("peppy.privacy_policy_scope", tableName: "Peppy")
                         .font(.footnote)
                 }
+                if model.status.role == "owner" {
+                    Section("Danger zone") {
+                        Button("Delete vault…", role: .destructive) { vaultDeleteText = ""; showingVaultDelete = true }
+                            .accessibilityIdentifier("vault-delete-button")
+                        Text("Vault deletion permanently removes server data and device access. Local encrypted data remains until uninstalled.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
             }.formStyle(.grouped).navigationTitle(Text("peppy.settings", tableName: "Peppy"))
-                .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } } }
-        }.accessibilityIdentifier("settings-screen")
+        .accessibilityIdentifier("settings-screen")
             .safeAreaInset(edge: .top, spacing: 0) {
                 if model.serverReachability == .unavailable {
                     ServerOfflineBanner(colors: PeppyTokens.colors(for: colorScheme), announcesTransition: false)
                 }
             }
+            .sheet(isPresented: $showingVaultDelete, onDismiss: { vaultDeleteText = "" }) {
+                NavigationStack { Form {
+                    Section("Type ERASE to confirm") {
+                        TextField("Type ERASE", text: $vaultDeleteText).autocorrectionDisabled().accessibilityIdentifier("vault-delete-confirm-field")
+                        Button("Delete vault", role: .destructive) { Task { await model.deleteVault(); showingVaultDelete = false } }
+                            .disabled(vaultDeleteText != "ERASE" || model.activity != .idle).accessibilityIdentifier("vault-delete-final-button")
+                    }
+                }.navigationTitle("Delete vault?").toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { vaultDeleteText = ""; showingVaultDelete = false } } } }
+            }
+    }
+}
+
+private struct NativeHero: View {
+    let title: String
+    let detail: String
+
+    var body: some View {
+        let dark = PeppyTokens.dark
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 18) {
+                Image(systemName: "iphone").font(.system(size: 42)).foregroundStyle(dark.Brand)
+                Image(systemName: "arrow.right").foregroundStyle(dark.Accent)
+                Image(systemName: "laptopcomputer").font(.system(size: 42)).foregroundStyle(dark.Accent)
+            }.accessibilityHidden(true)
+            Text(title).font(.title2.bold()).foregroundStyle(dark.TextStrong).accessibilityAddTraits(.isHeader)
+            Text(detail).foregroundStyle(dark.TextPrimary)
+        }.padding(24).frame(maxWidth: .infinity, alignment: .leading).background(dark.SurfaceChrome)
     }
 }
 

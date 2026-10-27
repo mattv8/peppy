@@ -11,6 +11,13 @@ internal enum class ContactSyncIntent { UNSET, ON, STOPPED }
 internal class ContactSyncPreferences(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
+    init {
+        // A former one-shot enable request must never survive into the consent-gated UI.
+        if (prefs.contains(LEGACY_START_AFTER_READ_GRANT)) {
+            prefs.edit().remove(LEGACY_START_AFTER_READ_GRANT).apply()
+        }
+    }
+
     /** The legacy key remains the durable local intent: absent is unset, false is stopped. */
     var enabled: Boolean
         get() = intent == ContactSyncIntent.ON
@@ -24,30 +31,13 @@ internal class ContactSyncPreferences(context: Context) {
             else -> ContactSyncIntent.STOPPED
         }
 
-    /**
-     * Foreground permission reconciliation only; workers never promote. A pending start from an
-     * explicit user start is consumed once by a read grant; otherwise only an unset intent promotes.
-     * A retirement pending from a locked stop never resumes, and an explicit stop stays stopped.
-     */
-    fun promoteGrantedUnset(readGranted: Boolean): Boolean {
-        if (!readGranted || retirePending) return false
-        if (startAfterReadGrant) {
-            enabled = true
-            startAfterReadGrant = false
-            return true
-        }
-        if (intent != ContactSyncIntent.UNSET) return false
-        enabled = true
-        return true
-    }
-
     var readPermissionRequested: Boolean
         get() = prefs.getBoolean(READ_PERMISSION_REQUESTED, false)
         set(value) { prefs.edit().putBoolean(READ_PERMISSION_REQUESTED, value).apply() }
 
-    var startAfterReadGrant: Boolean
-        get() = prefs.getBoolean(START_AFTER_READ_GRANT, false)
-        set(value) { prefs.edit().putBoolean(START_AFTER_READ_GRANT, value).apply() }
+    var writePermissionRequested: Boolean
+        get() = prefs.getBoolean(WRITE_PERMISSION_REQUESTED, false)
+        set(value) { prefs.edit().putBoolean(WRITE_PERMISSION_REQUESTED, value).apply() }
 
     var readAccessGranted: Boolean
         get() = prefs.getBoolean(READ_ACCESS_GRANTED, false)
@@ -66,8 +56,9 @@ internal class ContactSyncPreferences(context: Context) {
         const val ENABLED = "enabled"
         const val RETIRE_PENDING = "retire-pending"
         const val READ_PERMISSION_REQUESTED = "read-permission-requested"
-        const val START_AFTER_READ_GRANT = "start-after-read-grant"
+        const val WRITE_PERMISSION_REQUESTED = "write-permission-requested"
         const val READ_ACCESS_GRANTED = "read-access-granted"
+        const val LEGACY_START_AFTER_READ_GRANT = "start-after-read-grant"
     }
 }
 

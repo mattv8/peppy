@@ -10,24 +10,21 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class ContactSyncPreferencesTest {
-    @Test fun migratesLegacyValuesAndOnlyPromotesUnsetAfterReadAccess() {
+    @Test fun osReadAccessNeverPromotesUnsetConsent() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         context.getSharedPreferences("peppy-contact-sync", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val preferences = ContactSyncPreferences(context)
 
         assertEquals(ContactSyncIntent.UNSET, preferences.intent)
-        assertEquals(false, preferences.promoteGrantedUnset(readGranted = false))
-        assertEquals(true, preferences.promoteGrantedUnset(readGranted = true))
-        assertEquals(ContactSyncIntent.ON, preferences.intent)
+        assertEquals(ContactSyncIntent.UNSET, preferences.intent)
 
         preferences.enabled = false
         assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
-        assertEquals(false, preferences.promoteGrantedUnset(readGranted = true))
         assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
         preferences.readPermissionRequested = true
         assertEquals(true, preferences.readPermissionRequested)
-        preferences.startAfterReadGrant = true
-        assertEquals(true, preferences.startAfterReadGrant)
+        preferences.writePermissionRequested = true
+        assertEquals(true, preferences.writePermissionRequested)
         assertEquals(false, preferences.readAccessGranted)
         preferences.readAccessGranted = true
         assertEquals(true, preferences.readAccessGranted)
@@ -37,41 +34,37 @@ class ContactSyncPreferencesTest {
         assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
     }
 
-    @Test fun explicitStoppedStartDeniedThenSettingsGrantTurnsOnExactlyOnce() {
+    @Test fun explicitOnRemainsDurableAcrossPermissionReconciliation() {
         val preferences = freshPreferences()
-        preferences.enabled = false
-        preferences.startAfterReadGrant = true
-
-        assertEquals(false, preferences.promoteGrantedUnset(readGranted = false))
-        assertEquals(true, preferences.startAfterReadGrant)
-        assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
-
-        assertEquals(true, preferences.promoteGrantedUnset(readGranted = true))
-        assertEquals(false, preferences.startAfterReadGrant)
+        preferences.enabled = true
         assertEquals(ContactSyncIntent.ON, preferences.intent)
+    }
 
-        assertEquals(false, preferences.promoteGrantedUnset(readGranted = true))
-        assertEquals(ContactSyncIntent.ON, preferences.intent)
+    @Test fun clearsLegacyDeferredStartWithoutEnabling() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        context.getSharedPreferences("peppy-contact-sync", android.content.Context.MODE_PRIVATE)
+            .edit().clear().putBoolean("start-after-read-grant", true).commit()
+
+        val preferences = ContactSyncPreferences(context)
+
+        assertEquals(ContactSyncIntent.UNSET, preferences.intent)
+        assertEquals(false, context.getSharedPreferences("peppy-contact-sync", android.content.Context.MODE_PRIVATE)
+            .contains("start-after-read-grant"))
     }
 
     @Test fun passiveStoppedGrantDoesNotPromote() {
         val preferences = freshPreferences()
         preferences.enabled = false
 
-        assertEquals(false, preferences.promoteGrantedUnset(readGranted = true))
         assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
-        assertEquals(false, preferences.startAfterReadGrant)
     }
 
-    @Test fun retirePendingNeverResumesEvenWithStartFlag() {
+    @Test fun retirePendingStaysStopped() {
         val preferences = freshPreferences()
         preferences.enabled = false
-        preferences.startAfterReadGrant = true
         preferences.retirePending = true
 
-        assertEquals(false, preferences.promoteGrantedUnset(readGranted = true))
         assertEquals(ContactSyncIntent.STOPPED, preferences.intent)
-        assertEquals(true, preferences.startAfterReadGrant)
     }
 
     private fun freshPreferences(): ContactSyncPreferences {

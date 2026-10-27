@@ -41,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.peppy.mobile.ui.InfoButton
+import dev.peppy.mobile.ui.ConsentSheet
 
 internal sealed interface OwnNumberUiState {
     data class Detected(val number: String, val saved: String?) : OwnNumberUiState
@@ -80,6 +81,7 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
     var editing by remember(route) { mutableStateOf(false) }
     var message by remember(route) { mutableStateOf<String?>(null) }
     var permissionDenied by remember { mutableStateOf(false) }
+    var permissionDisclosure by remember { mutableStateOf(false) }
     var resumeRefresh by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -185,7 +187,7 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
                         if (permissionPermanentlyDenied && activity != null) {
                             activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.parse("package:${context.packageName}")))
                         } else {
-                            permissionRequest.launch(Manifest.permission.READ_PHONE_NUMBERS)
+                            permissionDisclosure = true
                         }
                     },
                     modifier = Modifier.testTag("mms-own-number-permission-button"),
@@ -229,6 +231,14 @@ internal fun OwnNumberSettings(context: Context, databaseOpen: Boolean, route: S
         }
         message?.let { Text(it, Modifier.testTag("mms-own-number-message"), style = MaterialTheme.typography.bodySmall) }
     }
+    if (permissionDisclosure) ConsentSheet(
+        title = stringResource(R.string.peppy_toggle_android_own_number_title),
+        body = stringResource(R.string.peppy_help_android_own_number),
+        tag = "mms-own-number-consent-sheet",
+        onDismiss = { permissionDisclosure = false },
+        onConfirm = { permissionDisclosure = false; permissionRequest.launch(Manifest.permission.READ_PHONE_NUMBERS) },
+        confirmLabel = stringResource(R.string.peppy_toggle_android_agree),
+    )
 }
 
 @Composable

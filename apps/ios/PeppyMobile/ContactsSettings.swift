@@ -23,31 +23,53 @@ struct ContactsState {
     var error: String?
 }
 
+private struct ContactsConsentSheet: View {
+    let onDismiss: () -> Void
+    let onAgree: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("peppy.toggle_ios_contacts_consent_title", tableName: "Peppy").font(.title2.bold())
+                        .accessibilityAddTraits(.isHeader).accessibilityIdentifier("contacts-consent-sheet-title")
+                    Text("peppy.contacts_description", tableName: "Peppy").accessibilityIdentifier("contacts-consent-sheet-body")
+                    Text("peppy.toggle_ios_contacts_data_flow", tableName: "Peppy")
+                    Text("peppy.toggle_ios_contacts_scope", tableName: "Peppy").accessibilityIdentifier("contacts-consent-sheet-next-step")
+                }.padding(24)
+            }
+            Divider()
+            VStack(spacing: 8) {
+                Button { onAgree() } label: { Text("peppy.toggle_ios_agree", tableName: "Peppy").frame(maxWidth: .infinity, minHeight: 44) }
+                    .buttonStyle(.borderedProminent).tint(PeppyTokens.colors(for: colorScheme).Accent).foregroundStyle(PeppyTokens.colors(for: colorScheme).AccentText)
+                    .accessibilityIdentifier("contacts-consent-sheet-confirm")
+                Button { onDismiss() } label: { Text("peppy.toggle_ios_not_now", tableName: "Peppy").frame(maxWidth: .infinity, minHeight: 44) }
+                    .buttonStyle(.bordered).accessibilityIdentifier("contacts-consent-sheet-dismiss")
+            }.padding(16)
+        }.accessibilityIdentifier("contacts-consent-sheet").presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+    }
+}
+
 extension AppModel {
     /// Reconciles local contact access and runs one bounded foreground pass when access starts.
     func refreshContacts() async {
         let previousAccess = contacts.access
         contacts.access = (try? await contactsProvider.access()) ?? .notDetermined
-        var preferences = contactsPreferences.load()
-        let promoted = status.databaseOpen && contacts.access.mayRead && preferences.intent == .unset
-        if promoted {
-            preferences.intent = .on
-            contactsPreferences.save(preferences)
-            scheduleContactsBackgroundWork()
-        }
+        let preferences = contactsPreferences.load()
         contacts.enabled = preferences.enabled
         contacts.intent = preferences.intent
         if status.databaseOpen { contacts.overview = (try? await session.contactsOverview()) ?? contacts.overview }
         let regainedAccess = !previousAccess.mayRead && contacts.access.mayRead && preferences.intent == .on && contacts.lastReport?.outcome == .noAccess
         let initialForegroundPass = !contacts.didReconcileAccess && contacts.access.mayRead && preferences.intent == .on
         contacts.didReconcileAccess = true
-        if status.databaseOpen, (initialForegroundPass || promoted || regainedAccess), contacts.enabled {
+        if status.databaseOpen, (initialForegroundPass || regainedAccess), contacts.enabled {
             await runContactsPass(.foreground)
         }
     }
 
     /// Explicit user action only: asks for Contacts access in the foreground, then opts in.
-    func enableContacts() async {
+    func enableContacts(afterAccess: @MainActor (Bool) -> Bool = { $0 }) async {
         contacts.working = true
         defer { contacts.working = false }
         #if canImport(Contacts)
@@ -56,12 +78,14 @@ extension AppModel {
         }
         #endif
         contacts.access = (try? await contactsProvider.access()) ?? .notDetermined
-        guard contacts.access.mayRead else { return }
+        guard contacts.access.mayRead, afterAccess(contacts.access.mayRead) else { return }
         var preferences = contactsPreferences.load()
         preferences.intent = .on
         contactsPreferences.save(preferences)
-        contacts.enabled = true
-        contacts.intent = .on
+        let readback = contactsPreferences.load()
+        contacts.enabled = readback.enabled
+        contacts.intent = readback.intent
+        guard readback.enabled else { return }
         scheduleContactsBackgroundWork()
         await runContactsPass(.foreground)
     }
@@ -157,30 +181,38 @@ extension AppModel {
 struct ContactsSection: View {
     let model: AppModel
     @State private var confirmingRetire = false
+    @State private var showingStopOptions = false
+    @State private var consent = ContactsConsentDecision()
+    @State private var showingConsent = false
+    @State private var awaitingSettingsReturn = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Section {
-            Text("peppy.help_ios_contacts_footer", tableName: "Peppy")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("contacts-data-flow-hint")
-            if !model.contacts.enabled {
-                disabledControls
-            } else {
-                accessRows
-                containerPicker
-                policyPicker
-                statusRows
-                approvals
-                Button("Pause contact sync") { model.pauseContacts() }
-                    .accessibilityIdentifier("contacts-pause-button")
-                Button("Retire this phone's contact book…", role: .destructive) { confirmingRetire = true }
-                    .disabled(model.contacts.working || model.contacts.overview.bookId == nil)
-                    .accessibilityIdentifier("contacts-retire-button")
+            Toggle(isOn: Binding(get: { model.contacts.enabled }, set: setEnabled)) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("peppy.toggle_ios_contacts_title", tableName: "Peppy")
+                    Text(model.contacts.enabled
+                         ? String(localized: "peppy.toggle_ios_contacts_on", table: "Peppy")
+                         : String(localized: "peppy.toggle_ios_contacts_off", table: "Peppy"))
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
-            if let error = model.contacts.error {
-                Text(error).foregroundStyle(.red).accessibilityIdentifier("contacts-error")
+            .disabled(model.contacts.working || !model.status.keysUnlocked || (model.contacts.access == .restricted && !model.contacts.enabled))
+            .accessibilityIdentifier("contacts-sync-row")
+            if model.contacts.access == .restricted {
+                Text("peppy.toggle_ios_contacts_restricted", tableName: "Peppy")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("contacts-restricted-reason")
             }
+            if let attention = attentionSummary {
+                Text(attention).foregroundStyle(PeppyTokens.colors(for: colorScheme).Error)
+                    .accessibilityIdentifier("contacts-attention-summary")
+            }
+            NavigationLink { contactsDetails } label: {
+                Text("peppy.toggle_ios_contacts_details", tableName: "Peppy")
+            }
+            .accessibilityIdentifier("contacts-details-link")
         } header: {
             HStack {
                 Text("Contacts")
@@ -190,40 +222,105 @@ struct ContactsSection: View {
         }
         .accessibilityIdentifier("contacts-section")
         .task(id: model.status.databaseOpen) { await model.refreshContacts() }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, awaitingSettingsReturn else { return }
+            awaitingSettingsReturn = false
+            Task { await completeSettingsReturn() }
+        }
+        .onDisappear { awaitingSettingsReturn = false; consent.cancel() }
+        .sheet(isPresented: $showingConsent, onDismiss: { if consent.phase == .disclosure { consent.cancel() } }) {
+            ContactsConsentSheet(onDismiss: { showingConsent = false }, onAgree: agree)
+        }
         .confirmationDialog("Retire this contact book?", isPresented: $confirmingRetire, titleVisibility: .visible) {
             Button("Retire", role: .destructive) { Task { await model.retireContacts() } }
                 .accessibilityIdentifier("contacts-confirm-retire-button")
         } message: {
             Text("Your other devices will show this book as retired. Contacts on this phone are not changed or deleted. Turning sync on again starts a new book.")
         }
-    }
-
-    @ViewBuilder private var disabledControls: some View {
-        switch model.contacts.access {
-        case .denied:
-            Text(String(localized: "peppy.contacts_access_denied", table: "Peppy")).font(.footnote).foregroundStyle(.secondary)
-            openSettingsButton
-        case .restricted:
-            Text("Contacts access is restricted by this iPhone.").font(.footnote).foregroundStyle(.secondary)
-        case .notDetermined:
-            Button(String(localized: "peppy.contacts_allow_access_ios", table: "Peppy")) { Task { await model.enableContacts() } }
-                .disabled(model.contacts.working || !model.status.keysUnlocked)
-                .accessibilityIdentifier("contacts-enable-button")
-        case .full, .limited:
-            Text(model.contacts.intent == .stopped ? String(localized: "peppy.contacts_stopped", table: "Peppy") : "Contact sync is ready to start.")
-                .font(.footnote).foregroundStyle(.secondary)
-            Button(model.contacts.intent == .stopped ? String(localized: "peppy.contacts_resume_ios", table: "Peppy") : String(localized: "peppy.contacts_start", table: "Peppy")) { Task { await model.enableContacts() } }
-                .disabled(model.contacts.working || !model.status.keysUnlocked)
-                .accessibilityIdentifier("contacts-enable-button")
+        .confirmationDialog("Turn off contact sync?", isPresented: $showingStopOptions, titleVisibility: .visible) {
+            Button { model.pauseContacts() } label: { Text("peppy.toggle_ios_contacts_pause", tableName: "Peppy") }
+                .accessibilityIdentifier("contacts-pause-button")
+            Button(role: .destructive) { confirmingRetire = true } label: { Text("peppy.toggle_ios_contacts_retire", tableName: "Peppy") }
+                .disabled(model.contacts.overview.bookId == nil)
+                .accessibilityIdentifier("contacts-retire-button")
+            Button(role: .cancel) {} label: { Text("peppy.cancel", tableName: "Peppy") }
+        } message: {
+            Text("peppy.toggle_ios_contacts_stop_consequences", tableName: "Peppy")
         }
     }
 
-    @ViewBuilder private var openSettingsButton: some View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var attentionSummary: String? {
+        if let error = model.contacts.error { return error }
+        if let report = model.contacts.lastReport, let outcome = Self.outcomeText(report) { return outcome }
+        if !model.contacts.overview.pending.isEmpty { return String(localized: "peppy.toggle_ios_contacts_status", table: "Peppy") }
+        return nil
+    }
+
+    private func setEnabled(_ enabled: Bool) {
+        if enabled { beginConsent() } else if model.contacts.enabled { showingStopOptions = true }
+    }
+
+    private var contactsDetails: some View {
+        Form {
+            Section {
+                accessRows
+                containerPicker
+                policyPicker
+                statusRows
+                approvals
+            } header: {
+                Text("peppy.toggle_ios_contacts_section", tableName: "Peppy")
+            }
+        }
+        .navigationTitle(Text("peppy.toggle_ios_contacts_title", tableName: "Peppy"))
+        .accessibilityIdentifier("contacts-details-screen")
+    }
+
+    private func beginConsent() {
+        guard !model.contacts.working, model.status.keysUnlocked else { return }
+        consent.requestEnable()
+        showingConsent = consent.phase == .disclosure
+    }
+
+    private func agree() {
+        showingConsent = false
+        switch consent.agree(access: model.contacts.access) {
+        case .apply:
+            Task { await applyIfCurrent() }
+        case .requestAccess:
+            Task {
+                await model.enableContacts(afterAccess: { granted in
+                    consent.accessResult(granted: granted) == .apply && model.status.keysUnlocked
+                })
+                consent.finish()
+            }
+        case .openSettings:
+            awaitingSettingsReturn = true
+            openAppSettings()
+        case .none:
+            break
+        }
+    }
+
+    private func applyIfCurrent() async {
+        guard consent.phase == .applying, model.status.keysUnlocked, !model.contacts.working else { return }
+        await model.enableContacts(afterAccess: { _ in consent.phase == .applying && model.status.keysUnlocked })
+        consent.finish()
+    }
+
+    private func completeSettingsReturn() async {
+        await model.refreshContacts()
+        guard model.status.keysUnlocked,
+              consent.settingsAccessResult(granted: model.contacts.access.mayRead) == .apply
+        else { return }
+        await applyIfCurrent()
+    }
+
+    private func openAppSettings() {
         #if canImport(UIKit)
-        Button("Manage access in Settings") {
-            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-        }
-        .accessibilityIdentifier("contacts-manage-access-button")
+        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
         #endif
     }
 
@@ -242,7 +339,7 @@ struct ContactsSection: View {
             .accessibilityIdentifier("contacts-manage-access-button")
             #endif
         case .notDetermined:
-            Button(String(localized: "peppy.contacts_allow_access_ios", table: "Peppy")) { Task { await model.enableContacts() } }
+            Button(String(localized: "peppy.contacts_allow_access_ios", table: "Peppy")) { beginConsent() }
                 .accessibilityIdentifier("contacts-request-access-button")
         case .full:
             EmptyView()
