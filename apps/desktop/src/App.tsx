@@ -114,6 +114,8 @@ import { GatewayPicker } from "./GatewayPicker";
 import { installHostedSessionRenewal } from "./hostedSessionRenewal";
 import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps } from "./layout-persistence";
 import { hiddenTimeIds } from "./timestamp-bursts";
+import { linkReactions, locateReactionTarget, NO_REACTIONS, ReactionBadges, ReactionNotice, ReactionSettings, useShowReactions, type ActorName, type ReactionNoticeInfo, type ReactionTargetResult } from "./reactions";
+import { normalizeReactionText, quoteMatches } from "./reactions/parse";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
 import {
   DraftStore,
@@ -150,6 +152,16 @@ export {
   type DraftSlot,
   type SaveOutcome,
 } from "./drafts/DraftStore";
+
+export const REACTION_HIGHLIGHT_MS = 1600;
+const REACTION_NOT_FOUND = "The original message couldn't be found.";
+const REACTION_LIMITED_SEARCH = "The original message wasn't found in the searched results. Load more history and try again.";
+const REACTION_INDEXING = "Search is still indexing. Try again shortly.";
+
+function reactionUnavailableCopy(result: ReactionTargetResult): string {
+  if (result.state === "indexing") return REACTION_INDEXING;
+  return result.state === "not-found" && result.exhausted === false ? REACTION_LIMITED_SEARCH : REACTION_NOT_FOUND;
+}
 
 /**
  * Display-only names for phone addresses. Stored conversation names, addresses and draft
@@ -568,6 +580,10 @@ function MessageMeta({ message, hideTime = false }: { message: MessageView; hide
   </div>;
 }
 
+function showsReactionNoticeMeta(message: MessageView): boolean {
+  return message.sender === "self" && Boolean(message.status && ["failed-before-submit", "failed-confirmed", "unknown"].includes(message.status));
+}
+
 function MessageList({
   conversation,
   loading,
@@ -598,6 +614,11 @@ function MessageList({
   onLoadNewer,
   onGoToLatest,
   compactTimestamps,
+  showReactions,
+  actorName,
+  onOpenReactionTarget,
+  pendingReactionId,
+  reactionFeedback,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -628,7 +649,13 @@ function MessageList({
   onLoadNewer(): void;
   onGoToLatest(): void;
   compactTimestamps: boolean;
+  showReactions: boolean;
+  actorName: ActorName;
+  onOpenReactionTarget(reaction: MessageView, notice: ReactionNoticeInfo): void;
+  pendingReactionId?: string;
+  reactionFeedback?: { reactionId: string; message: string };
 }) {
+  const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   if (loading)
     return (
       <div
@@ -684,7 +711,9 @@ function MessageList({
     const displayedTime = messageTime(message).displayedTime;
     return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
   };
-  const hiddenTimes = compactTimestamps ? hiddenTimeIds(conversation.messages, timeIsShown) : new Set<string>();
+  const hiddenTimes = compactTimestamps
+    ? hiddenTimeIds(conversation.messages, (message) => timeIsShown(message) && !(reactions.notices.has(message.id) && !showsReactionNoticeMeta(message)))
+    : new Set<string>();
   const hiddenTimeTitle = (message: MessageView) => hiddenTimes.has(message.id)
     ? formatDateTime(messageTime(message).displayedTime) ?? undefined
     : undefined;
@@ -714,8 +743,11 @@ function MessageList({
         {!conversation.messages.length && <p>Start the conversation.</p>}
         {groupMessages(conversation.messages).map((group) => {
           const message = group.messages[0];
+          const reactionNotice = reactions.notices.get(message.id);
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
           if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} />;
+          if (reactionNotice) return <ReactionNotice key={message.id} reaction={message} notice={reactionNotice} actorName={actorName} rowRef={(row) => registerRow(message.id, row)} onOpen={onOpenReactionTarget} busy={pendingReactionId === message.id} feedback={reactionFeedback?.reactionId === message.id ? reactionFeedback.message : undefined} meta={showsReactionNoticeMeta(message) ? <MessageMeta message={message} /> : undefined} />;
+          const badges = reactions.badges.get(message.id);
           return (
             <div
               key={message.id}
@@ -805,6 +837,7 @@ function MessageList({
                   );
                 })}
               </article>
+              {badges && <ReactionBadges messageId={message.id} badges={badges} actorName={actorName} />}
               <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} />
             </div>
           );
@@ -841,6 +874,8 @@ function SettingsView({
   onNavigationPosition,
   compactTimestamps,
   onCompactTimestamps,
+  showReactions,
+  onShowReactions,
   desktop,
   onStartAtLogin,
   notifications,
@@ -874,6 +909,8 @@ function SettingsView({
   onNavigationPosition(position: NavigationPosition): void;
   compactTimestamps: boolean;
   onCompactTimestamps(enabled: boolean): void;
+  showReactions: boolean;
+  onShowReactions(show: boolean): void;
   desktop?: DesktopSnapshot["desktop"];
   onStartAtLogin(enabled: boolean): Promise<void>;
   notifications: DesktopSnapshot["notifications"];
@@ -928,6 +965,7 @@ function SettingsView({
     { id: "sync", label: "Sync encryption" },
     { id: "devices", label: "Devices" },
     { id: "notifications", label: "Notifications" },
+    { id: "messages", label: "Messages" },
     { id: "theme", label: "Appearance" },
     ...(desktop?.startupSupported ? [{ id: "startup", label: "Startup" }] : []),
     ...(nativeUpdateHost ? [{ id: "updates", label: "Updates" }] : []),
@@ -1073,6 +1111,7 @@ function SettingsView({
         onOpenSettings={onOpenSettings}
         headsSupported={headsSupported}
       />
+      <ReactionSettings show={showReactions} onShow={onShowReactions} />
       <section id="settings-theme" className="settings-card" data-settings-section="theme">
         <h2>Appearance</h2>
         <p>Choose how Peppy follows your system appearance.</p>
@@ -1242,6 +1281,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   });
   const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
+  const [showReactions, setShowReactions] = useShowReactions();
+  const [pendingReactionId, setPendingReactionId] = useState<string>();
+  const [reactionFeedback, setReactionFeedback] = useState<{ reactionId: string; message: string }>();
   const [activeView, setActiveViewNow] = useState<"conversations" | "notifications" | "settings" | "contacts">(
     "conversations",
   );
@@ -1331,6 +1373,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const pendingSeenMessageIds = useRef(new Set<string>());
 
   const selectedRef = useRef(selected);
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const sendingRef = useRef(false);
@@ -1359,11 +1403,25 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [searchTargetId, setSearchTargetId] = useState<string>();
   const searchReadGate = useRef(false);
   const navigationGeneration = useRef(0);
+  const reactionNavigationGeneration = useRef(0);
+  const previousReactionViewRef = useRef(activeView);
   const recoveryRestoreSequence = useRef(0);
   const latestRequiredConversationRef = useRef<string | undefined>(undefined);
   const previousSearchSessionKeyRef = useRef("");
   const activateSearchHitHandlerRef = useRef<(hit: LocalSearchHit) => void>(() => undefined);
   const messageRows = useRef(new Map<string, HTMLElement>());
+  const reactionHighlightCleanupRef = useRef<() => void>(() => undefined);
+  useEffect(() => () => reactionHighlightCleanupRef.current(), []);
+  const invalidateReactionNavigation = () => {
+    reactionNavigationGeneration.current += 1;
+    setPendingReactionId(undefined);
+    setReactionFeedback(undefined);
+  };
+  useEffect(() => {
+    if (previousReactionViewRef.current === activeView) return;
+    previousReactionViewRef.current = activeView;
+    invalidateReactionNavigation();
+  }, [activeView]);
   useLayoutEffect(() => {
     const intent = conflictFocusIntentRef.current;
     if (!intent || intent !== storedConflict) return;
@@ -1617,6 +1675,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const choose = (key: string) => {
+    if (selectedRef.current !== key) invalidateReactionNavigation();
     if (detachedHistoryRef.current && detachedHistoryRef.current.conversationId !== key) clearDetached();
     loadSequence.current += 1;
     historySequence.current += 1;
@@ -2024,6 +2083,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
     if (previousSearchSessionKeyRef.current === renderedSearchSessionKey) return;
     previousSearchSessionKeyRef.current = renderedSearchSessionKey;
+    invalidateReactionNavigation();
     const detachedConversationId = detachedHistoryRef.current?.conversationId;
     clearDetached();
     setContactTarget(undefined);
@@ -3063,6 +3123,74 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const activeDisplay = active
     ? displayConversation(active.name, active.participants, resolution, active.id, active.recipientlessDraft)
     : undefined;
+  const actorName: ActorName = (actor) => {
+    if (actor.sender === "self") return "You";
+    if (!actor.senderAddress) return activeDisplay?.name ?? "Someone";
+    const contactName = resolution[actor.senderAddress]?.displayName;
+    if (contactName) return contactName;
+    const isSoleParticipant = active?.participants?.length === 1 && active.participants[0] === actor.senderAddress;
+    return isSoleParticipant && activeDisplay?.name ? activeDisplay.name : actor.senderAddress;
+  };
+  const revealReactionTarget = (row: HTMLElement) => {
+    reactionHighlightCleanupRef.current();
+    let addedTabIndex = false;
+    const clearHighlight = () => {
+      window.clearTimeout(timer);
+      row.removeAttribute("data-reaction-highlight");
+      if (addedTabIndex) row.removeAttribute("tabindex");
+      reactionHighlightCleanupRef.current = () => undefined;
+    };
+    row.scrollIntoView?.({ block: "center" });
+    row.setAttribute("data-reaction-highlight", "true");
+    if (!row.hasAttribute("tabindex")) {
+      row.setAttribute("tabindex", "-1");
+      addedTabIndex = true;
+    }
+    row.focus({ preventScroll: true });
+    // Keep this duration aligned with the reaction-highlight-fade keyframes.
+    const timer = window.setTimeout(clearHighlight, REACTION_HIGHLIGHT_MS);
+    reactionHighlightCleanupRef.current = clearHighlight;
+  };
+  const openReactionTarget = async (reaction: MessageView, notice: ReactionNoticeInfo) => {
+    const requestGeneration = ++reactionNavigationGeneration.current;
+    setPendingReactionId(undefined);
+    setReactionFeedback(undefined);
+    const loadedTarget = notice.targetId ? messageRows.current.get(notice.targetId) : undefined;
+    if (loadedTarget) return revealReactionTarget(loadedTarget);
+
+    const conversationId = selectedRef.current;
+    if (!conversationId) return;
+    const navigationAtStart = navigationGeneration.current;
+    const sessionAtStart = currentSearchSessionKey();
+    const isCurrent = () => mountedRef.current
+      && reactionNavigationGeneration.current === requestGeneration
+      && navigationGeneration.current === navigationAtStart
+      && currentSearchSessionKey() === sessionAtStart
+      && selectedRef.current === conversationId
+      && activeViewRef.current === "conversations";
+    setPendingReactionId(reaction.id);
+    try {
+      const result = await locateReactionTarget(searchLocal, { conversationId, reaction, notice });
+      if (!isCurrent()) return;
+      if (result.state === "candidate") {
+        const window = await bridge.load_message_window({ direction: "around", conversationId, messageId: result.hit.messageId });
+        if (!isCurrent()) return;
+        const target = window.conversationId === conversationId
+          ? window.messages.find((message) => message.id === result.hit.messageId)
+          : undefined;
+        if (!target || !quoteMatches(normalizeReactionText(target.body), notice)) {
+          setReactionFeedback({ reactionId: reaction.id, message: REACTION_NOT_FOUND });
+          return;
+        }
+      }
+      if (result.state === "found" || result.state === "candidate") activateSearchHit(result.hit);
+      else setReactionFeedback({ reactionId: reaction.id, message: reactionUnavailableCopy(result) });
+    } catch {
+      if (isCurrent()) setReactionFeedback({ reactionId: reaction.id, message: REACTION_NOT_FOUND });
+    } finally {
+      if (reactionNavigationGeneration.current === requestGeneration) setPendingReactionId(undefined);
+    }
+  };
   const title =
     activeDisplay?.name ??
     (isLocalDraftKey(slotKey)
@@ -3344,6 +3472,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onLoadNewer={() => void loadNewerMessages()}
       onGoToLatest={() => active?.id && void loadLatest(active.id).catch(reportAction("Could not load the latest messages: "))}
       compactTimestamps={compactTimestamps}
+      showReactions={showReactions}
+      actorName={actorName}
+      onOpenReactionTarget={(reaction, notice) => { void openReactionTarget(reaction, notice); }}
+      pendingReactionId={pendingReactionId}
+      reactionFeedback={reactionFeedback}
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
@@ -3702,6 +3835,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onNavigationPosition={changeNavigationPosition}
               compactTimestamps={compactTimestamps}
               onCompactTimestamps={changeCompactTimestamps}
+              showReactions={showReactions}
+              onShowReactions={setShowReactions}
               desktop={snapshot?.desktop}
               onStartAtLogin={async enabled => {
                 try { await bridge.set_start_at_login(enabled); await refresh(); }

@@ -1,0 +1,31 @@
+.reaction-badges {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: min(76%, 620px);
+  min-width: 0;
+  margin: -10px 8px 0;
+}
+.reaction-badge { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border: 1px solid var(--peppy-border-strong); border-radius: var(--peppy-radius-pill); background: var(--peppy-surface-widget); color: var(--peppy-text-primary); white-space: nowrap; }
+.reaction-emoji, .reaction-notice-emoji { font-family: var(--peppy-font-body), "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+.reaction-emoji { font-size: 13px; line-height: 20px; }
+.reaction-count { color: var(--peppy-text-secondary); font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; }
+.reaction-notice-row { align-items: center; margin-bottom: 8px; }
+.reaction-notice { display: block; max-width: min(90%, 620px); min-width: 0; padding: 3px 8px; border: 0; border-radius: var(--peppy-radius-sm); background: none; color: var(--peppy-text-secondary); font: inherit; font-size: 12px; line-height: 1.4; text-align: center; cursor: pointer; }
+.reaction-notice-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.reaction-notice-actor { color: var(--peppy-text-primary); font-weight: 700; }
+.reaction-notice-emoji { font-size: 14px; line-height: 1; }
+.reaction-notice-quote { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; }
+.reaction-notice:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.reaction-notice:hover .reaction-notice-quote { text-decoration-color: currentColor; }
+.reaction-notice:active { background: var(--peppy-surface-active); }
+.reaction-notice:focus-visible { outline: 2px solid var(--peppy-focus); outline-offset: 2px; }
+.reaction-notice-row .message-meta { align-self: center; justify-content: center; }
+.reaction-notice-feedback { max-width: min(90%, 620px); color: var(--peppy-warning-text); font-size: 12px; line-height: 1.4; text-align: center; }
+.reaction-notice[aria-busy="true"] { opacity: .7; cursor: progress; }
+[data-reaction-highlight="true"] { outline: 2px solid var(--peppy-focus); outline-offset: 3px; animation: reaction-highlight-fade 1600ms var(--peppy-ease-out) forwards; }
+@keyframes reaction-highlight-fade { 0%, 70% { outline-color: var(--peppy-focus); } 100% { outline-color: transparent; } }
+@media (pointer: coarse) { .reaction-notice { min-height: 32px; } }
+@media (forced-colors: active) { .reaction-notice { color: CanvasText; } .reaction-notice:hover { background: Canvas; outline: 1px solid Highlight; } }
