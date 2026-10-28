@@ -1,12 +1,12 @@
-//! Per-desktop notification policy. This module deliberately owns no synchronized content: core
-//! supplies live-only banner candidates and the UI receives the sanitized snapshot separately.
+//! Per-desktop banner delivery. Preferences are vault state owned by core; the legacy
+//! per-installation file seeds at most one vault before it is retired.
 use crate::{
+    credentials::Binding,
     error::{BridgeError, BridgeResult},
-    fsutil,
     session::Session,
     tray, AppState,
 };
-use peppy_client_core::BannerCandidate;
+use peppy_client_core::{BannerCandidate, Client};
 pub use peppy_desktop_api::{NotificationPreferences, Preview};
 use serde::Deserialize;
 use std::{
@@ -41,8 +41,10 @@ pub struct NotificationContext {
 }
 
 pub struct NotificationSettings {
+    root: PathBuf,
     path: PathBuf,
-    preferences: Mutex<NotificationPreferences>,
+    /// Serializes legacy claim, core adoption, and retirement across snapshot and banner reads.
+    migration_lock: Mutex<()>,
     pub context: Mutex<NotificationContext>,
     /// Serializes core queue read/post/ack without holding the application/session mutex.
     drain_lock: Mutex<()>,
@@ -55,46 +57,147 @@ struct BannerDrainState {
     trailing: bool,
 }
 
+#[derive(Clone, Copy)]
+pub enum PreferenceRead {
+    Snapshot,
+    Delivery,
+}
+
 impl NotificationSettings {
     pub fn load(root: &Path) -> Self {
         let path = root.join(PREFERENCES_FILE);
-        let preferences = fs::metadata(&path)
-            .ok()
-            .filter(|metadata| metadata.len() <= MAX_PREFERENCES_BYTES)
-            .and_then(|_| fs::read(&path).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
         Self {
+            root: root.to_owned(),
             path,
-            preferences: Mutex::new(preferences),
+            migration_lock: Mutex::new(()),
             context: Mutex::new(NotificationContext::default()),
             drain_lock: Mutex::new(()),
             banner_drain: Mutex::new(BannerDrainState::default()),
         }
     }
 
-    pub fn preferences(&self) -> NotificationPreferences {
-        self.preferences
+    /// Resolves the vault value and performs a crash-safe, vault-bound legacy adoption.
+    ///
+    /// The legacy filename is renamed into the binding's private data directory before core sees
+    /// it. A restart can therefore retry only that binding; another vault cannot race a clone.
+    pub fn notification_preferences(
+        &self,
+        client: &Client,
+        binding: &Binding,
+        read: PreferenceRead,
+    ) -> BridgeResult<(NotificationPreferences, bool)> {
+        let _migration = self
+            .migration_lock
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let current = client
+            .notification_preferences()
+            .map_err(crate::error::core_error)?;
+        if let Some(preferences) = current {
+            if let Err(error) = self.retire_legacy_after_established_value(binding) {
+                eprintln!(
+                    "peppy: notification preference legacy cleanup failed: {}",
+                    error.code
+                );
+            }
+            return Ok((preferences, false));
+        }
+
+        let key_status = client.key_status().map_err(crate::error::core_error)?;
+        let unlocked = key_status
+            .active_epoch
+            .is_some_and(|epoch| key_status.unlocked_epochs.contains(&epoch));
+        if !unlocked {
+            return self.unresolved_preferences(binding, read);
+        }
+
+        let Some(legacy) = self.claim_legacy(binding)? else {
+            return Ok((NotificationPreferences::default(), false));
+        };
+        let adopted = client
+            .adopt_legacy_notification_preferences(legacy)
+            .map_err(crate::error::core_error)?;
+        if adopted {
+            self.retire_claim(binding)?;
+            return Ok((
+                client
+                    .notification_preferences()
+                    .map_err(crate::error::core_error)?
+                    .unwrap_or_default(),
+                true,
+            ));
+        }
+        if let Some(preferences) = client
+            .notification_preferences()
+            .map_err(crate::error::core_error)?
+        {
+            self.retire_claim(binding)?;
+            return Ok((preferences, false));
+        }
+        self.unresolved_preferences(binding, read)
     }
 
-    pub fn set_preferences(&self, preferences: NotificationPreferences) -> BridgeResult<()> {
-        let mut write = self.preferences.lock().unwrap_or_else(|p| p.into_inner());
-        let bytes = serde_json::to_vec(&preferences).map_err(|_| {
-            BridgeError::new(
-                "notification-preferences",
-                "Could not save notification preferences.",
-            )
-        })?;
-        fsutil::write_private_atomic(&self.path, &bytes).map_err(|_| {
-            BridgeError::new(
-                "notification-preferences",
-                "Could not save notification preferences.",
-            )
-        })?;
-        *write = preferences;
+    pub(crate) fn claim_path(&self, binding: &Binding) -> PathBuf {
+        binding
+            .data_dir(&self.root)
+            .join("notification-preferences.legacy.json")
+    }
+
+    fn pending_legacy(&self, binding: &Binding) -> BridgeResult<bool> {
+        Ok(read_claimed_legacy(&self.claim_path(binding))?.is_some()
+            || read_unclaimed_legacy(&self.path).is_some())
+    }
+
+    fn unresolved_preferences(
+        &self,
+        binding: &Binding,
+        read: PreferenceRead,
+    ) -> BridgeResult<(NotificationPreferences, bool)> {
+        if matches!(read, PreferenceRead::Delivery) && self.pending_legacy(binding)? {
+            return Err(legacy_file_error());
+        }
+        Ok((NotificationPreferences::default(), false))
+    }
+
+    fn claim_legacy(&self, binding: &Binding) -> BridgeResult<Option<NotificationPreferences>> {
+        let claim = self.claim_path(binding);
+        if let Some(preferences) = read_claimed_legacy(&claim)? {
+            return Ok(Some(preferences));
+        }
+        if claim.exists() {
+            return Err(legacy_file_error());
+        }
+        if read_unclaimed_legacy(&self.path).is_none() {
+            return Ok(None);
+        }
+        match fs::rename(&self.path, &claim) {
+            Ok(()) => {
+                sync_parent(&self.path)?;
+                sync_parent(&claim)?;
+                read_claimed_legacy(&claim)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::metadata(&self.path) {
+                    Err(source_error) if source_error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(None)
+                    }
+                    _ => Err(legacy_file_error()),
+                }
+            }
+            Err(_) => Err(legacy_file_error()),
+        }
+    }
+
+    fn retire_claim(&self, binding: &Binding) -> BridgeResult<()> {
+        let claim = self.claim_path(binding);
+        fs::remove_file(&claim).map_err(|_| legacy_file_error())?;
+        sync_parent(&claim)
+    }
+
+    fn retire_legacy_after_established_value(&self, binding: &Binding) -> BridgeResult<()> {
+        if self.claim_legacy(binding)?.is_some() {
+            self.retire_claim(binding)?;
+        }
         Ok(())
     }
 
@@ -128,6 +231,51 @@ impl NotificationSettings {
             false
         }
     }
+}
+
+fn read_unclaimed_legacy(path: &Path) -> Option<NotificationPreferences> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return None,
+    };
+    if !metadata.is_file() || metadata.len() > MAX_PREFERENCES_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&fs::read(path).ok()?).ok().filter(
+        |preferences: &NotificationPreferences| preferences != &NotificationPreferences::default(),
+    )
+}
+
+fn read_claimed_legacy(path: &Path) -> BridgeResult<Option<NotificationPreferences>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(legacy_file_error()),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_PREFERENCES_BYTES {
+        return Err(legacy_file_error());
+    }
+    let preferences = serde_json::from_slice(&fs::read(path).map_err(|_| legacy_file_error())?)
+        .map_err(|_| legacy_file_error())?;
+    if preferences == NotificationPreferences::default() {
+        return Err(legacy_file_error());
+    }
+    Ok(Some(preferences))
+}
+
+fn sync_parent(path: &Path) -> BridgeResult<()> {
+    #[cfg(unix)]
+    fs::File::open(path.parent().expect("notification preferences parent"))
+        .and_then(|parent| parent.sync_all())
+        .map_err(|_| legacy_file_error())?;
+    Ok(())
+}
+
+fn legacy_file_error() -> BridgeError {
+    BridgeError::new(
+        "notification-preferences",
+        "Could not migrate notification preferences.",
+    )
 }
 
 fn stable_id(candidate: &BannerCandidate) -> i32 {
@@ -225,7 +373,7 @@ pub fn drain_banner_candidates(
         .drain_lock
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let mut preferences = settings.preferences();
+    let mut preferences = session.delivery_notification_preferences(settings)?;
     if app
         .state::<AppState>()
         .app_locked
@@ -356,32 +504,103 @@ pub fn drain_banner_candidates(
 mod tests {
     use super::*;
 
+    fn binding(vault_id: &str) -> Binding {
+        Binding {
+            origin: "https://example.test".into(),
+            vault_id: vault_id.into(),
+            device_id: "device".into(),
+        }
+    }
+
     #[test]
-    fn preferences_default_and_persist_privately() {
+    fn legacy_file_is_read_only_adoption_input() {
         let dir = tempfile::tempdir().unwrap();
+        let preferences = NotificationPreferences {
+            message_banners: false,
+            mirrored_banners: true,
+            preview: Preview::Hidden,
+            ..NotificationPreferences::default()
+        };
+        fs::write(
+            dir.path().join(PREFERENCES_FILE),
+            serde_json::to_vec(&preferences).unwrap(),
+        )
+        .unwrap();
         let settings = NotificationSettings::load(dir.path());
-        assert_eq!(settings.preferences(), NotificationPreferences::default());
-        settings
-            .set_preferences(NotificationPreferences {
-                message_banners: false,
-                mirrored_banners: true,
-                preview: Preview::Hidden,
-                ..NotificationPreferences::default()
-            })
-            .unwrap();
-        assert_eq!(
-            NotificationSettings::load(dir.path()).preferences().preview,
-            Preview::Hidden
-        );
-        #[cfg(unix)]
-        assert_eq!(
-            std::os::unix::fs::PermissionsExt::mode(
-                &fs::metadata(dir.path().join(PREFERENCES_FILE))
-                    .unwrap()
-                    .permissions()
-            ) & 0o777,
-            0o600
-        );
+        let vault = binding("vault-a");
+        fs::create_dir_all(vault.data_dir(dir.path())).unwrap();
+        assert_eq!(settings.claim_legacy(&vault).unwrap(), Some(preferences));
+        assert!(!dir.path().join(PREFERENCES_FILE).exists());
+        assert!(settings.claim_path(&vault).exists());
+    }
+
+    #[test]
+    fn legacy_claim_is_vault_bound_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = binding("vault-a");
+        let second = binding("vault-b");
+        fs::create_dir_all(first.data_dir(dir.path())).unwrap();
+        fs::create_dir_all(second.data_dir(dir.path())).unwrap();
+        fs::write(
+            dir.path().join(PREFERENCES_FILE),
+            br#"{"messageBanners":true,"mirroredBanners":true,"preview":"hidden"}"#,
+        )
+        .unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        assert!(settings.claim_legacy(&first).unwrap().is_some());
+        assert!(settings.claim_legacy(&second).unwrap().is_none());
+
+        let restarted = NotificationSettings::load(dir.path());
+        assert!(restarted.claim_legacy(&first).unwrap().is_some());
+        assert!(restarted.claim_legacy(&second).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_claim_failure_is_reported_without_consuming_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = binding("vault-a");
+        fs::write(
+            dir.path().join(PREFERENCES_FILE),
+            br#"{"messageBanners":true,"mirroredBanners":true,"preview":"hidden"}"#,
+        )
+        .unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        assert!(settings.claim_legacy(&vault).is_err());
+        assert!(dir.path().join(PREFERENCES_FILE).exists());
+    }
+
+    #[test]
+    fn missing_or_oversized_legacy_file_is_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = binding("vault-a");
+        fs::create_dir_all(vault.data_dir(dir.path())).unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        assert!(settings.claim_legacy(&vault).unwrap().is_none());
+        fs::write(dir.path().join(PREFERENCES_FILE), vec![b' '; 9 * 1024]).unwrap();
+        assert!(settings.claim_legacy(&vault).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_unclaimed_legacy_file_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = binding("vault-a");
+        fs::create_dir_all(vault.data_dir(dir.path())).unwrap();
+        fs::write(dir.path().join(PREFERENCES_FILE), b"not json").unwrap();
+        let settings = NotificationSettings::load(dir.path());
+
+        assert!(settings.claim_legacy(&vault).unwrap().is_none());
+        assert!(dir.path().join(PREFERENCES_FILE).exists());
+    }
+
+    #[test]
+    fn malformed_claimed_legacy_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = binding("vault-a");
+        fs::create_dir_all(vault.data_dir(dir.path())).unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        fs::write(settings.claim_path(&vault), b"not json").unwrap();
+
+        assert!(settings.claim_legacy(&vault).is_err());
     }
 
     #[test]

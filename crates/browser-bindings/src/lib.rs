@@ -4,11 +4,11 @@
 //! filesystem and must checkpoint it before acknowledging mutating calls.
 use peppy_client_core::{
     AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, Error as CoreError,
-    Message, MessageId, VaultId,
+    Message, MessageId, NotificationPreferences, VaultId,
 };
 use peppy_crypto::{KeyProfile, VaultCheckHeader};
 use peppy_desktop_api::{
-    self as dto, GatewayView, NotificationPreferences,
+    self as dto, GatewayView,
     compose::{self, ComposeError, DiscardDraftInput, DraftInput},
 };
 use serde::{Deserialize, Serialize};
@@ -165,7 +165,6 @@ pub struct BrowserCore {
     device_id: Option<DeviceId>,
     context: HostContext,
     gateways_known: bool,
-    preferences: NotificationPreferences,
     trusted_origin: Option<String>,
     identity_session: Option<identity_session::IdentitySession>,
     enrollment: Option<peppy_hosted_client::newenrollment::EnrollmentClient>,
@@ -204,7 +203,6 @@ impl BrowserCore {
             device_id: None,
             context: HostContext::default(),
             gateways_known: false,
-            preferences: NotificationPreferences::default(),
             trusted_origin: None,
             identity_session: None,
             enrollment: None,
@@ -579,7 +577,10 @@ impl BrowserCore {
             conversations: views,
             notifications: notices.notifications,
             app_filters: notices.app_filters,
-            notification_preferences: self.preferences.clone(),
+            notification_preferences: client
+                .notification_preferences()
+                .map_err(core)?
+                .unwrap_or_default(),
             active_conversation_id: active.map(|id| id.to_string()),
             draft: active
                 .and_then(|id| drafts_by_conversation.get(&id).copied())

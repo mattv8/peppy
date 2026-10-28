@@ -5,6 +5,7 @@ use peppy_client_core::{
     DeferredMediaStatus, Direction, Error, MediaPage, MediaPageAround, Message, MessageId,
     MirroredNotification, SendState, Transport,
 };
+pub use peppy_client_core::{NotificationPreferences, NotificationPreview as Preview};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -16,39 +17,6 @@ pub mod search;
 pub use search::*;
 pub mod search_history;
 pub use search_history::*;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationPreferences {
-    pub message_banners: bool,
-    pub mirrored_banners: bool,
-    pub preview: Preview,
-    /// Skip SMS/MMS banners for conversations that currently have a chat head.
-    #[serde(default = "default_true")]
-    pub mute_with_heads: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Preview {
-    Full,
-    Hidden,
-}
-
-impl Default for NotificationPreferences {
-    fn default() -> Self {
-        Self {
-            message_banners: true,
-            mirrored_banners: true,
-            preview: Preview::Full,
-            mute_with_heads: true,
-        }
-    }
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

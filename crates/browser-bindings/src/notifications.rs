@@ -9,6 +9,8 @@ pub(super) fn handles(command: &str) -> bool {
             | "set_app_muted"
             | "mark_notifications_seen"
             | "set_notification_preferences"
+            | "notification_preferences"
+            | "adopt_legacy_notification_preferences"
             | "pending_banner_candidates"
             | "ack_banner_candidates"
     )
@@ -66,9 +68,24 @@ impl BrowserCore {
             "set_notification_preferences" => {
                 let preferences: NotificationPreferences =
                     serde_json::from_value(args).map_err(|_| invalid())?;
-                self.client()?;
-                // The host checkpoints these display flags; notification content stays in SQLCipher.
-                self.preferences = preferences;
+                self.client()?
+                    .set_notification_preferences(preferences)
+                    .map_err(core)?;
+            }
+            "notification_preferences" => {
+                return serde_json::to_value(
+                    self.client()?.notification_preferences().map_err(core)?,
+                )
+                .map_err(|_| invalid());
+            }
+            "adopt_legacy_notification_preferences" => {
+                let preferences: NotificationPreferences =
+                    serde_json::from_value(args).map_err(|_| invalid())?;
+                let adopted = self
+                    .client()?
+                    .adopt_legacy_notification_preferences(preferences)
+                    .map_err(core)?;
+                return Ok(json!({ "adopted": adopted }));
             }
             "pending_banner_candidates" => {
                 #[derive(Deserialize)]
@@ -261,12 +278,46 @@ mod tests {
             snapshot["notificationPreferences"],
             json!({"messageBanners":false,"mirroredBanners":true,"preview":"hidden","muteWithHeads":true})
         );
+        assert_eq!(
+            call(&mut core, "notification_preferences", json!({})),
+            snapshot["notificationPreferences"]
+        );
         let rejected: Value=serde_json::from_str(&core.dispatch(r#"{"command":"set_notification_preferences","args":{"messageBanners":true,"mirroredBanners":true,"preview":"secret-fixture"}}"#)).unwrap();
         assert_eq!(rejected["ok"], false);
         assert!(!rejected.to_string().contains("secret-fixture"));
         assert_eq!(
             call(&mut core, "snapshot", json!({}))["notificationPreferences"],
             snapshot["notificationPreferences"]
+        );
+    }
+
+    #[test]
+    fn unset_preferences_are_null_and_legacy_adoption_is_one_shot() {
+        let (_directory, mut core) = fixture();
+        assert_eq!(
+            call(&mut core, "notification_preferences", json!({})),
+            Value::Null
+        );
+        let legacy = json!({"messageBanners":true,"mirroredBanners":false,"preview":"full","muteWithHeads":true});
+        assert_eq!(
+            call(
+                &mut core,
+                "adopt_legacy_notification_preferences",
+                legacy.clone()
+            ),
+            json!({"adopted":true})
+        );
+        assert_eq!(
+            call(
+                &mut core,
+                "adopt_legacy_notification_preferences",
+                legacy.clone()
+            ),
+            json!({"adopted":false})
+        );
+        assert_eq!(
+            call(&mut core, "notification_preferences", json!({})),
+            legacy
         );
     }
 }

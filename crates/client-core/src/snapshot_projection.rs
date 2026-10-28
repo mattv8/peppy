@@ -11,7 +11,8 @@
 //! 2. Once the drain finishes, `advance` decrypts those journaled records in bounded,
 //!    resumable batches and reduces them into generation-keyed stage tables with the same
 //!    semantic gates as live apply: contact revision and book generation, notification source
-//!    sequence plus lifetime tombstones, and app-filter `(revision, writer)` LWW. Edit
+//!    sequence plus lifetime tombstones, and LWW app-filter and notification-preference state.
+//!    Edit
 //!    requests/results, dismissals and commands are never staged and get no effects here.
 //! 3. When every retained record is staged, `promote` reconciles remote-owned rows against the
 //!    stage inside the caller's transaction: rows absent from the stage are removed and staged
@@ -32,7 +33,8 @@
 use crate::{
     AppFilter, Client, Ctx, Cursor, Error, MAX_SNAPSHOT_PAGE_BYTES, NotificationTarget,
     NotificationWire, Opened, PrivatePayload, contact_media, contacts, conversation_pinning,
-    conversation_tones, notifications, open_payload, parse_wire, take_within_budget, to_i64,
+    conversation_tones, notification_preferences, notifications, open_payload, parse_wire,
+    take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -88,6 +90,10 @@ CREATE TABLE IF NOT EXISTS projection_conversation_pins(generation INTEGER NOT N
 CREATE TABLE IF NOT EXISTS projection_conversation_tones(generation INTEGER NOT NULL, seed TEXT NOT NULL,
     palette_index INTEGER, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
     logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, PRIMARY KEY(generation,seed));
+CREATE TABLE IF NOT EXISTS projection_notification_preferences(generation INTEGER PRIMARY KEY,
+    message_banners INTEGER NOT NULL, mirrored_banners INTEGER NOT NULL, preview TEXT NOT NULL,
+    mute_with_heads INTEGER NOT NULL, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
+    logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL);
 ",
     )?;
     if upgrading {
@@ -481,6 +487,18 @@ pub(super) fn reduce(
             conn.execute("INSERT INTO projection_conversation_tones(generation,seed,palette_index,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(generation,seed) DO UPDATE SET palette_index=excluded.palette_index,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_tones.logical_revision OR (excluded.logical_revision=projection_conversation_tones.logical_revision AND excluded.writer_device_id>projection_conversation_tones.writer_device_id)", params![generation, seed, palette_index, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
             Ok(true)
         }
+        PrivatePayload::NotificationPreferences {
+            preferences,
+            logical_revision,
+            writer_device_id,
+        } => {
+            if !notification_preferences::valid_event(logical_revision, &writer_device_id, producer)
+            {
+                return Ok(false);
+            }
+            conn.execute("INSERT INTO projection_notification_preferences(generation,message_banners,mirrored_banners,preview,mute_with_heads,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(generation) DO UPDATE SET message_banners=excluded.message_banners,mirrored_banners=excluded.mirrored_banners,preview=excluded.preview,mute_with_heads=excluded.mute_with_heads,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_notification_preferences.logical_revision OR (excluded.logical_revision=projection_notification_preferences.logical_revision AND excluded.writer_device_id>projection_notification_preferences.writer_device_id)", params![generation, preferences.message_banners, preferences.mirrored_banners, notification_preferences::preview_code(preferences.preview), preferences.mute_with_heads, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
+            Ok(true)
+        }
         // Edit requests/results, dismissals and unknown kinds carry no staged state.
         _ => Ok(true),
     }
@@ -781,6 +799,35 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
             )?;
         }
     }
+    // Preferences have no deletion semantics: a snapshot that omits them cannot prove an older
+    // value was removed (for example, a pre-compaction event is absent from retained records).
+    type StagedNotificationPreferences = (bool, bool, String, bool, i64, String, i64, String);
+    let staged: Option<StagedNotificationPreferences> = conn.query_row("SELECT message_banners,mirrored_banners,preview,mute_with_heads,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_notification_preferences WHERE generation=?", params![generation], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))).optional()?;
+    if let Some((
+        message_banners,
+        mirrored_banners,
+        preview,
+        mute_with_heads,
+        sequence,
+        producer,
+        revision,
+        writer,
+    )) = staged
+    {
+        notification_preferences::apply(
+            conn,
+            &crate::NotificationPreferences {
+                message_banners,
+                mirrored_banners,
+                preview: notification_preferences::preview_from_code(&preview)?,
+                mute_with_heads,
+            },
+            u64::try_from(revision).map_err(|_| Error::Database)?,
+            &writer,
+            &producer,
+            u64::try_from(sequence).map_err(|_| Error::Database)?,
+        )?;
+    }
     let mut after = (String::new(), String::new());
     loop {
         type Row = (String, String, String, bool, i64, String, i64, String);
@@ -891,6 +938,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
         "projection_filters",
         "projection_conversation_pins",
         "projection_conversation_tones",
+        "projection_notification_preferences",
     ] {
         conn.execute(
             &format!("DELETE FROM {table} WHERE rowid IN (SELECT t.rowid FROM {table} t JOIN projection_generations g ON g.generation=t.generation WHERE g.state IN ('promoted','failed','superseded') LIMIT ?)"),
@@ -909,7 +957,8 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
            AND NOT EXISTS(SELECT 1 FROM projection_tombstones r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_filters r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins r WHERE r.generation=projection_generations.generation)
-           AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones r WHERE r.generation=projection_generations.generation)",
+           AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones r WHERE r.generation=projection_generations.generation)
+            AND NOT EXISTS(SELECT 1 FROM projection_notification_preferences r WHERE r.generation=projection_generations.generation)",
         [],
     )?;
     Ok(())

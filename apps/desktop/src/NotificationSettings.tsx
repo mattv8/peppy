@@ -15,12 +15,13 @@ function permissionMessage(check: NotificationCheck): string {
     : "This system doesn't report Peppy's notification permission, and the test notification could not be sent.";
 }
 
-export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, onPreferences, onMute, onPermission, onOpenSettings }: {
+export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, onPreferences, onMute, onPermission, onOpenSettings }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
   preferences: NotificationPreferences;
   headsSupported: boolean;
+  locked: boolean;
   onPreferences(value: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
   onPermission(): Promise<NotificationCheck | void>;
@@ -38,6 +39,8 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const sourceIds = apps.map(app => app.sourceDeviceId);
   const hasDesktopBanners = preferences.messageBanners || preferences.mirroredBanners;
   const muteWithHeads = preferences.muteWithHeads ?? true;
+  const lockedNoteId = locked ? "notification-banner-locked-note" : undefined;
+  const headsDescribedBy = locked ? "notification-mute-with-heads-hint notification-banner-locked-note" : "notification-mute-with-heads-hint";
   const save = async (action: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
@@ -45,6 +48,11 @@ export function NotificationSettings({ notifications, filters, sources, preferen
     try { await action(); }
     catch { setError("Could not save notification settings. Try again."); }
     finally { setBusy(false); }
+  };
+  // Vault-synced banner preferences cannot change while locked; per-app mutes are not affected.
+  const savePreferences = (value: NotificationPreferences) => {
+    if (locked) return;
+    void save(() => onPreferences(value));
   };
   const checkPermission = async () => {
     if (busy) return;
@@ -75,12 +83,14 @@ export function NotificationSettings({ notifications, filters, sources, preferen
       <h2>Notification mirroring</h2>
       <p>Mirrored app notifications use encrypted device sync. Carrier SMS/MMS has separate security boundaries.</p>
       <h3>Desktop banners</h3>
+      <p id="notification-banner-sync-note" className="settings-note">Banner choices apply to every computer and browser in this vault. System notification permission is set on each device.</p>
+      {locked && <p id="notification-banner-locked-note" className="settings-note">Unlock Peppy to change banner settings.</p>}
       <div className="settings-control-row">
         <label htmlFor="notification-message-banners">SMS/MMS banners</label>
         <span className="settings-switch">
           <input id="notification-message-banners" type="checkbox" role="switch"
-            checked={preferences.messageBanners} aria-checked={preferences.messageBanners} disabled={busy}
-            onChange={event => void save(() => onPreferences({ ...preferences, messageBanners: event.target.checked }))} />
+            checked={preferences.messageBanners} aria-checked={preferences.messageBanners} disabled={busy || locked} aria-describedby={lockedNoteId}
+            onChange={event => savePreferences({ ...preferences, messageBanners: event.target.checked })} />
           <span aria-hidden />
         </span>
       </div>
@@ -91,8 +101,8 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         </label>
         <span className="settings-switch">
           <input id="notification-mute-with-heads" type="checkbox" role="switch" checked={muteWithHeads} aria-checked={muteWithHeads}
-            aria-labelledby="notification-mute-with-heads-label" aria-describedby="notification-mute-with-heads-hint" disabled={busy}
-            onChange={event => void save(() => onPreferences({ ...preferences, muteWithHeads: event.target.checked }))} />
+            aria-labelledby="notification-mute-with-heads-label" aria-describedby={headsDescribedBy} disabled={busy || locked}
+            onChange={event => savePreferences({ ...preferences, muteWithHeads: event.target.checked })} />
           <span aria-hidden />
         </span>
       </div>}
@@ -100,16 +110,16 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         <label htmlFor="notification-mirrored-banners">App notification banners</label>
         <span className="settings-switch">
           <input id="notification-mirrored-banners" type="checkbox" role="switch"
-            checked={preferences.mirroredBanners} aria-checked={preferences.mirroredBanners} disabled={busy}
-            onChange={event => void save(() => onPreferences({ ...preferences, mirroredBanners: event.target.checked }))} />
+            checked={preferences.mirroredBanners} aria-checked={preferences.mirroredBanners} disabled={busy || locked} aria-describedby={lockedNoteId}
+            onChange={event => savePreferences({ ...preferences, mirroredBanners: event.target.checked })} />
           <span aria-hidden />
         </span>
       </div>
       {hasDesktopBanners && <>
         <div className="settings-control-row">
           <label htmlFor="notification-preview">Banner preview</label>
-          <select id="notification-preview" value={preferences.preview} disabled={busy}
-            onChange={event => void save(() => onPreferences({ ...preferences, preview: event.target.value as NotificationPreferences["preview"] }))}>
+          <select id="notification-preview" value={preferences.preview} disabled={busy || locked} aria-describedby={lockedNoteId}
+            onChange={event => savePreferences({ ...preferences, preview: event.target.value as NotificationPreferences["preview"] })}>
             <option value="full">Full content</option>
             <option value="hidden">Hidden — generic banner only</option>
           </select>

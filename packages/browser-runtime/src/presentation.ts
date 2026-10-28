@@ -1,4 +1,5 @@
 const SETTINGS_KEY = "notification-preferences";
+const LEGACY_VAULT_KEY = "notification-preferences-vault";
 const BANNER_LIMIT = 20;
 const STALE_BANNER_MS = 2 * 60 * 1000;
 
@@ -11,7 +12,6 @@ export type NotificationPreferences = {
 
 export interface NotificationSettings {
   load(): Promise<NotificationPreferences | undefined>;
-  save(preferences: NotificationPreferences): Promise<void>;
 }
 
 export type BannerCandidate = {
@@ -28,6 +28,16 @@ export type BannerContext = { view: "conversations" | "notifications" | "setting
 export interface BannerSession {
   query(command: string, args: Record<string, unknown>): Promise<unknown>;
   mutate(command: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+/** Reads the vault-wide preferences owned by Rust core. */
+export class CoreNotificationSettings implements NotificationSettings {
+  public constructor(private readonly session: Pick<BannerSession, "query">) {}
+
+  public async load(): Promise<NotificationPreferences | undefined> {
+    const value = await this.session.query("notification_preferences", {});
+    return value === null || value === undefined ? undefined : notificationPreferences(value);
+  }
 }
 
 export interface NotificationAdapter {
@@ -179,29 +189,44 @@ function redactedCandidate(candidate: BannerCandidate, preferences: Notification
   return { ...candidate, ...bannerText(candidate, preferences) };
 }
 
-/** Stores only nonsecret presentation flags in a Worker-owned IndexedDB record. */
-export class IndexedDbNotificationSettings implements NotificationSettings {
+/** Legacy pre-sync presentation flags, bound to one vault before adoption and then cleared. */
+export class IndexedDbNotificationSettings {
   private database?: IDBDatabase;
 
   public constructor(private readonly name: string, private readonly indexedDB: IDBFactory = globalThis.indexedDB) {}
 
-  public async load(): Promise<NotificationPreferences | undefined> {
+  /** Atomically claims this origin's legacy flags for exactly one authenticated vault. */
+  public async claimForVault(vaultId: string): Promise<NotificationPreferences | undefined> {
     try {
       const database = await this.open();
-      const transaction = database.transaction("settings", "readonly");
-      const value = await request(transaction.objectStore("settings").get(SETTINGS_KEY));
+      const transaction = database.transaction("settings", "readwrite");
+      const store = transaction.objectStore("settings");
+      const value = await request(store.get(SETTINGS_KEY));
+      if (value === undefined) {
+        await transactionDone(transaction);
+        return undefined;
+      }
+      const preferences = notificationPreferences(value);
+      const boundVault = await request(store.get(LEGACY_VAULT_KEY));
+      if (boundVault !== undefined && boundVault !== vaultId) {
+        await transactionDone(transaction);
+        return undefined;
+      }
+      if (boundVault === undefined) store.put(vaultId, LEGACY_VAULT_KEY);
       await transactionDone(transaction);
-      return value === undefined ? undefined : notificationPreferences(value);
+      return preferences;
     } catch {
       throw new Error("Presentation settings are unavailable");
     }
   }
 
-  public async save(preferences: NotificationPreferences): Promise<void> {
+  public async clear(): Promise<void> {
     try {
       const database = await this.open();
       const transaction = database.transaction("settings", "readwrite");
-      transaction.objectStore("settings").put(notificationPreferences(preferences), SETTINGS_KEY);
+      const store = transaction.objectStore("settings");
+      store.delete(SETTINGS_KEY);
+      store.delete(LEGACY_VAULT_KEY);
       await transactionDone(transaction);
     } catch {
       throw new Error("Presentation settings are unavailable");

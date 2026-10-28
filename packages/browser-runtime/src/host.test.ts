@@ -34,7 +34,7 @@ class FakeSession implements HostSession {
   public async query(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> {
     this.calls.push({ command, args, mutation: false });
     if (command === "contact_snapshot" && !Array.isArray(args.addresses)) throw { code: "invalid-request" };
-    if (command === "_worker_identity_metadata") return { deviceId: "00000000-0000-0000-0000-000000000001" };
+    if (command === "_worker_identity_metadata") return { vaultId: "00000000-0000-4000-8000-000000000001", deviceId: "00000000-0000-0000-0000-000000000001" };
     return command === "snapshot" ? this.snapshot : { command };
   }
   public async mutate(command: string, args: Record<string, unknown>): Promise<import("./core.js").CoreResult> { this.calls.push({ command, args, mutation: true }); this.generation += 1; return { command }; }
@@ -1152,19 +1152,131 @@ describe("browser host RPC", () => {
     await dispatchBrowserRpc(session, { id: 3, command: "discard_draft", args: { input: { id: "draft", conversationId: "conversation", expectedRevision: "1" } } });
     expect(session.calls).toEqual([
       { command: "save_draft", args: { text: "draft" }, mutation: true },
-      { command: "set_notification_preferences", args: { preview: "hidden" }, mutation: true },
+      { command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", muteWithHeads: true }, mutation: true },
       { command: "discard_draft", args: { id: "draft", conversationId: "conversation", expectedRevision: "1" }, mutation: true },
     ]);
   });
 
-  it("does not report notification preferences saved when Worker settings storage fails", async () => {
+  it("writes notification preferences through the checkpointed core session", async () => {
     const session = new FakeSession();
-    const response = await dispatchBrowserRpc(session, { id: 1, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } }, {
-      load: async () => undefined,
-      save: async () => { throw new Error("indexeddb unavailable"); },
+    const response = await dispatchBrowserRpc(session, { id: 1, command: "set_notification_preferences", args: { preferences: { preview: "hidden" } } });
+    expect(response).toMatchObject({ ok: true });
+    expect(session.calls).toEqual([{ command: "set_notification_preferences", args: { messageBanners: true, mirroredBanners: true, preview: "hidden", muteWithHeads: true }, mutation: true }]);
+  });
+
+  it("keeps a failed-clear adoption bound to its original vault", async () => {
+    const first = new FakeSession();
+    const second = new FakeSession();
+    second.query = async (command, args) => {
+      second.calls.push({ command, args, mutation: false });
+      if (command === "_worker_identity_metadata") return { vaultId: "00000000-0000-4000-8000-000000000002" };
+      return {};
+    };
+    first.query = async (command, args) => {
+      first.calls.push({ command, args, mutation: false });
+      if (command === "_worker_identity_metadata") return { vaultId: "00000000-0000-4000-8000-000000000001" };
+      if (command === "notification_preferences") return null;
+      return {};
+    };
+    first.mutate = async (command, args) => { first.calls.push({ command, args, mutation: true }); return { adopted: true }; };
+    const legacy = { claimForVault: vi.fn().mockResolvedValueOnce({ messageBanners: true, mirroredBanners: true, preview: "hidden" }).mockResolvedValueOnce(undefined), clear: vi.fn().mockRejectedValue(new Error("clear failed")) };
+    await expect(dispatchBrowserRpc(first, { id: 1, command: "load_state", args: {} }, legacy)).resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(second, { id: 2, command: "load_state", args: {} }, legacy)).resolves.toMatchObject({ ok: true });
+    expect(second.calls).not.toContainEqual(expect.objectContaining({ command: "adopt_legacy_notification_preferences" }));
+    expect(legacy.claimForVault).toHaveBeenNthCalledWith(1, "00000000-0000-4000-8000-000000000001");
+    expect(legacy.claimForVault).toHaveBeenNthCalledWith(2, "00000000-0000-4000-8000-000000000002");
+  });
+
+  it("retries cleanup after an established vault value without failing load state", async () => {
+    const session = new FakeSession();
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "_worker_identity_metadata") return { vaultId: "00000000-0000-4000-8000-000000000001" };
+      if (command === "notification_preferences") return { messageBanners: true, mirroredBanners: true, preview: "hidden" };
+      return {};
+    };
+    const clear = vi.fn().mockRejectedValueOnce(new Error("clear failed")).mockResolvedValue(undefined);
+    const legacy = { claimForVault: vi.fn().mockResolvedValue({ messageBanners: true, mirroredBanners: true, preview: "hidden" }), clear };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "load_state", args: {} }, legacy)).resolves.toMatchObject({ ok: true });
+    await expect(dispatchBrowserRpc(session, { id: 2, command: "load_state", args: {} }, legacy)).resolves.toMatchObject({ ok: true });
+    expect(clear).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks startup banner delivery until legacy hidden preferences migrate", async () => {
+    const session = new FakeSession();
+    let adopted = false;
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "_worker_identity_metadata") return { vaultId: "00000000-0000-4000-8000-000000000001" };
+      if (command === "notification_preferences") return adopted ? { messageBanners: true, mirroredBanners: true, preview: "hidden" } : null;
+      if (command === "pending_banner_candidates") return [{ id: "candidate-1", kind: "message", title: "Private title", body: "Private body", createdAt: Date.now() }];
+      if (command === "search_local") return { indexState: "ready" };
+      return {};
+    };
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      if (command === "adopt_legacy_notification_preferences") { adopted = true; return { adopted: true }; }
+      return {};
+    };
+    let changed: (() => void) | undefined;
+    const wake = vi.fn();
+    const shown: Array<{ title: string; body: string; tag: string }> = [];
+    const legacy = { claimForVault: vi.fn().mockRejectedValueOnce(new Error("IndexedDB unavailable")).mockResolvedValue({ messageBanners: true, mirroredBanners: true, preview: "hidden" }), clear: vi.fn().mockResolvedValue(undefined) };
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      legacySettings: legacy,
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: { start: async () => undefined, stop: async () => undefined, wake, subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; } } as unknown as import("./host.js").BrowserNetwork,
     });
-    expect(response).toMatchObject({ ok: false, error: { code: "unavailable" } });
-    expect(session.calls).toEqual([]);
+    const attached = port();
+    await host.attach(attached);
+    changed?.();
+    await eventually(() => legacy.claimForVault.mock.calls.length === 1);
+    expect(shown).toEqual([]);
+    changed?.();
+    await eventually(() => shown.length === 1);
+    expect(shown).toEqual([{ title: "New message", body: "Open Peppy to view it.", tag: "peppy-candidate-1" }]);
+    expect(wake).toHaveBeenCalledOnce();
+    expect(attached.messages).toContainEqual({ event: "changed" });
+  });
+
+  it("keeps candidates queued when adoption reports unresolved", async () => {
+    const session = new FakeSession();
+    session.query = async (command, args) => {
+      session.calls.push({ command, args, mutation: false });
+      if (command === "_worker_identity_metadata") return { vaultId: "00000000-0000-4000-8000-000000000001" };
+      if (command === "notification_preferences") return null;
+      if (command === "pending_banner_candidates") return [{ id: "candidate-1", kind: "message", title: "Private title", body: "Private body", createdAt: Date.now() }];
+      if (command === "search_local") return { indexState: "ready" };
+      return {};
+    };
+    session.mutate = async (command, args) => {
+      session.calls.push({ command, args, mutation: true });
+      return command === "adopt_legacy_notification_preferences" ? { adopted: false } : {};
+    };
+    let changed: (() => void) | undefined;
+    const shown: unknown[] = [];
+    const host = new BrowserWorkerHost({
+      locks: locks(),
+      boot: async () => session,
+      legacySettings: { claimForVault: async () => ({ messageBanners: true, mirroredBanners: true, preview: "hidden" }), clear: async () => undefined },
+      notification: { available: true, permission: "granted", show: notification => { shown.push(notification); } },
+      network: { start: async () => undefined, stop: async () => undefined, subscribeChanges: (listener: () => void) => { changed = listener; return () => undefined; } } as unknown as import("./host.js").BrowserNetwork,
+    });
+    await host.attach(port());
+    changed?.();
+    await eventually(() => session.calls.some(call => call.command === "adopt_legacy_notification_preferences"));
+    expect(shown).toEqual([]);
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "ack_banner_candidates" }));
+  });
+
+  it("retires default legacy settings without checkpointing adoption", async () => {
+    const session = new FakeSession();
+    const legacy = { claimForVault: vi.fn().mockResolvedValue({ messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true }), clear: vi.fn().mockResolvedValue(undefined) };
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "load_state", args: {} }, legacy)).resolves.toMatchObject({ ok: true });
+    expect(session.calls).not.toContainEqual(expect.objectContaining({ command: "adopt_legacy_notification_preferences" }));
+    expect(legacy.clear).toHaveBeenCalledOnce();
   });
 
   it("echoes a valid id for an oversized malformed request", async () => {

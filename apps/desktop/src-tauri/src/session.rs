@@ -9,7 +9,7 @@ use crate::{
     error::{core_error, BridgeError, BridgeResult},
     media,
     net::Api,
-    notifications::NotificationPreferences,
+    notifications::{NotificationPreferences, NotificationSettings, PreferenceRead},
     secure_store::SecretStore,
     sync::DownloadRetryState,
 };
@@ -444,6 +444,35 @@ fn compose_error(error: ComposeError) -> BridgeError {
 }
 
 impl Session {
+    /// Reads the core-owned vault policy and wakes outbound sync after a legacy adoption.
+    pub fn notification_preferences(
+        &self,
+        settings: &NotificationSettings,
+    ) -> BridgeResult<NotificationPreferences> {
+        self.read_notification_preferences(settings, PreferenceRead::Snapshot)
+    }
+
+    /// Reads the core-owned policy for native delivery, refusing unresolved legacy migration.
+    pub fn delivery_notification_preferences(
+        &self,
+        settings: &NotificationSettings,
+    ) -> BridgeResult<NotificationPreferences> {
+        self.read_notification_preferences(settings, PreferenceRead::Delivery)
+    }
+
+    fn read_notification_preferences(
+        &self,
+        settings: &NotificationSettings,
+        read: PreferenceRead,
+    ) -> BridgeResult<NotificationPreferences> {
+        let (preferences, adopted) =
+            settings.notification_preferences(&self.client, &self.binding, read)?;
+        if adopted {
+            self.notify();
+        }
+        Ok(preferences)
+    }
+
     pub(crate) fn register_started(session: &Arc<Self>) {
         let mut sessions = started_sessions()
             .lock()
@@ -1717,10 +1746,129 @@ mod tests {
     use super::*;
     use crate::{
         media::tests::sample_png,
+        notifications::NotificationSettings,
         tests::{fixture_at, gateway, input, routed, PHRASE},
     };
     use peppy_client_core::IncomingSms;
     use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    #[test]
+    fn notification_preferences_adopt_once_then_follow_core() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let legacy = NotificationPreferences {
+            preview: peppy_desktop_api::Preview::Hidden,
+            ..NotificationPreferences::default()
+        };
+        std::fs::write(
+            fixture.dir.path().join("notification-preferences.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let settings = NotificationSettings::load(fixture.dir.path());
+
+        assert_eq!(session.notification_preferences(&settings).unwrap(), legacy);
+        assert!(!fixture
+            .dir
+            .path()
+            .join("notification-preferences.json")
+            .exists());
+        assert!(!settings.claim_path(&session.binding).exists());
+
+        let remote = NotificationPreferences {
+            message_banners: false,
+            ..NotificationPreferences::default()
+        };
+        session
+            .client
+            .set_notification_preferences(remote.clone())
+            .unwrap();
+        assert_eq!(session.notification_preferences(&settings).unwrap(), remote);
+    }
+
+    #[test]
+    fn locked_snapshot_uses_safe_default_while_banner_delivery_is_withheld() {
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.dir.path().join("notification-preferences.json"),
+            br#"{"messageBanners":true,"mirroredBanners":true,"preview":"hidden"}"#,
+        )
+        .unwrap();
+        let settings = NotificationSettings::load(fixture.dir.path());
+
+        assert_eq!(
+            session.notification_preferences(&settings).unwrap(),
+            NotificationPreferences::default()
+        );
+        assert!(session
+            .delivery_notification_preferences(&settings)
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn established_core_preferences_survive_legacy_cleanup_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = fixture_at("http://127.0.0.1:9");
+        let session = open_session(
+            fixture.dir.path(),
+            &fixture.store,
+            &fixture.binding,
+            &[],
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session
+            .client
+            .unlock(&fixture.profile, &fixture.header, PHRASE)
+            .unwrap();
+        let established = NotificationPreferences {
+            preview: peppy_desktop_api::Preview::Hidden,
+            ..NotificationPreferences::default()
+        };
+        session
+            .client
+            .set_notification_preferences(established.clone())
+            .unwrap();
+        let settings = NotificationSettings::load(fixture.dir.path());
+        let claim = settings.claim_path(&session.binding);
+        std::fs::write(&claim, serde_json::to_vec(&established).unwrap()).unwrap();
+        let claim_parent = claim.parent().unwrap();
+        std::fs::set_permissions(claim_parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        assert_eq!(
+            session.notification_preferences(&settings).unwrap(),
+            established
+        );
+        assert_eq!(
+            session
+                .delivery_notification_preferences(&settings)
+                .unwrap(),
+            established
+        );
+
+        std::fs::set_permissions(claim_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
 
     #[test]
     fn encryption_state_preserves_snapshot_precedence() {

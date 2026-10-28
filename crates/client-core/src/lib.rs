@@ -41,6 +41,7 @@ mod media_cache;
 mod message_history_capture;
 mod message_history_protocol;
 mod message_history_requests;
+mod notification_preferences;
 pub use deferred_media::{DeferredMediaRequestReport, DeferredMediaStatus, DeferredOriginal};
 mod media_paging;
 mod mms;
@@ -103,7 +104,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 38;
+const SCHEMA_VERSION: i64 = 39;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 
@@ -390,6 +391,11 @@ pub enum PrivatePayload {
         logical_revision: u64,
         writer_device_id: String,
     },
+    NotificationPreferences {
+        preferences: NotificationPreferences,
+        logical_revision: u64,
+        writer_device_id: String,
+    },
     MmsOwnAddress {
         source_device_id: DeviceId,
         subscription_id: String,
@@ -498,6 +504,40 @@ pub struct AppFilter {
     pub package_name: String,
     pub app_name: String,
     pub muted: bool,
+}
+
+/// Vault-wide banner presentation choices, replicated as one LWW record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationPreferences {
+    pub message_banners: bool,
+    pub mirrored_banners: bool,
+    pub preview: NotificationPreview,
+    /// Skip SMS/MMS banners for conversations that currently have a chat head.
+    #[serde(default = "default_true")]
+    pub mute_with_heads: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationPreview {
+    Full,
+    Hidden,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self {
+            message_banners: true,
+            mirrored_banners: true,
+            preview: NotificationPreview::Full,
+            mute_with_heads: true,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -5044,6 +5084,13 @@ CREATE TABLE IF NOT EXISTS conversation_tones(seed TEXT PRIMARY KEY, palette_ind
   logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
   producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
 ";
+const MIGRATION_39: &str = "
+CREATE TABLE IF NOT EXISTS notification_preferences(id INTEGER PRIMARY KEY CHECK(id=1),
+  message_banners INTEGER NOT NULL, mirrored_banners INTEGER NOT NULL,
+  preview TEXT NOT NULL CHECK(preview IN ('full','hidden')), mute_with_heads INTEGER NOT NULL,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+";
 
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
@@ -5060,9 +5107,8 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
     }
     Ok(())
 }
-/// Decoder revision six replays applied conversation pin/tone events per epoch, restoring LWW
-/// state and compaction frontiers after older clients recorded them as unknown.
-const DECODER_REVISION: &str = "6";
+/// Decoder revision seven replays applied LWW events after older clients consumed them as unknown.
+const DECODER_REVISION: &str = "7";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -5153,6 +5199,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             apply_migration_36(&tx)?;
             tx.execute_batch(MIGRATION_37)?;
             tx.execute_batch(MIGRATION_38)?;
+            tx.execute_batch(MIGRATION_39)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -5161,7 +5208,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=37)) => {
+        Some(version @ (4..=38)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -5263,6 +5310,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 37 {
                 tx.execute_batch(MIGRATION_38)?;
+            }
+            if version <= 38 {
+                tx.execute_batch(MIGRATION_39)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -5368,19 +5418,23 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
             let Ok(plain) = decrypt(&keys.event, &aad, &sealed) else {
                 continue;
             };
-            let payload = match serde_json::from_slice::<PrivatePayload>(&plain) {
+            let (payload, inner_compaction) = match parse_authenticated_payload(&plain) {
                 Ok(payload) => payload,
                 Err(_) => {
-                    let is_malformed_tone_or_pin =
+                    let is_malformed_lww_event =
                         serde_json::from_slice::<serde_json::Value>(&plain)
                             .ok()
                             .is_some_and(|value| {
                                 matches!(
                                     value.get("kind").and_then(|kind| kind.as_str()),
-                                    Some("conversation_pin" | "conversation_tone")
+                                    Some(
+                                        "conversation_pin"
+                                            | "conversation_tone"
+                                            | "notification_preferences"
+                                    )
                                 )
                             });
-                    if status == "applied" && is_malformed_tone_or_pin {
+                    if status == "applied" && is_malformed_lww_event {
                         conn.execute(
                             "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
                             params![cursor],
@@ -5389,6 +5443,13 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                     continue;
                 }
             };
+            if envelope.compaction.as_ref() != inner_compaction.as_ref() {
+                conn.execute(
+                    "UPDATE journal SET status='quarantined',reason='authentication_failed' WHERE cursor=?",
+                    params![cursor],
+                )?;
+                continue;
+            }
             match (status.as_str(), payload) {
                 ("quarantined", PrivatePayload::MmsMessage { message, media, .. })
                     if valid_message(&message, envelope.producer_device_id)
@@ -5503,6 +5564,39 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                     learn_compaction(
                         conn,
                         Some(&format!("conversation-tone:{seed}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::NotificationPreferences {
+                        preferences,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !notification_preferences::valid_event(
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    notification_preferences::apply(
+                        conn,
+                        &preferences,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(notification_preferences::IDENTITY),
                         &producer,
                         to_i64(envelope.producer_sequence.0)?,
                         envelope.compaction.as_ref(),
@@ -5686,6 +5780,7 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "app_filter"
             | "conversation_pin"
             | "conversation_tone"
+            | "notification_preferences"
             | "mms_own_address"
             | "contact_book_state"
             | "contact_upserted"
@@ -5970,6 +6065,31 @@ fn apply_record(
                 conn,
                 &seed,
                 palette_index,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::NotificationPreferences {
+                preferences,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !notification_preferences::valid_event(
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            notification_preferences::apply(
+                conn,
+                &preferences,
                 logical_revision,
                 &writer_device_id,
                 &producer,
@@ -6907,6 +7027,9 @@ fn compaction_group(
         PrivatePayload::ConversationTone { seed, .. } => {
             (b"conversation-tone", vec![seed.as_bytes().to_vec()], false)
         }
+        PrivatePayload::NotificationPreferences { .. } => {
+            (b"notification-preferences", vec![b"vault".to_vec()], false)
+        }
         PrivatePayload::ContactBookState { book } => {
             (b"contact-book", vec![text(book, "id")?], false)
         }
@@ -7008,6 +7131,9 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             conversation_id, ..
         } => Some(format!("conversation-pin:{conversation_id}")),
         PrivatePayload::ConversationTone { seed, .. } => Some(format!("conversation-tone:{seed}")),
+        PrivatePayload::NotificationPreferences { .. } => {
+            Some(notification_preferences::IDENTITY.to_owned())
+        }
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -9896,10 +10022,10 @@ mod tests {
 
         let conn = Connection::open(&config.database_path).unwrap();
         apply_database_key(&conn, &key()).unwrap();
-        conn.execute_batch(
-            "DROP INDEX outbox_queued_priority;
-               UPDATE schema_meta SET version=39;",
-        )
+        conn.execute_batch(&format!(
+            "DROP INDEX outbox_queued_priority; UPDATE schema_meta SET version={};",
+            SCHEMA_VERSION + 1
+        ))
         .unwrap();
         drop(conn);
         assert!(matches!(
@@ -9913,7 +10039,7 @@ mod tests {
             conn.query_row("SELECT version FROM schema_meta", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            39
+            SCHEMA_VERSION + 1
         );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM drafts", [], |row| row

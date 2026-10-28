@@ -1,10 +1,9 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it } from "vitest";
-import { BannerPresenter, IndexedDbNotificationSettings, notificationPreferences, type BannerCandidate, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
+import { describe, expect, it, vi } from "vitest";
+import { BannerPresenter, CoreNotificationSettings, IndexedDbNotificationSettings, notificationPreferences, type BannerCandidate, type NotificationAdapter, type NotificationPreferences, type NotificationSettings } from "./presentation.js";
 
 const preferences: NotificationSettings = {
   load: async () => ({ messageBanners: true, mirroredBanners: true, preview: "full" }),
-  save: async () => undefined,
 };
 
 function candidate(overrides: Partial<BannerCandidate> = {}): BannerCandidate {
@@ -22,12 +21,59 @@ function adapter(overrides: Partial<NotificationAdapter> = {}): NotificationAdap
   return result;
 }
 
+async function seedLegacySettings(name: string, value: NotificationPreferences): Promise<void> {
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    const opening = indexedDB.open(name, 1);
+    opening.onupgradeneeded = () => opening.result.createObjectStore("settings");
+    opening.onerror = () => reject(opening.error);
+    opening.onsuccess = () => resolve(opening.result);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction("settings", "readwrite");
+    transaction.objectStore("settings").put(value, "notification-preferences");
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+  database.close();
+}
+
 describe("Worker notification presentation settings", () => {
-  it("persists only validated display flags across a Worker settings reload", async () => {
+  it("claims validated legacy display flags across a Worker settings reload", async () => {
     const name = `presentation-${crypto.randomUUID()}`;
-    const first = new IndexedDbNotificationSettings(name);
-    await first.save({ messageBanners: true, mirroredBanners: false, preview: "full" });
-    await expect(new IndexedDbNotificationSettings(name).load()).resolves.toEqual({ messageBanners: true, mirroredBanners: false, preview: "full", muteWithHeads: true });
+    await seedLegacySettings(name, { messageBanners: true, mirroredBanners: false, preview: "full" });
+    await expect(new IndexedDbNotificationSettings(name).claimForVault("00000000-0000-4000-8000-000000000001")).resolves.toEqual({ messageBanners: true, mirroredBanners: false, preview: "full", muteWithHeads: true });
+  });
+
+  it("binds legacy settings to one vault before they can be adopted", async () => {
+    const name = `presentation-${crypto.randomUUID()}`;
+    const legacy = new IndexedDbNotificationSettings(name);
+    await seedLegacySettings(name, { messageBanners: true, mirroredBanners: false, preview: "hidden" });
+    await expect(legacy.claimForVault("00000000-0000-4000-8000-000000000001")).resolves.toMatchObject({ preview: "hidden" });
+    await expect(legacy.claimForVault("00000000-0000-4000-8000-000000000002")).resolves.toBeUndefined();
+  });
+
+  it("reads preferences from core on every banner drain", async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ messageBanners: true, mirroredBanners: true, preview: "full" })
+      .mockResolvedValueOnce([candidate({ id: "first" })])
+      .mockResolvedValueOnce({ messageBanners: false, mirroredBanners: true, preview: "full" })
+      .mockResolvedValueOnce([candidate({ id: "second" })]);
+    const notification = adapter();
+    const presenter = new BannerPresenter({ query, mutate: async () => ({}) }, new CoreNotificationSettings({ query }), notification, () => undefined);
+    await presenter.drain();
+    await presenter.drain();
+    expect(notification.shown).toEqual([{ title: "Private title", body: "Private body", tag: "peppy-first" }]);
+  });
+
+  it("keeps hidden core previews hidden after legacy settings are retired", async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ messageBanners: true, mirroredBanners: true, preview: "hidden" })
+      .mockResolvedValueOnce([candidate()]);
+    const notification = adapter();
+    const presenter = new BannerPresenter({ query, mutate: async () => ({}) }, new CoreNotificationSettings({ query }), notification, () => undefined);
+    await presenter.drain();
+    expect(notification.shown).toEqual([{ title: "New message", body: "Open Peppy to view it.", tag: "peppy-candidate-1" }]);
   });
 
   it("rejects malformed settings values", () => {
