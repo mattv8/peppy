@@ -894,6 +894,8 @@ function SettingsView({
   accountUrl,
   canRevealVaultSecret = false,
   serverOffline = false,
+  requestedSection,
+  onRequestedSectionConsumed,
 }: {
   mode: "hosted" | "self-hosted";
   configuredOrigin?: string;
@@ -929,6 +931,8 @@ function SettingsView({
   accountUrl?: string;
   canRevealVaultSecret?: boolean;
   serverOffline?: boolean;
+  requestedSection?: string;
+  onRequestedSectionConsumed?(): void;
 }) {
   const [savingStartup, setSavingStartup] = useState(false);
   const [startupError, setStartupError] = useState("");
@@ -983,7 +987,7 @@ function SettingsView({
       setActiveSection(sections[0]?.id ?? "server");
     }
   }, [activeSection, sectionIds]);
-  const selectSection = (id: string) => {
+  const selectSection = useCallback((id: string) => {
     const section = document.getElementById(sectionElementId(id));
     setActiveSection(id);
     pendingSectionRef.current = id;
@@ -999,7 +1003,13 @@ function SettingsView({
         behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
       });
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!requestedSection) return;
+    selectSection(requestedSection);
+    onRequestedSectionConsumed?.();
+  }, [onRequestedSectionConsumed, requestedSection, selectSection]);
 
   useEffect(() => {
     const root = settingsContentRef.current;
@@ -1308,7 +1318,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const notificationsLocked = snapshot?.encryption.state !== "unlocked";
   const dismissibleNotificationsCount = dismissibleNotifications(snapshot?.notifications ?? [], snapshot?.appFilters ?? [], notificationsLocked).length;
   const contactsOpen = activeView === "contacts";
-  const notificationSettingsRequested = useRef(false);
+  const [notificationSettingsRequested, setNotificationSettingsRequested] = useState(false);
   const dismissingNotificationsRef = useRef(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice>();
   const [refreshNotice, setRefreshNotice] = useState("");
@@ -1627,12 +1637,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (composerConversation !== null) return;
     void bridge.set_notification_context(activeView, activeView === "conversations" ? selectedRef.current : undefined).catch(() => {});
   }, [activeView, selected, composerConversation]);
-  useEffect(() => {
-    if (activeView === "settings" && notificationSettingsRequested.current) {
-      notificationSettingsRequested.current = false;
-      document.getElementById("notification-settings")?.scrollIntoView?.({ block: "start" });
-    }
-  }, [activeView]);
   useEffect(() => installOverlayScrollbars(document), []);
   useLayoutEffect(() => {
     const measureOverlay = () => {
@@ -3858,6 +3862,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               accountUrl={accountUrl}
               canRevealVaultSecret={!browserHost && snapshot?.deviceRole === "owner" && snapshot.connection.state === "connected"}
                serverOffline={serverOffline}
+               requestedSection={notificationSettingsRequested ? "notifications" : undefined}
+               onRequestedSectionConsumed={() => setNotificationSettingsRequested(false)}
              />
           ) : notificationsOpen ? (
             <NotificationsView
@@ -3880,7 +3886,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   throw error;
                 });
               }}
-              onSettings={() => { notificationSettingsRequested.current = true; setActiveView("settings"); }}
+              onSettings={() => { setNotificationSettingsRequested(true); setActiveView("settings"); }}
             />
           ) : contactsOpen ? (
             <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
