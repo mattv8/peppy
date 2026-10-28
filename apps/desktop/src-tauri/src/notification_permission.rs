@@ -233,13 +233,14 @@ pub fn current_settings_url(app: &AppHandle) -> Option<String> {
     settings_url(Some(&identifier))
 }
 
-/// Blocking OS work. `test_sent` means fallback dispatch succeeded, not display;
-/// the legacy macOS backend sends on handle Drop and cannot report send errors.
+/// Blocking OS work. `test_sent` means native acceptance (or fallback dispatch
+/// when no native owner is available), not guaranteed display.
 /// Call via `crate::sync::blocking` so authorization callbacks never wait on a Tokio worker.
 pub fn check(app: &AppHandle) -> NotificationCheck {
     let status = query(app);
-    let test_sent = status != PermissionStatus::Denied
-        && crate::notification_activation::fallback::post(app, TEST_TITLE, TEST_BODY).is_ok();
+    let test_sent = send_test(status, || {
+        crate::notification_activation::post_test(app, TEST_TITLE, TEST_BODY)
+    });
     NotificationCheck {
         status,
         test_sent,
@@ -247,9 +248,28 @@ pub fn check(app: &AppHandle) -> NotificationCheck {
     }
 }
 
+fn send_test(status: PermissionStatus, post: impl FnOnce() -> Result<(), ()>) -> bool {
+    status != PermissionStatus::Denied && post().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_permission_denial_skips_test_and_acceptance_controls_sent() {
+        assert!(!send_test(PermissionStatus::Denied, || panic!(
+            "denied must not post"
+        )));
+        for status in [
+            PermissionStatus::Granted,
+            PermissionStatus::Quiet,
+            PermissionStatus::Unknown,
+        ] {
+            assert!(send_test(status, || Ok(())));
+            assert!(!send_test(status, || Err(())));
+        }
+    }
 
     #[test]
     fn maps_macos_authorization() {

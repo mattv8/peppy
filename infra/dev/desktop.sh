@@ -118,7 +118,7 @@ verify_macos_signing_identity() {
 macos() {
   local dev_config="$source_root/apps/desktop/src-tauri/tauri.dev.conf.json"
   local app_bundle="$target_dir/release/bundle/macos/Peppy_dev.app"
-  local dev_tls_enabled dev_tls_cert
+  local dev_tls_enabled dev_tls_cert bundle_identifier
   local -a cargo_args=(--locked)
   if [[ "$action" != open ]]; then
     dev_tls_enabled=$(python3 "$caller_root/infra/dev/dev_tls.py" enabled) || die "Could not read the DEBUG TLS setting."
@@ -150,6 +150,13 @@ macos() {
         (cd "$source_root" && select_macos_pinned_tools && check_native_pins && pnpm install --frozen-lockfile && CARGO_TARGET_DIR="$target_dir" PEPPY_DEV_TLS_CERT="${dev_tls_cert:-}" pnpm --dir apps/desktop exec tauri build --bundles app --config "$dev_config" -- "${cargo_args[@]}")
       fi
       [[ -d "$app_bundle" ]] || die "Tauri completed without the expected bundle: $app_bundle"
+      if [[ ${PEPPY_MACOS_SIGNING_IDENTITY+set} != set ]]; then
+        bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_bundle/Contents/Info.plist") || die "Could not read the built bundle identifier."
+        [[ -n "$bundle_identifier" ]] || die "The built bundle identifier is empty."
+        /usr/bin/codesign --force --sign - --identifier "$bundle_identifier" \
+          --preserve-metadata=entitlements,flags,runtime "$app_bundle"
+      fi
+      /usr/bin/codesign --verify --deep --strict "$app_bundle"
       ;;
   esac
 }
