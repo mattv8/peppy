@@ -28,6 +28,7 @@ pub struct Post {
     pub cancel: CancellationToken,
     pub title: String,
     pub body: String,
+    pub sound: bool,
 }
 
 #[derive(Clone)]
@@ -124,7 +125,7 @@ struct Entry<T> {
 
 trait Backend {
     type Item;
-    fn post(&mut self, id: &str, title: &str, body: &str, signal: Signal)
+    fn post(&mut self, id: &str, title: &str, body: &str, sound: bool, signal: Signal)
         -> Result<Self::Item, ()>;
     fn remove(&mut self, item: &Self::Item) -> bool;
 }
@@ -136,9 +137,10 @@ impl Backend for platform::Backend {
         id: &str,
         title: &str,
         body: &str,
+        sound: bool,
         signal: Signal,
     ) -> Result<Self::Item, ()> {
-        self.post(id, title, body, signal)
+        self.post(id, title, body, sound, signal)
     }
     fn remove(&mut self, item: &Self::Item) -> bool {
         self.remove(item)
@@ -172,6 +174,7 @@ impl<B: Backend> Registry<B> {
             &post.activation.request_id,
             &post.title,
             &post.body,
+            post.sound,
             signal.clone(),
         )?;
         self.entries.push_back(Entry {
@@ -312,6 +315,7 @@ mod tests {
     #[derive(Default)]
     struct TestBackend {
         callbacks: HashMap<String, Signal>,
+        sounds: Vec<bool>,
         log: Arc<Mutex<Vec<String>>>,
         fail_post: bool,
         fail_remove: bool,
@@ -330,7 +334,8 @@ mod tests {
     }
     impl Backend for TestBackend {
         type Item = TestItem;
-        fn post(&mut self, id: &str, _: &str, _: &str, signal: Signal) -> Result<TestItem, ()> {
+        fn post(&mut self, id: &str, _: &str, _: &str, sound: bool, signal: Signal) -> Result<TestItem, ()> {
+            self.sounds.push(sound);
             if self.fail_post || self.reject_after == Some(self.callbacks.len()) {
                 signal.retire();
                 return Err(());
@@ -376,7 +381,18 @@ mod tests {
             cancel: CancellationToken::new(),
             title: "not retained".into(),
             body: "not retained".into(),
+            sound: false,
         }
+    }
+
+    #[test]
+    fn notification_sound_choice_reaches_the_backend_for_each_post() {
+        let mut registry = registry();
+        registry.post(post(0)).unwrap();
+        let mut audible = post(1);
+        audible.sound = true;
+        registry.post(audible).unwrap();
+        assert_eq!(registry.backend.sounds, [false, true]);
     }
 
     fn test_owner(backend: TestBackend, prefill: usize) -> Owner {
@@ -480,6 +496,7 @@ mod tests {
                             destination,
                         },
                         cancel: session.cancel.clone(),
+                        sound: settings.sound_enabled(),
                         title,
                         body,
                     })
@@ -668,6 +685,7 @@ mod tests {
                         destination,
                     },
                     cancel: session.cancel.clone(),
+                    sound: settings.sound_enabled(),
                     title,
                     body,
                 })?;

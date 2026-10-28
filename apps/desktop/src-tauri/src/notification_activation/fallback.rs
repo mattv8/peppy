@@ -1,10 +1,11 @@
 //! Legacy Linux/development delivery and fixed permission-test banners. No click
 //! handlers or activation destinations are registered through this adapter.
 use notify_rust::Notification;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 pub(crate) fn post(app: &AppHandle, title: &str, body: &str) -> Result<(), ()> {
-    let notification = notification(title, body);
+    let sound = app.state::<crate::AppState>().notifications.sound_enabled();
+    let notification = notification(title, body, sound);
     #[cfg(target_os = "windows")]
     let notification = {
         let mut notification = notification;
@@ -27,9 +28,19 @@ pub(crate) fn post(app: &AppHandle, title: &str, body: &str) -> Result<(), ()> {
     notification.show().map(drop).map_err(|_| ())
 }
 
-fn notification(title: &str, body: &str) -> Notification {
+fn notification(title: &str, body: &str, sound: bool) -> Notification {
     let mut notification = Notification::new();
     notification.summary(title).body(body).auto_icon();
+    if sound {
+        #[cfg(target_os = "macos")]
+        notification.sound_name("NSUserNotificationDefaultSoundName");
+        #[cfg(target_os = "windows")]
+        notification.sound_name("Default");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        notification.sound_name("message-new-instant");
+    }
+    #[cfg(target_os = "linux")]
+    notification.hint(notify_rust::Hint::SuppressSound(!sound));
     notification
 }
 
@@ -58,7 +69,7 @@ mod tests {
 
     #[test]
     fn notification_fallback_preserves_content_auto_icon_and_no_actions() {
-        let notification = notification("provided title", "provided body");
+        let notification = notification("provided title", "provided body", false);
         assert_eq!(notification.summary, "provided title");
         assert_eq!(notification.body, "provided body");
         assert!(!notification.icon.is_empty());

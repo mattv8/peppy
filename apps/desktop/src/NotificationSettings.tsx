@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AppFilter, MirroredNotification, NotificationCheck, NotificationPreferences } from "./bridge";
 import { notificationAppName, notificationTuple, notificationSourceName } from "./Notifications";
 
@@ -15,13 +15,14 @@ function permissionMessage(check: NotificationCheck): string {
     : "This system doesn't report Peppy's notification permission, and the test notification could not be sent.";
 }
 
-export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, onPreferences, onMute, onPermission, onOpenSettings }: {
+export function NotificationSettings({ notifications, filters, sources, preferences, headsSupported, locked, soundSettings, onPreferences, onMute, onPermission, onOpenSettings }: {
   notifications: MirroredNotification[];
   filters: AppFilter[];
   sources: { id: string; name: string }[];
   preferences: NotificationPreferences;
   headsSupported: boolean;
   locked: boolean;
+  soundSettings?: { load(): Promise<boolean>; save(enabled: boolean): Promise<void> };
   onPreferences(value: NotificationPreferences): Promise<void>;
   onMute(filter: AppFilter): Promise<void>;
   onPermission(): Promise<NotificationCheck | void>;
@@ -31,6 +32,20 @@ export function NotificationSettings({ notifications, filters, sources, preferen
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [check, setCheck] = useState<NotificationCheck>();
+  const [soundEnabled, setSoundEnabled] = useState<boolean>();
+  const loadSound = soundSettings?.load;
+  useEffect(() => {
+    let current = true;
+    setSoundEnabled(undefined);
+    if (loadSound && !locked) {
+      void loadSound().then(value => {
+        if (current) setSoundEnabled(value);
+      }).catch(() => {
+        if (current) setError("Could not load notification sound settings. Reopen Settings to try again.");
+      });
+    }
+    return () => { current = false; };
+  }, [loadSound, locked]);
   // Observed app defaults never override authoritative synchronized mute choices.
   const apps = [...new Map([
     ...notifications.map(n => ({ sourceDeviceId: n.target.sourceDeviceId, packageName: n.packageName, appName: n.appName, muted: false })),
@@ -116,6 +131,21 @@ export function NotificationSettings({ notifications, filters, sources, preferen
         </span>
       </div>
       {hasDesktopBanners && <>
+        {soundSettings && <div id="notification-sounds-row" className="settings-control-row">
+          <label htmlFor="notification-sounds">Notification sounds</label>
+          <span className="settings-switch">
+            <input id="notification-sounds" type="checkbox" role="switch"
+              checked={soundEnabled ?? false} aria-checked={soundEnabled ?? false}
+              disabled={busy || locked || soundEnabled === undefined} aria-describedby="notification-sounds-hint"
+              onChange={event => {
+                if (locked || soundEnabled === undefined) return;
+                const enabled = event.target.checked;
+                void save(async () => { await soundSettings.save(enabled); setSoundEnabled(enabled); });
+              }} />
+            <span aria-hidden />
+          </span>
+        </div>}
+        {soundSettings && <p id="notification-sounds-hint" className="settings-note">Play the system notification sound on this computer. System volume and Focus or Do Not Disturb still apply.</p>}
         <div className="settings-control-row">
           <label htmlFor="notification-preview">Banner preview</label>
           <select id="notification-preview" value={preferences.preview} disabled={busy || locked} aria-describedby={lockedNoteId}

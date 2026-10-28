@@ -16,6 +16,29 @@ use std::{
 
 type Signals = Arc<Mutex<HashMap<String, Signal>>>;
 
+fn notification_content(
+    title: &str,
+    body: &str,
+    sound: bool,
+) -> Retained<UNMutableNotificationContent> {
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    if sound {
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+    }
+    content
+}
+
+fn presentation_options(sound: bool) -> UNNotificationPresentationOptions {
+    let options = UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List;
+    if sound {
+        options | UNNotificationPresentationOptions::Sound
+    } else {
+        options
+    }
+}
+
 define_class!(
     // NSObject has no additional subclass requirements. Ivars are thread-safe;
     // UN invokes these methods on its own callback queue, not necessarily main.
@@ -60,12 +83,11 @@ define_class!(
         fn present(
             &self,
             _center: &UNUserNotificationCenter,
-            _notification: &UNNotification,
+            notification: &UNNotification,
             completion: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            completion
-                .call((UNNotificationPresentationOptions::Banner
-                    | UNNotificationPresentationOptions::List,));
+            let sound = notification.request().content().sound().is_some();
+            completion.call((presentation_options(sound),));
         }
     }
 );
@@ -124,14 +146,19 @@ impl Backend {
         })
     }
 
-    pub fn post(&mut self, id: &str, title: &str, body: &str, signal: Signal) -> Result<Item, ()> {
+    pub fn post(
+        &mut self,
+        id: &str,
+        title: &str,
+        body: &str,
+        sound: bool,
+        signal: Signal,
+    ) -> Result<Item, ()> {
         // UN owns completion blocks until posting finishes. Removing a request
         // does not guarantee its completion has run, so bound this lifetime too.
         reserve_completion(&self.in_flight)?;
         objc2::rc::autoreleasepool(|_| {
-            let content = UNMutableNotificationContent::new();
-            content.setTitle(&NSString::from_str(title));
-            content.setBody(&NSString::from_str(body));
+            let content = notification_content(title, body, sound);
             let identifier = NSString::from_str(id);
             let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
                 &identifier,
@@ -208,6 +235,16 @@ fn reserve_completion(in_flight: &AtomicUsize) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_sound_macos_content_and_foreground_policy_match() {
+        for enabled in [false, true] {
+            let content = notification_content("title", "body", enabled);
+            assert_eq!(content.sound().is_some(), enabled);
+            assert_eq!(presentation_options(enabled).contains(UNNotificationPresentationOptions::Sound), enabled);
+            assert!(presentation_options(enabled).contains(UNNotificationPresentationOptions::Banner));
+        }
+    }
     use std::cell::Cell;
 
     #[test]

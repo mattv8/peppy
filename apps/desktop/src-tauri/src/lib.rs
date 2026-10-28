@@ -3862,6 +3862,28 @@ fn set_start_at_login(
     result.map_err(|_| BridgeError::new("start-at-login", "Could not update Start at login."))
 }
 
+#[tauri::command]
+fn get_notification_sound(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> BridgeResult<bool> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    Ok(state.notifications.sound_enabled())
+}
+
+#[tauri::command]
+async fn set_notification_sound(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> BridgeResult<()> {
+    let _operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let settings = state.notifications.clone();
+    blocking(move || settings.set_sound_enabled(enabled)).await
+}
+
 /// Explicit user action only. Native head rendering failure leaves the normal
 /// composer reachable; this command owns that fallback to prevent duplicate UI.
 #[tauri::command]
@@ -4829,6 +4851,8 @@ pub fn run() {
         list_restorable_contacts,
         restore_contact,
         set_start_at_login,
+        get_notification_sound,
+        set_notification_sound,
         popout_conversation,
         hide_head,
         close_composer,

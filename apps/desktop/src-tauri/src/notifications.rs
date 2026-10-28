@@ -18,6 +18,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 const PREFERENCES_FILE: &str = "notification-preferences.json";
+const SOUND_FILE: &str = "notification-sound.json";
 const MAX_PREFERENCES_BYTES: u64 = 8 * 1024;
 const BANNER_BATCH: usize = 20;
 const MAX_BANNER_BATCHES_PER_WAKE: usize = 5;
@@ -48,6 +49,7 @@ pub struct NotificationSettings {
     /// Serializes core queue read/post/ack without holding the application/session mutex.
     drain_lock: Mutex<()>,
     banner_drain: Mutex<BannerDrainState>,
+    sound: Mutex<bool>,
 }
 
 #[derive(Default)]
@@ -63,6 +65,23 @@ pub enum PreferenceRead {
 }
 
 impl NotificationSettings {
+    pub fn sound_enabled(&self) -> bool {
+        *self.sound.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub fn set_sound_enabled(&self, enabled: bool) -> BridgeResult<()> {
+        let mut sound = self.sound.lock().unwrap_or_else(|poison| poison.into_inner());
+        crate::fsutil::write_private_atomic(
+            &self.root.join(SOUND_FILE),
+            if enabled { b"true" } else { b"false" },
+        )
+        .map_err(|_| {
+            BridgeError::new("notification-sound", "Could not save notification sound settings.")
+        })?;
+        *sound = enabled;
+        Ok(())
+    }
+
     pub fn load(root: &Path) -> Self {
         let path = root.join(PREFERENCES_FILE);
         Self {
@@ -72,6 +91,11 @@ impl NotificationSettings {
             context: Mutex::new(NotificationContext::default()),
             drain_lock: Mutex::new(()),
             banner_drain: Mutex::new(BannerDrainState::default()),
+            sound: Mutex::new(
+                fs::read(root.join(SOUND_FILE)).ok()
+                    .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
+                    .unwrap_or(false),
+            ),
         }
     }
 
@@ -512,6 +536,29 @@ pub(crate) fn drain_with_delivery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_sound_is_opt_in_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        assert!(!settings.sound_enabled());
+        settings.set_sound_enabled(true).unwrap();
+        assert!(settings.sound_enabled());
+        assert!(NotificationSettings::load(dir.path()).sound_enabled());
+        settings.set_sound_enabled(false).unwrap();
+        assert!(!NotificationSettings::load(dir.path()).sound_enabled());
+    }
+
+    #[test]
+    fn notification_sound_failed_save_keeps_last_applied_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = NotificationSettings::load(dir.path());
+        settings.set_sound_enabled(true).unwrap();
+        fs::remove_file(dir.path().join("notification-sound.json")).unwrap();
+        fs::create_dir(dir.path().join("notification-sound.json")).unwrap();
+        assert!(settings.set_sound_enabled(false).is_err());
+        assert!(settings.sound_enabled());
+    }
 
     fn binding(vault_id: &str) -> Binding {
         Binding {

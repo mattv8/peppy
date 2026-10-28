@@ -63,8 +63,15 @@ impl Backend {
         }
     }
 
-    pub fn post(&mut self, id: &str, title: &str, body: &str, signal: Signal) -> Result<Item, ()> {
-        self.post_inner(id, title, body, signal).map_err(|_| ())
+    pub fn post(
+        &mut self,
+        id: &str,
+        title: &str,
+        body: &str,
+        sound: bool,
+        signal: Signal,
+    ) -> Result<Item, ()> {
+        self.post_inner(id, title, body, sound, signal).map_err(|_| ())
     }
 
     fn post_inner(
@@ -72,12 +79,13 @@ impl Backend {
         id: &str,
         title: &str,
         body: &str,
+        sound: bool,
         signal: Signal,
     ) -> windows::core::Result<Item> {
         let document = XmlDocument::new()?;
         document.LoadXml(&HSTRING::from(format!(
-            "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual><audio silent=\"true\"/></toast>",
-            escape(title), escape(body))))?;
+            "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{}</toast>",
+            escape(title), escape(body), super::windows_audio(sound))))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         let tag = HSTRING::from(id);
         toast.SetTag(&tag)?;

@@ -72,6 +72,8 @@
     "allow-list-devices",
     "allow-revoke-device",
     "allow-set-start-at-login",
+    "allow-get-notification-sound",
+    "allow-set-notification-sound",
     "allow-hide-head",
     "allow-popout-conversation",
     "allow-acknowledge-lifecycle",

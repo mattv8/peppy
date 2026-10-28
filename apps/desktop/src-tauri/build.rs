@@ -66,6 +66,8 @@ const COMMANDS: &[&str] = &[
     "close_composer",
     "close_head_panel",
     "set_start_at_login",
+    "get_notification_sound",
+    "set_notification_sound",
     "popout_conversation",
     "acknowledge_lifecycle",
     "hosted_account",
