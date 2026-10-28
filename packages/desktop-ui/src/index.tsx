@@ -708,6 +708,7 @@ export function AppTitlebar({
   sidebarExpanded,
   sidebarControls,
   onNewMessage,
+  newMessageDisabled = false,
   navigation,
   search,
 }: {
@@ -723,6 +724,7 @@ export function AppTitlebar({
   sidebarExpanded?: boolean;
   sidebarControls?: string;
   onNewMessage?(): void;
+  newMessageDisabled?: boolean;
   navigation?: ReactNode;
   search?: ReactNode;
 }) {
@@ -809,6 +811,7 @@ export function AppTitlebar({
           data-action="new-message"
           aria-label="New conversation"
           title="New conversation"
+          disabled={newMessageDisabled}
           onClick={onNewMessage}
         ><MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden /></button>}
       </div>}

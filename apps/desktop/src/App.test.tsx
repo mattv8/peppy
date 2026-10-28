@@ -30,6 +30,16 @@ import {
  * conversation); saves are CAS on `expectedRevision`; sends use the STORED draft and clear it.
  */
 type HostError = { code: string; message: string };
+const findNewConversationAction = async () => {
+  const action = within(document.getElementById("desktop-titlebar")!).getByRole("button", { name: "New conversation" });
+  await waitFor(() => expect(action).toBeEnabled());
+  return action;
+};
+const findEmptyConversationAction = () => waitFor(() => {
+  const action = document.getElementById("new-conversation-cta");
+  expect(action).toBeVisible();
+  return action!;
+});
 const SMS_ONLY: GatewayView = {
   id: "gw-phone",
   name: "Phone",
@@ -2101,7 +2111,7 @@ describe("conversation pinning", () => {
     vi.mocked(bridge.save_draft).mockReturnValue(saving.promise);
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     await screen.findByLabelText("Recipients");
 
     const rows = [...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row")!);
@@ -2131,7 +2141,7 @@ describe("new-recipient drafts", () => {
     host.conversations = [];
     render(<App />);
 
-    const cta = await screen.findByRole("button", { name: "New conversation" });
+    const cta = await findEmptyConversationAction();
     expect(cta).toHaveAttribute("id", "new-conversation-cta");
     expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
     expect(document.getElementById("conversation-stage")).toHaveStyle({
@@ -2145,11 +2155,11 @@ describe("new-recipient drafts", () => {
     expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
   });
 
-  it("starts an in-place draft from the thread-list toolbar", async () => {
+  it("starts an in-place draft from the main navbar", async () => {
     host.conversations = [];
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
 
     expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
     expect(document.getElementById("new-conversation-cta")).not.toBeInTheDocument();
@@ -2170,7 +2180,7 @@ describe("new-recipient drafts", () => {
     vi.mocked(bridge.save_draft).mockReturnValueOnce(save.promise);
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
+    fireEvent.click(await findNewConversationAction());
     const recipients = await screen.findByLabelText("Recipients");
     fireEvent.change(recipients, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(recipients, { key: "Enter" });
@@ -2192,12 +2202,12 @@ describe("new-recipient drafts", () => {
     host.conversations = [];
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
+    fireEvent.click(await findNewConversationAction());
     expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete draft" }));
 
-    expect(await screen.findByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(await findEmptyConversationAction()).toBeInTheDocument();
     expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Recipients")).not.toBeInTheDocument();
     expect(document.getElementById("conversation-stage")).toHaveStyle({
@@ -2205,7 +2215,7 @@ describe("new-recipient drafts", () => {
     });
     expect(screen.queryByRole("button", { name: "Delete draft" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    fireEvent.click(await findEmptyConversationAction());
     expect(await screen.findByLabelText("Recipients")).toBeInTheDocument();
   });
 
@@ -2214,7 +2224,7 @@ describe("new-recipient drafts", () => {
     render(<App />);
 
     expect(await screen.findByText("Initial state unavailable")).toHaveAttribute("role", "alert");
-    expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(document.getElementById("new-conversation-cta")).toBeVisible();
     expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
   });
 
@@ -2524,7 +2534,7 @@ describe("new-recipient drafts", () => {
       code: "invalid-recipient",
       message: "Recipients must be phone numbers.",
     };
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -2552,7 +2562,7 @@ describe("new-recipient drafts", () => {
   it("does not save an invalid new recipient", async () => {
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     save.mockClear();
@@ -2567,7 +2577,7 @@ describe("new-recipient drafts", () => {
   it("blocks Send while a recipient is pending, then saves the canonical number on commit", async () => {
     host.gateways = [MMS_SIM];
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -2597,7 +2607,7 @@ describe("new-recipient drafts", () => {
   it("keeps new-compose recipient editing after an incoming history match", async () => {
     host.gateways = [MMS_SIM];
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -2633,7 +2643,7 @@ describe("new-recipient drafts", () => {
     const firstSave = deferred<Draft>();
     const save = vi.mocked(bridge.save_draft).mockImplementationOnce(() => firstSave.promise);
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -2654,7 +2664,7 @@ describe("new-recipient drafts", () => {
     host.gateways = [MMS_SIM];
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -2677,7 +2687,7 @@ describe("new-recipient drafts", () => {
 
   it("removes the exact stored ID from a multi-recipient draft", async () => {
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -2728,7 +2738,7 @@ describe("floating conversation actions", () => {
 
   it("uses the persisted conversation ID after a local draft is rekeyed", async () => {
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -3040,7 +3050,7 @@ describe("draft durability", () => {
     expect(recovery).toHaveTextContent("late local text");
     expect(within(recovery).getByRole("button", { name: "Copy retained text" })).toBeInTheDocument();
     expect(within(recovery).getByRole("button", { name: "Restore in new draft" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
+    expect(document.getElementById("new-conversation-cta")).toBeVisible();
     expect(screen.queryByLabelText("Composer")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /River/ }));
     const selectedRecovery = await screen.findByRole("status", { name: "Recoverable unsaved draft" });
@@ -4521,18 +4531,22 @@ describe("desktop presentation controls", () => {
       expect(navigation.querySelectorAll("[data-rail-item]")).toHaveLength(4);
     });
 
-    it("places the in-place compose action in only the active navigation location", async () => {
-      const { unmount } = render(<App />);
-      await screen.findByText("Hello from Aurora");
-      expect(document.querySelector("#thread-list-toolbar [data-action=new-message]")).toBeInTheDocument();
-      expect(document.querySelector("#desktop-titlebar [data-action=new-message]")).not.toBeInTheDocument();
-      unmount();
-
-      localStorage.setItem("peppy.layout.v1", JSON.stringify({ navigationPosition: "title-bar" }));
+    it.each(["side-rail", "title-bar"])("keeps compose in the main navbar with %s navigation", async navigationPosition => {
+      localStorage.setItem("peppy.layout.v1", JSON.stringify({ navigationPosition }));
       render(<App />);
       await screen.findByText("Hello from Aurora");
-      expect(document.querySelector("#thread-list-toolbar [data-action=new-message]")).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+      const action = within(document.getElementById("desktop-titlebar")!).getByRole("button", { name: "New conversation" });
+      expect(document.querySelector("#thread-list-toolbar")).not.toBeInTheDocument();
+      fireEvent.click(action);
+      expect(document.getElementById("draft-recipients")).toBeInTheDocument();
+    });
+
+    it.each(["Settings", "Notifications", "Contacts"])("navbar compose returns from %s to a new conversation", async view => {
+      render(<App />);
+      await screen.findByText("Hello from Aurora");
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${view}`) }));
+      fireEvent.click(within(document.getElementById("desktop-titlebar")!).getByRole("button", { name: "New conversation" }));
+      await waitFor(() => expect(document.getElementById("conversation-pane")).toHaveAttribute("data-view", "conversations"));
       expect(document.getElementById("draft-recipients")).toBeInTheDocument();
     });
 
@@ -5013,7 +5027,7 @@ describe("desktop presentation controls", () => {
 
   it("renders the recipient panel in the safe rail layer between messages and composer", async () => {
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -5037,7 +5051,7 @@ describe("desktop presentation controls", () => {
       JSON.stringify({ listWidth: 320, recipientPosition: { x: 37, y: 53 } }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -5057,7 +5071,7 @@ describe("desktop presentation controls", () => {
       JSON.stringify({ listWidth: 320, recipientAnchor: "bottom-left", sibling: true, recipientPosition: { x: -1, y: 53 } }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
@@ -5315,7 +5329,7 @@ describe("display-only contact names", () => {
     ]);
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    fireEvent.click(await findNewConversationAction());
     const picker = await screen.findByLabelText("Recipients");
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     save.mockClear();

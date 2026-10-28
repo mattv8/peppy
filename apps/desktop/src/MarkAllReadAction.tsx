@@ -127,7 +127,7 @@ export function MarkAllReadAction({ unreadCount, enabled, markAllRead, refresh, 
   });
   const button = unreadCount || pending ? <button ref={actionRef} id="mark-all-read" type="button" aria-label="Mark all as read" title="Mark all as read" aria-haspopup="dialog" aria-expanded={confirming} {...(confirming ? { "aria-controls": "mark-all-read-confirmation" } : {})} disabled={!enabled || pending} aria-busy={pending || undefined} onFocus={trackFocus} onBlur={trackBlur} onClick={() => setConfirming(current => !current)}><CheckCheck size={16} strokeWidth={1.75} aria-hidden /></button> : null;
 
-  return <div id="mark-all-read-boundary">
+  return <div id="mark-all-read-boundary" role="toolbar" aria-label="Thread list toolbar" data-empty={!button && !confirming && !notice || undefined}>
     {button}
     {confirming && <div ref={popoverRef} id="mark-all-read-confirmation" role="dialog" aria-label="Confirm mark all as read" onFocus={trackFocus} onBlur={trackBlur}><p>{unreadCount.toLocaleString()} unread messages. All synced conversations in Peppy.</p><div><button ref={confirmRef} className="primary-button" type="button" disabled={pending} onClick={() => void run()}>Mark all as read</button><button className="secondary-button" type="button" disabled={pending} onClick={closeConfirmation}>Cancel</button></div></div>}
     <div id="thread-list-action-notice" role={notice === "mutation" || notice === "mutation-refresh" || notice === "refresh" || notice === "outcome" ? "alert" : "status"} aria-live="polite">

@@ -52,7 +52,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 #thread-list[hidden] {
   display: none;
 }
-#thread-list-toolbar {
+#mark-all-read-boundary {
   position: relative;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -62,6 +62,11 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   align-items: center;
   padding: 4px 8px;
   border-bottom: 1px solid var(--peppy-border);
+}
+#mark-all-read-boundary[data-empty] {
+  min-height: 0;
+  padding: 0;
+  border: 0;
 }
 #onboarding-view input,
 #setup-panel input,
@@ -152,7 +157,6 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
 .notif-app-filter-label b, .notif-app-filter-label small { display: block; }
 .notif-app-filter-label small { color: var(--peppy-text-muted); font-size: 11px; }
 #settings-view h3 { margin: 8px 0 0; color: var(--peppy-text-strong); font-size: 13px; }
-#thread-list-toolbar > button,
 #mark-all-read,
 .header-actions button {
   width: 28px;
@@ -165,12 +169,8 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   background: transparent;
   color: var(--peppy-text-secondary);
 }
-#thread-list-toolbar > button:hover,
 .header-actions button:hover {
   background: var(--peppy-surface-hover);
-}
-#mark-all-read-boundary {
-  display: contents;
 }
 #mark-all-read-confirmation {
   position: absolute;

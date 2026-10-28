@@ -211,6 +211,7 @@ select:focus-visible {
 }
 @media (max-width: 640px) {
   .titlebar:has(#titlebar-search) { height: auto; min-height: var(--peppy-titlebar-height); flex-wrap: wrap; padding-block: 4px; padding-inline: 8px; }
+  .titlebar:has(#titlebar-search) > .window-controls-macos { height: var(--peppy-titlebar-height); }
   #titlebar-search { order: 10; flex-basis: min(520px, 100%); margin-inline: auto; }
 }
 .titlebar-status {

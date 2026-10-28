@@ -2773,15 +2773,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       label: phone.label,
     }));
   };
-  const showConversationList = () => {
-    if (narrowBrowserViewport) {
-      setActiveView("conversations");
-      setMobileConversationListOpen(true);
-      return;
-    }
-    if (activeView !== "conversations") setActiveView("conversations");
-    if (listCollapsed) resizeListTo(previousListWidth.current);
-  };
   const toggleConversationList = () => {
     if (narrowBrowserViewport) {
       if (activeView !== "conversations") {
@@ -2800,8 +2791,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     resizeListTo(listCollapsed ? previousListWidth.current : 0);
   };
   const startTitlebarMessage = () => {
-    showConversationList();
-    void startNewMessage();
+    const begin = () => {
+      setContactTarget(undefined);
+      setActiveViewNow("conversations");
+      if (listCollapsed) resizeListTo(previousListWidth.current);
+      void startNewMessage();
+    };
+    if (contactNavigation.current) contactNavigation.current(begin);
+    else begin();
   };
 
   const restoreRecovery = async (recovery: DraftRecovery, feedbackKey: string) => {
@@ -3862,7 +3859,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
-        onNewMessage={navigationPosition === "title-bar" || activeView !== "conversations" || listCollapsed || (narrowConversationListMode && !showingMobileConversationList) ? startTitlebarMessage : undefined}
+        onNewMessage={startTitlebarMessage}
+        newMessageDisabled={loading || snapshot?.encryption.state !== "unlocked" || Boolean(appLock?.locked)}
         navigation={navigationPosition === "title-bar" ? (
           <NavButtons
             orientation="titlebar"
@@ -3912,20 +3910,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 : { width: renderedListWidth, flexBasis: renderedListWidth }
           }
         >
-          <div
-            id="thread-list-toolbar"
-            role="toolbar"
-            aria-label="Thread list toolbar"
-          >
-            {navigationPosition === "side-rail" && <button
-              id="new-message"
-              aria-label="New message"
-              title="New message"
-              data-action="new-message"
-              onClick={() => void startNewMessage()}
-            >
-              <MessageSquarePlus size={16} strokeWidth={1.75} aria-hidden />
-            </button>}
             <MarkAllReadAction
               key={currentSearchSessionKey()}
               unreadCount={snapshot?.conversations.reduce((total, conversation) => total + conversation.unread, 0) ?? 0}
@@ -3933,17 +3917,14 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               markAllRead={() => bridge.mark_all_read()}
               refresh={() => refresh()}
               onFocusFallback={() => {
-                const newMessage = document.getElementById("new-message") as HTMLButtonElement | null;
                 const titlebarNewMessage = document.querySelector<HTMLButtonElement>("[data-action='new-message']");
                 const omniInput = document.querySelector<HTMLInputElement>("#titlebar-search input");
                 const fallback = document.getElementById("thread-list") ?? document.getElementById("conversation-pane");
-                if (newMessage && !newMessage.disabled) newMessage.focus();
-                else if (titlebarNewMessage && !titlebarNewMessage.disabled) titlebarNewMessage.focus();
+                if (titlebarNewMessage && !titlebarNewMessage.disabled) titlebarNewMessage.focus();
                 else if (omniInput && !omniInput.disabled) omniInput.focus();
                 else fallback?.focus();
               }}
             />
-          </div>
             <ConversationList
             conversations={conversations}
             selectedId={slotKey}
