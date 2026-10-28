@@ -106,7 +106,7 @@ just desktop-open
 
 `desktop-dev`, `desktop-bundle`, and `desktop-run` run `pnpm install --frozen-lockfile` before building to synchronize dependencies with the selected source tree's lockfile. An install failure stops the build; `desktop-run` does not open an older bundle. These commands do not upgrade packages beyond the lockfile.
 
-On macOS, development builds are not Developer ID signed or notarized; macOS may apply ad-hoc linker signing without a TeamIdentifier or sealed resources.
+On macOS, `desktop-bundle` and `desktop-run` fully ad-hoc sign the app bundle using its `CFBundleIdentifier` unless `PEPPY_MACOS_SIGNING_IDENTITY` is set, then strictly verify the bundle and nested signatures. Ad-hoc bundles have sealed resources but no TeamIdentifier; development builds are not notarized.
 
 Development uses a separate Keychain namespace. The first dev launch creates an empty profile. Any prior app data and Keychain records stored under the production identity `org.peppy.desktop` remain unchanged; there is no automatic migration. Legacy Keychain records copy only within the current namespace, never from production into dev.
 

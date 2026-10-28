@@ -72,18 +72,44 @@ pub fn post(
     title: String,
     body: String,
 ) -> Result<(), ()> {
+    post_with_activation(
+        app,
+        Some(NotificationActivation {
+            request_id: uuid::Uuid::new_v4().simple().to_string(),
+            session_generation: session.generation.clone(),
+            destination,
+        }),
+        session.cancel.clone(),
+        title,
+        body,
+    )
+}
+
+pub fn post_test(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), ()> {
+    post_with_activation(
+        app,
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        title.to_owned(),
+        body.to_owned(),
+    )
+}
+
+fn post_with_activation(
+    app: &tauri::AppHandle,
+    activation: Option<NotificationActivation>,
+    cancel: tokio_util::sync::CancellationToken,
+    title: String,
+    body: String,
+) -> Result<(), ()> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let state = app.state::<AppState>();
         let guard = state.notification_activation.owner.lock().unwrap();
         if let Some(owner) = guard.as_ref() {
             let acceptance = owner.submit(owner::Post {
-                activation: NotificationActivation {
-                    request_id: uuid::Uuid::new_v4().simple().to_string(),
-                    session_generation: session.generation.clone(),
-                    destination,
-                },
-                cancel: session.cancel.clone(),
+                activation,
+                cancel,
                 sound: state.notifications.sound_enabled(),
                 title,
                 body,
@@ -94,6 +120,8 @@ pub fn post(
             return acceptance.and_then(owner::Acceptance::wait);
         }
     }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = (activation, cancel);
     fallback::post(app, &title, &body)
 }
 

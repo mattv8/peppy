@@ -24,7 +24,7 @@ const CLICK: u64 = 1;
 const RETIRE: u64 = 2;
 
 pub struct Post {
-    pub activation: NotificationActivation,
+    pub activation: Option<NotificationActivation>,
     pub cancel: CancellationToken,
     pub title: String,
     pub body: String,
@@ -117,7 +117,7 @@ pub struct Owner {
 }
 
 struct Entry<T> {
-    activation: NotificationActivation,
+    activation: Option<NotificationActivation>,
     cancel: CancellationToken,
     signal: Signal,
     handle: T,
@@ -170,8 +170,12 @@ impl<B: Backend> Registry<B> {
             sequence: self.sequence.clone(),
             wake: self.wake.clone(),
         };
+        let request_id = post.activation.as_ref().map_or_else(
+            || uuid::Uuid::new_v4().simple().to_string(),
+            |activation| activation.request_id.clone(),
+        );
         let handle = self.backend.post(
-            &post.activation.request_id,
+            &request_id,
             &post.title,
             &post.body,
             post.sound,
@@ -194,7 +198,9 @@ impl<B: Backend> Registry<B> {
             let event = entry.signal.event.load(Ordering::Acquire);
             if event != 0 || entry.cancel.is_cancelled() {
                 if event & 3 == CLICK && !entry.cancel.is_cancelled() {
-                    clicks.push((event >> 2, entry.activation.clone(), entry.cancel.clone()));
+                    if let Some(activation) = &entry.activation {
+                        clicks.push((event >> 2, activation.clone(), entry.cancel.clone()));
+                    }
                     // Cleanup failure must not suppress a genuine click or replay
                     // it on the next wake. Keep its registration until removal succeeds.
                     entry.signal.event.store(event | RETIRE, Ordering::Release);
@@ -373,16 +379,91 @@ mod tests {
     }
     fn post(id: usize) -> Post {
         Post {
-            activation: NotificationActivation {
+            activation: Some(NotificationActivation {
                 request_id: id.to_string(),
                 session_generation: "instance".into(),
                 destination: Destination::Main,
-            },
+            }),
             cancel: CancellationToken::new(),
             title: "not retained".into(),
             body: "not retained".into(),
             sound: false,
         }
+    }
+
+    #[test]
+    fn notification_anonymous_test_waits_for_native_acceptance_without_session() {
+        for outcome in [Ok(()), Err(())] {
+            let (started, observing) = mpsc::sync_channel(1);
+            let (complete, result) = mpsc::sync_channel(1);
+            let owner = test_owner(
+                TestBackend {
+                    acceptance: Some((started, result)),
+                    ..Default::default()
+                },
+                0,
+            );
+            let receipt = owner.submit(anonymous_post()).unwrap();
+            observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+            assert!(matches!(
+                receipt.result.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            complete.send(outcome).unwrap();
+            assert_eq!(receipt.wait(), outcome);
+            owner.stop();
+        }
+    }
+
+    fn anonymous_post() -> Post {
+        Post {
+            activation: None,
+            cancel: CancellationToken::new(),
+            title: "Peppy".into(),
+            body: "Test notification".into(),
+            sound: true,
+        }
+    }
+
+    #[test]
+    fn notification_anonymous_timeout_cleans_up_late_native_acceptance() {
+        let (started, observing) = mpsc::sync_channel(1);
+        let (complete, result) = mpsc::sync_channel(1);
+        let (retired, retirement) = mpsc::sync_channel(1);
+        let owner = test_owner(
+            TestBackend {
+                acceptance: Some((started, result)),
+                retired: Some(retired),
+                ..Default::default()
+            },
+            0,
+        );
+        let receipt = owner.submit(anonymous_post()).unwrap();
+        observing.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        assert!(receipt.wait_for(std::time::Duration::ZERO).is_err());
+        complete.send(Ok(())).unwrap();
+        retirement.recv_timeout(PLATFORM_TIMEOUT).unwrap();
+        owner.stop();
+    }
+
+    #[test]
+    fn notification_anonymous_test_has_unique_ids_and_never_navigates() {
+        let mut registry = registry();
+        registry.post(anonymous_post()).unwrap();
+        registry.post(anonymous_post()).unwrap();
+        assert_eq!(registry.backend.callbacks.len(), 2);
+        assert_eq!(registry.backend.sounds, [true, true]);
+        for (id, callback) in &registry.backend.callbacks {
+            assert!(uuid::Uuid::parse_str(id).is_ok());
+            callback.click();
+        }
+        registry.backend.fail_remove = true;
+        assert!(registry.reconcile().is_empty());
+        assert_eq!(registry.entries.len(), 2);
+        registry.backend.fail_remove = false;
+        assert!(registry.reconcile().is_empty());
+        assert!(registry.entries.is_empty());
+        assert!(registry.backend.callbacks.is_empty());
     }
 
     #[test]
@@ -490,11 +571,11 @@ mod tests {
             |destination, title, body| {
                 owner
                     .submit(Post {
-                        activation: NotificationActivation {
+                        activation: Some(NotificationActivation {
                             request_id: uuid::Uuid::new_v4().to_string(),
                             session_generation: session.generation.clone(),
                             destination,
-                        },
+                        }),
                         cancel: session.cancel.clone(),
                         sound: settings.sound_enabled(),
                         title,
@@ -679,11 +760,11 @@ mod tests {
             |_, _| false,
             |destination, title, body| {
                 let receipt = owner.submit(Post {
-                    activation: NotificationActivation {
+                    activation: Some(NotificationActivation {
                         request_id: "late-post".into(),
                         session_generation: session.generation.clone(),
                         destination,
-                    },
+                    }),
                     cancel: session.cancel.clone(),
                     sound: settings.sound_enabled(),
                     title,
