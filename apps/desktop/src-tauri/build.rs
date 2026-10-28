@@ -2,6 +2,8 @@
 /// that a window's capability does not explicitly allow (`capabilities/*.json`), so composer
 /// windows can only reach the conversation/draft/read/attachment/close commands.
 const COMMANDS: &[&str] = &[
+    "peek_notification_activation",
+    "ack_notification_activation",
     "load_state",
     "load_history",
     "search_local",

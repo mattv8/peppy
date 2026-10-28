@@ -207,6 +207,9 @@ importers:
       '@peppy/desktop-ui':
         specifier: workspace:*
         version: link:../../packages/desktop-ui
+      '@peppy/generated':
+        specifier: workspace:*
+        version: link:../../packages/generated
       '@tauri-apps/api':
         specifier: ^2.0.0
         version: 2.12.0

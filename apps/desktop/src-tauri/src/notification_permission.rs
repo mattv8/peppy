@@ -2,7 +2,6 @@
 //! it, posts a fixed content-free test banner, and names the OS settings page.
 use serde::Serialize;
 use tauri::AppHandle;
-use tauri_plugin_notification::NotificationExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -172,8 +171,8 @@ mod windows_os {
         UI::Notifications::{NotificationSetting, ToastNotificationManager},
     };
 
-    // Mirrors the show/app-ID heuristic in tauri-plugin-notification 2.5.1 desktop.rs: the plugin
-    // sets System.AppUserModel.ID only outside target/debug and target/release, so those builds
+    // Our legacy fallback sets System.AppUserModel.ID only outside target/debug
+    // and target/release, so those development builds
     // are not matched to Peppy's toast identity and report Unknown here.
     fn installed() -> bool {
         let Ok(exe) = tauri::utils::platform::current_exe() else {
@@ -234,18 +233,13 @@ pub fn current_settings_url(app: &AppHandle) -> Option<String> {
     settings_url(Some(&identifier))
 }
 
-/// Blocking OS work. `test_sent` means the test was handed to the OS notifier, not displayed.
+/// Blocking OS work. `test_sent` means fallback dispatch succeeded, not display;
+/// the legacy macOS backend sends on handle Drop and cannot report send errors.
 /// Call via `crate::sync::blocking` so authorization callbacks never wait on a Tokio worker.
 pub fn check(app: &AppHandle) -> NotificationCheck {
     let status = query(app);
     let test_sent = status != PermissionStatus::Denied
-        && app
-            .notification()
-            .builder()
-            .title(TEST_TITLE)
-            .body(TEST_BODY)
-            .show()
-            .is_ok();
+        && crate::notification_activation::fallback::post(app, TEST_TITLE, TEST_BODY).is_ok();
     NotificationCheck {
         status,
         test_sent,

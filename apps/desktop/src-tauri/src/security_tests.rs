@@ -225,6 +225,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     let hosted = include_str!("hosted/mod.rs");
     let enrollment = include_str!("enrollment.rs");
     let history_search = include_str!("search_history.rs");
+    let notification_activation = include_str!("notification_activation.rs");
     for command in &commands {
         assert!(
             registered.contains(&format!("enrollment::{command},"))
@@ -233,10 +234,12 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         );
         assert!(
             registered.contains(&format!("fn {command}("))
-                || [hosted, enrollment, history_search].iter().any(|source| {
-                    source.contains(&format!("pub async fn {command}("))
-                        || source.contains(&format!("pub fn {command}("))
-                }),
+                || [hosted, enrollment, history_search, notification_activation]
+                    .iter()
+                    .any(|source| {
+                        source.contains(&format!("pub async fn {command}("))
+                            || source.contains(&format!("pub fn {command}("))
+                    }),
             "{command} declared in the app manifest but not defined"
         );
     }
@@ -247,6 +250,28 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
     assert!(registered.contains("fn load_history("));
     let handler = &registered[registered.find("tauri::generate_handler![").unwrap()..];
     assert!(handler.contains("\n        load_history,"));
+    for command in ["peek_notification_activation", "ack_notification_activation"] {
+        assert!(commands.contains(&command.to_owned()));
+        assert!(handler.contains(&format!("notification_activation::{command},")));
+        assert!(main.contains(&allow(command)));
+        assert!(!composer.contains(&allow(command)));
+        assert!(!crate::COMPOSER_COMMANDS.contains(&command));
+        let definition = notification_activation
+            .split(&format!("pub async fn {command}("))
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        assert!(definition.contains("window: tauri::WebviewWindow"));
+        assert!(definition.contains("crate::require_main(window.label())?;"));
+    }
+    let main_manifest: Value =
+        serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+    let composer_manifest: Value =
+        serde_json::from_str(include_str!("../capabilities/composer.json")).unwrap();
+    assert_eq!(main_manifest["windows"], json!(["main"]));
+    assert_eq!(composer_manifest["windows"], json!(["composer-*"]));
     assert!(crate::COMPOSER_COMMANDS.contains(&"load_history"));
     assert!(main.contains("allow-load-history"));
     assert!(composer.contains("allow-load-history"));

@@ -16,7 +16,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
-use tauri_plugin_notification::NotificationExt;
 
 const PREFERENCES_FILE: &str = "notification-preferences.json";
 const MAX_PREFERENCES_BYTES: u64 = 8 * 1024;
@@ -278,14 +277,6 @@ fn legacy_file_error() -> BridgeError {
     )
 }
 
-fn stable_id(candidate: &BannerCandidate) -> i32 {
-    let mut hash = 0x811c9dc5u32;
-    for byte in candidate.id.bytes() {
-        hash = (hash ^ u32::from(byte)).wrapping_mul(0x01000193);
-    }
-    (hash & 0x7fff_ffff) as i32
-}
-
 fn focused_for_candidate(
     app: &AppHandle,
     settings: &NotificationSettings,
@@ -362,23 +353,50 @@ fn banner_text(
 }
 
 /// Drains only durable live candidates produced by core. A candidate is acknowledged after an OS
-/// post attempt (or intentional policy suppression), leaving the unavoidable crash window after
+/// acceptance (or intentional policy suppression), leaving the unavoidable crash window after
 /// delivery and before acknowledgement explicit. Snapshot/history imports never create these rows.
 pub fn drain_banner_candidates(
     app: &AppHandle,
     session: &Session,
     settings: &NotificationSettings,
 ) -> BridgeResult<bool> {
+    drain_with_delivery(
+        session,
+        settings,
+        || {
+            app.state::<AppState>()
+                .app_locked
+                .load(std::sync::atomic::Ordering::Acquire)
+        },
+        |candidate, preferences| {
+            focused_for_candidate(app, settings, candidate)
+                || suppressed_by_head(preferences, candidate, |id| {
+                    crate::heads_runtime::has_head(app, id)
+                })
+        },
+        |destination, title, body| {
+            crate::notification_activation::post(app, session, destination, title, body)
+        },
+    )
+}
+
+pub(crate) fn drain_with_delivery(
+    session: &Session,
+    settings: &NotificationSettings,
+    app_locked: impl Fn() -> bool,
+    suppress: impl Fn(&BannerCandidate, &NotificationPreferences) -> bool,
+    mut post: impl FnMut(
+        peppy_desktop_api::NotificationActivationDestination,
+        String,
+        String,
+    ) -> Result<(), ()>,
+) -> BridgeResult<bool> {
     let _drain = settings
         .drain_lock
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut preferences = session.delivery_notification_preferences(settings)?;
-    if app
-        .state::<AppState>()
-        .app_locked
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    if app_locked() {
         preferences.preview = Preview::Hidden;
     }
     let now = SystemTime::now()
@@ -396,25 +414,21 @@ pub fn drain_banner_candidates(
         }
         let mut acknowledge = Vec::with_capacity(candidates.len());
         let mut summary_count = 0usize;
+        let mut summary_ids = Vec::new();
         let mut recent = Vec::new();
         for candidate in candidates {
-            if !allowed(&preferences, &candidate)
-                || focused_for_candidate(app, settings, &candidate)
-                || suppressed_by_head(&preferences, &candidate, |id| {
-                    crate::heads_runtime::has_head(app, id)
-                })
-            {
+            if !allowed(&preferences, &candidate) || suppress(&candidate, &preferences) {
                 acknowledge.push(candidate.id);
             } else if now.saturating_sub(candidate.created_at) > STALE_CANDIDATE_MS {
                 summary_count += 1;
-                acknowledge.push(candidate.id);
+                summary_ids.push(candidate.id);
             } else {
                 recent.push(candidate);
             }
         }
         if recent.len() > BANNER_BURST_SUMMARY_THRESHOLD {
             summary_count += recent.len();
-            acknowledge.extend(recent.into_iter().map(|candidate| candidate.id));
+            summary_ids.extend(recent.into_iter().map(|candidate| candidate.id));
         } else {
             for candidate in recent {
                 let (mut title, body) = banner_text(&preferences, &candidate);
@@ -427,14 +441,12 @@ pub fn drain_banner_candidates(
                         .map(|target| target.source_device_id.as_str());
                     title = crate::contacts::banner_title(&session.client, &title, source);
                 }
-                if app
-                    .notification()
-                    .builder()
-                    .id(stable_id(&candidate))
-                    .title(title)
-                    .body(body)
-                    .show()
-                    .is_err()
+                if post(
+                    crate::notification_activation::destination(&candidate),
+                    title,
+                    body,
+                )
+                .is_err()
                 {
                     if !acknowledge.is_empty() {
                         session
@@ -453,16 +465,12 @@ pub fn drain_banner_candidates(
         }
         if summary_count > 0
             && (preferences.message_banners || preferences.mirrored_banners)
-            && app
-                .notification()
-                .builder()
-                .id(0x4f50_5553)
-                .title("Peppy")
-                .body(format!(
-                    "{summary_count} new items arrived while Peppy was away."
-                ))
-                .show()
-                .is_err()
+            && post(
+                peppy_desktop_api::NotificationActivationDestination::Main,
+                "Peppy".into(),
+                format!("{summary_count} new items arrived while Peppy was away."),
+            )
+            .is_err()
         {
             if !acknowledge.is_empty() {
                 session
@@ -476,6 +484,7 @@ pub fn drain_banner_candidates(
                 "Could not post a native notification.",
             ));
         }
+        acknowledge.extend(summary_ids);
         session
             .client
             .ack_banner_candidates(acknowledge)

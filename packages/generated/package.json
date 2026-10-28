@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./protocol": "./src/protocol.ts",
-    "./local-search": "./src/local-search.ts"
+    "./local-search": "./src/local-search.ts",
+    "./notification-activation": "./src/notification-activation.ts"
   }
 }
