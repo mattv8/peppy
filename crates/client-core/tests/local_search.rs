@@ -236,7 +236,7 @@ fn mixed_text_does_not_match_phone_digits_but_phone_format_does() {
 }
 
 #[test]
-fn contact_labels_use_book_display_name_and_organization_fallback_without_dangling_separator() {
+fn computed_display_name_fallbacks_retain_primary_subtitle() {
     let directory = tempfile::TempDir::new().unwrap();
     let vault = Vault::new();
     let config = config(&directory, "contact-labels", &vault);
@@ -262,6 +262,161 @@ fn contact_labels_use_book_display_name_and_organization_fallback_without_dangli
             title: "Acme Labs".into(),
             subtitle: "Coworkers".into(),
         }]
+    );
+}
+
+#[test]
+fn contact_metadata_searches_user_fields_without_labels_or_internal_ids() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "contact-metadata", &vault);
+    let client = unlocked(&config, &vault);
+    client.capture_contact_book(&json!({
+        "schema_version": 1,
+        "book": {"id": "opaque-book", "owner_device_id": config.device_id.to_string(), "generation": "1", "state": "active", "region": "US", "display_name": "People"},
+        "contacts": [{
+            "id": "opaque-contact", "book_id": "opaque-book", "revision": "1", "display_name": "Ada",
+            "name": {"given": "Ada", "family": "Lovelace"}, "nickname": "Enchantress", "organization": "Analytical Engines", "title": "Programmer", "notes": "Unicode context:\n café 東京 needle followed by enough text to trim safely.",
+            "phones": [{"id": "private-phone", "label": "Mobile", "value": "+1 (555) 010-2222"}],
+            "emails": [{"id": "private-email", "label": "Work", "value": "ada@analysis.test"}],
+            "addresses": [{"id": "private-address", "label": "Home", "value": "12 St James Square", "city": "London", "postal_code": "SW1Y 4JH", "country": "United Kingdom"}],
+            "birthday": {"year": 1815, "month": 12, "day": 10},
+            "provenance": {"source_id": "private-source", "read_only": false}
+        }]
+    }).to_string()).unwrap();
+    let search = |query: &str| {
+        client
+            .search_local(LocalSearchRequest {
+                query: query.into(),
+                kind: Some(SearchKind::Contact),
+                cursor: None,
+                limit: Some(6),
+            })
+            .unwrap()
+    };
+
+    for (query, field) in [
+        ("Enchantress", "Nickname"),
+        ("Engines", "Organization"),
+        ("Programmer", "Title"),
+        ("café", "Notes"),
+        ("analysis.test", "Email"),
+        ("James", "Address"),
+        ("London", "Address"),
+        ("1815-12-10", "Birthday"),
+        ("12-10", "Birthday"),
+    ] {
+        assert!(
+            matches!(search(query).items.as_slice(), [LocalSearchHit::Contact { subtitle, .. }] if subtitle.contains(&format!(" · {field} · "))),
+            "{query}"
+        );
+    }
+    let notes = search("café");
+    assert!(
+        matches!(notes.items.as_slice(), [LocalSearchHit::Contact { subtitle, .. }] if !subtitle.contains('\n') && subtitle.contains("café 東京 needle") && subtitle.rsplit(" · ").next().is_some_and(|snippet| snippet.chars().count() <= 61))
+    );
+    assert_eq!(search("(555) 010-2222").items.len(), 1);
+    for query in ["Mobile", "Work", "Home", "opaque-contact", "private-source"] {
+        assert!(search(query).items.is_empty(), "{query}");
+    }
+}
+
+#[test]
+fn name_and_phone_matches_rank_above_metadata_and_keep_phone_subtitle() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "contact-ranking", &vault);
+    let client = unlocked(&config, &vault);
+    client.capture_contact_book(&json!({
+        "schema_version": 1,
+        "book": {"id": "people", "owner_device_id": config.device_id.to_string(), "generation": "1", "state": "active", "region": "US", "display_name": "People"},
+        "contacts": [
+            {"id":"name","book_id":"people","revision":"1","display_name":"Needle Name","phones":[{"id":"p1","value":"+15550001"}],"emails":[],"addresses":[],"provenance":{"source_id":"s1","read_only":false}},
+            {"id":"metadata","book_id":"people","revision":"1","display_name":"Other","notes":"Needle metadata","phones":[],"emails":[],"addresses":[],"provenance":{"source_id":"s2","read_only":false}},
+            {"id":"phone","book_id":"people","revision":"1","display_name":"Phone","phones":[{"id":"p2","value":"+1 555 0002"}],"emails":[],"addresses":[],"provenance":{"source_id":"s3","read_only":false}}
+        ]
+    }).to_string()).unwrap();
+    let names = client
+        .search_local(LocalSearchRequest {
+            query: "Needle".into(),
+            kind: Some(SearchKind::Contact),
+            cursor: None,
+            limit: Some(6),
+        })
+        .unwrap();
+    assert!(
+        matches!(names.items.as_slice(), [LocalSearchHit::Contact { contact_id, subtitle, .. }, LocalSearchHit::Contact { contact_id: metadata_id, .. }] if contact_id == "name" && metadata_id == "metadata" && subtitle == "People · +15550001")
+    );
+    let phones = client
+        .search_local(LocalSearchRequest {
+            query: "(555) 0002".into(),
+            kind: Some(SearchKind::Contact),
+            cursor: None,
+            limit: Some(6),
+        })
+        .unwrap();
+    assert!(
+        matches!(phones.items.as_slice(), [LocalSearchHit::Contact { contact_id, subtitle, .. }] if contact_id == "phone" && subtitle == "People · +1 555 0002")
+    );
+}
+
+#[test]
+fn metadata_snippets_map_expanding_unicode_matches_to_source_characters() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "unicode-snippet", &vault);
+    let client = unlocked(&config, &vault);
+    let notes = format!("{} needle after", "İ".repeat(100));
+    client
+        .capture_contact_book(
+            &json!({
+                "schema_version": 1,
+                "book": {"id": "people", "owner_device_id": config.device_id.to_string(), "generation": "1", "state": "active", "region": "US"},
+                "contacts": [{"id":"unicode","book_id":"people","revision":"1","display_name":"Unicode","notes":notes,"phones":[],"emails":[],"addresses":[],"provenance":{"source_id":"s","read_only":false}}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    let page = client
+        .search_local(LocalSearchRequest {
+            query: "needle".into(),
+            kind: Some(SearchKind::Contact),
+            cursor: None,
+            limit: Some(6),
+        })
+        .unwrap();
+    assert!(
+        matches!(page.items.as_slice(), [LocalSearchHit::Contact { subtitle, .. }] if subtitle.contains("Notes") && subtitle.contains("needle") && subtitle.rsplit(" · ").next().is_some_and(|snippet| snippet.chars().count() <= 61))
+    );
+}
+
+#[test]
+fn metadata_snippets_use_whole_string_lowercase_for_terminal_sigma() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let vault = Vault::new();
+    let config = config(&directory, "sigma-snippet", &vault);
+    let client = unlocked(&config, &vault);
+    let notes = format!("{} ΟΣ", "x".repeat(100));
+    client
+        .capture_contact_book(
+            &json!({
+                "schema_version": 1,
+                "book": {"id": "people", "owner_device_id": config.device_id.to_string(), "generation": "1", "state": "active", "region": "US"},
+                "contacts": [{"id":"sigma","book_id":"people","revision":"1","display_name":"Sigma","notes":notes,"phones":[],"emails":[],"addresses":[],"provenance":{"source_id":"s","read_only":false}}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    let page = client
+        .search_local(LocalSearchRequest {
+            query: "ος".into(),
+            kind: Some(SearchKind::Contact),
+            cursor: None,
+            limit: Some(6),
+        })
+        .unwrap();
+    assert!(
+        matches!(page.items.as_slice(), [LocalSearchHit::Contact { subtitle, .. }] if subtitle.contains("Notes") && subtitle.contains("ΟΣ"))
     );
 }
 

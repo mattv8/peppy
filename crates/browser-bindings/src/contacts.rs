@@ -292,7 +292,9 @@ impl BrowserCore {
             ));
         }
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
-        let raw = parse(self.client()?.contact_book_view(&json!({"schema_version": 1, "book_id": book_id, "search": query, "limit": shared::PAGE_LIMIT, "offset": offset}).to_string()))?;
+        let sort = shared::list_sort(args.get("sort").filter(|sort| !sort.is_null()))
+            .map_err(contact_error)?;
+        let raw = parse(self.client()?.contact_book_view(&json!({"schema_version": 1, "book_id": book_id, "search": query, "limit": shared::PAGE_LIMIT, "offset": offset, "sort": sort}).to_string()))?;
         let contacts = raw
             .get("contacts")
             .and_then(Value::as_array)
@@ -681,6 +683,13 @@ mod tests {
         })
     }
 
+    fn named_contact(book_id: &str, id: &str, given: &str, family: &str) -> Value {
+        let mut contact = contact_in_book(book_id, id, given, "+12025550199");
+        contact["display_name"] = json!(format!("{given} {family}"));
+        contact["name"]["family"] = json!(family);
+        contact
+    }
+
     fn dispatch_value(core: &mut BrowserCore, command: &str, args: Value) -> Value {
         let response: Value = serde_json::from_str(
             &core.dispatch(&json!({"command": command, "args": args}).to_string()),
@@ -847,6 +856,61 @@ mod tests {
             )["code"],
             "invalid-contact-edit"
         );
+    }
+
+    #[test]
+    fn list_contacts_defaults_and_validates_sort_before_calling_core() {
+        let mut fixture = ContactFixture::new();
+        let book_id = "sort-book";
+        fixture.capture_book(
+            book_id,
+            true,
+            vec![
+                named_contact(book_id, "id-a", "Zoe", "Able"),
+                named_contact(book_id, "id-b", "Amy", "Zulu"),
+                named_contact(book_id, "id-c", "Mia", "Middle"),
+            ],
+        );
+        fixture.deliver_owner_to_browser();
+
+        let defaulted = fixture.command("list_contacts", json!({"bookId": book_id}));
+        assert_eq!(
+            defaulted
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|contact| contact["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["id-a", "id-c", "id-b"],
+            "family order must not follow the deliberately different ID order"
+        );
+        let null_defaulted =
+            fixture.command("list_contacts", json!({"bookId": book_id, "sort": null}));
+        assert_eq!(
+            null_defaulted, defaulted,
+            "browser null matches omitted sort"
+        );
+        let given = fixture.command(
+            "list_contacts",
+            json!({"bookId": book_id, "sort": {"key": "given", "direction": "asc"}}),
+        );
+        assert_eq!(
+            given
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|contact| contact["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["id-b", "id-c", "id-a"]
+        );
+        for sort in [
+            json!({"key": "given"}),
+            json!({"key": "family", "direction": "up"}),
+        ] {
+            let error = fixture.error("list_contacts", json!({"bookId": book_id, "sort": sort}));
+            assert_eq!(error["code"], "invalid-contact-edit");
+            assert_eq!(error["message"], "The contact sort is invalid.");
+        }
     }
 
     #[test]

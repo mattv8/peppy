@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 
 const MAX_CONTACTS: usize = 20_000;
 const MAX_VALUES: usize = 20;
@@ -1073,6 +1074,7 @@ pub(crate) fn finish_scan(
 pub(crate) fn view(conn: &Connection, input: &str) -> Result<String, Error> {
     let v = parse(input)?;
     let book_id = req(&v, "book_id")?;
+    let sort = explicit_sort(&v)?;
     let limit = v
         .get("limit")
         .and_then(Value::as_u64)
@@ -1095,19 +1097,155 @@ pub(crate) fn view(conn: &Connection, input: &str) -> Result<String, Error> {
             .ok_or(Error::NotFound)?,
     )
     .map_err(|_| Error::Database)?;
-    // Search runs before pagination and only over displayable text.
-    let contacts = conn
+    // Search runs before pagination and only over displayable text. Unsorted callers keep
+    // the legacy lazy parse and ID ordering; explicit sorts parse the complete match set.
+    let rows = conn
         .prepare("SELECT body FROM contacts WHERE book_id=? AND deleted_at IS NULL ORDER BY id")?
         .query_map([book_id], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
-        .filter(|c| search.is_empty() || searchable(c).contains(&search))
-        .skip(offset)
-        .take(limit)
-        .map(|c| crate::contact_media::present(conn, sanitize(c)))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
+    let contacts: Vec<Value> = match sort {
+        Some(sort) => {
+            let mut contacts = rows
+                .into_iter()
+                .filter_map(|body| serde_json::from_str::<Value>(&body).ok())
+                .filter(|contact| search.is_empty() || searchable(contact).contains(&search))
+                .map(|contact| {
+                    let keys = ContactSortKeys::from_contact(&contact, sort.key);
+                    (contact, keys)
+                })
+                .collect::<Vec<_>>();
+            contacts.sort_by(|(_, left), (_, right)| left.cmp(right, sort.direction));
+            contacts
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|(contact, _)| crate::contact_media::present(conn, sanitize(contact)))
+                .collect()
+        }
+        None => rows
+            .into_iter()
+            .filter_map(|body| serde_json::from_str::<Value>(&body).ok())
+            .filter(|contact| search.is_empty() || searchable(contact).contains(&search))
+            .skip(offset)
+            .take(limit)
+            .map(|contact| crate::contact_media::present(conn, sanitize(contact)))
+            .collect(),
+    };
     Ok(json!({"schema_version":1,"book":sanitize(book),"contacts":contacts,"offset":offset,"limit":limit}).to_string())
+}
+
+#[derive(Clone, Copy)]
+enum ContactSortKey {
+    Given,
+    Family,
+}
+
+#[derive(Clone, Copy)]
+enum ContactSortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Copy)]
+struct ContactSort {
+    key: ContactSortKey,
+    direction: ContactSortDirection,
+}
+
+/// Parses only an explicitly supplied sort. Omitting it intentionally preserves legacy order.
+fn explicit_sort(input: &Value) -> Result<Option<ContactSort>, Error> {
+    let Some(sort) = input.get("sort") else {
+        return Ok(None);
+    };
+    let sort = sort.as_object().ok_or_else(invalid)?;
+    if sort.len() != 2
+        || !sort
+            .keys()
+            .all(|key| matches!(key.as_str(), "key" | "direction"))
+    {
+        return Err(invalid());
+    }
+    let key = match sort.get("key").and_then(Value::as_str) {
+        Some("given") => ContactSortKey::Given,
+        Some("family") => ContactSortKey::Family,
+        _ => return Err(invalid()),
+    };
+    let direction = match sort.get("direction").and_then(Value::as_str) {
+        Some("asc") => ContactSortDirection::Asc,
+        Some("desc") => ContactSortDirection::Desc,
+        _ => return Err(invalid()),
+    };
+    Ok(Some(ContactSort { key, direction }))
+}
+
+struct ContactSortKeys {
+    primary: String,
+    other: String,
+    display: String,
+    id: String,
+    named: bool,
+}
+
+impl ContactSortKeys {
+    fn from_contact(contact: &Value, key: ContactSortKey) -> Self {
+        let given = normalized_name(contact, "given");
+        let family = normalized_name(contact, "family");
+        let display = normalized_contact_text(contact.get("display_name"));
+        let (selected, other) = match key {
+            ContactSortKey::Given => (given, family),
+            ContactSortKey::Family => (family, given),
+        };
+        let primary = [&selected, &other, &display]
+            .into_iter()
+            .find(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_default();
+        Self {
+            named: !primary.is_empty(),
+            primary,
+            other,
+            display,
+            id: contact
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    }
+
+    fn cmp(&self, other: &Self, direction: ContactSortDirection) -> Ordering {
+        match (self.named, other.named) {
+            (false, true) => return Ordering::Greater,
+            (true, false) => return Ordering::Less,
+            _ => {}
+        }
+        for (left, right) in [
+            (&self.primary, &other.primary),
+            (&self.other, &other.other),
+            (&self.display, &other.display),
+        ] {
+            let ordering = left.cmp(right);
+            if ordering != Ordering::Equal {
+                return match direction {
+                    ContactSortDirection::Asc => ordering,
+                    ContactSortDirection::Desc => ordering.reverse(),
+                };
+            }
+        }
+        // The query begins in legacy ID order; retain that stable order for otherwise equal names.
+        self.id.cmp(&other.id)
+    }
+}
+
+fn normalized_name(contact: &Value, key: &str) -> String {
+    normalized_contact_text(contact.pointer(&format!("/name/{key}")))
+}
+
+fn normalized_contact_text(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(|text| text.trim().to_lowercase())
+        .unwrap_or_default()
 }
 
 fn searchable(contact: &Value) -> String {

@@ -1754,10 +1754,14 @@ async fn list_contacts(
     book_id: String,
     query: Option<String>,
     offset: Option<u32>,
+    sort: Option<serde_json::Value>,
 ) -> BridgeResult<Vec<serde_json::Value>> {
     let operation = admit_update_operation(&state)?;
     let session = state.require_session_admitted(&operation).await?;
-    blocking(move || contacts::list_contacts(&session, &book_id, query.as_deref(), offset)).await
+    blocking(move || {
+        contacts::list_contacts(&session, &book_id, query.as_deref(), offset, sort.as_ref())
+    })
+    .await
 }
 
 /// Display-only recipient discovery: phone numbers of matching contacts (addresses, not IDs).

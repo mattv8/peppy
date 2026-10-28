@@ -203,6 +203,7 @@ pub fn list_contacts(
     book_id: &str,
     query: Option<&str>,
     offset: Option<u32>,
+    sort: Option<&Value>,
 ) -> BridgeResult<Vec<Value>> {
     if !valid_id(book_id) {
         return Err(invalid("The contact book is invalid."));
@@ -211,6 +212,7 @@ pub fn list_contacts(
     if query.chars().count() > shared::MAX_TEXT {
         return Err(invalid("The contact search is too long."));
     }
+    let sort = shared::list_sort(sort).map_err(BridgeError::from)?;
     let raw = parse_core(
         session.client.contact_book_view(
             &json!({
@@ -219,6 +221,7 @@ pub fn list_contacts(
                 "search": query,
                 "limit": shared::PAGE_LIMIT,
                 "offset": offset.unwrap_or(0),
+                "sort": sort,
             })
             .to_string(),
         ),
