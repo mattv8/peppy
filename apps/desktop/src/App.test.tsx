@@ -2903,6 +2903,10 @@ describe("draft durability", () => {
   });
 
   it("requires an explicit reviewed choice before replacing a stale stored draft", async () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(performance.now());
+      return 1;
+    });
     host.drafts.set("aurora", {
       id: "draft-aurora",
       conversationId: "aurora",
