@@ -111,7 +111,8 @@ import { DETACHED_HISTORY_LIMIT, boundedAroundMessages, mergeDetachedMessages, s
 
 import { GatewayPicker } from "./GatewayPicker";
 import { installHostedSessionRenewal } from "./hostedSessionRenewal";
-import { persistLayoutPatch, persistRecipientPosition } from "./layout-persistence";
+import { persistLayoutPatch, persistRecipientPosition, readCompactTimestamps } from "./layout-persistence";
+import { hiddenTimeIds } from "./timestamp-bursts";
 import { FALLBACK_ERROR, errorCode, errorText } from "./bridgeErrors";
 import {
   DraftStore,
@@ -535,23 +536,32 @@ function DraftRecovery({ error, onRetry }: { error: string; onRetry(): void }) {
 
 type RowRegistry = (id: string, row: HTMLElement | null) => void;
 
-function MessageMeta({ message }: { message: MessageView }) {
+function MessageMeta({ message, hideTime = false }: { message: MessageView; hideTime?: boolean }) {
   const { displayedTime, deliveryTimeFallback, deliveryTimeUnavailable } = messageTime(message);
   const formattedTime = formatDateTime(displayedTime);
   const isoTime = isoDateTime(displayedTime);
   const deliveryConfirmed = message.status === "delivery-confirmed";
-  const deliveryLabel = deliveryTimeFallback ? "Delivery confirmed; sent time shown because delivery time is unavailable" : deliveryTimeUnavailable ? "Delivery confirmed; time unavailable" : "Delivery confirmed";
   const phoneHistory = message.sender === "self" && !message.status && Boolean(formattedTime);
   const compactStatus = message.status && ["gateway-persisted", "preparing", "submitted", "sent"].includes(message.status);
   const statusLabel = message.status ? STATUS_LABEL[message.status] : undefined;
   const validTime = Boolean(formattedTime && isoTime);
+  const showTime = validTime && !hideTime;
+  const deliveryLabel = deliveryTimeFallback
+    ? hideTime
+      ? "Delivery confirmed; delivery time unavailable"
+      : "Delivery confirmed; sent time shown because delivery time is unavailable"
+    : deliveryTimeUnavailable
+      ? "Delivery confirmed; time unavailable"
+      : "Delivery confirmed";
   const statusIcon = message.status === "sent" ? <Check size={10} aria-hidden /> : <Clock size={10} aria-hidden />;
-  if (!message.status && !formattedTime) return null;
+  const showTextStatus = !deliveryConfirmed && Boolean(message.status) && (!compactStatus || !validTime);
+  const showCompactStatus = !deliveryConfirmed && Boolean(compactStatus && validTime);
+  if (!showTextStatus && !showTime && !showCompactStatus && !deliveryConfirmed && !phoneHistory) return null;
   return <div className="message-meta" data-message-meta={message.id} data-status={message.status}>
-    {!deliveryConfirmed && message.status && (!compactStatus || !validTime) && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
-    {!deliveryConfirmed && message.status && !compactStatus && validTime && <span className="message-meta-separator" aria-hidden>·</span>}
-    {validTime && <time dateTime={isoTime}>{formattedTime}</time>}
-    {!deliveryConfirmed && compactStatus && validTime && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
+    {showTextStatus && <span className="message-meta-status">{["failed-before-submit", "failed-confirmed"].includes(message.status!) ? <X size={10} aria-hidden /> : message.status === "unknown" ? <TriangleAlert size={10} aria-hidden /> : statusIcon}{statusLabel}</span>}
+    {showTextStatus && showTime && <span className="message-meta-separator" aria-hidden>·</span>}
+    {showTime && <time dateTime={isoTime}>{formattedTime}</time>}
+    {showCompactStatus && <span className="message-meta-status" role="img" aria-label={statusLabel} title={statusLabel}>{statusIcon}</span>}
     {deliveryConfirmed && <span className="message-meta-status" role="img" aria-label={deliveryLabel} title={deliveryLabel}><CheckCheck size={10} aria-hidden /></span>}
     {phoneHistory && <span className="message-meta-status" role="img" aria-label="From phone history" title="From phone history" data-message-phone-icon={message.id}><Smartphone size={10} aria-hidden /></span>}
   </div>;
@@ -586,6 +596,7 @@ function MessageList({
   detachedHistory,
   onLoadNewer,
   onGoToLatest,
+  compactTimestamps,
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -615,6 +626,7 @@ function MessageList({
   detachedHistory?: DetachedHistory;
   onLoadNewer(): void;
   onGoToLatest(): void;
+  compactTimestamps: boolean;
 }) {
   if (loading)
     return (
@@ -667,6 +679,14 @@ function MessageList({
         </div>
       </div>
     );
+  const timeIsShown = (message: MessageView) => {
+    const displayedTime = messageTime(message).displayedTime;
+    return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
+  };
+  const hiddenTimes = compactTimestamps ? hiddenTimeIds(conversation.messages, timeIsShown) : new Set<string>();
+  const hiddenTimeTitle = (message: MessageView) => hiddenTimes.has(message.id)
+    ? formatDateTime(messageTime(message).displayedTime) ?? undefined
+    : undefined;
   return (
     <div
       ref={listRef}
@@ -694,7 +714,7 @@ function MessageList({
         {groupMessages(conversation.messages).map((group) => {
           const message = group.messages[0];
           const imageRun = group.messages.every((candidate) => candidate.transport === "mms" && candidate.attachments.length > 0 && candidate.attachments.every((attachment) => attachment.mediaType.startsWith("image/")));
-          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} />;
+          if (imageRun) return <MediaGrid key={group.id} messages={group.messages} onOpen={onOpenMedia} renderMessageMeta={(candidate) => <MessageMeta message={candidate} hideTime={hiddenTimes.has(candidate.id)} />} renderCaption={(candidate) => <MessageText text={candidate.body} onOpenExternal={onOpenExternal} />} messageRef={(candidate) => (row) => registerRow(candidate.id, row)} messageTitle={hiddenTimeTitle} />;
           return (
             <div
               key={message.id}
@@ -709,6 +729,7 @@ function MessageList({
                 aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
                 tabIndex={searchTargetId === message.id ? -1 : undefined}
                 className={`message-bubble ${message.sender}`}
+                title={hiddenTimeTitle(message)}
               >
                 {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
                 {message.subject && <p className="message-subject">Subject: {message.subject}</p>}
@@ -783,7 +804,7 @@ function MessageList({
                   );
                 })}
               </article>
-              <MessageMeta message={message} />
+              <MessageMeta message={message} hideTime={hiddenTimes.has(message.id)} />
             </div>
           );
         })}
@@ -817,6 +838,8 @@ function SettingsView({
   onTheme,
   navigationPosition,
   onNavigationPosition,
+  compactTimestamps,
+  onCompactTimestamps,
   desktop,
   onStartAtLogin,
   notifications,
@@ -846,6 +869,8 @@ function SettingsView({
   onTheme(theme: Theme): void;
   navigationPosition: NavigationPosition;
   onNavigationPosition(position: NavigationPosition): void;
+  compactTimestamps: boolean;
+  onCompactTimestamps(enabled: boolean): void;
   desktop?: DesktopSnapshot["desktop"];
   onStartAtLogin(enabled: boolean): Promise<void>;
   notifications: DesktopSnapshot["notifications"];
@@ -1081,6 +1106,13 @@ function SettingsView({
             Title bar
           </label>
         </fieldset>
+        <div id="settings-compact-timestamps-group">
+          <label className="settings-check">
+            <input id="settings-compact-timestamps" type="checkbox" checked={compactTimestamps} aria-describedby="settings-compact-timestamps-hint" onChange={(event) => onCompactTimestamps(event.target.checked)} />
+            Show times only after a pause
+          </label>
+          <p id="settings-compact-timestamps-hint" className="settings-field-hint">Hides times on messages sent within an hour of the next one.</p>
+        </div>
       </section>
       {desktop?.startupSupported && <section id="settings-startup" className="settings-card" data-settings-section="startup">
         <h2>Startup</h2>
@@ -1202,6 +1234,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       return "side-rail";
     }
   });
+  const [compactTimestamps, setCompactTimestamps] = useState(readCompactTimestamps);
   const [activeView, setActiveViewNow] = useState<"conversations" | "notifications" | "settings" | "contacts">(
     "conversations",
   );
@@ -1402,6 +1435,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const changeNavigationPosition = (position: NavigationPosition) => {
     setNavigationPosition(position);
     persistLayout({ navigationPosition: position });
+  };
+  const changeCompactTimestamps = (enabled: boolean) => {
+    setCompactTimestamps(enabled);
+    persistLayout({ compactTimestamps: enabled });
   };
   const railWidth = navigationPosition === "side-rail" ? RAIL_WIDTH : 0;
   const listMaxForWindow = Math.max(
@@ -3299,6 +3336,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       detachedHistory={detachedHistory?.conversationId === active?.id ? detachedHistory : undefined}
       onLoadNewer={() => void loadNewerMessages()}
       onGoToLatest={() => active?.id && void loadLatest(active.id).catch(reportAction("Could not load the latest messages: "))}
+      compactTimestamps={compactTimestamps}
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
@@ -3655,6 +3693,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onTheme={setTheme}
               navigationPosition={navigationPosition}
               onNavigationPosition={changeNavigationPosition}
+              compactTimestamps={compactTimestamps}
+              onCompactTimestamps={changeCompactTimestamps}
               desktop={snapshot?.desktop}
               onStartAtLogin={async enabled => {
                 try { await bridge.set_start_at_login(enabled); await refresh(); }

@@ -1233,6 +1233,7 @@ describe("lazy conversation history", () => {
   });
 
   it("renders compact message metadata with truthful delivery and phone-history timing", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ compactTimestamps: false }));
     const incoming = host.conversations[0].messages[0];
     Object.assign(incoming, { timestamp: "1788435180000", attachments: [] });
     host.conversations[0].messages.push(
@@ -1324,6 +1325,7 @@ describe("lazy conversation history", () => {
   });
 
   it("renders receipt and status evidence below their bubbles without exposing routing metadata", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ compactTimestamps: false }));
     const incoming = host.conversations[0].messages[0];
     Object.assign(incoming, {
       timestamp: "1788435180000",
@@ -1468,6 +1470,151 @@ describe("lazy conversation history", () => {
       expect(meta).not.toHaveTextContent(label);
       expect(meta.querySelector(".message-meta-separator")).not.toBeInTheDocument();
     }
+  });
+
+  it("suppresses earlier burst times by default and immediately restores them when disabled", async () => {
+    const first = host.conversations[0].messages[0];
+    Object.assign(first, { timestamp: "1788435100000", attachments: [] });
+    host.conversations[0].messages.push({
+      ...first,
+      id: "m-phone-history",
+      sender: "self",
+      body: "Phone history",
+      timestamp: "1788435110000",
+      status: undefined,
+    }, {
+      ...first,
+      id: "m-delivery-fallback",
+      sender: "self",
+      body: "Delivery fallback",
+      timestamp: "1788435120000",
+      status: "delivery-confirmed",
+      statusAt: "not-a-date",
+    }, {
+      ...first,
+      id: "m-sent-progress",
+      sender: "self",
+      body: "Sent progress",
+      timestamp: "1788435130000",
+      status: "sent",
+      statusAt: "1788435130000",
+    }, {
+      ...first,
+      id: "m-burst-keeper",
+      body: "Later message",
+      timestamp: "1788435180000",
+    });
+
+    const view = render(<App />);
+    await screen.findByText("Later message");
+
+    const hiddenBubble = document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')!;
+    expect(document.querySelector('[data-message-meta="m-aurora"]')).not.toBeInTheDocument();
+    expect(hiddenBubble).toHaveAttribute("title", formatDateTime("1788435100000")!);
+    expect(document.querySelector('[data-message-meta="m-burst-keeper"] time')).toHaveTextContent(formatDateTime("1788435180000")!);
+    const phoneHistory = document.querySelector<HTMLElement>('[data-message-meta="m-phone-history"]')!;
+    expect(within(phoneHistory).getByRole("img", { name: "From phone history" })).toBeInTheDocument();
+    expect(phoneHistory.querySelector("time")).not.toBeInTheDocument();
+    const deliveryFallback = document.querySelector<HTMLElement>('[data-message-meta="m-delivery-fallback"]')!;
+    expect(within(deliveryFallback).getByRole("img", { name: "Delivery confirmed; delivery time unavailable" })).toHaveAttribute("title", "Delivery confirmed; delivery time unavailable");
+    expect(deliveryFallback.querySelector("time")).not.toBeInTheDocument();
+    const sentProgress = document.querySelector<HTMLElement>('[data-message-meta="m-sent-progress"]')!;
+    expect(within(sentProgress).getByRole("img", { name: "Sent" })).toBeInTheDocument();
+    expect(sentProgress.querySelector("time")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const compactTimestamps = await screen.findByRole("checkbox", { name: "Show times only after a pause" });
+    expect(compactTimestamps).toBeChecked();
+    fireEvent.click(compactTimestamps);
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+
+    expect(document.querySelector('[data-message-meta="m-aurora"] time')).toHaveTextContent(formatDateTime("1788435100000")!);
+    expect(document.querySelector<HTMLElement>('[data-message-id="m-aurora"]')).not.toHaveAttribute("title");
+    expect(JSON.parse(localStorage.getItem("peppy.layout.v1")!)).toMatchObject({ compactTimestamps: false });
+
+    view.unmount();
+    render(<App />);
+    await screen.findByText("Later message");
+    expect(document.querySelector('[data-message-meta="m-aurora"] time')).toHaveTextContent(formatDateTime("1788435100000")!);
+  });
+
+  it("retains an eligible keeper behind a trailing queued message", async () => {
+    const eligible = host.conversations[0].messages[0];
+    Object.assign(eligible, { timestamp: "1788435100000", attachments: [] });
+    host.conversations[0].messages.push({
+      ...eligible,
+      id: "m-queued-trailing",
+      sender: "self",
+      body: "Queued trailing",
+      timestamp: "1788435110000",
+      status: "queued-local",
+    });
+
+    render(<App />);
+
+    await screen.findByText("Queued trailing");
+    expect(document.querySelector('[data-message-meta="m-aurora"] time')).toHaveTextContent(formatDateTime("1788435100000")!);
+    expect(document.querySelector('[data-message-meta="m-queued-trailing"] time')).not.toBeInTheDocument();
+  });
+
+  it("uses timestamps for bursts while live status and arrival changes replace the keeper", async () => {
+    const eligible = host.conversations[0].messages[0];
+    Object.assign(eligible, { timestamp: "1788435100000", attachments: [] });
+    const transitioning = {
+      ...eligible,
+      id: "m-transitioning",
+      sender: "self" as const,
+      body: "Transitioning",
+      timestamp: "1788435110000",
+      status: "queued-local" as const,
+    };
+    host.conversations[0].messages.push(transitioning);
+
+    render(<App />);
+    await screen.findByText("Transitioning");
+    expect(document.querySelector('[data-message-meta="m-aurora"] time')).toHaveTextContent(formatDateTime("1788435100000")!);
+
+    Object.assign(transitioning, { status: "sent" as const, statusAt: "1788445100000" });
+    await act(async () => hint?.());
+    await waitFor(() => {
+      expect(document.querySelector('[data-message-meta="m-aurora"] time')).not.toBeInTheDocument();
+      expect(document.querySelector('[data-message-meta="m-transitioning"] time')).toHaveTextContent(formatDateTime("1788445100000")!);
+    });
+
+    host.conversations[0].messages.push({
+      ...eligible,
+      id: "m-new-arrival",
+      body: "New arrival",
+      timestamp: "1788435120000",
+    });
+    await act(async () => hint?.());
+    await waitFor(() => {
+      expect(document.querySelector('[data-message-meta="m-transitioning"] time')).not.toBeInTheDocument();
+      expect(document.querySelector('[data-message-meta="m-new-arrival"] time')).toHaveTextContent(formatDateTime("1788435120000")!);
+    });
+
+    host.conversations[0].messages.push({
+      ...eligible,
+      id: "m-failed-hidden",
+      sender: "self",
+      body: "Failed",
+      timestamp: "1788435130000",
+      status: "failed-confirmed",
+      statusAt: "1788435130000",
+    }, {
+      ...eligible,
+      id: "m-final-keeper",
+      body: "Final keeper",
+      timestamp: "1788435140000",
+    });
+    await act(async () => hint?.());
+    await waitFor(() => {
+      const failed = document.querySelector<HTMLElement>('[data-message-meta="m-failed-hidden"]')!;
+      expect(failed).toHaveTextContent("Failed");
+      expect(failed.querySelector("time")).not.toBeInTheDocument();
+      expect(failed.querySelector(".message-meta-separator")).not.toBeInTheDocument();
+      expect(document.querySelector('[data-message-meta="m-final-keeper"] time')).toHaveTextContent(formatDateTime("1788435140000")!);
+    });
   });
 
   it("retains only valid loaded image previews across an anchored state refresh", async () => {
