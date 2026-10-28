@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::enrollment::{
-    decode_base64url, EnrollmentEncodingError, EnrollmentRole, ProposedDevice, ENROLLMENT_KEY_BYTES,
+    ENROLLMENT_KEY_BYTES, EnrollmentEncodingError, EnrollmentRole, ProposedDevice, decode_base64url,
 };
 
 pub const COMPUTER_ENROLLMENT_VERSION: u8 = 1;
@@ -133,7 +133,7 @@ fn lowercase_hex(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::enrollment::{
-        encode_base64url, ClientKind, EnrollmentState, ENROLLMENT_TRANSFER_NONCE_BYTES,
+        ClientKind, ENROLLMENT_TRANSFER_NONCE_BYTES, EnrollmentState, encode_base64url,
     };
 
     fn recipient() -> ComputerEnrollmentRecipient {

@@ -1,8 +1,10 @@
 import Foundation
-import XCTest
+import Testing
 @testable import PeppyNative
 
-final class HostedWakeRuntimeTests: XCTestCase {
+@Suite("Hosted wake runtime")
+struct HostedWakeRuntimeTests {
+    @Test
     func testRetiringContextSurvivesNewSessionAndUsesCapturedBearer() async throws {
         let store = InMemorySecureStore()
         let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
@@ -13,16 +15,17 @@ final class HostedWakeRuntimeTests: XCTestCase {
                                       databaseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), allowLoopbackHTTP: false)
 
         let restored = try await recreated.retiringRelayWakeContexts()
-        XCTAssertEqual(restored, [context])
+        #expect(restored == [context])
         let publisher = try await recreated.capturedRelayWakeRoutePublisher(context: context)
         try await publisher.remove(routeId: UUID().uuidString.lowercased())
-        XCTAssertEqual(transport.request?.headers["Authorization"], "Bearer old-bearer")
+        #expect(transport.request?.headers["Authorization"] == "Bearer old-bearer")
 
         try await recreated.completeRetiringRelayWakeContext(context)
         let remaining = try await recreated.retiringRelayWakeContexts()
-        XCTAssertTrue(remaining.isEmpty)
+        #expect(remaining.isEmpty)
     }
 
+    @Test
     func testRecreatedPausedDrainRevokesStoredRouteBeforeRemovingContext() async throws {
         let store = InMemorySecureStore()
         let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
@@ -37,12 +40,13 @@ final class HostedWakeRuntimeTests: XCTestCase {
 
         await recreated.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
 
-        XCTAssertEqual(transport.paths, ["DELETE /v1/devices/self/wake-route", "POST /v1/routes/\(route.routeId)/revoke"])
-        XCTAssertEqual(transport.serverBearer, "Bearer old-bearer")
+        #expect(transport.paths == ["DELETE /v1/devices/self/wake-route", "POST /v1/routes/\(route.routeId)/revoke"])
+        #expect(transport.serverBearer == "Bearer old-bearer")
         let remaining = try await recreated.retiringRelayWakeContexts()
-        XCTAssertTrue(remaining.isEmpty)
+        #expect(remaining.isEmpty)
     }
 
+    @Test
     func testLegacyRouteMigratesToDurableCleanupBeforeSlotRemoval() async throws {
         let store = InMemorySecureStore()
         let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
@@ -59,18 +63,19 @@ final class HostedWakeRuntimeTests: XCTestCase {
                                      publisher: NoopPublisher(), identity: identity)
 
         try await client.migrateLegacyRouteIfNeeded()
-        XCTAssertNil(store.value(relayAccount))
-        XCTAssertNotNil(store.value(decoyAccount))
+        #expect(store.value(relayAccount) == nil)
+        #expect(store.value(decoyAccount) != nil)
         let hasCleanup = try await client.hasPendingCleanup()
-        XCTAssertTrue(hasCleanup)
+        #expect(hasCleanup)
 
         // Durable: a fresh client over the same protected store still owns the queued cleanup.
         let recreated = RelayWakeClient(origin: origin, transport: CleanupTransport(), secure: store,
                                         publisher: NoopPublisher(), identity: identity)
         let stillQueued = try await recreated.hasPendingCleanup()
-        XCTAssertTrue(stillQueued)
+        #expect(stillQueued)
     }
 
+    @Test
     func testBoundPublisherTreatsOldServerDeleteAsTerminal() async throws {
         let store = InMemorySecureStore()
         let identity = RelayWakeIdentity(origin: "https://server.example.test", vaultId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), environment: "production")
@@ -81,10 +86,11 @@ final class HostedWakeRuntimeTests: XCTestCase {
 
         let publisher = try await recreated.capturedRelayWakeRoutePublisher(context: context)
         try await publisher.remove(routeId: UUID().uuidString.lowercased())
-        XCTAssertEqual(transport.request?.method, "DELETE")
-        XCTAssertEqual(transport.request?.headers["Authorization"], "Bearer device-bearer")
+        #expect(transport.request?.method == "DELETE")
+        #expect(transport.request?.headers["Authorization"] == "Bearer device-bearer")
     }
 
+    @Test
     func testResumeReactivatesContextAfterSuccessfulPauseCleanup() async throws {
         let store = InMemorySecureStore()
         let transport = CleanupTransport()
@@ -93,15 +99,16 @@ final class HostedWakeRuntimeTests: XCTestCase {
 
         try await session.retireRelayWakeContexts()
         await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
-        XCTAssertTrue(try Self.contexts(store).isEmpty)
+        #expect(try Self.contexts(store).isEmpty)
 
         // Resume in the same process reuses the bound client, so registration must run again.
         try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
         let live = try Self.contexts(store)
-        XCTAssertEqual(live.count, 1)
-        XCTAssertEqual(live.first?.retiring, false)
+        #expect(live.count == 1)
+        #expect(live.first?.retiring == false)
     }
 
+    @Test
     func testOfflinePauseResumeNeverRevokesNewRouteThroughRetiringDuplicate() async throws {
         let store = InMemorySecureStore()
         let transport = CleanupTransport()
@@ -113,17 +120,18 @@ final class HostedWakeRuntimeTests: XCTestCase {
 
         // Offline pause: the context is retiring and its cleanup stays queued, never drained.
         try await session.retireRelayWakeContexts()
-        XCTAssertEqual(try Self.contexts(store).first?.retiring, true)
+        #expect(try Self.contexts(store).first?.retiring == true)
 
         // Resume with the retiring duplicate still present must not drain the new live route.
         try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
         await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
-        XCTAssertTrue(transport.paths.isEmpty)
+        #expect(transport.paths.isEmpty)
         let live = try Self.contexts(store)
-        XCTAssertEqual(live.count, 1)
-        XCTAssertEqual(live.first?.retiring, false)
+        #expect(live.count == 1)
+        #expect(live.first?.retiring == false)
     }
 
+    @Test
     func testRegistrationKeepsRetiringContextsOfOtherIdentities() async throws {
         let store = InMemorySecureStore()
         let transport = CleanupTransport()
@@ -135,10 +143,11 @@ final class HostedWakeRuntimeTests: XCTestCase {
         try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
 
         let remaining = try Self.contexts(store)
-        XCTAssertTrue(remaining.contains(otherContext))
-        XCTAssertEqual(remaining.filter { !$0.retiring }.count, 1)
+        #expect(remaining.contains(otherContext))
+        #expect(remaining.filter { !$0.retiring }.count == 1)
     }
 
+    @Test
     func testCapabilityProbeUsesPinnedUnauthenticatedRequest() async throws {
         let transport = CapabilityTransport(status: 200, body: ["confirm_candidates": true])
         let session = NativeSession(
@@ -149,12 +158,13 @@ final class HostedWakeRuntimeTests: XCTestCase {
         let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
 
         let supportsCandidates = try await session.relayWakeSupportsCandidates(origin: origin)
-        XCTAssertTrue(supportsCandidates)
-        XCTAssertEqual(transport.request?.method, "GET")
-        XCTAssertEqual(transport.request?.url.path, "/v1/capabilities")
-        XCTAssertNil(transport.request?.headers["Authorization"])
+        #expect(supportsCandidates)
+        #expect(transport.request?.method == "GET")
+        #expect(transport.request?.url.path == "/v1/capabilities")
+        #expect(transport.request?.headers["Authorization"] == nil)
     }
 
+    @Test
     func testMissingCapabilityUsesLegacyCompatibility() async throws {
         let transport = CapabilityTransport(status: 404, body: [:])
         let session = NativeSession(
@@ -164,9 +174,10 @@ final class HostedWakeRuntimeTests: XCTestCase {
         )
         let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
         let supportsCandidates = try await session.relayWakeSupportsCandidates(origin: origin)
-        XCTAssertFalse(supportsCandidates)
+        #expect(!(supportsCandidates))
     }
 
+    @Test
     func testCapabilityProbeTreatsRateLimitAsRetryable() async throws {
         let transport = CapabilityTransport(status: 429, body: [:])
         let session = NativeSession(
@@ -177,14 +188,18 @@ final class HostedWakeRuntimeTests: XCTestCase {
         let origin = try ServerOrigin(canonical: "https://relay.example.test", allowLoopbackHTTP: false)
         do {
             _ = try await session.relayWakeSupportsCandidates(origin: origin)
-            XCTFail("Expected retryable server error")
+            Issue.record("Expected retryable server error")
         } catch let error as ClientError {
-            guard case .server(429, _) = error else { return XCTFail("Unexpected error: \(error)") }
+            guard case .server(429, _) = error else {
+                Issue.record("Unexpected error: \(error)")
+                return
+            }
         }
     }
 }
 
 extension HostedWakeRuntimeTests {
+    @Test
     func testCoalescedWakeWorkRunsOverlappingSameKeyOnce() async {
         let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
         let probe = WakeWorkProbe()
@@ -194,15 +209,16 @@ extension HostedWakeRuntimeTests {
         let second = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
         try? await Task.sleep(for: .milliseconds(10))
         let runs = await probe.runCount
-        XCTAssertEqual(runs, 1)
+        #expect(runs == 1)
 
         await probe.releaseAll()
         await first.value
         await second.value
         let completed = await probe.completedCount
-        XCTAssertEqual(completed, 1)
+        #expect(completed == 1)
     }
 
+    @Test
     func testCoalescedWakeWorkRunsDifferentKeysConcurrently() async {
         let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
         let probe = WakeWorkProbe()
@@ -212,15 +228,16 @@ extension HostedWakeRuntimeTests {
         let second = Task { @MainActor in await coordinator.run(key: 2) { await probe.run() } }
         await probe.waitForRuns(2)
         let runs = await probe.runCount
-        XCTAssertEqual(runs, 2)
+        #expect(runs == 2)
 
         await probe.releaseAll()
         await first.value
         await second.value
         let completed = await probe.completedCount
-        XCTAssertEqual(completed, 2)
+        #expect(completed == 2)
     }
 
+    @Test
     func testCoalescedWakeWorkCancelledWaiterReturnsWithoutCancellingWork() async {
         let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
         let probe = WakeWorkProbe()
@@ -228,30 +245,36 @@ extension HostedWakeRuntimeTests {
 
         let first = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
         await probe.waitForRuns(1)
-        let returned = expectation(description: "cancelled waiter returned")
+        let returned = WakeWorkReturnProbe()
         let joiner = Task { @MainActor in
             await coordinator.run(key: 1) { await probe.run() }
-            returned.fulfill()
+            await returned.recordReturn()
         }
         joiner.cancel()
-        await fulfillment(of: [returned], timeout: 1)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while !(await returned.didReturn), clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await returned.didReturn)
         let runs = await probe.runCount
-        XCTAssertEqual(runs, 1)
+        #expect(runs == 1)
 
         await probe.releaseAll()
         await first.value
         await joiner.value
         let completed = await probe.completedCount
-        XCTAssertEqual(completed, 1)
+        #expect(completed == 1)
 
         let later = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
         await probe.waitForRuns(2)
         await probe.releaseAll()
         await later.value
         let totalRuns = await probe.runCount
-        XCTAssertEqual(totalRuns, 2)
+        #expect(totalRuns == 2)
     }
 
+    @Test
     func testCoalescedWakeWorkCancelledWaiterDoesNotClearRunningWork() async {
         let coordinator = await MainActor.run { CoalescedWakeWork<Int>() }
         let probe = WakeWorkProbe()
@@ -264,24 +287,26 @@ extension HostedWakeRuntimeTests {
         let laterJoiner = Task { @MainActor in await coordinator.run(key: 1) { await probe.run() } }
         try? await Task.sleep(for: .milliseconds(10))
         let runs = await probe.runCount
-        XCTAssertEqual(runs, 1)
+        #expect(runs == 1)
 
         await probe.releaseAll()
         await first.value
         await laterJoiner.value
         let completed = await probe.completedCount
-        XCTAssertEqual(completed, 1)
+        #expect(completed == 1)
     }
 
+    @Test
     func testWakeFenceRetiresCapturedWorkWhenPauseWins() {
         var fence = WakeWorkFence()
         let captured = fence.generation
-        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: true), .proceed)
+        #expect(fence.checkpoint(captured: captured, enabled: true) == .proceed)
 
         fence.preferenceChanged()
-        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: false), .retirePaused)
+        #expect(fence.checkpoint(captured: captured, enabled: false) == .retirePaused)
     }
 
+    @Test
     func testWakeFenceSupersedesCapturedWorkAfterPauseAndResume() {
         var fence = WakeWorkFence()
         let captured = fence.generation
@@ -289,9 +314,10 @@ extension HostedWakeRuntimeTests {
         fence.preferenceChanged()
 
         // A capability or registration answer from before the toggle must not continue on its own.
-        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: true), .superseded)
+        #expect(fence.checkpoint(captured: captured, enabled: true) == .superseded)
     }
 
+    @Test
     func testPauseWinningRegistrationRetiresAndDrainsTheLiveContext() async throws {
         let store = InMemorySecureStore()
         let transport = CleanupTransport()
@@ -302,14 +328,15 @@ extension HostedWakeRuntimeTests {
         // Registration completes after the pause began: the context is live until the checkpoint.
         try await session.registerRelayWakeContext(identity: wakeIdentity, relayOrigin: relayOrigin)
         fence.preferenceChanged()
-        XCTAssertEqual(fence.checkpoint(captured: captured, enabled: false), .retirePaused)
+        #expect(fence.checkpoint(captured: captured, enabled: false) == .retirePaused)
 
         // The sequence AppModel runs on .retirePaused: retire, then drain before returning.
         try await session.retireRelayWakeContexts()
         await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
-        XCTAssertTrue(try Self.contexts(store).isEmpty)
+        #expect(try Self.contexts(store).isEmpty)
     }
 
+    @Test
     func testEnabledExitSweepDrainsRetiringContextOfAnotherRelay() async throws {
         let store = InMemorySecureStore()
         let transport = CleanupTransport()
@@ -320,7 +347,7 @@ extension HostedWakeRuntimeTests {
 
         await session.drainRetiringRelayWakeContexts(relayTransport: transport, secure: store)
 
-        XCTAssertTrue(try Self.contexts(store).isEmpty)
+        #expect(try Self.contexts(store).isEmpty)
     }
 
     fileprivate static func legacyRoute() -> [String: String] {
@@ -343,6 +370,14 @@ extension HostedWakeRuntimeTests {
         try await session.open()
         let wakeIdentity = RelayWakeIdentity(origin: identity.origin, vaultId: identity.vaultId, deviceId: identity.deviceId, environment: "production")
         return (session, wakeIdentity, "https://relay.example.test")
+    }
+}
+
+private actor WakeWorkReturnProbe {
+    private(set) var didReturn = false
+
+    func recordReturn() {
+        didReturn = true
     }
 }
 

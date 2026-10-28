@@ -1,6 +1,6 @@
 use super::NativeEnrollmentClient;
 use crate::{MobileBindingsError, NativeClient};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::computer_enrollment::{ComputerEnrollmentCreated, ComputerPairingQr};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -202,10 +202,10 @@ fn prompt_digest(qr_json: &str) -> String {
 mod tests {
     use super::*;
     use crate::newenrollment::{
-        new_native_enrollment_client, new_native_existing_owner_enrollment_client,
-        NativeEnrollmentClientKind,
+        NativeEnrollmentClientKind, new_native_enrollment_client,
+        new_native_existing_owner_enrollment_client,
     };
-    use crate::{create_vault_material, open_native_client, NativeOpenConfig};
+    use crate::{NativeOpenConfig, create_vault_material, open_native_client};
     use peppy_hosted_api::computer_enrollment::ComputerEnrollmentCreated;
     use uuid::Uuid;
 
@@ -258,9 +258,11 @@ mod tests {
         owner
             .configure_owner_computer_device(owner_device_id.to_string())
             .unwrap();
-        assert!(owner
-            .owner_computer_create_request("not json".into())
-            .is_err());
+        assert!(
+            owner
+                .owner_computer_create_request("not json".into())
+                .is_err()
+        );
         let foreign = new_native_enrollment_client(
             "https://other.example".into(),
             NativeEnrollmentClientKind::Desktop,
@@ -279,9 +281,11 @@ mod tests {
             "phone".into(),
         )
         .unwrap();
-        assert!(claimant
-            .owner_computer_create_request(claimant_qr())
-            .is_err());
+        assert!(
+            claimant
+                .owner_computer_create_request(claimant_qr())
+                .is_err()
+        );
     }
 
     #[test]
@@ -292,13 +296,15 @@ mod tests {
             .unwrap();
         let request = owner.owner_computer_create_request(claimant_qr()).unwrap();
         assert_eq!(owner.owner_computer_view().unwrap().sas, None);
-        assert!(owner
-            .consume_owner_computer_created(
-                Uuid::new_v4().to_string(),
-                request.prompt_digest.clone(),
-                created(),
-            )
-            .is_err());
+        assert!(
+            owner
+                .consume_owner_computer_created(
+                    Uuid::new_v4().to_string(),
+                    request.prompt_digest.clone(),
+                    created(),
+                )
+                .is_err()
+        );
         owner
             .consume_owner_computer_created(
                 request.invitation_id.clone(),
@@ -308,9 +314,15 @@ mod tests {
             .unwrap();
         let view = owner.owner_computer_view().unwrap();
         assert!(view.sas.is_some());
-        assert!(owner
-            .consume_owner_computer_created(request.invitation_id, request.prompt_digest, created())
-            .is_err());
+        assert!(
+            owner
+                .consume_owner_computer_created(
+                    request.invitation_id,
+                    request.prompt_digest,
+                    created()
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -337,33 +349,39 @@ mod tests {
             database_key: vec![9; 32],
         })
         .unwrap();
-        assert!(owner
-            .approve_owner_computer_request(
-                request.invitation_id.clone(),
-                request.prompt_digest.clone(),
-                false,
-                PHRASE.into(),
-                native.clone(),
-            )
-            .is_err());
-        assert!(owner
-            .approve_owner_computer_request(
-                request.invitation_id.clone(),
-                request.prompt_digest.clone(),
-                true,
-                "wrong phrase".into(),
-                native.clone(),
-            )
-            .is_err());
-        assert!(owner
-            .approve_owner_computer_request(
-                request.invitation_id.clone(),
-                request.prompt_digest.clone(),
-                true,
-                PHRASE.into(),
-                native.clone(),
-            )
-            .is_err());
+        assert!(
+            owner
+                .approve_owner_computer_request(
+                    request.invitation_id.clone(),
+                    request.prompt_digest.clone(),
+                    false,
+                    PHRASE.into(),
+                    native.clone(),
+                )
+                .is_err()
+        );
+        assert!(
+            owner
+                .approve_owner_computer_request(
+                    request.invitation_id.clone(),
+                    request.prompt_digest.clone(),
+                    true,
+                    "wrong phrase".into(),
+                    native.clone(),
+                )
+                .is_err()
+        );
+        assert!(
+            owner
+                .approve_owner_computer_request(
+                    request.invitation_id.clone(),
+                    request.prompt_digest.clone(),
+                    true,
+                    PHRASE.into(),
+                    native.clone(),
+                )
+                .is_err()
+        );
         native
             .unlock(material.profile_json, material.header_json, PHRASE.into())
             .unwrap();

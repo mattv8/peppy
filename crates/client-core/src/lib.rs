@@ -4156,7 +4156,7 @@ fn journal_record(
         };
     }
     // Coordinate with the active snapshot generation at this cursor.
-    if let Some(generation) = active_generation(&tx)? {
+    if let Some(generation) = active_generation(tx)? {
         let staged: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT wire FROM snapshot_records WHERE generation=? AND cursor=?",
@@ -4183,7 +4183,7 @@ fn journal_record(
             _ => {}
         }
     }
-    let result = classify(&tx, &ctx, cursor, &wire, envelope)?;
+    let result = classify(tx, ctx, cursor, &wire, envelope)?;
     let (status, reason) = match result {
         IngestResult::Journaled => ("pending", None),
         IngestResult::Duplicate => ("duplicate", None),
