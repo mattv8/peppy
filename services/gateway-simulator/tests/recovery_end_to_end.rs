@@ -14,13 +14,19 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     fs,
     future::Future,
+    net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::Duration,
 };
 use tempfile::TempDir;
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
+    time::Instant,
+};
 use uuid::Uuid;
 
 const PG_IMAGE: &str =
@@ -253,6 +259,40 @@ fn database_url(fixture: &ComposeFixture) -> String {
     )
 }
 
+async fn wait_for_postgres_host_port(fixture: &ComposeFixture) {
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
+
+    let address = SocketAddr::from(([127, 0, 0, 1], fixture.port("postgres", "5432")));
+    let deadline = Instant::now() + NETWORK_TIMEOUT;
+
+    loop {
+        let probe = async {
+            let mut stream = TcpStream::connect(address).await?;
+            stream.write_all(&SSL_REQUEST).await?;
+            let mut response = [0];
+            stream.read_exact(&mut response).await?;
+            if matches!(response[0], b'S' | b'N') {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "unexpected SSLRequest response: 0x{:02x}",
+                    response[0]
+                )))
+            }
+        };
+        let last_error = match tokio::time::timeout(Duration::from_secs(1), probe).await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "SSLRequest probe timed out".to_owned(),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "phase=postgres-host-port-ready status=timeout address={address} last_error={last_error}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn s3_config(fixture: &ComposeFixture) -> S3Config {
     let suffix = &fixture.project[fixture.project.len() - 8..];
     S3Config {
@@ -272,6 +312,7 @@ fn s3_config(fixture: &ComposeFixture) -> S3Config {
 }
 
 async fn start_router(fixture: &ComposeFixture, migrate: bool) -> RouterRuntime {
+    wait_for_postgres_host_port(fixture).await;
     let database_url = database_url(fixture);
     let s3 = s3_config(fixture);
     let config = Config {

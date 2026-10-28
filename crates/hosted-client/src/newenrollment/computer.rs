@@ -204,7 +204,7 @@ impl EnrollmentClient {
             .ok_or(HostedClientError::InvalidRequest)
             .and_then(decode_b64_24)?;
         let handoff = open_handoff(
-            &transfer,
+            transfer,
             &context.owner_transfer_public_key,
             &context,
             &EncryptedHandoff { nonce, ciphertext },
@@ -821,10 +821,7 @@ mod tests {
             peppy_client_core::DatabaseKey::new(&[42; 32]).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            identity.activate_verified_handoff(&correct_client).unwrap(),
-            true
-        );
+        assert!(identity.activate_verified_handoff(&correct_client).unwrap());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Enrollment persistence helpers shared by community and hosted bootstrap paths.
 
+pub mod computers;
 pub mod invitations;
 pub mod manual;
-pub mod computers;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use peppy_hosted_api::enrollment::ClientKind;

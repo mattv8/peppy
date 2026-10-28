@@ -1263,9 +1263,11 @@ pub async fn enrollment_discover(
         response,
         existing_role,
         client,
-        resumed_pending,
-        has_gateway,
-        !saved_identity && existing_role.is_none(),
+        DiscoveryState {
+            resumed_pending,
+            has_gateway,
+            new_identity: !saved_identity && existing_role.is_none(),
+        },
     );
     Ok(controller.view())
 }
@@ -1280,6 +1282,12 @@ pub async fn enrollment_start_over(
     start_over_core(&state.enrollment, &*state.store, fetch_instance).await
 }
 
+struct DiscoveryState {
+    resumed_pending: bool,
+    has_gateway: Option<bool>,
+    new_identity: bool,
+}
+
 /// Applies a discovery result. An existing device keeps its client when the origin is unchanged.
 fn apply_discovery(
     controller: &mut Controller,
@@ -1287,10 +1295,13 @@ fn apply_discovery(
     response: InstanceInfo,
     existing_role: Option<EnrollmentRole>,
     client: Option<EnrollmentClient>,
-    resumed_pending: bool,
-    has_gateway: Option<bool>,
-    new_identity: bool,
+    state: DiscoveryState,
 ) {
+    let DiscoveryState {
+        resumed_pending,
+        has_gateway,
+        new_identity,
+    } = state;
     let same_origin = controller.origin.as_deref() == Some(selected.as_str());
     controller.origin = Some(selected);
     controller.can_connect_computer = new_identity && response.claimed;
@@ -1382,7 +1393,10 @@ fn saved_identity_for_origin(state: &AppState, origin: &str) -> BridgeResult<boo
     for binding in bindings {
         let _ = stored_credential(&*state.store, &binding)?;
     }
-    Ok(config.bindings.iter().any(|known| known.binding.origin == origin))
+    Ok(config
+        .bindings
+        .iter()
+        .any(|known| known.binding.origin == origin))
 }
 
 #[tauri::command]
@@ -1437,7 +1451,15 @@ pub async fn enrollment_create_owner(
             .await
         },
         |mut identity, passphrase, expected_binding| async move {
-            install_identity(app_ref, state_ref, &mut identity, Some(passphrase), expected_binding, false).await
+            install_identity(
+                app_ref,
+                state_ref,
+                &mut identity,
+                Some(passphrase),
+                expected_binding,
+                false,
+            )
+            .await
         },
     )
     .await;
@@ -1638,7 +1660,15 @@ pub async fn enrollment_connect_shared_secret(
         .finish_manual_admission(complete_json, passphrase.to_string())
         .map_err(|_| enrollment_error())?;
     let role = identity.metadata().role;
-    install_identity(&app, &state, &mut identity, Some(passphrase), expected_binding, false).await?;
+    install_identity(
+        &app,
+        &state,
+        &mut identity,
+        Some(passphrase),
+        expected_binding,
+        false,
+    )
+    .await?;
     let has_gateway = refresh_gateway_presence(&state).await?;
     let mut controller = state
         .enrollment
@@ -2059,7 +2089,15 @@ pub async fn enrollment_create_vault(
             .finish_owner_admission(response, passphrase.to_string())
             .map_err(|_| enrollment_error())?
     };
-    install_identity(&app, &state, &mut identity, Some(passphrase), expected_binding, false).await?;
+    install_identity(
+        &app,
+        &state,
+        &mut identity,
+        Some(passphrase),
+        expected_binding,
+        false,
+    )
+    .await?;
     // The identity is durably imported; never retain the request secret merely because a later
     // UI operation was cancelled or superseded.
     tombstone_vault_request_checkpoint(&*state.store, &origin)?;
@@ -6078,9 +6116,11 @@ mod owner_retry_tests {
             info,
             Some(EnrollmentRole::Device),
             None,
-            false,
-            None,
-            false,
+            DiscoveryState {
+                resumed_pending: false,
+                has_gateway: None,
+                new_identity: false,
+            },
         );
 
         assert_eq!(
@@ -6105,9 +6145,11 @@ mod owner_retry_tests {
             info,
             Some(EnrollmentRole::Device),
             None,
-            false,
-            None,
-            false,
+            DiscoveryState {
+                resumed_pending: false,
+                has_gateway: None,
+                new_identity: false,
+            },
         );
 
         assert!(controller.client.is_none());
@@ -6175,7 +6217,11 @@ mod owner_retry_tests {
     #[test]
     fn protected_saved_binding_lookup_distinguishes_a_fresh_native_identity() {
         let root = tempfile::tempdir().unwrap();
-        let fresh = AppState::new(root.path().to_path_buf(), Arc::new(RecordingStore::default()), crate::tests::noop());
+        let fresh = AppState::new(
+            root.path().to_path_buf(),
+            Arc::new(RecordingStore::default()),
+            crate::tests::noop(),
+        );
         assert!(!saved_identity_for_origin(&fresh, ORIGIN).unwrap());
 
         let binding = active_binding();
@@ -6209,16 +6255,15 @@ mod owner_retry_tests {
         crate::credentials::store_credential(&store, &credential).unwrap();
         std::fs::create_dir_all(binding.data_dir(root.path())).unwrap();
         std::fs::write(binding.database_path(root.path()), b"db").unwrap();
-        assert!(prepared_target_retry_matches(
-            &store,
-            Some(&binding),
-            &binding,
-            &credential,
-            true,
-        )
-        .unwrap());
+        assert!(
+            prepared_target_retry_matches(&store, Some(&binding), &binding, &credential, true,)
+                .unwrap()
+        );
 
-        let foreign = crate::credentials::Binding { device_id: uuid::Uuid::new_v4().to_string(), ..binding.clone() };
+        let foreign = crate::credentials::Binding {
+            device_id: uuid::Uuid::new_v4().to_string(),
+            ..binding.clone()
+        };
         assert!(!prepared_target_retry_matches(
             &store,
             Some(&foreign),
@@ -6258,9 +6303,11 @@ mod owner_retry_tests {
             info,
             Some(EnrollmentRole::Device),
             None,
-            false,
-            Some(true),
-            false,
+            DiscoveryState {
+                resumed_pending: false,
+                has_gateway: Some(true),
+                new_identity: false,
+            },
         );
 
         let view = controller.view();
@@ -6279,9 +6326,11 @@ mod owner_retry_tests {
             info,
             None,
             None,
-            false,
-            None,
-            true,
+            DiscoveryState {
+                resumed_pending: false,
+                has_gateway: None,
+                new_identity: true,
+            },
         );
         let value = serde_json::to_value(controller.view()).unwrap();
         assert_eq!(value["newIdentity"], true);

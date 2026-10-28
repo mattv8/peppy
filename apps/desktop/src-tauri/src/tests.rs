@@ -35,7 +35,7 @@ fn fresh_native_snapshot_is_locked_not_a_preview_identity() {
     let snapshot = crate::empty_snapshot(None);
     assert_eq!(snapshot.mode, "native");
     assert_eq!(snapshot.encryption.state, "locked");
-    assert_eq!(snapshot.connection.error_code.as_deref(), Some("server-required"));
+    assert_eq!(snapshot.connection.error_code, Some("server-required"));
 }
 
 pub(crate) struct Fixture {

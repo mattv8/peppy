@@ -392,7 +392,7 @@ internal fun OwnerPhoneApprovalScreen(
 }
 
 @Composable
-private fun ApprovalPassphraseDialog(request: CompletableDeferred<CharArray?>) {
+internal fun ApprovalPassphraseDialog(request: CompletableDeferred<CharArray?>) {
     var secret by remember(request) { mutableStateOf("") }
     val focusRequester = remember(request) { FocusRequester() }
 

@@ -103,7 +103,9 @@ async fn install_prepared_identity(
         .prepared_identity
         .take()
         .ok_or_else(enrollment_error)?;
-    if let Err(error) = install_identity(app, state, &mut identity, None, expected_binding, true).await {
+    if let Err(error) =
+        install_identity(app, state, &mut identity, None, expected_binding, true).await
+    {
         state
             .enrollment
             .lock()
@@ -134,7 +136,10 @@ async fn fetch_status(
     hosted: &crate::hosted::HostedState,
 ) -> BridgeResult<Option<String>> {
     let (origin, request) = {
-        let controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
         let origin = controller.origin()?.to_owned();
         let request = controller
             .client
@@ -157,7 +162,7 @@ async fn post_computer_status(
     request: StatusRequest,
     account_session: Option<&str>,
 ) -> BridgeResult<Option<String>> {
-    let mut request_builder = http(&origin)?
+    let mut request_builder = http(origin)?
         .post(format!("{origin}{}", request.path))
         .header("content-type", "application/json")
         .body(serde_json::to_string(&request.body).map_err(|_| enrollment_error())?);
@@ -191,8 +196,14 @@ async fn post_computer_confirm(
     .await
 }
 
-fn update_view_from_status(state: &AppState, status: Option<String>) -> BridgeResult<ComputerClaimantView> {
-    let mut controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+fn update_view_from_status(
+    state: &AppState,
+    status: Option<String>,
+) -> BridgeResult<ComputerClaimantView> {
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
     let client = controller.client.as_ref().ok_or_else(enrollment_error)?;
     let local = match status {
         Some(status) => client.computer_claimant_view(status),
@@ -216,7 +227,10 @@ pub async fn enrollment_begin_computer_claimant(
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let origin = {
-        let mut controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
         let origin = controller.origin()?.to_owned();
         if let Some(claimant) = controller.computer_claimant.as_ref() {
             if claimant_must_finish(claimant) {
@@ -240,7 +254,10 @@ pub async fn enrollment_begin_computer_claimant(
     }
     let expected_binding = state.config()?.active_binding().cloned();
     let qr_payload = {
-        let mut controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
         admission_client(&mut controller)?
             .begin_computer_claimant()
             .map_err(|_| enrollment_error())?
@@ -293,21 +310,37 @@ pub async fn enrollment_confirm_computer_claimant(
     let _operation = crate::admit_update_operation(&state)?;
     crate::require_main(window.label())?;
     let prepared = {
-        let controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
-        let claimant = controller.computer_claimant.as_ref().ok_or_else(enrollment_error)?;
-        (claimant.prepared_identity.is_some(), claimant.expected_binding.clone(), claimant.view.invitation_id.clone())
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let claimant = controller
+            .computer_claimant
+            .as_ref()
+            .ok_or_else(enrollment_error)?;
+        (
+            claimant.prepared_identity.is_some(),
+            claimant.expected_binding.clone(),
+            claimant.view.invitation_id.clone(),
+        )
     };
     if prepared.0 {
         install_prepared_identity(&app, &state, prepared.1).await?;
         let has_gateway = refresh_gateway_presence(&state).await?;
-        let mut controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+        let mut controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
         controller.computer_claimant = None;
         controller.has_gateway = has_gateway;
         set_identity_ready(&mut controller, Some(EnrollmentRole::Device));
         return Ok(connected_view(prepared.2));
     }
     let saved_request = {
-        let controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
         controller
             .computer_claimant
             .as_ref()
@@ -317,7 +350,9 @@ pub async fn enrollment_confirm_computer_claimant(
     let request = match saved_request {
         Some(request) => request,
         None => {
-            let status = fetch_status(&state, &hosted).await?.ok_or_else(enrollment_error)?;
+            let status = fetch_status(&state, &hosted)
+                .await?
+                .ok_or_else(enrollment_error)?;
             let request = state
                 .enrollment
                 .lock()
@@ -347,8 +382,14 @@ pub async fn enrollment_confirm_computer_claimant(
         }
     };
     let (origin, expected_binding, invitation_id) = {
-        let controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
-        let claimant = controller.computer_claimant.as_ref().ok_or_else(enrollment_error)?;
+        let controller = state
+            .enrollment
+            .lock()
+            .map_err(|_| BridgeError::host_state())?;
+        let claimant = controller
+            .computer_claimant
+            .as_ref()
+            .ok_or_else(enrollment_error)?;
         (
             controller.origin()?.to_owned(),
             claimant.expected_binding.clone(),
@@ -382,7 +423,10 @@ pub async fn enrollment_confirm_computer_claimant(
         .prepared_identity = Some(identity);
     install_prepared_identity(&app, &state, expected_binding).await?;
     let has_gateway = refresh_gateway_presence(&state).await?;
-    let mut controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
     controller.computer_claimant = None;
     controller.has_gateway = has_gateway;
     set_identity_ready(&mut controller, Some(EnrollmentRole::Device));
@@ -395,8 +439,14 @@ pub fn enrollment_cancel_computer_claimant(
     state: State<'_, AppState>,
 ) -> BridgeResult<()> {
     crate::require_main(window.label())?;
-    let mut controller = state.enrollment.lock().map_err(|_| BridgeError::host_state())?;
-    let claimant = controller.computer_claimant.as_ref().ok_or_else(enrollment_error)?;
+    let mut controller = state
+        .enrollment
+        .lock()
+        .map_err(|_| BridgeError::host_state())?;
+    let claimant = controller
+        .computer_claimant
+        .as_ref()
+        .ok_or_else(enrollment_error)?;
     if !claimant_cancellation_allowed(claimant) || claimant.prepared_identity.is_some() {
         return Err(BridgeError::new(
             "enrollment-state",
@@ -466,7 +516,10 @@ mod tests {
         };
         assert!(claimant_cancellation_allowed(&waiting));
         let approved = ClaimantState {
-            view: ComputerClaimantView { state: "approved", ..waiting.view.clone() },
+            view: ComputerClaimantView {
+                state: "approved",
+                ..waiting.view.clone()
+            },
             ..waiting
         };
         assert!(!claimant_cancellation_allowed(&approved));
@@ -491,7 +544,10 @@ mod tests {
         };
         assert!(!claimant_must_finish(&claimant));
         assert!(claimant_must_finish(&ClaimantState {
-            view: ComputerClaimantView { state: "approved", ..claimant.view.clone() },
+            view: ComputerClaimantView {
+                state: "approved",
+                ..claimant.view.clone()
+            },
             ..claimant
         }));
     }
