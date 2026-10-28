@@ -4158,6 +4158,71 @@ describe("host state display", () => {
     expect(scrollWindow).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("opens notification settings in its content and consumes each navigation request (reduced motion: %s)", async (reducedMotion) => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: reducedMotion && query === "(prefers-reduced-motion: reduce)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(screen.getByRole("button", { name: /^Notifications/ }));
+
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const originalClientTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientTop");
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect;
+    const scrollContent = vi.fn();
+    const scrollAncestors = vi.fn();
+    const scrollWindow = vi.spyOn(window, "scrollTo");
+    const margin = document.createElement("style");
+    margin.textContent = "#notification-settings { scroll-margin-top: 8px; }";
+    document.head.append(margin);
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scrollContent });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollAncestors });
+    Object.defineProperty(HTMLElement.prototype, "clientTop", {
+      configurable: true,
+      get() { return this.id === "settings-content" ? 2 : originalClientTop?.get?.call(this) ?? 0; },
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.id === "settings-content") return new DOMRect(0, 120, 500, 400);
+      if (this.id === "notification-settings") return new DOMRect(0, 820, 500, 160);
+      return originalBounds.call(this);
+    });
+
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+      await waitFor(() => expect(scrollContent).toHaveBeenCalledTimes(1));
+      expect(scrollContent).toHaveBeenLastCalledWith({ top: 690, behavior: reducedMotion ? "instant" : "smooth" });
+      expect(scrollContent.mock.contexts[0]).toBe(document.getElementById("settings-content"));
+      expect(scrollAncestors).not.toHaveBeenCalled();
+      expect(scrollWindow).not.toHaveBeenCalled();
+      expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("aria-current", "location");
+
+      fireEvent.click(screen.getByRole("button", { name: /^Notifications/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+      await waitFor(() => expect(scrollContent).toHaveBeenCalledTimes(2));
+
+      fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      expect(scrollContent).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("link", { name: "Server" })).toHaveAttribute("aria-current", "location");
+
+      fireEvent.change(screen.getByLabelText("Settings category"), { target: { value: "notifications" } });
+      expect(scrollContent).toHaveBeenCalledTimes(3);
+      expect(scrollContent.mock.contexts[2]).toBe(document.getElementById("settings-content"));
+      expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("aria-current", "location");
+      expect(scrollAncestors).not.toHaveBeenCalled();
+      expect(scrollWindow).not.toHaveBeenCalled();
+    } finally {
+      margin.remove();
+      Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: originalScrollTo });
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: originalScrollIntoView });
+      if (originalClientTop) Object.defineProperty(HTMLElement.prototype, "clientTop", originalClientTop);
+      else delete (HTMLElement.prototype as { clientTop?: number }).clientTop;
+    }
+  });
+
   it("keeps a titlebar compose fallback when the thread list is hidden by another view", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
