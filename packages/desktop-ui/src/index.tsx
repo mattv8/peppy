@@ -13,6 +13,8 @@ import {
   Minus,
   Paperclip,
   PanelLeft,
+  Pin,
+  PinOff,
   Plus,
   SendHorizontal,
   Settings,
@@ -125,6 +127,7 @@ export type Conversation = {
   status?: string;
   recipientlessDraft?: boolean;
   draftOnly?: boolean;
+  pinned?: boolean;
 };
 export type Attachment = {
   id: string;
@@ -862,10 +865,12 @@ export function ConversationList({
   onSelect,
   onPopout,
   onDelete,
+  onTogglePin,
   onCancelDelete,
   deleteConfirmationId,
   deletingId,
   deleteWarningId,
+  pendingPinId,
   loading = false,
 }: {
   conversations: Conversation[];
@@ -873,10 +878,13 @@ export function ConversationList({
   onSelect(id: string): void;
   onPopout?(id: string): void;
   onDelete?(id: string): void;
+  /** Requests the desired durable pin state for an established conversation. */
+  onTogglePin?(id: string, pinned: boolean): void;
   onCancelDelete?(): void;
   deleteConfirmationId?: string;
   deletingId?: string;
   deleteWarningId?: string;
+  pendingPinId?: string;
   loading?: boolean;
 }) {
   return (
@@ -887,12 +895,14 @@ export function ConversationList({
         ) : conversations.length ? (
           conversations.map((c) => {
             const isDeleteConfirmation = deleteConfirmationId === c.id;
+            const isPinPending = pendingPinId === c.id;
+            const isPinActionDisabled = pendingPinId !== undefined;
             return <li key={c.id}>
               <div className={`conversation-row ${selectedId === c.id ? "selected" : ""}`} data-conversation-row={c.id}>
                 <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
                   <ContactAvatar {...(c.avatar ?? conversationAvatar({ id: c.id, name: c.name }))} size={36} className="avatar" />
                   <span className="conversation-copy">
-                    <b title={c.name} className={isDeleteConfirmation ? "sr-only" : undefined}>{c.name}</b>
+                    <b title={c.name} className={isDeleteConfirmation ? "sr-only" : undefined}>{c.pinned && !c.draftOnly && <span className="conversation-pin-marker" role="img" aria-label="Pinned" title="Pinned"><Pin size={12} aria-hidden /></span>}{c.name}</b>
                     {isDeleteConfirmation ? (
                       <small id={deleteWarningId ?? `delete-draft-warning-${c.id}`} className="conversation-delete-warning" role="status">Deleting this draft permanently removes its text and attachments.</small>
                     ) : <small>{c.preview}</small>}
@@ -903,7 +913,21 @@ export function ConversationList({
                     </span>
                   )}
                 </button>
-                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout) && <div data-conversation-actions>
+                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout || (onTogglePin && !c.draftOnly)) && <div data-conversation-actions data-pending-pin={isPinPending || undefined}>
+                  {onTogglePin && !c.draftOnly && <button
+                    type="button"
+                    className={`conversation-pin ${isPinPending ? "pending" : ""}`}
+                    data-pin-conversation-id={c.id}
+                    aria-label={`${c.pinned ? "Unpin" : "Pin"} conversation`}
+                    title={`${c.pinned ? "Unpin" : "Pin"} ${c.name}`}
+                    disabled={isPinActionDisabled}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onTogglePin(c.id, !c.pinned);
+                    }}
+                  >
+                    {isPinPending ? <Loader className="busy-indicator-icon" size={15} aria-hidden /> : c.pinned ? <PinOff size={15} aria-hidden /> : <Pin size={15} aria-hidden />}
+                  </button>}
                   {c.recipientlessDraft && c.draftOnly && onDelete && <button
                     type="button"
                     className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}

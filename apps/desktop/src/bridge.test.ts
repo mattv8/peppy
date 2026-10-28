@@ -116,6 +116,7 @@ describe("bridge subscriptions", () => {
     await tauriBridge.enrollment_cancel_phone();
     await tauriBridge.reveal_vault_secret();
     await tauriBridge.mark_all_read();
+    await tauriBridge.set_conversation_pinned("conversation-id", true);
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_devices", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "revoke_device", { deviceId: "device-id" });
@@ -127,6 +128,7 @@ describe("bridge subscriptions", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(8, "enrollment_cancel_phone", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(9, "reveal_vault_secret", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(10, "mark_all_read", undefined);
+    expect(invokeMock).toHaveBeenNthCalledWith(11, "set_conversation_pinned", { conversationId: "conversation-id", pinned: true });
   });
 });
 
@@ -143,6 +145,13 @@ describe("fixture draft saves", () => {
     expect(await fixtureBridge.mark_all_read()).toBe("0");
     const state = await fixtureBridge.load_state();
     expect(state.conversations.every(conversation => conversation.unread === 0)).toBe(true);
+  });
+
+  it("updates only an established fixture conversation pin state", async () => {
+    await fixtureBridge.set_conversation_pinned("conv-aurora", true);
+
+    expect((await fixtureBridge.load_state()).conversations.find(conversation => conversation.id === "conv-aurora")?.pinned).toBe(true);
+    await expect(fixtureBridge.set_conversation_pinned("missing", true)).rejects.toMatchObject({ code: "not-found" });
   });
 
   it("reuses one blank draft without overwriting its content", async () => {

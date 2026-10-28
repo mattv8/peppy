@@ -944,6 +944,8 @@ public protocol NativeClientProtocol: AnyObject, Sendable {
     
     func setContactScanRequestCapability(inputJson: String) throws  -> String
     
+    func setConversationPinned(conversationId: String, pinned: Bool) throws 
+    
     func setGatewaySettings(settings: NativeGatewaySettings) throws 
     
     func setMmsAcquisitionPart(id: String, providerPartId: String, attachmentId: String) throws 
@@ -2372,6 +2374,16 @@ open func setContactScanRequestCapability(inputJson: String)throws  -> String  {
         FfiConverterString.lower(inputJson),uniffiCallStatus
     )
 })
+}
+    
+open func setConversationPinned(conversationId: String, pinned: Bool)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_conversation_pinned(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterBool.lower(pinned),uniffiCallStatus
+    )
+}
 }
     
 open func setGatewaySettings(settings: NativeGatewaySettings)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
@@ -4520,12 +4532,14 @@ public func FfiConverterTypeNativeComposeDraftUpdate_lower(_ value: NativeCompos
 public struct NativeConversation: Equatable, Hashable {
     public var conversationId: String
     public var unreadCount: UInt64
+    public var pinned: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(conversationId: String, unreadCount: UInt64) {
+    public init(conversationId: String, unreadCount: UInt64, pinned: Bool) {
         self.conversationId = conversationId
         self.unreadCount = unreadCount
+        self.pinned = pinned
     }
 
     
@@ -4545,13 +4559,15 @@ public struct FfiConverterTypeNativeConversation: FfiConverterRustBuffer {
         return
             try NativeConversation(
                 conversationId: FfiConverterString.read(from: &buf), 
-                unreadCount: FfiConverterUInt64.read(from: &buf)
+                unreadCount: FfiConverterUInt64.read(from: &buf), 
+                pinned: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: NativeConversation, into buf: inout [UInt8]) {
         FfiConverterString.write(value.conversationId, into: &buf)
         FfiConverterUInt64.write(value.unreadCount, into: &buf)
+        FfiConverterBool.write(value.pinned, into: &buf)
     }
 }
 
@@ -11143,6 +11159,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_contact_scan_request_capability() != 62690) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_conversation_pinned() != 5079) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings() != 40564) {

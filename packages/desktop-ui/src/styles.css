@@ -493,12 +493,12 @@ select:focus-visible {
 .conversation-select { display: flex; width: 100%; min-width: 0; height: 100%; align-items: center; gap: 8px; padding: 8px; border: 0; background: transparent; color: inherit; text-align: left; }
 [data-conversation-actions] { position: absolute; inset-block: 0; right: 6px; display: flex; align-items: center; gap: 2px; background: var(--conversation-row-surface); opacity: 0; pointer-events: none; transition: opacity var(--peppy-duration-fast) var(--peppy-ease-out); }
 [data-conversation-actions]::before { position: absolute; top: 0; right: 100%; width: 24px; height: 100%; background: linear-gradient(to right, transparent, var(--conversation-row-surface)); content: ""; opacity: 0; pointer-events: none; transition: opacity var(--peppy-duration-fast) var(--peppy-ease-out); }
-.conversation-popout, .conversation-delete { width: 32px; height: 32px; flex: 0 0 32px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); pointer-events: none; }
-.conversation-row:hover [data-conversation-actions], .conversation-row:has(:focus-visible) [data-conversation-actions], .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions], .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] { opacity: 1; }
-.conversation-row:hover [data-conversation-actions] > button, .conversation-row:has(:focus-visible) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] > button { pointer-events: auto; }
-.conversation-row:hover [data-conversation-actions]::before, .conversation-row:has(:focus-visible) [data-conversation-actions]::before, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions]::before { opacity: 1; }
-.conversation-select:focus-visible, .conversation-popout:focus-visible, .conversation-delete:focus-visible { outline-offset: -2px; }
-.conversation-popout:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
+.conversation-pin, .conversation-popout, .conversation-delete { width: 32px; height: 32px; flex: 0 0 32px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--peppy-text-secondary); pointer-events: none; }
+.conversation-row:hover [data-conversation-actions], .conversation-row:has(:focus-visible) [data-conversation-actions], .conversation-row:has(.conversation-pin.pending) [data-conversation-actions], .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions], .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] { opacity: 1; }
+.conversation-row:hover [data-conversation-actions] > button, .conversation-row:has(:focus-visible) [data-conversation-actions] > button, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions] > button, .conversation-row:has(.conversation-delete:disabled) [data-conversation-actions] > button { pointer-events: auto; }
+.conversation-row:hover [data-conversation-actions]::before, .conversation-row:has(:focus-visible) [data-conversation-actions]::before, .conversation-row:has(.conversation-pin.pending) [data-conversation-actions]::before, .conversation-row:has(.conversation-delete.confirming) [data-conversation-actions]::before { opacity: 1; }
+.conversation-select:focus-visible, .conversation-pin:focus-visible, .conversation-popout:focus-visible, .conversation-delete:focus-visible { outline-offset: -2px; }
+.conversation-pin:hover, .conversation-popout:hover { background: var(--peppy-surface-hover); color: var(--peppy-text-primary); }
 .conversation-delete { color: var(--peppy-text-secondary); }
 .conversation-delete.confirming { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
 .conversation-delete:hover { background: var(--peppy-danger-hover); color: var(--peppy-danger-text); }
@@ -513,6 +513,7 @@ select:focus-visible {
   [data-conversation-actions] { position: static; flex: none; background: transparent; opacity: 1; }
   [data-conversation-actions]::before { display: none; }
   [data-conversation-actions] > button { pointer-events: auto; }
+  [data-conversation-actions] > button { width: 44px; height: 44px; flex-basis: 44px; }
 }
 .conversation-row:hover,
 .conversation-row.selected,
@@ -552,6 +553,7 @@ select:focus-visible {
   white-space: nowrap;
   font-size: 12px;
 }
+.conversation-pin-marker { display: inline-grid; width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; place-items: center; color: var(--peppy-accent); }
 .unread {
   min-width: 18px;
   padding: 2px 5px;
@@ -1067,7 +1069,7 @@ select:focus-visible {
   #omni-search-clear:focus-visible { outline-color: Highlight; }
   [data-conversation-actions] { background: Canvas; }
   [data-conversation-actions]::before { background: Canvas; }
-  .conversation-popout, .conversation-delete { color: ButtonText; }
+  .conversation-pin, .conversation-popout, .conversation-delete { color: ButtonText; }
   .conversation-delete.confirming { background: Highlight; color: HighlightText; }
   .conversation-copy .conversation-delete-warning { color: CanvasText; }
 }

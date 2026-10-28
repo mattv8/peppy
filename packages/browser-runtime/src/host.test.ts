@@ -65,6 +65,16 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
+  it("routes conversation pinning through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const args = { conversationId: "conversation", pinned: true };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "set_conversation_pinned", args }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(session.calls).toEqual([{ command: "set_conversation_pinned", args, mutation: true }]);
+  });
+
   it("allows one bounded deferred-media batch as a checkpointed mutation", async () => {
     const session = new FakeSession();
     const attachmentIds = [

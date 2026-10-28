@@ -262,7 +262,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         assert!(main.contains(&allow(command)));
         assert!(composer.contains(&allow(command)));
     }
-    for command in ["mark_all_read"] {
+    for command in ["mark_all_read", "set_conversation_pinned"] {
         assert!(commands.contains(&command.to_owned()));
         assert!(handler.contains(&format!("\n        {command},")));
         assert!(main.contains(&allow(command)));
@@ -304,6 +304,7 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "popout_conversation",
         "hide_head",
         "mark_all_read",
+        "set_conversation_pinned",
         "hosted_account",
         "hosted_sign_in",
         "hosted_sign_out",

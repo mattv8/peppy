@@ -244,7 +244,8 @@ fn read_before_arrival_out_of_order_buffering_and_duplicate_replay() {
         first.list_conversations().unwrap(),
         vec![Conversation {
             conversation_id: captured.conversation_id,
-            unread_count: 1
+            unread_count: 1,
+            pinned: false
         }]
     );
 

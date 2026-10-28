@@ -34,6 +34,7 @@ const COMMANDS: &[&str] = &[
     "dismiss_notification",
     "dismiss_all_notifications",
     "set_app_muted",
+    "set_conversation_pinned",
     "mark_notifications_seen",
     "set_notification_preferences",
     "set_notification_context",

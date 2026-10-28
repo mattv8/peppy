@@ -430,6 +430,7 @@ pub enum NativeNotificationCaptureOutcome {
 pub struct NativeConversation {
     pub conversation_id: String,
     pub unread_count: u64,
+    pub pinned: bool,
 }
 
 /// Sanitized message presentation data. Database keys, passphrases, purpose keys,
@@ -2452,8 +2453,20 @@ impl NativeClient {
                 .map(|item| NativeConversation {
                     conversation_id: item.conversation_id.to_string(),
                     unread_count: item.unread_count,
+                    pinned: item.pinned,
                 })
                 .collect()
+        })
+    }
+
+    pub fn set_conversation_pinned(
+        &self,
+        conversation_id: String,
+        pinned: bool,
+    ) -> Result<(), MobileBindingsError> {
+        let conversation_id = parse_id(&conversation_id)?;
+        with_client(&self.client, |client| {
+            client.set_conversation_pinned(conversation_id, pinned)
         })
     }
 
@@ -3119,6 +3132,65 @@ mod tests {
             client.list_conversations(),
             Err(MobileBindingsError::Closed)
         ));
+    }
+
+    #[test]
+    fn conversation_pinning_projects_state_and_validates_requests() {
+        let path = std::env::temp_dir().join(format!(
+            "peppy-mobile-conversation-pinning-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let client = open_native_client(NativeOpenConfig {
+            database_path: path.to_string_lossy().into_owned(),
+            vault_id: vault_id.clone(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+            database_key: vec![7; 32],
+        })
+        .unwrap();
+
+        let captured = client
+            .capture_incoming(NativeIncomingSms {
+                conversation_id: None,
+                sender_address: "+15555550100".into(),
+                body: "pin this conversation".into(),
+                provider_message_id: Some("conversation-pinning-1".into()),
+                imported: false,
+            })
+            .unwrap();
+        let conversation_id = captured.conversation_id;
+
+        assert!(!client.list_conversations().unwrap()[0].pinned);
+        assert!(matches!(
+            client.set_conversation_pinned("not-a-conversation-id".into(), true),
+            Err(MobileBindingsError::InvalidRequest)
+        ));
+        assert!(matches!(
+            client.set_conversation_pinned(conversation_id.clone(), true),
+            Err(MobileBindingsError::KeysUnavailable)
+        ));
+
+        let material = create_vault_material(vault_id, "test passphrase".into()).unwrap();
+        client
+            .unlock(
+                material.profile_json,
+                material.header_json,
+                "test passphrase".into(),
+            )
+            .unwrap();
+        client
+            .set_conversation_pinned(conversation_id.clone(), true)
+            .unwrap();
+        assert_eq!(
+            client.list_conversations().unwrap()[0],
+            NativeConversation {
+                conversation_id,
+                unread_count: 1,
+                pinned: true,
+            }
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
