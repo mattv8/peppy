@@ -281,6 +281,27 @@ class SmsCaptureSchedulingTest {
         assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
     }
 
+    @Test fun receiverRecoveryEnqueuesProviderWorkOnlyWhenReadSmsIsGranted() {
+        val application = context.applicationContext as android.app.Application
+        val manager = WorkManager.getInstance(context)
+        rememberReadSmsPermission()
+        shadowOf(application).grantPermissions(Manifest.permission.READ_SMS)
+
+        IncomingCapture.recover(context)
+
+        assertEquals(1, manager.getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().size)
+    }
+
+    @Test fun receiverRecoveryWithoutReadSmsDoesNotEnqueueProviderWork() {
+        val application = context.applicationContext as android.app.Application
+        rememberReadSmsPermission()
+        shadowOf(application).denyPermissions(Manifest.permission.READ_SMS)
+
+        IncomingCapture.recover(context)
+
+        assertTrue(WorkManager.getInstance(context).getWorkInfosForUniqueWork(SmsCaptureWork.NAME).get().isEmpty())
+    }
+
     @Test fun workerRejectsPriorSessionAttributionAndDoesNotMeasureAZeroDelay() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val events = mutableListOf<String>()

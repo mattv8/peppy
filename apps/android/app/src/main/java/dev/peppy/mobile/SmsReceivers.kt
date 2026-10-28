@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.provider.Telephony
 import android.telephony.SmsMessage
 import androidx.annotation.VisibleForTesting
@@ -13,41 +14,12 @@ import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeIncomingSms
 import uniffi.peppy_mobile_bindings.NativeSendResult
 import java.security.MessageDigest
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.Executor
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 /** Seam for the one scheduling side effect, so tests can observe capture-before-schedule. */
 object GatewayScheduler {
     @VisibleForTesting
     @Volatile
     internal var schedule: (Context) -> Unit = { GatewayWork.enqueueUrgent(it) }
-}
-
-/**
- * Receivers hand durable core work to this single owned thread via goAsync and finish only after
- * the commit and scheduling. The queue is bounded; when full, work runs on the caller instead of
- * being dropped. No network or key derivation ever runs here.
- */
-object ReceiverWork {
-    private val owned = ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, ArrayBlockingQueue(64), { runnable ->
-        Thread(runnable, "peppy-receiver").apply { isDaemon = true }
-    }, ThreadPoolExecutor.CallerRunsPolicy()).apply { allowCoreThreadTimeOut(true) }
-
-    @VisibleForTesting
-    @Volatile
-    internal var executor: Executor = owned
-
-    fun run(finish: () -> Unit, work: () -> Unit) {
-        executor.execute {
-            try {
-                work()
-            } finally {
-                finish()
-            }
-        }
-    }
 }
 
 /** One PDU's text as decoded by the platform. */
@@ -60,10 +32,11 @@ data class IncomingSmsPart(val address: String, val body: String, val timestampM
  */
 class IncomingSmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val receivedAt = SystemClock.elapsedRealtime()
         if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
         val messages: Array<SmsMessage?> = try {
             Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
-        } catch (_: RuntimeException) {
+        } catch (_: Exception) {
             return
         }
         val parts = messages.filterNotNull().mapNotNull { message ->
@@ -72,11 +45,28 @@ class IncomingSmsReceiver : BroadcastReceiver() {
         if (parts.isEmpty()) return
         val app = context.applicationContext
         val pending = goAsync()
-        ReceiverWork.run(finish = { pending.finish() }) { IncomingCapture.handle(app, parts) }
+        ReceiverWork.run(
+            receivedAtMillis = receivedAt,
+            finish = { pending.finish() },
+            recovery = { IncomingCapture.recover(app) },
+        ) { IncomingCapture.handle(app, parts) }
     }
 }
 
 object IncomingCapture {
+    /** Provider recovery is a best-effort hint only; it contains no SMS content or address. */
+    fun recover(context: Context) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
+            ReceiverWork.diagnose("incoming SMS recovery unavailable without READ_SMS")
+            return
+        }
+        try {
+            SmsCaptureWork.enqueue(context)
+        } catch (_: Exception) {
+            ReceiverWork.diagnose("incoming SMS recovery enqueue failed")
+        }
+    }
+
     /**
      * Captures every sender's concatenated parts, then schedules sync only if something was
      * durably captured. Returns the number of messages captured (including core duplicates).
@@ -127,10 +117,23 @@ object IncomingCapture {
 /** Non-exported receiver reached only through this app's explicit callback PendingIntents. */
 class SmsStatusReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val receivedAt = SystemClock.elapsedRealtime()
         val code = resultCode
         val app = context.applicationContext
         val pending = goAsync()
-        ReceiverWork.run(finish = { pending.finish() }) { handle(app, intent, code) }
+        ReceiverWork.run(
+            scheduler = ReceiverWork.evidenceScheduler,
+            receivedAtMillis = receivedAt,
+            finish = { pending.finish() },
+            recovery = { GatewayScheduler.schedule(app) },
+        ) {
+            record(app, intent, code)?.let { evidence ->
+                GatewayScheduler.schedule(app)
+                ReceiverWork.submitCallbackApply(recovery = { GatewayScheduler.schedule(app) }, work = {
+                    NativeGateway.open(app)?.let { SmsCallbackReconciler.apply(it, evidence.store, evidence.commandId, evidence.result) }
+                })
+            }
+        }
     }
 
     companion object {
@@ -142,6 +145,15 @@ class SmsStatusReceiver : BroadcastReceiver() {
          * unavailable or the process dies, the next sync pass replays it.
          */
         internal fun handle(context: Context, intent: Intent, resultCode: Int): NativeSendResult? {
+            val recorded = record(context, intent, resultCode) ?: return null
+            val accepted = NativeGateway.open(context)?.let { SmsCallbackReconciler.apply(it, recorded.store, recorded.commandId, recorded.result) } == true
+            GatewayScheduler.schedule(context)
+            return recorded.result.takeIf { accepted }
+        }
+
+        private data class Evidence(val store: SmsCallbackStore, val commandId: String, val result: NativeSendResult)
+
+        private fun record(context: Context, intent: Intent, resultCode: Int): Evidence? {
             if (intent.action != ACTION) return null
             val identity = CallbackIdentity.parse(intent.data) ?: return null
             val outcome = when (identity.kind) {
@@ -150,10 +162,7 @@ class SmsStatusReceiver : BroadcastReceiver() {
             }
             val store = SmsCallbackStore(context)
             val result = store.record(identity, outcome) ?: return null
-            val client = NativeGateway.open(context)
-            val accepted = client != null && SmsCallbackReconciler.apply(client, store, identity.commandId, result)
-            GatewayScheduler.schedule(context)
-            return result.takeIf { accepted }
+            return Evidence(store, identity.commandId, result)
         }
 
         private fun deliveryOutcome(intent: Intent): PartOutcome {

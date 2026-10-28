@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import org.json.JSONObject
 import uniffi.peppy_mobile_bindings.MobileBindingsException
 import uniffi.peppy_mobile_bindings.NativeClientInterface
@@ -123,23 +124,47 @@ object MmsCallbackIntents {
 /** Declared non-exported by the integration owner. Callback evidence is committed before core I/O. */
 class MmsStatusReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val receivedAt = SystemClock.elapsedRealtime()
         val code = resultCode; val pending = goAsync(); val app = context.applicationContext
-        ReceiverWork.run(finish = { pending.finish() }) { handle(app, intent, code) }
+        ReceiverWork.run(
+            scheduler = ReceiverWork.evidenceScheduler,
+            receivedAtMillis = receivedAt,
+            finish = { pending.finish() },
+            recovery = { GatewayScheduler.schedule(app) },
+        ) {
+            record(app, intent, code)?.let { evidence ->
+                GatewayScheduler.schedule(app)
+                ReceiverWork.submitCallbackApply(recovery = { GatewayScheduler.schedule(app) }, work = {
+                    NativeGateway.open(app)?.let { MmsCallbackReconciler.apply(it, evidence.store, evidence.commandId, evidence.result) }
+                })
+            }
+        }
     }
     companion object {
         const val ACTION = "dev.peppy.mobile.MMS_CALLBACK"
         internal fun handle(context: Context, intent: Intent, resultCode: Int): NativeSendResult? {
+            val recorded = record(context, intent, resultCode) ?: return null
+            NativeGateway.open(context)?.let { MmsCallbackReconciler.apply(it, recorded.store, recorded.commandId, recorded.result) }
+            GatewayScheduler.schedule(context)
+            return recorded.result
+        }
+
+        private data class Evidence(val store: MmsCallbackStore, val commandId: String, val result: NativeSendResult)
+
+        private fun record(context: Context, intent: Intent, resultCode: Int): Evidence? {
             if (intent.action != ACTION) return null
             val commandId = MmsCallbackIntents.commandId(intent.data) ?: return null
             // RESULT_OK proves handoff to the platform, not delivery. Other result codes are
             // intentionally unknown: MMS implementations do not document them uniformly.
             val store = MmsCallbackStore(context)
-            if (resultCode != Activity.RESULT_OK) { store.unknown(commandId, resultCode); GatewayScheduler.schedule(context); return null }
+            if (resultCode != Activity.RESULT_OK) {
+                store.unknown(commandId, resultCode)
+                GatewayScheduler.schedule(context)
+                return null
+            }
             val result = NativeSendResult.SENT
             if (!store.record(commandId, result)) return null
-            NativeGateway.open(context)?.let { MmsCallbackReconciler.apply(it, store, commandId, result) }
-            GatewayScheduler.schedule(context)
-            return result
+            return Evidence(store, commandId, result)
         }
     }
 }

@@ -153,7 +153,8 @@ const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpo
 const BATTERY_LOOKUP_INDEXES: &str = "
 CREATE INDEX IF NOT EXISTS sms_acquisitions_reserved_sequence ON sms_acquisitions(conversation_id,source_sequence) WHERE state!='complete';
 CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
- CREATE INDEX IF NOT EXISTS outbox_queued_priority ON outbox(priority,seq) WHERE state='queued';
+CREATE INDEX IF NOT EXISTS outbox_queued_priority ON outbox(priority,seq) WHERE state='queued';
+CREATE INDEX IF NOT EXISTS outbox_pending_events_history ON outbox(envelope_id,compaction,purpose,state) WHERE purpose='event' AND state IN ('unsealed','queued');
 ";
 
 type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Store>>>>;
