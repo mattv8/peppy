@@ -65,6 +65,13 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([]);
   });
 
+  it("keeps notification settings links native-only", async () => {
+    const session = new FakeSession();
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "open_notification_settings", args: {} }))
+      .resolves.toMatchObject({ ok: false, error: { code: "unsupported" } });
+    expect(session.calls).toEqual([]);
+  });
+
   it("keeps history attempts scoped to their owning port and makes status read-only", async () => {
     const session = new FakeSession();
     const attemptId = "018f2c5e-6a3b-7c4d-8e5f-0123456789ab";
@@ -243,7 +250,7 @@ describe("browser host RPC", () => {
         quarantineCount: 0,
         notifications: [],
         appFilters: [],
-        notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
+        notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true },
       },
     });
     expect(JSON.stringify(response)).not.toContain("do-not-expose");

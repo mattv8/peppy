@@ -14,7 +14,6 @@ use std::{
 };
 use tauri::{Emitter, Listener, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
@@ -42,6 +41,7 @@ mod lifecycle;
 mod material_state;
 mod media;
 mod net;
+mod notification_permission;
 mod notifications;
 mod origin;
 mod search_history;
@@ -3524,22 +3524,36 @@ fn set_notification_context(
     Ok(())
 }
 
-/// Permission is native-only. Desktop plugin status is not a reliable OS authorization query, so
-/// callers must guide users to OS settings rather than treating this as a banner grant.
+/// Reads OS notification authorization and posts a fixed, content-free test banner unless the OS
+/// reports Peppy as blocked.
 #[tauri::command]
-fn request_notification_permission(
+async fn request_notification_permission(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
-) -> BridgeResult<String> {
+) -> BridgeResult<notification_permission::NotificationCheck> {
+    // Admit then release at once: the guard must not be held across the up-to-60s OS prompt.
+    drop(admit_update_operation(&app.state::<AppState>())?);
+    require_main(window.label())?;
+    blocking(move || Ok(notification_permission::check(&app))).await
+}
+
+/// Opens Peppy's page in the OS notification settings. Main window only.
+#[tauri::command]
+fn open_notification_settings(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> BridgeResult<()> {
     let _operation = admit_update_operation(&app.state::<AppState>())?;
     require_main(window.label())?;
-    let _plugin_state = app.notification().request_permission().map_err(|_| {
+    let url = notification_permission::current_settings_url(&app).ok_or_else(|| {
         BridgeError::new(
-            "notification-permission",
-            "Could not request notification permission.",
+            "unsupported",
+            "Notification settings are unavailable on this platform.",
         )
     })?;
-    Ok("unknown".into())
+    app.opener()
+        .open_url(url, None::<String>)
+        .map_err(|_| BridgeError::new("open-failed", "Could not open notification settings."))
 }
 
 /// OS registration is authoritative. This command is main-window-only and no
@@ -4499,6 +4513,7 @@ pub fn run() {
         set_notification_preferences,
         set_notification_context,
         request_notification_permission,
+        open_notification_settings,
         list_devices,
         revoke_device,
         list_contact_books,

@@ -1824,6 +1824,20 @@ pub fn conversation_is_panel(app: &AppHandle, conversation_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True while `conversation_id` has a live chat head (collapsed or expanded) for the active
+/// binding. Safe to call when the head runtime is not managed (returns false).
+pub fn has_head(app: &AppHandle, conversation_id: &str) -> bool {
+    app.try_state::<HeadRuntime>()
+        .and_then(|runtime| {
+            runtime
+                .state
+                .lock()
+                .ok()
+                .map(|state| !state.stopped && state.heads.contains_key(conversation_id))
+        })
+        .unwrap_or(false)
+}
+
 pub fn activate_from_tray(app: &AppHandle, conversation_id: &str) {
     let event = runtime(app).state.lock().ok().and_then(|state| {
         state

@@ -188,6 +188,18 @@ fn allowed(preferences: &NotificationPreferences, candidate: &BannerCandidate) -
     }
 }
 
+/// Only SMS/MMS banners for a conversation with a live chat head are muted. Mirrored app
+/// notifications and other conversations keep their banners.
+fn suppressed_by_head(
+    preferences: &NotificationPreferences,
+    candidate: &BannerCandidate,
+    has_head: impl Fn(&str) -> bool,
+) -> bool {
+    preferences.mute_with_heads
+        && candidate.kind == "message"
+        && candidate.conversation_id.as_deref().is_some_and(has_head)
+}
+
 fn banner_text(
     preferences: &NotificationPreferences,
     candidate: &BannerCandidate,
@@ -240,6 +252,9 @@ pub fn drain_banner_candidates(
         for candidate in candidates {
             if !allowed(&preferences, &candidate)
                 || focused_for_candidate(app, settings, &candidate)
+                || suppressed_by_head(&preferences, &candidate, |id| {
+                    crate::heads_runtime::has_head(app, id)
+                })
             {
                 acknowledge.push(candidate.id);
             } else if now.saturating_sub(candidate.created_at) > STALE_CANDIDATE_MS {
@@ -351,6 +366,7 @@ mod tests {
                 message_banners: false,
                 mirrored_banners: true,
                 preview: Preview::Hidden,
+                ..NotificationPreferences::default()
             })
             .unwrap();
         assert_eq!(
@@ -436,6 +452,47 @@ mod tests {
         };
         assert!(should_suppress_main_focus(true, &conversations, &message));
         assert!(!should_suppress_main_focus(true, &conversations, &mirrored));
+    }
+
+    #[test]
+    fn head_suppression_only_mutes_messages_with_a_head_when_enabled() {
+        let message = |conversation: Option<&str>| BannerCandidate {
+            id: "message".into(),
+            kind: "message".into(),
+            conversation_id: conversation.map(Into::into),
+            notification_target: None,
+            title: String::new(),
+            body: String::new(),
+            created_at: 0,
+        };
+        let headed = |id: &str| id == "conversation-a";
+        let enabled = NotificationPreferences::default();
+        let disabled = NotificationPreferences {
+            mute_with_heads: false,
+            ..NotificationPreferences::default()
+        };
+
+        assert!(suppressed_by_head(
+            &enabled,
+            &message(Some("conversation-a")),
+            headed
+        ));
+        assert!(!suppressed_by_head(
+            &enabled,
+            &message(Some("conversation-b")),
+            headed
+        ));
+        assert!(!suppressed_by_head(&enabled, &message(None), headed));
+        assert!(!suppressed_by_head(
+            &disabled,
+            &message(Some("conversation-a")),
+            headed
+        ));
+        let mirrored = BannerCandidate {
+            kind: "notification".into(),
+            ..message(Some("conversation-a"))
+        };
+        assert!(!suppressed_by_head(&enabled, &mirrored, headed));
     }
 
     #[test]

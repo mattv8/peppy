@@ -1065,4 +1065,36 @@ describe("BrowserBridge", () => {
     Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
     bridge.dispose();
   });
+
+  it("sends a content-free browser test notification only when granted", async () => {
+    const original = globalThis.Notification;
+    const posted = vi.fn();
+    class TestNotification {
+      public static permission: NotificationPermission = "granted";
+      public static failToConstruct = false;
+      public static async requestPermission(): Promise<NotificationPermission> { return TestNotification.permission; }
+      public constructor(title: string, options: NotificationOptions) {
+        if (TestNotification.failToConstruct) throw new Error("blocked");
+        posted(title, options);
+      }
+    }
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: TestNotification });
+    try {
+      const bridge = new BrowserBridge(new TestPort() as unknown as MessagePort);
+      await expect(bridge.request_notification_permission()).resolves.toEqual({ status: "granted", testSent: true, canOpenSettings: false });
+      expect(posted).toHaveBeenCalledWith("Peppy", { body: "Test notification: desktop banners are working." });
+
+      TestNotification.permission = "denied";
+      await expect(bridge.request_notification_permission()).resolves.toEqual({ status: "denied", testSent: false, canOpenSettings: false });
+      expect(posted).toHaveBeenCalledTimes(1);
+
+      TestNotification.permission = "granted";
+      TestNotification.failToConstruct = true;
+      await expect(bridge.request_notification_permission()).resolves.toEqual({ status: "granted", testSent: false, canOpenSettings: false });
+      expect(posted).toHaveBeenCalledTimes(1);
+      bridge.dispose();
+    } finally {
+      Object.defineProperty(globalThis, "Notification", { configurable: true, value: original });
+    }
+  });
 });

@@ -22,6 +22,13 @@ pub struct NotificationPreferences {
     pub message_banners: bool,
     pub mirrored_banners: bool,
     pub preview: Preview,
+    /// Skip SMS/MMS banners for conversations that currently have a chat head.
+    #[serde(default = "default_true")]
+    pub mute_with_heads: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +44,7 @@ impl Default for NotificationPreferences {
             message_banners: true,
             mirrored_banners: true,
             preview: Preview::Full,
+            mute_with_heads: true,
         }
     }
 }
@@ -858,7 +866,37 @@ mod tests {
                 "messageBanners": true,
                 "mirroredBanners": true,
                 "preview": "full",
+                "muteWithHeads": true,
             })
+        );
+    }
+
+    #[test]
+    fn legacy_notification_preferences_default_mute_with_heads_on() {
+        let parsed: NotificationPreferences = serde_json::from_value(json!({
+            "messageBanners": true,
+            "mirroredBanners": false,
+            "preview": "hidden",
+        }))
+        .unwrap();
+
+        assert!(parsed.mute_with_heads);
+        assert!(!parsed.mirrored_banners);
+        assert_eq!(parsed.preview, Preview::Hidden);
+    }
+
+    #[test]
+    fn notification_preferences_round_trip_mute_with_heads() {
+        let preferences = NotificationPreferences {
+            mute_with_heads: false,
+            ..NotificationPreferences::default()
+        };
+        let value = serde_json::to_value(&preferences).unwrap();
+
+        assert_eq!(value["muteWithHeads"], json!(false));
+        assert_eq!(
+            serde_json::from_value::<NotificationPreferences>(value).unwrap(),
+            preferences
         );
     }
 

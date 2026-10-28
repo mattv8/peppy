@@ -141,7 +141,7 @@ const HISTORY_COMMANDS = new Set(["get_history_search", "start_history_search", 
 const NATIVE_ONLY = new Set([
   "configure_server", "get_app_lock_status", "set_app_lock", "unlock_app", "pick_attachments",
   "open_composer", "set_start_at_login", "popout_conversation", "hide_head",
-  "close_composer", "close_head_panel", "window", "request_notification_permission", "set_notification_context",
+  "close_composer", "close_head_panel", "window", "request_notification_permission", "open_notification_settings", "set_notification_context",
   "subscribe_lifecycle", "subscribe_lifecycle_finished", "acknowledge_lifecycle", "hosted_account",
   "hosted_sign_in", "hosted_sign_out", "hosted_open_billing", "hosted_provision",
 ]);
@@ -192,7 +192,7 @@ function safeSnapshot(phase: BrowserSessionPhase): Record<string, unknown> {
     version: "1", mode: "browser", connection: { state: "offline" },
     encryption: { state: phase === "unenrolled" ? "preview" : "locked" }, gateways: [], conversations: [],
     head: { enabled: false, capability: "unsupported" }, pendingCount: 0, quarantineCount: 0,
-    notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full" },
+    notifications: [], appFilters: [], notificationPreferences: { messageBanners: true, mirroredBanners: true, preview: "full", muteWithHeads: true },
   };
 }
 
