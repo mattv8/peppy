@@ -123,6 +123,8 @@ pub const MAX_SNAPSHOT_RECORDS: u64 = 100_000;
 pub const READ_STATE_BATCH_SIZE: usize = MAX_SEAL_BATCH;
 /// Input bytes per snapshot page (typed records count their canonical JSON).
 pub const MAX_SNAPSHOT_PAGE_BYTES: usize = 8 * 1024 * 1024;
+/// Records accepted by one atomic raw replay ingest.
+pub const MAX_REPLAY_PAGE: usize = 200;
 /// Stored bytes per staged generation (oversize records are kept as small digest markers).
 pub const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 /// Obsolete staging rows removed per maintenance step.
@@ -163,6 +165,9 @@ const FINGERPRINT_HEX_BYTES: usize = 64;
 const KEY_CACHE_BYTES: usize = 4 + 1 + 16 + 16 + 4 + FINGERPRINT_HEX_BYTES + 32 + 32 + 32;
 const LEGACY_KEY_CACHE_BYTES: usize = KEY_CACHE_BYTES - 32;
 const KEY_CACHE_CHECK_DOMAIN: &[u8] = b"peppy-native-key-cache-check-v1\0";
+const BROWSER_LOCAL_IDENTITY_AAD_PREFIX: &[u8] = b"peppy-browser-local-identity-v1\0";
+const BROWSER_LOCAL_IDENTITY_PLAINTEXT_BYTES: usize = 128;
+const MAX_BROWSER_LOCAL_IDENTITY_AAD_BYTES: usize = 64 * 1024;
 const NEXT_SOURCE_SEQUENCE_SQL: &str = "SELECT MAX(value) FROM (SELECT COALESCE(MAX(source_sequence),0) AS value FROM messages WHERE conversation_id=?1 AND source_device_id=?2 UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM mms_acquisitions WHERE conversation_id=?1 AND state!='complete' UNION ALL SELECT COALESCE(MAX(source_sequence),0) FROM sms_acquisitions WHERE conversation_id=?1 AND state!='complete')";
 const SEAL_PENDING_SQL: &str = "SELECT priority,seq,envelope_id,command_id,purpose,route,plain,compaction FROM outbox WHERE state='unsealed' AND envelope_id NOT IN (SELECT envelope_id FROM outbox_conflicts) AND (priority>? OR (priority=? AND seq>?)) ORDER BY priority,seq LIMIT 256";
 const BATTERY_LOOKUP_INDEXES: &str = "
@@ -767,6 +772,27 @@ pub struct RawSnapshotRecord {
     pub cursor: Cursor,
     pub envelope_json: Vec<u8>,
 }
+/// One raw server record for atomic replay ingest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawReplayRecord {
+    pub cursor: Cursor,
+    pub envelope_json: Vec<u8>,
+}
+/// The durable outcome of one atomic replay page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IngestBatchReport {
+    pub journaled: usize,
+    pub duplicate: usize,
+    pub quarantined: usize,
+    pub receive_cursor: Cursor,
+}
+/// Durable replay receipt and projection state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayProgress {
+    pub received_through: Cursor,
+    pub processed_through: Cursor,
+    pub waiting_for_keys: u64,
+}
 /// A local outbox row whose envelope ID the server accepted with different bytes (for example
 /// after a database rollback). It is never uploaded or sealed again; reconcile it explicitly.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -866,6 +892,11 @@ pub struct ComposeDraftUpdate {
     pub route: Option<GatewayRoute>,
 }
 
+struct LocalIdentitySealCapability {
+    key: PurposeKey,
+    verified_header: VaultCheckHeader,
+}
+
 struct EpochKeys {
     profile: KeyProfile,
     fingerprint: String,
@@ -874,6 +905,9 @@ struct EpochKeys {
     /// V1 native caches did not carry this derived key. They remain decrypt-compatible,
     /// but must not produce compactable events until a V2 cache or passphrase unlock.
     compaction: Option<PurposeKey>,
+    /// Installed only by authenticated handoff import, consumed by the first matching browser
+    /// identity seal, and cleared by cache replacement, epoch cutover, or dropping in-memory keys.
+    local_identity_seal: Option<LocalIdentitySealCapability>,
     /// Present only after a passphrase unlock or authenticated handoff import; native caches
     /// intentionally carry purpose keys alone and cannot recreate it.
     handoff: Option<HandoffRootPackage>,
@@ -1202,6 +1236,7 @@ impl Client {
             command: derive(KeyPurpose::Command)?,
             event: derive(KeyPurpose::Event)?,
             compaction: Some(derive(KeyPurpose::Compaction)?),
+            local_identity_seal: None,
             handoff: Some(
                 HandoffRootPackage::new(root, profile.clone(), header.clone())
                     .map_err(|_| Error::Crypto)?,
@@ -1251,6 +1286,18 @@ impl Client {
         seal_with_store(s)
     }
 
+    /// Attempts an import from a borrowed opaque handoff. The original remains available for a
+    /// retry if validation, database opening, or durable installation fails.
+    pub fn import_verified_handoff_retryable(
+        &self,
+        handoff: &VerifiedHandoff,
+    ) -> Result<(), Error> {
+        let attempt = handoff
+            .duplicate_for_core_import()
+            .map_err(|_| Error::Crypto)?;
+        self.import_verified_handoff(attempt)
+    }
+
     /// Installs a context-anchored authenticated handoff. It deliberately does not accept
     /// `NativeKeyCache`, which cannot establish enrollment bindings.
     pub fn import_verified_handoff(&self, handoff: VerifiedHandoff) -> Result<(), Error> {
@@ -1274,6 +1321,10 @@ impl Client {
         let command = derive(KeyPurpose::Command)?;
         let event = derive(KeyPurpose::Event)?;
         let compaction = derive(KeyPurpose::Compaction)?;
+        let local_identity_seal = LocalIdentitySealCapability {
+            key: derive(KeyPurpose::LocalWrap)?,
+            verified_header: header.clone(),
+        };
         let handoff = if context.role == EnrollmentRole::Owner {
             Some(
                 HandoffRootPackage::new(root, profile.clone(), header.clone())
@@ -1287,6 +1338,7 @@ impl Client {
             command,
             event,
             compaction: Some(compaction),
+            local_identity_seal: Some(local_identity_seal),
             profile: profile.clone(),
             handoff,
         };
@@ -1374,6 +1426,9 @@ impl Client {
         seal_pending(&tx, &ctx, MAX_SEAL_BATCH)?;
         tx.commit()?;
         s.active_epoch = Some(epoch);
+        for keys in s.keys.values_mut() {
+            keys.local_identity_seal = None;
+        }
         Ok(())
     }
 
@@ -1467,6 +1522,7 @@ impl Client {
             command,
             event,
             compaction,
+            local_identity_seal: None,
             profile: profile.clone(),
             handoff,
         };
@@ -1490,6 +1546,47 @@ impl Client {
             active_epoch: s.active_epoch,
             unlocked_epochs: s.keys.keys().copied().collect(),
         })
+    }
+
+    /// Seals browser-local identity plaintext once with a just-imported verified vault epoch. This
+    /// returns ciphertext only; neither the root nor the derived LocalWrap key crosses the core
+    /// boundary. Passphrase unlocks do not install this one-shot capability.
+    pub fn seal_local_identity(
+        &self,
+        profile: &KeyProfile,
+        expected_header: &VaultCheckHeader,
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<EncryptedEnvelope, Error> {
+        let mut s = self.lock()?;
+        if profile.vault_id != s.config.vault_id.0 || s.active_epoch != Some(profile.key_epoch) {
+            return Err(Error::InvalidProfile);
+        }
+        if !aad.starts_with(BROWSER_LOCAL_IDENTITY_AAD_PREFIX)
+            || aad.len() > MAX_BROWSER_LOCAL_IDENTITY_AAD_BYTES
+            || plaintext.len() != BROWSER_LOCAL_IDENTITY_PLAINTEXT_BYTES
+        {
+            return Err(Error::InvalidRequest("browser local identity"));
+        }
+        let keys = s
+            .keys
+            .get_mut(&profile.key_epoch)
+            .ok_or(Error::KeysUnavailable)?;
+        if keys.profile != *profile {
+            return Err(Error::InvalidProfile);
+        }
+        let capability = keys
+            .local_identity_seal
+            .as_ref()
+            .ok_or(Error::KeysUnavailable)?;
+        if capability.verified_header != *expected_header {
+            return Err(Error::InvalidProfile);
+        }
+        let capability = keys
+            .local_identity_seal
+            .take()
+            .ok_or(Error::KeysUnavailable)?;
+        encrypt(&capability.key, aad, plaintext).map_err(|_| Error::Crypto)
     }
 
     /// Seals a phone enrollment handoff only from the active epoch's verified root capability.
@@ -2423,9 +2520,69 @@ impl Client {
         self.journal(cursor, wire, parsed.as_ref())
     }
 
+    /// Canonicalizes and journals one ordered server page in a single transaction.
+    pub fn ingest_raw_batch(
+        &self,
+        records: &[RawReplayRecord],
+    ) -> Result<IngestBatchReport, Error> {
+        if records.is_empty() || records.len() > MAX_REPLAY_PAGE {
+            return Err(Error::InvalidRequest("replay page size"));
+        }
+        let mut input_bytes = 0usize;
+        let mut previous = 0u64;
+        let mut page = Vec::with_capacity(records.len());
+        for record in records {
+            if record.cursor.0 == 0
+                || record.cursor.0 > i64::MAX as u64
+                || record.cursor.0 <= previous
+            {
+                return Err(Error::InvalidCursor);
+            }
+            input_bytes = input_bytes
+                .checked_add(record.envelope_json.len())
+                .ok_or(Error::InvalidRequest("replay page bytes"))?;
+            if input_bytes > MAX_SNAPSHOT_PAGE_BYTES {
+                return Err(Error::InvalidRequest("replay page bytes"));
+            }
+            let wire = raw_wire(&record.envelope_json)?;
+            let envelope = parse_wire(&wire);
+            page.push((record.cursor, wire, envelope));
+            previous = record.cursor.0;
+        }
+
+        let mut guard = self.lock()?;
+        let (conn, ctx) = guard.parts();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut report = IngestBatchReport::default();
+        for (cursor, wire, envelope) in page {
+            match journal_record(&tx, &ctx, cursor, wire, envelope.as_ref())? {
+                IngestResult::Journaled => report.journaled += 1,
+                IngestResult::Duplicate => report.duplicate += 1,
+                IngestResult::Quarantined(_) => report.quarantined += 1,
+            }
+        }
+        report.receive_cursor = Cursor(advance_frontier(&tx, 0)?);
+        advance_processed_frontier(&tx)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
     /// Highest contiguous journaled cursor; resume server fetches after it.
     pub fn receive_cursor(&self) -> Result<Cursor, Error> {
         Ok(Cursor(receive_cursor(&self.lock()?.conn)?))
+    }
+
+    /// Reports contiguous receipt and processing frontiers without mutating durable state.
+    pub fn replay_progress(&self) -> Result<ReplayProgress, Error> {
+        let store = self.lock()?;
+        let received_through = receive_cursor(&store.conn)?;
+        let processed_through = processed_cursor(&store.conn, received_through)?;
+        let waiting_for_keys = waiting_for_keys(&store.conn, &store.keys, received_through)?;
+        Ok(ReplayProgress {
+            received_through: Cursor(received_through),
+            processed_through: Cursor(processed_through),
+            waiting_for_keys,
+        })
     }
 
     /// Drains up to `limit` published snapshot records into the journal (in cursor order), then
@@ -2509,6 +2666,7 @@ impl Client {
             |r| r.get(0),
         )?;
         report.waiting_for_keys = usize::try_from(waiting).map_err(|_| Error::Database)?;
+        advance_processed_frontier(&tx)?;
         tx.commit()?;
         Ok(report)
     }
@@ -3703,6 +3861,9 @@ impl Client {
             tx.commit()?;
             return Err(Error::SnapshotMismatch);
         }
+        // Persist the pre-snapshot frontier before publishing raises receipt to high-water; an
+        // incomplete snapshot must never make progress appear to rewind or complete early.
+        advance_processed_frontier(&tx)?;
         let receive_cursor = advance_frontier(
             &tx,
             u64::try_from(current.high_water).map_err(|_| Error::Database)?,
@@ -3725,6 +3886,13 @@ impl Client {
             current.server_compaction_generation.is_some(),
             current.expected,
         )?;
+        if current.expected == 0 {
+            mark_processed_snapshot_coverage(
+                &tx,
+                u64::try_from(current.high_water).map_err(|_| Error::Database)?,
+            )?;
+        }
+        advance_processed_frontier(&tx)?;
         tx.commit()?;
         let count = |v: i64| usize::try_from(v).map_err(|_| Error::Database);
         Ok(SnapshotReport {
@@ -3911,69 +4079,88 @@ impl Client {
         let mut guard = self.lock()?;
         let (conn, ctx) = guard.parts();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT wire FROM journal WHERE cursor=?",
-                params![cursor],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            return if existing == wire {
-                Ok(IngestResult::Duplicate)
-            } else {
-                Err(Error::Conflict)
-            };
-        }
-        // Coordinate with the active snapshot generation at this cursor.
-        if let Some(generation) = active_generation(&tx)? {
-            let staged: Option<Vec<u8>> = tx
-                .query_row(
-                    "SELECT wire FROM snapshot_records WHERE generation=? AND cursor=?",
-                    params![generation.number, cursor],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match (staged, generation.published) {
-                // Published records are committed history awaiting drain.
-                (Some(staged), true) => {
-                    return if staged == wire {
-                        Ok(IngestResult::Duplicate)
-                    } else {
-                        Err(Error::Conflict)
-                    };
-                }
-                // Live data wins over unpublished staging; that staging can no longer publish.
-                (Some(staged), false) if staged != wire => {
-                    tx.execute(
-                        "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
-                        params![generation.number],
-                    )?;
-                }
-                _ => {}
-            }
-        }
-        let result = classify(&tx, &ctx, cursor, &wire, envelope)?;
-        let (status, reason) = match result {
-            IngestResult::Journaled => ("pending", None),
-            IngestResult::Duplicate => ("duplicate", None),
-            IngestResult::Quarantined(reason) => ("quarantined", Some(reason.code())),
-        };
-        tx.execute(
-            "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason) VALUES(?,?,?,?,?,?)",
-            params![
-                cursor,
-                envelope.map(|e| e.envelope_id.to_string()),
-                envelope.map(|e| e.key_epoch),
-                wire,
-                status,
-                reason
-            ],
+        let result = journal_record(
+            &tx,
+            &ctx,
+            Cursor(u64::try_from(cursor).map_err(|_| Error::InvalidCursor)?),
+            wire,
+            envelope,
         )?;
         advance_frontier(&tx, 0)?;
+        advance_processed_frontier(&tx)?;
         tx.commit()?;
         Ok(result)
     }
+}
+
+fn journal_record(
+    tx: &Connection,
+    ctx: &Ctx,
+    cursor: Cursor,
+    wire: Vec<u8>,
+    envelope: Option<&Envelope>,
+) -> Result<IngestResult, Error> {
+    let cursor = to_i64(cursor.0)?;
+    let existing: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT wire FROM journal WHERE cursor=?",
+            params![cursor],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        return if existing == wire {
+            Ok(IngestResult::Duplicate)
+        } else {
+            Err(Error::Conflict)
+        };
+    }
+    // Coordinate with the active snapshot generation at this cursor.
+    if let Some(generation) = active_generation(&tx)? {
+        let staged: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT wire FROM snapshot_records WHERE generation=? AND cursor=?",
+                params![generation.number, cursor],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match (staged, generation.published) {
+            // Published records are committed history awaiting drain.
+            (Some(staged), true) => {
+                return if staged == wire {
+                    Ok(IngestResult::Duplicate)
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+            // Live data wins over unpublished staging; that staging can no longer publish.
+            (Some(staged), false) if staged != wire => {
+                tx.execute(
+                    "UPDATE snapshot_generations SET state='failed' WHERE generation=?",
+                    params![generation.number],
+                )?;
+            }
+            _ => {}
+        }
+    }
+    let result = classify(&tx, &ctx, cursor, &wire, envelope)?;
+    let (status, reason) = match result {
+        IngestResult::Journaled => ("pending", None),
+        IngestResult::Duplicate => ("duplicate", None),
+        IngestResult::Quarantined(reason) => ("quarantined", Some(reason.code())),
+    };
+    tx.execute(
+        "INSERT INTO journal(cursor,envelope_id,key_epoch,wire,status,reason) VALUES(?,?,?,?,?,?)",
+        params![
+            cursor,
+            envelope.map(|e| e.envelope_id.to_string()),
+            envelope.map(|e| e.key_epoch),
+            wire,
+            status,
+            reason
+        ],
+    )?;
+    Ok(result)
 }
 
 pub(crate) fn media_metadata_for(
@@ -4033,6 +4220,118 @@ fn advance_frontier(conn: &Connection, floor: u64) -> Result<u64, Error> {
         set_meta(conn, "receive_cursor", &frontier.to_string())?;
     }
     Ok(frontier)
+}
+
+const PROCESSED_CURSOR_META: &str = "processed_cursor";
+const PROCESSED_SNAPSHOT_HIGH_WATER_META: &str = "processed_snapshot_high_water";
+
+/// Advances the persisted processed frontier using primary-key lookups only. Snapshot coverage
+/// lets compacted holes become processed only after the entire published snapshot has drained.
+fn advance_processed_frontier(conn: &Connection) -> Result<u64, Error> {
+    let received = receive_cursor(conn)?;
+    let mut frontier = processed_cursor(conn, received)?;
+    let snapshot_high_water = processed_snapshot_high_water(conn)?;
+    while frontier < received {
+        let next = frontier.checked_add(1).ok_or(Error::Database)?;
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM journal WHERE cursor=?",
+                params![to_i64(next)?],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match status.as_deref() {
+            Some("pending") => break,
+            Some(_) => frontier = next,
+            None if next <= snapshot_high_water => {
+                let covered_through = received.min(snapshot_high_water);
+                let pending: Option<i64> = conn.query_row(
+                    "SELECT MIN(cursor) FROM journal WHERE status='pending' AND cursor>=? AND cursor<=?",
+                    params![to_i64(next)?, to_i64(covered_through)?],
+                    |row| row.get(0),
+                )?;
+                frontier = match pending {
+                    Some(cursor) => u64::try_from(cursor - 1).map_err(|_| Error::Database)?,
+                    None => covered_through,
+                };
+            }
+            None => break,
+        }
+    }
+    set_meta(conn, PROCESSED_CURSOR_META, &frontier.to_string())?;
+    Ok(frontier)
+}
+
+/// Reads the persisted frontier. Databases created before this progress query use one bounded
+/// indexed bootstrap; subsequent calls only read metadata, never scan the journal.
+fn processed_cursor(conn: &Connection, received: u64) -> Result<u64, Error> {
+    if let Some(cursor) = get_meta(conn, PROCESSED_CURSOR_META)? {
+        return cursor.parse().map_err(|_| Error::Database);
+    }
+    let snapshot_draining = exists(
+        conn,
+        "SELECT 1 FROM snapshot_generations WHERE state='published' LIMIT 1",
+    )?;
+    if snapshot_draining {
+        return Ok(0);
+    }
+    let pending: Option<i64> = conn.query_row(
+        "SELECT MIN(cursor) FROM journal WHERE status='pending' AND cursor<=?",
+        params![to_i64(received)?],
+        |row| row.get(0),
+    )?;
+    match pending {
+        Some(cursor) => u64::try_from(cursor - 1).map_err(|_| Error::Database),
+        None => Ok(received),
+    }
+}
+
+fn processed_snapshot_high_water(conn: &Connection) -> Result<u64, Error> {
+    get_meta(conn, PROCESSED_SNAPSHOT_HIGH_WATER_META)?
+        .map(|value| value.parse().map_err(|_| Error::Database))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn mark_processed_snapshot_coverage(conn: &Connection, high_water: u64) -> Result<(), Error> {
+    let current = processed_snapshot_high_water(conn)?;
+    if high_water > current {
+        set_meta(
+            conn,
+            PROCESSED_SNAPSHOT_HIGH_WATER_META,
+            &high_water.to_string(),
+        )?;
+    }
+    Ok(())
+}
+
+fn waiting_for_keys(
+    conn: &Connection,
+    keys: &BTreeMap<u32, EpochKeys>,
+    received: u64,
+) -> Result<u64, Error> {
+    let received = to_i64(received)?;
+    let waiting: i64 = if keys.is_empty() {
+        conn.query_row(
+            "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?",
+            params![received],
+            |row| row.get(0),
+        )?
+    } else {
+        let epochs = keys
+            .keys()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM journal WHERE status='pending' AND cursor<=?1 AND (key_epoch IS NULL OR key_epoch NOT IN ({epochs}))"
+            ),
+            params![received],
+            |row| row.get(0),
+        )?
+    };
+    u64::try_from(waiting).map_err(|_| Error::Database)
 }
 
 macro_rules! message_select {
@@ -4254,6 +4553,10 @@ fn drain_snapshot(
     )?;
     match next {
         None => {
+            mark_processed_snapshot_coverage(
+                conn,
+                u64::try_from(generation.high_water).map_err(|_| Error::Database)?,
+            )?;
             conn.execute(
                 "DELETE FROM snapshot_generations WHERE generation=?",
                 params![generation.number],
@@ -7887,6 +8190,7 @@ fn to_i64(value: u64) -> Result<i64, Error> {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use peppy_crypto::create_vault_check_header;
     use peppy_crypto::enrollment::EnrollmentContext;
     use rusqlite::StatementStatus;
     use serde_json::json;
@@ -11484,6 +11788,106 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn borrowed_verified_handoff_import_can_retry_after_identity_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let fixture = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        let wrong = handoff_test_client(&directory, "wrong-retry.db", vault_id, DeviceId::new());
+        assert!(
+            wrong
+                .import_verified_handoff_retryable(&fixture.handoff)
+                .is_err()
+        );
+
+        let correct = handoff_test_client(&directory, "correct-retry.db", vault_id, device_id);
+        correct
+            .import_verified_handoff_retryable(&fixture.handoff)
+            .unwrap();
+        assert_eq!(correct.key_status().unwrap().active_epoch, Some(4));
+    }
+
+    #[test]
+    fn verified_handoff_local_identity_seal_binds_header_and_is_one_shot() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let fixture = sealed_handoff_fixture(vault_id.0, device_id.0, 4);
+        let client = handoff_test_client(&directory, "local-wrap.db", vault_id, device_id);
+        client.import_verified_handoff(fixture.handoff).unwrap();
+
+        let attacker_root = derive_root_key("attacker phrase", &fixture.profile).unwrap();
+        let attacker_header =
+            create_vault_check_header(&attacker_root, fixture.profile.clone()).unwrap();
+        let aad = b"peppy-browser-local-identity-v1\0{}";
+        let plaintext = [0_u8; 128];
+        assert!(matches!(
+            client.seal_local_identity(
+                &fixture.profile,
+                &fixture.header,
+                b"other-purpose",
+                &plaintext
+            ),
+            Err(Error::InvalidRequest("browser local identity"))
+        ));
+        assert!(matches!(
+            client.seal_local_identity(&fixture.profile, &fixture.header, aad, &[0; 127]),
+            Err(Error::InvalidRequest("browser local identity"))
+        ));
+        assert!(matches!(
+            client.seal_local_identity(&fixture.profile, &attacker_header, aad, &plaintext),
+            Err(Error::InvalidProfile)
+        ));
+        assert!(
+            client
+                .seal_local_identity(&fixture.profile, &fixture.header, aad, &plaintext)
+                .is_ok()
+        );
+        assert!(matches!(
+            client.seal_local_identity(&fixture.profile, &fixture.header, aad, &plaintext),
+            Err(Error::KeysUnavailable)
+        ));
+    }
+
+    #[test]
+    fn passphrase_cache_and_epoch_cutover_do_not_leave_local_identity_seal_capability() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = VaultId::new();
+        let device_id = DeviceId::new();
+        let client = handoff_test_client(&directory, "no-local-wrap.db", vault_id, device_id);
+        let profile = KeyProfile::new(vault_id.0, 1).unwrap();
+        let root = derive_root_key(HANDOFF_PASSPHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        client
+            .unlock(&profile, &header, HANDOFF_PASSPHRASE)
+            .unwrap();
+        let cache = client.export_native_key_cache(1).unwrap();
+        client.import_native_key_cache(&cache).unwrap();
+        assert!(matches!(
+            client.seal_local_identity(
+                &profile,
+                &header,
+                b"peppy-browser-local-identity-v1\0{}",
+                &[0; 128]
+            ),
+            Err(Error::KeysUnavailable)
+        ));
+
+        let next = sealed_handoff_fixture(vault_id.0, device_id.0, 2);
+        client.import_verified_handoff(next.handoff).unwrap();
+        client.activate_epoch(2).unwrap();
+        assert!(matches!(
+            client.seal_local_identity(
+                &next.profile,
+                &next.header,
+                b"peppy-browser-local-identity-v1\0{}",
+                &[0; 128]
+            ),
+            Err(Error::KeysUnavailable)
+        ));
     }
 
     #[test]

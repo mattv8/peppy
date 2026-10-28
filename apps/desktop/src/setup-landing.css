@@ -163,7 +163,8 @@
   justify-self: start;
 }
 
-#enrollment-qr-hero {
+#enrollment-qr-hero,
+#computer-qr-hero {
   align-items: center;
   display: grid;
   gap: 8px;
@@ -171,14 +172,18 @@
   margin-block: 8px;
 }
 
-#enrollment-qr-image {
+#enrollment-qr-image,
+#computer-qr-image {
   width: clamp(160px, 38vh, 256px);
   max-width: 100%;
   height: auto;
   image-rendering: auto;
 }
 
-#enrollment-countdown {
+#enrollment-countdown,
+#computer-countdown {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 3px 8px;
   border: 1px solid var(--peppy-border);
   border-radius: var(--peppy-radius-pill, var(--peppy-control-radius));
@@ -192,10 +197,40 @@
   line-height: 1.5;
 }
 
+.setup-notice {
+  padding: 10px 12px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius));
+  background: var(--peppy-surface-widget);
+  color: var(--peppy-text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+#computer-verification {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
 #enrollment-verification-code {
   font-family: monospace;
   font-size: 24px;
   letter-spacing: .12em;
+}
+
+#computer-verification-code {
+  justify-self: start;
+  padding: 8px 12px;
+  border: 1px solid var(--peppy-border-strong);
+  border-radius: var(--peppy-radius-md, var(--peppy-control-radius));
+  background: var(--peppy-surface-widget);
+  font-family: var(--peppy-font-mono, monospace);
+  font-size: clamp(24px, 7vw, 32px);
+  font-weight: 700;
+  letter-spacing: .14em;
+  line-height: 1.2;
 }
 
 #self-hosted-url-input {

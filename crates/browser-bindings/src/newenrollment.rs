@@ -113,6 +113,16 @@ struct ConfirmInvitation {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ComputerStatus {
+    status_json: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FinishComputer {
+    complete_json: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostedOwnerPrepare {
     account_id: String,
     passphrase: SecretString,
@@ -157,6 +167,7 @@ impl BrowserCore {
                 let origin = canonical_origin(&input.origin)?;
                 if self.identity_session.is_some()
                     || self.client.is_some()
+                    || self.prepared_enrollment_identity.is_some()
                     || self
                         .trusted_origin
                         .as_deref()
@@ -524,6 +535,109 @@ impl BrowserCore {
                     .map_err(|_| invalid())?;
                 Ok(json!({"request": request}))
             }
+            "_worker_enrollment_begin_computer_claimant" => {
+                empty_new_enrollment(raw)?;
+                let qr = self
+                    .enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .begin_computer_claimant()
+                    .map_err(|_| invalid())?;
+                Ok(json!({"qr": qr}))
+            }
+            "_worker_enrollment_computer_status_request" => {
+                empty_new_enrollment(raw)?;
+                let request = self
+                    .enrollment
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .computer_status_request()
+                    .map_err(|_| invalid())?;
+                Ok(json!({"request": request}))
+            }
+            "_worker_enrollment_computer_claimant_view" => {
+                let input: ComputerStatus =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let view = self
+                    .enrollment
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .computer_claimant_view(input.status_json)
+                    .map_err(|_| invalid())?;
+                Ok(json!({
+                    "invitationId": view.invitation_id,
+                    "awaitingOwner": view.awaiting_owner,
+                    "state": view.state,
+                    "expiresInSeconds": view.expires_in_seconds,
+                    "sas": view.sas,
+                }))
+            }
+            "_worker_enrollment_computer_awaiting_owner_view" => {
+                empty_new_enrollment(raw)?;
+                let view = self
+                    .enrollment
+                    .as_ref()
+                    .ok_or_else(unavailable)?
+                    .computer_awaiting_owner_view()
+                    .map_err(|_| invalid())?;
+                Ok(json!({
+                    "invitationId": view.invitation_id,
+                    "awaitingOwner": view.awaiting_owner,
+                    "state": view.state,
+                    "expiresInSeconds": view.expires_in_seconds,
+                }))
+            }
+            "_worker_enrollment_confirm_computer" => {
+                let input: ComputerStatus =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                let request = self
+                    .enrollment
+                    .as_mut()
+                    .ok_or_else(unavailable)?
+                    .confirm_computer_enrollment(input.status_json)
+                    .map_err(|_| invalid())?;
+                Ok(json!({"request": request}))
+            }
+            "_worker_enrollment_finish_computer" => {
+                let input: FinishComputer =
+                    serde_json::from_str(raw.get()).map_err(|_| invalid())?;
+                if self.prepared_enrollment_identity.is_none() {
+                    let identity = self
+                        .enrollment
+                        .as_mut()
+                        .ok_or_else(unavailable)?
+                        .finish_computer_admission(input.complete_json)
+                        .map_err(|_| invalid())?;
+                    self.prepared_enrollment_identity = Some(identity);
+                }
+                let mut identity = self
+                    .prepared_enrollment_identity
+                    .take()
+                    .ok_or_else(unavailable)?;
+                let result = self.install_prepared_verified_enrollment_identity(&mut identity);
+                if result.is_ok() {
+                    // The worker must now commit its encrypted checkpoint. A checkpoint failure
+                    // poisons that worker; it must not re-enter this consumed in-memory session.
+                    self.enrollment = None;
+                } else {
+                    self.prepared_enrollment_identity = Some(identity);
+                }
+                result
+            }
+            "_worker_enrollment_cancel_computer_claimant" => {
+                empty_new_enrollment(raw)?;
+                if self.client.is_some() || self.identity_session.is_some() {
+                    return Err(invalid());
+                }
+                if self.prepared_enrollment_identity.take().is_none() {
+                    self.enrollment
+                        .as_mut()
+                        .ok_or_else(unavailable)?
+                        .cancel_computer_flow()
+                        .map_err(|_| invalid())?;
+                }
+                Ok(json!({}))
+            }
             _ => Err(unknown_command()),
         }
     }
@@ -540,9 +654,13 @@ fn empty_new_enrollment(raw: &RawValue) -> Result<(), Failure> {
 mod tests {
     use super::*;
     use peppy_crypto::{create_vault_check_header, derive_root_key};
+    use peppy_hosted_api::computer_enrollment::{
+        ApproveComputerEnrollmentRequest, ComputerEnrollmentCreated, ComputerEnrollmentStatus,
+    };
     use peppy_hosted_api::enrollment::{
-        ClaimInvitationRequest, EnrollmentRole, EnrollmentState, EnrollmentTranscript,
-        InvitationClaim, InvitationPublicClaim, InvitationStatus, PhonePairingQr,
+        AdmissionComplete, ClaimInvitationRequest, EnrollmentRole, EnrollmentState,
+        EnrollmentTranscript, InvitationClaim, InvitationPublicClaim, InvitationStatus,
+        PhonePairingQr, VaultMaterial,
     };
 
     const ORIGIN: &str = "https://peppy.test/";
@@ -577,6 +695,200 @@ mod tests {
             .unwrap(),
         );
         core
+    }
+
+    fn browser_computer_completion_fixture() -> (BrowserCore, String, PathBuf) {
+        let vault_id = Uuid::new_v4();
+        let owner_device_id = Uuid::new_v4();
+        let profile = KeyProfile::new(vault_id, 3).unwrap();
+        let root_key = derive_root_key("correct horse battery staple", &profile).unwrap();
+        let header = create_vault_check_header(&root_key, profile.clone()).unwrap();
+
+        let mut claimant = peppy_hosted_client::newenrollment::EnrollmentClient::new(
+            ORIGIN.into(),
+            ClientKind::Browser,
+            "Browser computer".into(),
+        )
+        .unwrap();
+        let qr = claimant.begin_computer_claimant().unwrap();
+        let mut owner = peppy_hosted_client::newenrollment::EnrollmentClient::for_existing_owner(
+            ORIGIN.into(),
+            ClientKind::Desktop,
+            "Owner computer".into(),
+            profile.clone(),
+            header.clone(),
+        )
+        .unwrap();
+        owner
+            .configure_computer_owner_device(owner_device_id)
+            .unwrap();
+        owner.scan_computer_qr(qr).unwrap();
+        owner
+            .accept_computer_created(
+                serde_json::to_string(&ComputerEnrollmentCreated {
+                    server_nonce: URL_SAFE_NO_PAD.encode([7; 32]),
+                    expires_in_seconds: 60,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        let owner_directory =
+            std::env::temp_dir().join(format!("peppy-browser-owner-computer-{}", Uuid::new_v4()));
+        std::fs::create_dir(&owner_directory).unwrap();
+        let owner_client = Client::open(
+            ClientConfig {
+                database_path: owner_directory.join("owner.db"),
+                vault_id: VaultId(vault_id),
+                device_id: DeviceId(owner_device_id),
+            },
+            DatabaseKey::new(&[31; 32]).unwrap(),
+        )
+        .unwrap();
+        owner_client
+            .unlock(&profile, &header, "correct horse battery staple")
+            .unwrap();
+        let approval: ApproveComputerEnrollmentRequest = serde_json::from_str(
+            &owner
+                .approve_computer_enrollment_with_client(true, &owner_client)
+                .unwrap(),
+        )
+        .unwrap();
+        let status = ComputerEnrollmentStatus {
+            state: EnrollmentState::Approved,
+            expires_in_seconds: 60,
+            transcript: Some(approval.transcript),
+            encrypted_key_package: Some(approval.encrypted_key_package),
+            transfer_nonce: Some(approval.transfer_nonce),
+            owner_proof: Some(approval.owner_proof),
+        };
+        let status_json = serde_json::to_string(&status).unwrap();
+        claimant.confirm_computer_enrollment(status_json).unwrap();
+        let metadata = claimant.computer_awaiting_owner_view().err();
+        assert!(metadata.is_some(), "confirmed flow is pending admission");
+
+        let claimant_device_id = status
+            .transcript
+            .as_ref()
+            .unwrap()
+            .recipient
+            .device
+            .device_id;
+        let complete = AdmissionComplete {
+            vault_id,
+            device_id: claimant_device_id,
+            role: EnrollmentRole::Device,
+            material: VaultMaterial {
+                profile: serde_json::to_value(&profile).unwrap(),
+                check_header: URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap()),
+                fingerprint: profile.fingerprint().unwrap(),
+                key_epoch: profile.key_epoch,
+                admission_public_key: URL_SAFE_NO_PAD.encode([0; 32]),
+            },
+        };
+
+        let browser_root =
+            std::env::temp_dir().join(format!("peppy-browser-computer-retry-{}", Uuid::new_v4()));
+        std::fs::create_dir(&browser_root).unwrap();
+        let mut core = BrowserCore::new(browser_root.clone());
+        value(&dispatch(
+            &mut core,
+            "_worker_initialize",
+            &json!({"origin": ORIGIN}).to_string(),
+        ));
+        core.enrollment = Some(claimant);
+        (
+            core,
+            serde_json::to_string(&complete).unwrap(),
+            browser_root,
+        )
+    }
+
+    #[test]
+    fn computer_finish_retries_same_completion_after_real_open_failure() {
+        let (mut core, complete_json, root) = browser_computer_completion_fixture();
+        let existing_directory = root.join("client.db");
+        std::fs::create_dir(&existing_directory).unwrap();
+        let marker = existing_directory.join("user-data");
+        std::fs::write(&marker, b"preserve me").unwrap();
+        let args = json!({"completeJson": complete_json}).to_string();
+
+        let first = dispatch(&mut core, "_worker_enrollment_finish_computer", &args);
+        assert_eq!(first["ok"], false);
+        assert_eq!(first["error"]["code"], "identity-exists");
+        assert!(core.prepared_enrollment_identity.is_some());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"preserve me");
+
+        std::fs::remove_file(marker).unwrap();
+        std::fs::remove_dir(existing_directory).unwrap();
+        let second = dispatch(&mut core, "_worker_enrollment_finish_computer", &args);
+        assert_eq!(second["ok"], true, "{second}");
+        assert!(core.prepared_enrollment_identity.is_none());
+        assert!(core.identity_session.is_some());
+        assert_eq!(
+            dispatch(&mut core, "_worker_checkpoint_identity", "{}")["ok"],
+            true
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn computer_finish_never_removes_existing_database_symlink_or_target() {
+        use std::os::unix::fs::symlink;
+
+        let (mut core, complete_json, root) = browser_computer_completion_fixture();
+        let external = root.join("external-user.db");
+        std::fs::write(&external, b"existing user database").unwrap();
+        let database_link = root.join("client.db");
+        symlink(&external, &database_link).unwrap();
+        let args = json!({"completeJson": complete_json}).to_string();
+
+        let first = dispatch(&mut core, "_worker_enrollment_finish_computer", &args);
+        assert_eq!(first["ok"], false);
+        assert!(
+            std::fs::symlink_metadata(&database_link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&external).unwrap(), b"existing user database");
+
+        std::fs::remove_file(database_link).unwrap();
+        let second = dispatch(&mut core, "_worker_enrollment_finish_computer", &args);
+        assert_eq!(second["ok"], true, "{second}");
+        assert_eq!(std::fs::read(&external).unwrap(), b"existing user database");
+    }
+
+    #[test]
+    fn computer_finish_cleans_only_database_files_created_by_partial_open() {
+        let (mut core, complete_json, root) = browser_computer_completion_fixture();
+        let media_blocker = root.join("client.db.media");
+        std::fs::write(&media_blocker, b"external blocker").unwrap();
+        let args = json!({"completeJson": complete_json}).to_string();
+
+        let first = dispatch(&mut core, "_worker_enrollment_finish_computer", &args);
+        assert_eq!(first["ok"], false);
+        assert!(core.prepared_enrollment_identity.is_some());
+        assert!(
+            !root.join("client.db").exists(),
+            "a database created by the failed open must be removed for retry"
+        );
+        assert_eq!(std::fs::read(&media_blocker).unwrap(), b"external blocker");
+
+        std::fs::remove_file(media_blocker).unwrap();
+        let second = dispatch(&mut core, "_worker_enrollment_finish_computer", &args);
+        assert_eq!(second["ok"], true, "{second}");
+    }
+
+    #[test]
+    fn computer_finish_accepts_no_remote_passphrase() {
+        assert!(serde_json::from_str::<FinishComputer>(r#"{"completeJson":"{}"}"#).is_ok());
+        assert!(
+            serde_json::from_str::<FinishComputer>(
+                r#"{"completeJson":"{}","passphrase":"remote secret"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

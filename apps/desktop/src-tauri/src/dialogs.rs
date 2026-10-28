@@ -41,11 +41,11 @@ fn admit(app: &AppHandle) -> BridgeResult<crate::update_safety::OperationGuard> 
         .map_err(|message| BridgeError::new("update-busy", message))
 }
 
-const VAULT_SECRET_TITLE: &str = "Vault shared secret";
+const VAULT_SECRET_TITLE: &str = "Vault key phrase";
 const VAULT_SECRET_INSTRUCTIONS: &str =
-    "Use this secret to connect a phone or another device to your vault. Keep it private.";
+    "Use this Vault key phrase to connect another device to your vault. Generated phrases usually have six words. This is not your account or admin password. Keep it private.";
 const VAULT_SECRET_DONE: &str = "Done";
-const VAULT_SECRET_COPY: &str = "Copy secret";
+const VAULT_SECRET_COPY: &str = "Copy Vault key phrase";
 // Escape and the window close box reach this slot on Windows and Linux (see
 // `vault_secret_buttons`), so its label must not be the copy action.
 const VAULT_SECRET_CLOSE: &str = "Close";
@@ -158,7 +158,7 @@ fn handle_secret_dialog_action(
 }
 
 fn secret_message(instructions: &str, secret: &str, feedback: Option<&str>) -> Zeroizing<String> {
-    let mut message = Zeroizing::new(format!("{instructions}\n\nVault shared secret:\n{secret}"));
+    let mut message = Zeroizing::new(format!("{instructions}\n\nVault key phrase:\n{secret}"));
     if let Some(feedback) = feedback {
         message.push_str("\n\n");
         message.push_str(feedback);
@@ -446,25 +446,25 @@ mod windows_dialog {
         let (message, caption) = match purpose {
             PassphrasePurpose::Unlock => (
                 w!(
-                    "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
+                    "Enter your Vault key phrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
                 ),
                 w!("Unlock Peppy sync"),
             ),
             PassphrasePurpose::ResumeOwnerSecret => (
                 w!(
-                    "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server."
+                    "Enter the Vault key phrase you saved during your earlier setup attempt. This is not your account or admin password. It is verified only on this device and is never sent to the server."
                 ),
                 w!("Resume Peppy server setup"),
             ),
             PassphrasePurpose::RecoverVaultSecret => (
                 w!(
-                    "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server."
+                    "Enter the Vault key phrase you saved when this vault was created. This is not your account or admin password. It is verified only on this device and is never sent to the server."
                 ),
                 w!("Complete vault setup"),
             ),
             PassphrasePurpose::ResumeHostedPassphrase => (
                 w!(
-                    "Enter the encryption passphrase you chose when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy."
+                    "Enter the Vault key phrase you used when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy."
                 ),
                 w!("Resume Peppy Hosted setup"),
             ),
@@ -594,13 +594,13 @@ mod linux {
     };
 
     const UNLOCK_TITLE: &str = "Unlock Peppy sync";
-    const UNLOCK_MESSAGE: &str = "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.";
+    const UNLOCK_MESSAGE: &str = "Enter your Vault key phrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.";
     const RESUME_OWNER_SECRET_TITLE: &str = "Resume Peppy server setup";
-    const RESUME_OWNER_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.";
+    const RESUME_OWNER_SECRET_MESSAGE: &str = "Enter the Vault key phrase you saved during your earlier setup attempt. This is not your account or admin password. It is verified only on this device and is never sent to the server.";
     const RECOVER_VAULT_SECRET_TITLE: &str = "Complete vault setup";
-    const RECOVER_VAULT_SECRET_MESSAGE: &str = "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.";
+    const RECOVER_VAULT_SECRET_MESSAGE: &str = "Enter the Vault key phrase you saved when this vault was created. This is not your account or admin password. It is verified only on this device and is never sent to the server.";
     const RESUME_HOSTED_PASSPHRASE_TITLE: &str = "Resume Peppy Hosted setup";
-    const RESUME_HOSTED_PASSPHRASE_MESSAGE: &str = "Enter the encryption passphrase you chose when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy.";
+    const RESUME_HOSTED_PASSPHRASE_MESSAGE: &str = "Enter the Vault key phrase you used when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy.";
     const APP_LOCK_MESSAGE: &str = "Enter the password required to open Peppy on this computer.";
 
     pub fn secure_passphrase(
@@ -850,7 +850,7 @@ mod tests {
         assert_eq!(unlock.0, "Unlock Peppy sync");
         assert_eq!(
             unlock.1,
-            "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
+            "Enter your Vault key phrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup."
         );
         assert_eq!(unlock.2, "Unlock");
         assert_ne!(unlock, hosted);
@@ -916,22 +916,22 @@ mod macos {
         match purpose {
             super::PassphrasePurpose::Unlock => (
                 "Unlock Peppy sync",
-                "Enter the vault passphrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.",
+                "Enter your Vault key phrase. It is verified on this device and never sent to the server. If successful, Peppy may save it to this device's protected secure storage for phone setup.",
                 "Unlock",
             ),
             super::PassphrasePurpose::ResumeOwnerSecret => (
                 "Resume Peppy server setup",
-                "Enter the vault shared secret you saved during your earlier setup attempt. This is not your admin password. It is verified only on this device and is never sent to the server.",
+                "Enter the Vault key phrase you saved during your earlier setup attempt. This is not your account or admin password. It is verified only on this device and is never sent to the server.",
                 "Continue",
             ),
             super::PassphrasePurpose::RecoverVaultSecret => (
                 "Complete vault setup",
-                "Enter the vault shared secret you saved when this vault was created. This is not your admin password. It is verified only on this device and is never sent to the server.",
+                "Enter the Vault key phrase you saved when this vault was created. This is not your account or admin password. It is verified only on this device and is never sent to the server.",
                 "Continue",
             ),
             super::PassphrasePurpose::ResumeHostedPassphrase => (
                 "Resume Peppy Hosted setup",
-                "Enter the encryption passphrase you chose when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy.",
+                "Enter the Vault key phrase you used when you started setting up Peppy Hosted on this computer. It is verified only on this device and is never sent to Peppy.",
                 "Continue",
             ),
             super::PassphrasePurpose::SetupToken => (

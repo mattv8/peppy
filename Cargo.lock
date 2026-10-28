@@ -1961,6 +1961,7 @@ dependencies = [
 name = "peppy-crypto"
 version = "0.1.0"
 dependencies = [
+ "hkdf",
  "hmac",
  "libc",
  "libsodium-rs",
@@ -2067,12 +2068,14 @@ dependencies = [
 name = "peppy-mobile-bindings"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "peppy-client-core",
  "peppy-crypto",
  "peppy-hosted-api",
  "peppy-hosted-client",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.17",
  "uniffi",
  "uuid",
@@ -2136,6 +2139,7 @@ dependencies = [
  "peppy-crypto",
  "peppy-domain",
  "peppy-hosted-api",
+ "peppy-hosted-client",
  "peppy-protocol",
  "reqwest",
  "serde",

@@ -3910,6 +3910,7 @@ dependencies = [
 name = "peppy-crypto"
 version = "0.1.0"
 dependencies = [
+ "hkdf",
  "hmac",
  "libc",
  "libsodium-rs",

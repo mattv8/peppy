@@ -120,13 +120,19 @@ recipient-rail boundaries, pane resizing, and saved layouts when restyling.
 Stable stage and QR hooks live in [SetupLanding](../apps/desktop/src/SetupLanding.tsx).
 Protocol rules are in [domain guidance](AGENTS.md).
 
-- One `connect_phone` QR, shown on first setup or from **Add phone** while the
-  owner has no phone. Keep it in onboarding or Add phone, never Settings. It has
-  no Save action and is not a credential or approval.
-- Rotate only near or after expiry, or when the requested method changes. Never
-  rotate while verifying a claimed phone.
-- **Enter shared secret on phone** switches a waiting invitation to the
-  shared-secret method before revealing the secret. **Set up phone later**
+- Two enrollment QR purposes, each shown by one side and never in Settings.
+  **`connect_phone`** is shown by the existing owner on first setup or from
+  **Add phone** while the owner has no phone; the new phone scans it.
+  **`connect_computer`** is shown by the unconnected desktop or browser in its
+  own setup; an existing owner phone scans it, and the owner approves there.
+  Neither QR has a Save action or is a credential or approval. The
+  `connect_computer` payload necessarily includes its invitation secret, so do
+  not describe that secret as absent from the renderer.
+- For `connect_phone`, rotate only near or after expiry, or when the requested
+  method changes. Never rotate while verifying a claimed phone.
+- **Enter Vault key phrase on phone** switches a waiting `connect_phone`
+  invitation to the shared-secret method before revealing the Vault key phrase.
+  It does not apply to `connect_computer`. **Set up phone later**
   cancels only the invitation and is remembered per origin.
 - After claim, show the SAS and require the owner's explicit checkbox before
   approval. After approval, never offer **Start again** or a replacement, even if
@@ -136,16 +142,19 @@ Protocol rules are in [domain guidance](AGENTS.md).
 Secret handling:
 
 - **Native desktop:** the setup code is requested only for token-protected first
-  claim, and the admin password comes from a native secure prompt. The vault
-  shared secret stays native and is shown only in a native dialog (**Copy
-  secret**). Phone approval uses the active Rust client's verified handoff
+  claim, and the admin password comes from a native secure prompt. The Vault
+  key phrase stays native and is shown only in a native dialog (**Copy Vault
+  key phrase**). Phone approval uses the active Rust client's verified handoff
   capability without a secret prompt; recovery may use the protected binding
-  secret when that capability is unavailable.
-- **Browser:** the generated secret is shown once and needs a save
+  secret when that capability is unavailable. Desktop computer enrollment, as
+  the recipient, must not prompt for the Vault key phrase during activation.
+- **Browser:** the generated Vault key phrase is shown once and needs a save
   acknowledgement. DOM prompts are reachable by same-origin JavaScript and must
   not be described as native secure. Keep values out of shared React snapshots.
   Clear secret fields after use.
   Phone approval invokes worker-private Rust capability, not a DOM secret prompt.
+  Browser computer enrollment activates from the verified handoff without a
+  Vault key phrase prompt; browser restart still asks for the Vault key phrase.
 - App-lock credentials are a separate native gate. See
   [native enrollment](../apps/desktop/src-tauri/src/enrollment.rs),
   [app lock](../apps/desktop/src-tauri/src/app_lock.rs), and
@@ -153,7 +162,7 @@ Secret handling:
 
 Community first setup shows the server-advertised mode. Open claim shows no
 setup-code input; token-protected claim shows it, citing `PEPPY_SETUP_TOKEN`.
-Keep the setup code, administrator password, and vault shared secret distinct.
+Keep the setup code, administrator password, and Vault key phrase distinct.
 Show no recovery or reset control. Web-only **Manage server** shows device status
 and read-only storage, quota, and retention, with no pairing QR or database reset.
 

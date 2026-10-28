@@ -39,6 +39,8 @@ struct DeviceView: View {
     @State private var showingPhoneEnrollment = false
     @State private var showingOwnerPhoneApproval = false
     @State private var ownerPhoneApprovalHost: OwnerPhoneApprovalHost?
+    @State private var showingOwnerComputerApproval = false
+    @State private var ownerComputerApprovalHost: OwnerComputerApprovalHost?
     @State private var showingHostedEnrollment = false
     @State private var enrollmentLoaded = false
     @State private var hostedAccountClient: HostedAccountClient?
@@ -91,6 +93,11 @@ struct DeviceView: View {
                     isPresented: $showingOwnerPhoneApproval,
                     revealSecret: { await model.revealOwnerVaultSecret() }
                 )
+            }
+        }
+        .sheet(isPresented: $showingOwnerComputerApproval) {
+            if let ownerComputerApprovalHost {
+                OwnerComputerApprovalView(host: ownerComputerApprovalHost, isPresented: $showingOwnerComputerApproval)
             }
         }
     }
@@ -333,10 +340,43 @@ struct DeviceView: View {
                             Text("peppy.owner_phone_add_cta", tableName: "Peppy").bold().frame(minHeight: 44)
                         }
                         .accessibilityIdentifier("add-phone-button")
+                        Button {
+                            Task {
+                                ownerComputerApprovalHost = await model.ownerComputerApprovalHost()
+                                showingOwnerComputerApproval = ownerComputerApprovalHost != nil
+                            }
+                        } label: {
+                            Text("peppy.owner_computer_add_cta", tableName: "Peppy").bold().frame(minHeight: 44)
+                        }
+                        .accessibilityIdentifier("connect-computer-button")
                     } header: {
                         Text("peppy.owner_phone_section_title", tableName: "Peppy")
                     }
                     .accessibilityIdentifier("owner-phone-section")
+                } else if model.status.identity != nil {
+                    Section {
+                        Label {
+                            Text("peppy.owner_computer_unavailable_label", tableName: "Peppy")
+                        } icon: {
+                            Image(systemName: "laptopcomputer")
+                        }
+                            .foregroundStyle(colors.TextSecondary)
+                            .accessibilityIdentifier("connect-computer-unavailable-row")
+                        if model.status.role == "owner" {
+                            Text("peppy.owner_computer_unlock_required", tableName: "Peppy")
+                                .font(.footnote)
+                                .foregroundStyle(colors.TextSecondary)
+                                .accessibilityIdentifier("connect-computer-owner-help")
+                        } else {
+                            Text("peppy.owner_computer_owner_required", tableName: "Peppy")
+                                .font(.footnote)
+                                .foregroundStyle(colors.TextSecondary)
+                                .accessibilityIdentifier("connect-computer-owner-help")
+                        }
+                    } header: {
+                        Text("peppy.owner_computer_section_title", tableName: "Peppy")
+                    }
+                    .accessibilityIdentifier("owner-computer-unavailable-section")
                 }
                 NavigationLink { SettingsView(model: model) } label: { Text("peppy.settings", tableName: "Peppy") }
                     .accessibilityIdentifier("account-settings-row")

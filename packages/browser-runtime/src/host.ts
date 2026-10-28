@@ -4,7 +4,7 @@ import { type EmscriptenFilesystem } from "./filesystem.js";
 import { acquireWorkerOwner, type OwnerLockManager, type WorkerOwner } from "./owner.js";
 import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from "./session.js";
 import { BrowserEnrollment, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
-import { BrowserScheduler } from "./scheduler.js";
+import { BrowserScheduler, type SchedulerSyncProgress } from "./scheduler.js";
 import { OriginTransport, TransportError } from "./transport.js";
 import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
@@ -65,6 +65,10 @@ export interface BrowserNetwork {
   enrollmentCreateVault(username: string, secrets: { adminPassword: string; passphrase: string }): Promise<EnrollmentView>;
   enrollmentPendingVaultRequest(): Promise<{ origin: string; requestId: string; displayName: string } | null>;
   enrollmentAddPhone(method: "transfer" | "shared_secret"): Promise<EnrollmentView>;
+  enrollmentConnectComputer(): Promise<EnrollmentView>;
+  enrollmentComputerStatus(): Promise<EnrollmentView>;
+  enrollmentConfirmComputer(): Promise<EnrollmentView>;
+  enrollmentCancelComputer(): Promise<EnrollmentView>;
   enrollmentStatus(): Promise<EnrollmentView>;
   enrollmentApprove(): Promise<EnrollmentView>;
   enrollmentCancel(options?: { waitingOnly?: boolean }): Promise<EnrollmentView | undefined>;
@@ -88,6 +92,7 @@ export interface BrowserNetwork {
   stopHistorySearch?(attemptId: string): void;
   unlockNewEpoch?(passphrase: string): Promise<void>;
   epochStatus?(): "epoch-mismatch" | "needs-unlock" | undefined;
+  syncProgress?(): SchedulerSyncProgress | undefined;
 }
 
 export interface BrowserHostDependencies {
@@ -153,6 +158,9 @@ const ENROLLMENT_MUTATIONS = new Set([
   "enrollment_set_hosted_csrf",
   "enrollment_connect_shared_secret",
   "enrollment_add_phone",
+  "enrollment_connect_computer",
+  "enrollment_confirm_computer",
+  "enrollment_cancel_computer",
   "enrollment_approve",
   "enrollment_cancel",
   "enrollment_sign_out",
@@ -292,7 +300,7 @@ type MediaLeases = {
   release(id: string): boolean;
 };
 
-export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases): Promise<RpcResponse> {
+export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
   const { id, command, args } = request;
   try {
@@ -307,7 +315,7 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
       const enriched = metadataOnly ? snapshot as Record<string, unknown> : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
-      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}) } };
+      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}), ...(syncProgress ? { syncProgress } : {}) } };
     }
     if (command === "load_history") {
       const page = await session.query("load_history", args);
@@ -747,7 +755,7 @@ export class BrowserWorkerHost {
     let response: RpcResponse;
     this.dispatchesInFlight += 1;
     try {
-      response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.portMediaLeases(port));
+      response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
     } finally {
       this.dispatchesInFlight -= 1;
     }
@@ -1000,8 +1008,12 @@ export class BrowserWorkerHost {
                 : request.command === "enrollment_vault_request_status" ? await network.enrollmentVaultRequestStatus()
                   : request.command === "enrollment_create_vault" && username && passphrase && adminPassword ? await network.enrollmentCreateVault(username, { adminPassword, passphrase })
                     : request.command === "enrollment_pending_vault_request" ? await network.enrollmentPendingVaultRequest()
-              : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
-                : request.command === "enrollment_status" ? await network.enrollmentStatus()
+               : request.command === "enrollment_add_phone" && (method === "transfer" || method === "shared_secret") ? await network.enrollmentAddPhone(method)
+                 : request.command === "enrollment_connect_computer" ? await network.enrollmentConnectComputer()
+                   : request.command === "enrollment_computer_status" ? await network.enrollmentComputerStatus()
+                     : request.command === "enrollment_confirm_computer" ? await network.enrollmentConfirmComputer()
+                       : request.command === "enrollment_cancel_computer" ? await network.enrollmentCancelComputer()
+                 : request.command === "enrollment_status" ? await network.enrollmentStatus()
                    : request.command === "enrollment_approve" ? await network.enrollmentApprove()
                      : request.command === "enrollment_cancel" ? await network.enrollmentCancel(waitingOnly === true ? { waitingOnly: true } : undefined)
         : request.command === "enrollment_sign_out" ? (await network.enrollmentSignOut(), undefined)
@@ -1164,6 +1176,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
   let polling = false;
   let pollPromise: Promise<void> | undefined;
   let pollDelay = 5_000;
+  let syncProgress: SchedulerSyncProgress | undefined;
   const changeListeners = new Set<() => void>();
   const stopNetwork = async () => {
     polling = false;
@@ -1198,6 +1211,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       retryAttachment(id) { scheduler?.retryAttachment(id); },
       async unlockNewEpoch(passphrase) { if (!scheduler) throw { code: "unavailable" }; await scheduler.unlockNewEpoch(passphrase); },
       epochStatus() { const state = scheduler?.epochStatus?.state; return state === "epoch-mismatch" || state === "needs-unlock" ? state : undefined; },
+      syncProgress() { return syncProgress; },
       stop: stopNetwork,
       subscribeChanges(listener) { changeListeners.add(listener); return () => changeListeners.delete(listener); },
       async enrollmentDiscover(origin) { return enrollment?.discover(origin) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
@@ -1209,7 +1223,11 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
        async enrollmentVaultRequestStatus() { return enrollment?.vaultRequestStatus() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentCreateVault(username, secrets) { return enrollment?.createVault(username, secrets) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentPendingVaultRequest() { return enrollment?.pendingVaultRequest() ?? null; },
-      async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentAddPhone(method) { return enrollment?.addPhone(method) ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentConnectComputer() { return enrollment?.connectComputer() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentComputerStatus() { return enrollment?.computerStatus() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentConfirmComputer() { return enrollment?.confirmComputer() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
+       async enrollmentCancelComputer() { return enrollment?.cancelComputer() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
       async enrollmentStatus() { return enrollment?.status() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentApprove() { return enrollment?.approve() ?? { mode: "community", stage: "error", errorCode: "unavailable" }; },
        async enrollmentCancel(options) { return enrollment?.cancel(options); },
@@ -1238,7 +1256,14 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       scheduler = new BrowserScheduler(
         session,
         publicTransport,
-        { media: { readCiphertext: (file, expectedBytes, signal) => session.readCiphertext(file, expectedBytes, signal), stageDownload: (bytes, signal) => session.stageDownload(bytes, signal), cleanupStagedDownload: source => session.cleanupStagedDownload(source) }, rotateEpoch: (profile, header, passphrase) => session.rotate(profile, header, passphrase) },
+        {
+          media: { readCiphertext: (file, expectedBytes, signal) => session.readCiphertext(file, expectedBytes, signal), stageDownload: (bytes, signal) => session.stageDownload(bytes, signal), cleanupStagedDownload: source => session.cleanupStagedDownload(source) },
+          rotateEpoch: (profile, header, passphrase) => session.rotate(profile, header, passphrase),
+          onProgress: progress => {
+            syncProgress = progress;
+            for (const listener of changeListeners) listener();
+          },
+        },
       );
       return session;
     },

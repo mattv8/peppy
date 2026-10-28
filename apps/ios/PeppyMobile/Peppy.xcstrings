@@ -2176,7 +2176,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unlock with passphrase"
+            "value": "Unlock with Vault key phrase"
           }
         }
       }
@@ -2566,7 +2566,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Your account already has a vault. Pair with an enrolled owner device and enter your existing encryption passphrase."
+            "value": "Your account already has a vault. Pair with an enrolled owner device and enter your existing Vault key phrase."
           }
         }
       }
@@ -2866,7 +2866,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter shared secret on phone"
+            "value": "Enter Vault key phrase on phone"
           }
         }
       }
@@ -3006,7 +3006,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter the vault shared secret you saved when this vault was created. This is not your admin password."
+            "value": "Enter the Vault key phrase you saved when this vault was created. This is not your admin password."
           }
         }
       }
@@ -3016,7 +3016,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Show shared secret"
+            "value": "Show Vault key phrase"
           }
         }
       }
@@ -3026,7 +3026,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hide shared secret"
+            "value": "Hide Vault key phrase"
           }
         }
       }
@@ -3036,7 +3036,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy keeps your vault shared secret in this phone's secure storage. Show it when you add another device."
+            "value": "Peppy keeps your Vault key phrase in this phone's secure storage. Show it when you add another device."
           }
         }
       }
@@ -3046,7 +3046,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "That shared secret does not match this vault."
+            "value": "That Vault key phrase does not match this vault."
           }
         }
       }
@@ -3056,7 +3056,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The vault shared secret saved on this phone no longer matches this vault."
+            "value": "The Vault key phrase saved on this phone no longer matches this vault."
           }
         }
       }
@@ -3066,7 +3066,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The vault shared secret is not saved on this phone."
+            "value": "The Vault key phrase is not saved on this phone."
           }
         }
       }
@@ -3076,7 +3076,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Set a screen lock on this phone to show the shared secret."
+            "value": "Set a screen lock on this phone to show the Vault key phrase."
           }
         }
       }
@@ -3117,6 +3117,296 @@
           "stringUnit": {
             "state": "translated",
             "value": "The server rejected this request. Start again."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Computer"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_add_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect computer"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect computer"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_unavailable_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect computer"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_owner_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only an unlocked owner device can approve a new computer. Connected gateway phones cannot approve; use an owner device or its Vault key phrase."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_unlock_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock this device to approve a new computer."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_scan_intro": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan the code shown on the computer you want to connect. Only an unlocked owner device can approve a new computer."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_scan_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan computer code"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_scanner_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan the computer code"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_camera_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Camera access is needed to scan a computer code. Allow it in Settings or cancel."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_open_settings_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_verify_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check that the codes match on both devices."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_codes_match": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The codes match"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_approve_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm and approve"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_approved_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approved. Finishing connection…"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_approved_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer is finishing its secure connection."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_done_cta": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_phrase_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vault key phrase"
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_phrase_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter your Vault key phrase. This is not your admin password."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_invalid_qr": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This is not a computer connection code for this server."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_codes_mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The codes must match before approval."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_secure_store": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Secure storage is unavailable. Nothing was approved."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock this device before approving a computer."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_account_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to your Peppy account to connect a computer."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_expired": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This computer connection request expired. Scan a new code."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_offline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not reach the server. Check your connection and try again."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_server_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server rejected this connection request. Scan a new code if it expired."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_enrollment": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection request could not be verified. Scan a new code and try again."
+          }
+        }
+      }
+    },
+    "peppy.owner_computer_error_generic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not connect this computer. Try again."
           }
         }
       }
@@ -3506,7 +3796,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create your encryption passphrase"
+            "value": "Create your Vault key phrase"
           }
         }
       }
@@ -3526,7 +3816,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy cannot recover this passphrase. Save it somewhere safe."
+            "value": "Peppy cannot recover this Vault key phrase. Save it somewhere safe."
           }
         }
       }
@@ -3556,7 +3846,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Generated locally on this device"
+            "value": "Generated locally on this device, usually six words. This is not your account or admin password."
           }
         }
       }
@@ -3566,7 +3856,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Peppy cannot recover my passphrase. I have saved it."
+            "value": "Peppy cannot recover my Vault key phrase. I have saved it."
           }
         }
       }
@@ -3576,7 +3866,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Encryption passphrase"
+            "value": "Vault key phrase"
           }
         }
       }
@@ -3586,7 +3876,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm your encryption passphrase"
+            "value": "Confirm your Vault key phrase"
           }
         }
       }
@@ -3596,7 +3886,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter your passphrase again to confirm you saved it."
+            "value": "Enter your Vault key phrase again to confirm you saved it."
           }
         }
       }
@@ -3606,7 +3896,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm passphrase"
+            "value": "Confirm Vault key phrase"
           }
         }
       }
@@ -3616,7 +3906,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The passphrases do not match."
+            "value": "The Vault key phrases do not match."
           }
         }
       }
@@ -3626,7 +3916,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use a longer, unpredictable passphrase or the generated suggestion."
+            "value": "Use a longer, unpredictable Vault key phrase or the generated suggestion."
           }
         }
       }
@@ -3646,7 +3936,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Show passphrase"
+            "value": "Show Vault key phrase"
           }
         }
       }
@@ -3656,7 +3946,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hide passphrase"
+            "value": "Hide Vault key phrase"
           }
         }
       }
@@ -3666,7 +3956,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Copy passphrase"
+            "value": "Copy Vault key phrase"
           }
         }
       }
@@ -3756,7 +4046,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This connection was not approved. Ask the owner to create a new Connect your phone code, or use your shared secret."
+            "value": "This connection was not approved. Ask the owner to create a new Connect your phone code, or use your Vault key phrase."
           }
         }
       }
@@ -3806,7 +4096,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter your encryption passphrase"
+            "value": "Enter your Vault key phrase"
           }
         }
       }
@@ -3816,7 +4106,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unlock synced content on this phone. Peppy cannot recover your passphrase."
+            "value": "Unlock synced content on this phone. Peppy cannot recover your Vault key phrase."
           }
         }
       }
@@ -4186,7 +4476,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter your server address and shared secret, or scan a Connect your phone code."
+            "value": "Enter your server address and Vault key phrase, or scan a Connect your phone code."
           }
         }
       }
@@ -4366,7 +4656,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use generated passphrase"
+            "value": "Use generated Vault key phrase"
           }
         }
       }
@@ -4546,7 +4836,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This server has already been set up. Connect with your admin password or vault shared secret instead."
+            "value": "This server has already been set up. Connect with your admin password or Vault key phrase instead."
           }
         }
       }
@@ -4636,7 +4926,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Connect with your vault shared secret."
+            "value": "Connect with your Vault key phrase."
           }
         }
       }
@@ -4826,7 +5116,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choose a username for your vault. Your password and vault secret will be requested securely."
+            "value": "Choose a username for your vault. Your password and Vault key phrase will be requested securely."
           }
         }
       }
@@ -4836,7 +5126,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "A secure prompt will ask for your password and vault shared secret. Peppy never sees them in this window."
+            "value": "A secure prompt will ask for your password and Vault key phrase. Peppy never sees them in this window."
           }
         }
       }

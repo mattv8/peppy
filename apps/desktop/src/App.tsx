@@ -42,6 +42,7 @@ import {
   Smartphone,
   SquarePen,
   StatusPopover,
+  SyncProgress,
   TriangleAlert,
   Trash2,
   X,
@@ -253,6 +254,25 @@ const PANE_MIN_WIDTH = 360;
 const LIST_COLLAPSE_THRESHOLD = 120;
 const TEXTAREA_LINE_HEIGHT = 22;
 const TEXTAREA_MAX_HEIGHT = 176;
+const NARROW_BROWSER_QUERY = "(max-width: 640px)";
+
+function useNarrowBrowserViewport(browserHost: boolean): boolean {
+  const [narrow, setNarrow] = useState(false);
+
+  useEffect(() => {
+    if (!browserHost || typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      setNarrow(false);
+      return;
+    }
+    const media = window.matchMedia(NARROW_BROWSER_QUERY);
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [browserHost]);
+
+  return narrow;
+}
 
 function mergeMessages(existing: MessageView[], refreshed: MessageView[]): MessageView[] {
   const refreshedById = new Map(refreshed.map((message) => [message.id, message]));
@@ -1125,7 +1145,7 @@ function SettingsView({
           <button id="settings-reveal-vault-secret" className="secondary-button" disabled={Boolean(pendingAction)} onClick={async () => {
             setRevealError(null);
             try { await bridge.reveal_vault_secret(); }
-            catch (error) { setRevealError(errorCode(error) === "vault-secret-unavailable" ? "This device doesn't have the vault shared secret stored." : FALLBACK_ERROR); }
+            catch (error) { setRevealError(errorCode(error) === "vault-secret-unavailable" ? "This device doesn't have the vault key phrase stored." : FALLBACK_ERROR); }
           }}>Show vault shared secret</button>
           {revealError && <p id="settings-reveal-vault-secret-error" className="settings-error" role="alert">{revealError}</p>}
         </>}
@@ -1262,6 +1282,7 @@ function StatusDetails({
 export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind?: "native" | "browser"; fixedOrigin?: string; accountUrl?: string } = {}) {
   const platform = detectPlatform();
   const browserHost = hostKind === "browser";
+  const narrowBrowserViewport = useNarrowBrowserViewport(browserHost);
   useUpdateActivity(!browserHost);
   useEffect(() => browserHost ? undefined : installHostedSessionRenewal(renewHostedSession), [browserHost]);
   const [composerConversation] = useState(() =>
@@ -1385,6 +1406,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const defaultListWidth = typeof window !== "undefined" && window.innerWidth < 900 ? 240 : 280;
   const [listWidth, setListWidth] = useState(defaultListWidth);
   const [listCollapsed, setListCollapsed] = useState(false);
+  const [mobileConversationListOpen, setMobileConversationListOpen] = useState(false);
   const [composerHeight, setComposerHeight] = useState<number | null>(null);
   const [recipientPosition, setRecipientPosition] = useState<RecipientPosition | null>(null);
   const [pendingRecipient, setPendingRecipient] = useState(false);
@@ -1730,6 +1752,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     historyAnchorRef.current = null;
     selectedRef.current = key;
     setSelected(key);
+    if (narrowBrowserViewport) setMobileConversationListOpen(false);
   };
   const setNotice = (message: string, severity: ActionNotice["severity"] = "error", persistent = false) =>
     setActionNotice(message ? { message, severity, persistent } : undefined);
@@ -2624,10 +2647,24 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }));
   };
   const showConversationList = () => {
+    if (narrowBrowserViewport) {
+      setActiveView("conversations");
+      setMobileConversationListOpen(true);
+      return;
+    }
     if (activeView !== "conversations") setActiveView("conversations");
     if (listCollapsed) resizeListTo(previousListWidth.current);
   };
   const toggleConversationList = () => {
+    if (narrowBrowserViewport) {
+      if (activeView !== "conversations") {
+        setActiveView("conversations");
+        setMobileConversationListOpen(true);
+        return;
+      }
+      if (selected) setMobileConversationListOpen((open) => !open);
+      return;
+    }
     if (activeView !== "conversations") {
       setActiveView("conversations");
       resizeListTo(previousListWidth.current);
@@ -3155,6 +3192,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const canRecoverNativeSync = canUnlock || nativeCredentialed;
   const needsServerSetup = snapshot?.connection.errorCode === "server-required" || snapshot?.connection.errorCode === "credentials-required";
   const showSetup = Boolean(snapshot && (addingPhone || initialEnrollmentActive || (!selected && (needsServerSetup || setupCode === "revoked" || (ownerWithoutPhone(snapshot) && phoneDeferredOrigin !== snapshot.connection.origin && !phoneSetupDeferred(snapshot.connection.origin)) || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state === "preview")))));
+  const narrowConversationListMode = narrowBrowserViewport && !showSetup && activeView === "conversations";
+  const showingMobileConversationList = narrowConversationListMode && (!selected || mobileConversationListOpen);
+  const hideThreadList = settingsOpen || notificationsOpen || contactsOpen || (narrowConversationListMode ? !showingMobileConversationList : listCollapsed);
   const enrolled = Boolean(snapshot && (nativeCredentialed || (browserHost && snapshot.mode === "browser" && snapshot.encryption.state !== "preview")));
   const serverOffline = Boolean(snapshot && enrolled && isServerUnreachable(snapshot.connection));
   const attachments: Attachment[] = content.attachmentIds.map(
@@ -3613,6 +3653,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     ...(refreshNotice ? [{ source: "refresh" as const, severity: "error" as const, message: refreshNotice, persistent: true }] : []),
     ...(actionNotice ? [{ source: "action" as const, ...actionNotice }] : []),
   ];
+  /* Progress is shown only for enrolled, unlocked UI; locked and setup states never render it. */
+  const syncProgressEligible = Boolean(snapshot && enrolled && !showSetup && snapshot.encryption.state !== "locked" && !appLock?.locked);
+  const syncProgressBanner = syncProgressEligible ? <SyncProgress progress={snapshot?.syncProgress} /> : null;
   const appNoticeBanner = <AppNoticeBanner
     notices={appNotices}
     onDismiss={(source) => {
@@ -3678,6 +3721,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       data-bridge-mode={snapshot?.mode ?? "unavailable"}
       data-platform={platform}
       data-navigation={navigationPosition}
+      data-browser-setup={browserHost && showSetup ? "true" : undefined}
+      data-narrow-browser={narrowBrowserViewport || undefined}
       inert={lifecyclePending ? true : undefined}
       aria-busy={loading || lifecyclePending ? "true" : undefined}
     >
@@ -3688,18 +3733,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         platform={platform}
         search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} historySearch={historyControls.historySearch} onSearchFurtherBack={historyControls.onSearchFurtherBack} onCancelHistorySearch={historyControls.onCancelHistorySearch} onOpenChange={setHistorySearchVisible} />}
         onToggleSidebar={toggleConversationList}
-        sidebarExpanded={activeView === "conversations" && !listCollapsed}
+        sidebarExpanded={narrowConversationListMode ? showingMobileConversationList : activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
-        onNewMessage={navigationPosition === "title-bar" || activeView !== "conversations" || listCollapsed ? startTitlebarMessage : undefined}
+        onNewMessage={navigationPosition === "title-bar" || activeView !== "conversations" || listCollapsed || (narrowConversationListMode && !showingMobileConversationList) ? startTitlebarMessage : undefined}
         navigation={navigationPosition === "title-bar" ? (
           <NavButtons
             orientation="titlebar"
             activeView={activeView}
             onView={setActiveView}
-            onToggleList={() =>
-              resizeListTo(listCollapsed ? previousListWidth.current : 0)
-            }
-            listCollapsed={listCollapsed}
+            onToggleList={toggleConversationList}
+            listCollapsed={narrowConversationListMode ? !showingMobileConversationList : listCollapsed}
             threadListId="thread-list"
             notificationUnread={notificationUnread}
             contactsPending={contactsPending}
@@ -3712,14 +3755,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         ) : undefined}
       />
       {appNoticeBanner}
+      {syncProgressBanner}
       <div ref={desktopBodyRef} id="desktop-body" className="desktop-layout">
         {navigationPosition === "side-rail" && <Panel
           activeView={activeView}
           onView={setActiveView}
-          onToggleList={() =>
-            resizeListTo(listCollapsed ? previousListWidth.current : 0)
-          }
-          listCollapsed={listCollapsed}
+          onToggleList={toggleConversationList}
+          listCollapsed={narrowConversationListMode ? !showingMobileConversationList : listCollapsed}
           threadListId="thread-list"
           status={panelStatus}
           notificationUnread={notificationUnread}
@@ -3732,12 +3774,15 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           id="thread-list"
           aria-label="Thread list"
           tabIndex={-1}
-          data-collapsed={listCollapsed || undefined}
-          hidden={settingsOpen || notificationsOpen || contactsOpen}
+          data-collapsed={!showingMobileConversationList && listCollapsed || undefined}
+          data-mobile-list={showingMobileConversationList || undefined}
+          hidden={hideThreadList}
           style={
-            listCollapsed || settingsOpen || notificationsOpen || contactsOpen
+            hideThreadList
               ? { display: "none" }
-              : { width: renderedListWidth, flexBasis: renderedListWidth }
+              : showingMobileConversationList
+                ? { width: "auto", flex: "1 1 0" }
+                : { width: renderedListWidth, flexBasis: renderedListWidth }
           }
         >
           <div
@@ -3786,7 +3831,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               pendingPinId={pendingPinId ?? undefined}
           />
         </aside>
-        {!settingsOpen && !notificationsOpen && !contactsOpen && <ResizeHandle
+        {!settingsOpen && !notificationsOpen && !contactsOpen && !narrowConversationListMode && <ResizeHandle
           id="handle-h1"
           direction="horizontal"
           ariaLabel="Resize thread list"
@@ -3812,6 +3857,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           className="conversation-pane"
           aria-label={settingsOpen ? "Settings pane" : notificationsOpen ? "Notifications pane" : contactsOpen ? "Contacts pane" : "Conversation"}
           data-view={activeView}
+          data-mobile-list={showingMobileConversationList || undefined}
           ref={paneRef}
         >
           <header id="thread-pane-header">
@@ -3990,6 +4036,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                   onInitialEnrollmentStart={() => setInitialEnrollmentActive(true)}
                   fixedOrigin={browserHost ? fixedOrigin : undefined}
                   accountUrl={browserHost ? accountUrl : undefined}
+                  newIdentity={browserHost && snapshot.encryption.state === "preview"}
+                  hostKind={browserHost ? "browser" : "native"}
                 />
               ) : (
                 <>

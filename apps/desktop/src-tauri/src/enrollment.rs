@@ -1,6 +1,6 @@
 //! Native-only enrollment orchestration. Secrets are collected by native dialogs and never cross IPC.
 use crate::{
-    credentials::{parse_credential, ImportedCredential},
+    credentials::{parse_credential, stored_credential, ImportedCredential},
     dialogs::{self, PassphrasePurpose},
     error::{BridgeError, BridgeResult},
     net::{read_bounded, NetError, MAX_JSON_BYTES},
@@ -27,6 +27,8 @@ const VAULT_REQUEST_CHECKPOINT_PREFIX: &str = "enrollment-vault-request:v1:";
 const VAULT_SECRET_PREFIX: &str = "enrollment-vault-secret:v1:";
 const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
+pub(super) mod computer;
+
 #[derive(Default)]
 pub struct Controller {
     client: Option<EnrollmentClient>,
@@ -46,6 +48,9 @@ pub struct Controller {
     owner_passphrase: Option<Zeroizing<String>>,
     vault_request_state: Option<String>,
     vault_creation_in_flight: bool,
+    computer_claimant: Option<computer::ClaimantState>,
+    can_connect_computer: bool,
+    new_identity: bool,
     operation_epoch: u64,
 }
 
@@ -69,6 +74,8 @@ pub struct EnrollmentView {
     display_name: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     owner_resume_pending: bool,
+    can_connect_computer: bool,
+    new_identity: bool,
 }
 
 impl Controller {
@@ -185,6 +192,8 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|info| info.mode == DeploymentMode::Community)
                 && self.owner_resume,
+            can_connect_computer: self.can_connect_computer,
+            new_identity: self.new_identity,
         }
     }
 
@@ -960,9 +969,10 @@ fn device_request(
 async fn install_identity(
     app: &AppHandle,
     state: &AppState,
-    identity: NativeEnrollmentIdentity,
-    passphrase: Zeroizing<String>,
+    identity: &mut NativeEnrollmentIdentity,
+    passphrase: Option<Zeroizing<String>>,
     expected_binding: Option<crate::credentials::Binding>,
+    allow_prepared_target_retry: bool,
 ) -> BridgeResult<()> {
     let operation = crate::admit_update_operation(state)?;
     let metadata = identity.metadata().clone();
@@ -983,13 +993,25 @@ async fn install_identity(
     drop(portable);
     let _import = state.import_lock.lock().await;
     let previous = state.config()?;
-    if previous.active_binding() != expected_binding.as_ref() {
+    let target_binding = credential.binding();
+    let installed_target_matches = || {
+        prepared_target_retry_matches(
+            &*state.store,
+            previous.active_binding(),
+            &target_binding,
+            &credential,
+            target_binding.database_path(&state.root).exists(),
+        )
+    };
+    if previous.active_binding() != expected_binding.as_ref()
+        && (!allow_prepared_target_retry || !installed_target_matches()?)
+    {
         return Err(BridgeError::new(
             "credential-changed",
             "The active credential changed while enrollment was in progress.",
         ));
     }
-    let permit = if previous.active_binding() != Some(&credential.binding()) {
+    let permit = if previous.active_binding() != Some(&target_binding) {
         Some(crate::lifecycle::prepare_switch(app).await?)
     } else {
         None
@@ -1010,19 +1032,16 @@ async fn install_identity(
     }
     (state.notifier)();
     let session = state.require_session_admitted(&operation).await?;
-    if let Some(activation) = identity.into_activation() {
-        let activation_session = session.clone();
-        crate::sync::blocking(move || {
-            activation
-                .activate(&activation_session.client)
-                .map_err(|_| enrollment_error())
-        })
-        .await?;
+    if identity
+        .activate_verified_handoff(&session.client)
+        .map_err(|_| enrollment_error())?
+    {
     } else {
         let fingerprint = metadata
             .profile
             .fingerprint()
             .map_err(|_| enrollment_error())?;
+        let passphrase = passphrase.ok_or_else(enrollment_error)?;
         crate::unlock_with(
             state,
             &session,
@@ -1033,13 +1052,31 @@ async fn install_identity(
         )
         .await?;
     }
-    persist_binding_secret(
-        &*state.store,
-        &session.binding.vault_secret_account(),
-        &vault_secret,
-        &origin,
-    );
+    if let Some(vault_secret) = vault_secret {
+        persist_binding_secret(
+            &*state.store,
+            &session.binding.vault_secret_account(),
+            &vault_secret,
+            &origin,
+        );
+    }
     Ok(())
+}
+
+/// A prepared claimant may retry only after the exact credential and database it installed are
+/// active. This excludes a user/server switch that happened while installation was failing.
+fn prepared_target_retry_matches(
+    store: &dyn SecretStore,
+    active_binding: Option<&crate::credentials::Binding>,
+    target_binding: &crate::credentials::Binding,
+    credential: &ImportedCredential,
+    database_exists: bool,
+) -> BridgeResult<bool> {
+    if active_binding != Some(target_binding) || !database_exists {
+        return Ok(false);
+    }
+    Ok(stored_credential(store, target_binding)?
+        .is_some_and(|stored| stored.device_token == credential.device_token))
 }
 
 /// Stores the verified vault secret for its device binding, then clears the origin's pending
@@ -1137,6 +1174,7 @@ pub async fn enrollment_discover(
     };
     let discovery_epoch = cancel_owner_operation(&state.enrollment)?;
     let response = fetch_instance(selected.clone()).await?;
+    let saved_identity = saved_identity_for_origin(&state, &selected)?;
     let existing = existing_identity(&state, &selected).await?;
     let existing_role = existing.as_ref().map(ExistingIdentity::role);
     if existing_role == Some(EnrollmentRole::Owner) {
@@ -1227,6 +1265,7 @@ pub async fn enrollment_discover(
         client,
         resumed_pending,
         has_gateway,
+        !saved_identity && existing_role.is_none(),
     );
     Ok(controller.view())
 }
@@ -1250,9 +1289,12 @@ fn apply_discovery(
     client: Option<EnrollmentClient>,
     resumed_pending: bool,
     has_gateway: Option<bool>,
+    new_identity: bool,
 ) {
     let same_origin = controller.origin.as_deref() == Some(selected.as_str());
     controller.origin = Some(selected);
+    controller.can_connect_computer = new_identity && response.claimed;
+    controller.new_identity = new_identity;
     controller.info = Some(response);
     match client {
         Some(client) => controller.client = Some(client),
@@ -1326,6 +1368,23 @@ async fn existing_identity(
     }
 }
 
+/// A configured binding is treated as a saved identity even if its protected credential was
+/// removed: replacing it could strand its local database. Reading each matching credential also
+/// makes secure-store failures fail closed before the setup UI offers claimant enrollment.
+fn saved_identity_for_origin(state: &AppState, origin: &str) -> BridgeResult<bool> {
+    let config = state.config()?;
+    let bindings: Vec<_> = config
+        .bindings
+        .iter()
+        .filter(|known| known.binding.origin == origin)
+        .map(|known| known.binding.clone())
+        .collect();
+    for binding in bindings {
+        let _ = stored_credential(&*state.store, &binding)?;
+    }
+    Ok(config.bindings.iter().any(|known| known.binding.origin == origin))
+}
+
 #[tauri::command]
 pub async fn enrollment_create_owner(
     window: WebviewWindow,
@@ -1377,8 +1436,8 @@ pub async fn enrollment_create_owner(
             )
             .await
         },
-        |identity, passphrase, expected_binding| async move {
-            install_identity(app_ref, state_ref, identity, passphrase, expected_binding).await
+        |mut identity, passphrase, expected_binding| async move {
+            install_identity(app_ref, state_ref, &mut identity, Some(passphrase), expected_binding, false).await
         },
     )
     .await;
@@ -1569,7 +1628,7 @@ pub async fn enrollment_connect_shared_secret(
         account_session.as_ref().map(|value| value.as_str()),
     )
     .await?;
-    let identity = state
+    let mut identity = state
         .enrollment
         .lock()
         .map_err(|_| BridgeError::host_state())?
@@ -1579,7 +1638,7 @@ pub async fn enrollment_connect_shared_secret(
         .finish_manual_admission(complete_json, passphrase.to_string())
         .map_err(|_| enrollment_error())?;
     let role = identity.metadata().role;
-    install_identity(&app, &state, identity, passphrase, expected_binding).await?;
+    install_identity(&app, &state, &mut identity, Some(passphrase), expected_binding, false).await?;
     let has_gateway = refresh_gateway_presence(&state).await?;
     let mut controller = state
         .enrollment
@@ -1985,7 +2044,7 @@ pub async fn enrollment_create_vault(
         Err(error) => return Err(error),
         Ok(response) => response,
     };
-    let identity = {
+    let mut identity = {
         let controller = state
             .enrollment
             .lock()
@@ -2000,7 +2059,7 @@ pub async fn enrollment_create_vault(
             .finish_owner_admission(response, passphrase.to_string())
             .map_err(|_| enrollment_error())?
     };
-    install_identity(&app, &state, identity, passphrase, expected_binding).await?;
+    install_identity(&app, &state, &mut identity, Some(passphrase), expected_binding, false).await?;
     // The identity is durably imported; never retain the request secret merely because a later
     // UI operation was cancelled or superseded.
     tombstone_vault_request_checkpoint(&*state.store, &origin)?;
@@ -6021,6 +6080,7 @@ mod owner_retry_tests {
             None,
             false,
             None,
+            false,
         );
 
         assert_eq!(
@@ -6047,6 +6107,7 @@ mod owner_retry_tests {
             None,
             false,
             None,
+            false,
         );
 
         assert!(controller.client.is_none());
@@ -6111,6 +6172,71 @@ mod owner_retry_tests {
         assert_eq!(error.code, "secure-store-unavailable");
     }
 
+    #[test]
+    fn protected_saved_binding_lookup_distinguishes_a_fresh_native_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let fresh = AppState::new(root.path().to_path_buf(), Arc::new(RecordingStore::default()), crate::tests::noop());
+        assert!(!saved_identity_for_origin(&fresh, ORIGIN).unwrap());
+
+        let binding = active_binding();
+        let saved = state_with_active_binding(&root, Arc::new(RecordingStore::default()), &binding);
+        assert!(saved_identity_for_origin(&saved, ORIGIN).unwrap());
+    }
+
+    #[test]
+    fn protected_saved_binding_lookup_fails_closed_when_secure_store_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let binding = active_binding();
+        let state = state_with_active_binding(&root, Arc::new(FailingStore), &binding);
+        assert_eq!(
+            saved_identity_for_origin(&state, ORIGIN).unwrap_err().code,
+            "secure-store-unavailable"
+        );
+    }
+
+    #[test]
+    fn prepared_claimant_retry_accepts_only_its_exact_installed_credential_and_database() {
+        let store = MemoryStore::default();
+        let root = tempfile::tempdir().unwrap();
+        let binding = active_binding();
+        let credential = ImportedCredential {
+            version: 1,
+            origin: binding.origin.clone(),
+            vault_id: binding.vault_id.clone(),
+            device_id: binding.device_id.clone(),
+            device_token: crate::credentials::tests::TOKEN.into(),
+        };
+        crate::credentials::store_credential(&store, &credential).unwrap();
+        std::fs::create_dir_all(binding.data_dir(root.path())).unwrap();
+        std::fs::write(binding.database_path(root.path()), b"db").unwrap();
+        assert!(prepared_target_retry_matches(
+            &store,
+            Some(&binding),
+            &binding,
+            &credential,
+            true,
+        )
+        .unwrap());
+
+        let foreign = crate::credentials::Binding { device_id: uuid::Uuid::new_v4().to_string(), ..binding.clone() };
+        assert!(!prepared_target_retry_matches(
+            &store,
+            Some(&foreign),
+            &binding,
+            &credential,
+            true,
+        )
+        .unwrap());
+        assert!(!prepared_target_retry_matches(
+            &store,
+            Some(&binding),
+            &binding,
+            &credential,
+            false,
+        )
+        .unwrap());
+    }
+
     #[tokio::test]
     async fn gateway_presence_propagates_same_origin_secure_store_failures() {
         let root = tempfile::tempdir().unwrap();
@@ -6134,12 +6260,32 @@ mod owner_retry_tests {
             None,
             false,
             Some(true),
+            false,
         );
 
         let view = controller.view();
         assert_eq!(view.has_gateway, Some(true));
         assert_eq!(view.owner, Some(false));
         assert_eq!(view.stage, "ready");
+    }
+
+    #[test]
+    fn discovery_view_exposes_only_authoritative_new_identity_claimant_signal() {
+        let mut controller = unclaimed_controller().into_inner().unwrap();
+        let info = controller.info.clone().unwrap();
+        apply_discovery(
+            &mut controller,
+            ORIGIN.into(),
+            info,
+            None,
+            None,
+            false,
+            None,
+            true,
+        );
+        let value = serde_json::to_value(controller.view()).unwrap();
+        assert_eq!(value["newIdentity"], true);
+        assert_eq!(value["canConnectComputer"], false);
     }
 
     #[test]

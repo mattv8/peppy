@@ -4,11 +4,13 @@ use crate::{MobileBindingsError, NativeClient};
 use peppy_hosted_api::enrollment::{ClientKind, EnrollmentMethod, EnrollmentRole};
 use std::sync::{Arc, Mutex};
 
+mod owner_computer;
 mod owner_phone;
 
 #[derive(uniffi::Object)]
 pub struct NativeEnrollmentClient {
     inner: Mutex<peppy_hosted_client::newenrollment::EnrollmentClient>,
+    owner_computer: Mutex<Option<owner_computer::OwnerComputerPrompt>>,
 }
 
 #[derive(uniffi::Object)]
@@ -59,6 +61,7 @@ pub fn new_native_enrollment_client(
             )
             .map_err(enrollment_error)?,
         ),
+        owner_computer: Mutex::new(None),
     }))
 }
 
@@ -96,6 +99,7 @@ pub fn new_native_existing_owner_enrollment_client(
             )
             .map_err(enrollment_error)?,
         ),
+        owner_computer: Mutex::new(None),
     }))
 }
 
@@ -470,5 +474,6 @@ pub fn restore_native_enrollment_client(
             peppy_hosted_client::newenrollment::EnrollmentClient::restore(checkpoint)
                 .map_err(enrollment_error)?,
         ),
+        owner_computer: Mutex::new(None),
     }))
 }

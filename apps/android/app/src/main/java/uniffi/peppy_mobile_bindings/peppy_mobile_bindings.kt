@@ -1089,6 +1089,18 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_owner_computer_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_owner_computer_flow(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_configure_owner_computer_device(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_owner_computer_created(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_computer_create_request(
+    ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_computer_view(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_passphrase_matches(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_phone_invitation_id(
@@ -1522,6 +1534,18 @@ internal object UniffiLib {
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_accepted(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_approve_owner_computer_request(`ptr`: Long,`invitationId`: RustBuffer.ByValue,`promptDigest`: RustBuffer.ByValue,`codesMatch`: Byte,`vaultKeyPhrase`: RustBuffer.ByValue,`nativeClient`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_cancel_owner_computer_flow(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_configure_owner_computer_device(`ptr`: Long,`deviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_owner_computer_created(`ptr`: Long,`invitationId`: RustBuffer.ByValue,`promptDigest`: RustBuffer.ByValue,`createdJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_computer_create_request(`ptr`: Long,`qrJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_computer_view(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_passphrase_matches(`ptr`: Long,`passphrase`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -2321,6 +2345,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header() and 0xFFFF) != 50961) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_owner_computer_request() and 0xFFFF) != 59108) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_owner_computer_flow() and 0xFFFF) != 56080) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_configure_owner_computer_device() and 0xFFFF) != 13459) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_owner_computer_created() and 0xFFFF) != 48909) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_computer_create_request() and 0xFFFF) != 28487) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_computer_view() and 0xFFFF) != 1365) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_passphrase_matches() and 0xFFFF) != 22026) {
@@ -5804,6 +5846,38 @@ public interface NativeEnrollmentClientInterface {
     
     fun `vaultRequestHeader`(): kotlin.String
     
+    /**
+     * Verifies the separately prompted vault key phrase, requires an unlocked native core, and
+     * emits the authenticated approval only after an explicit comparison-code confirmation.
+     */
+    fun `approveOwnerComputerRequest`(`invitationId`: kotlin.String, `promptDigest`: kotlin.String, `codesMatch`: kotlin.Boolean, `vaultKeyPhrase`: kotlin.String, `nativeClient`: NativeClient): kotlin.String
+    
+    /**
+     * Clears only local computer-enrollment state; it does not cancel the server enrollment.
+     */
+    fun `cancelOwnerComputerFlow`()
+    
+    /**
+     * Supplies the enrolled owner UUID from protected native identity storage. The shared client
+     * rejects scans until this has been configured; it never uses its local enrollment UUID.
+     */
+    fun `configureOwnerComputerDevice`(`deviceId`: kotlin.String)
+    
+    /**
+     * Pins one create response only when it belongs to the currently displayed QR prompt.
+     */
+    fun `consumeOwnerComputerCreated`(`invitationId`: kotlin.String, `promptDigest`: kotlin.String, `createdJson`: kotlin.String)
+    
+    /**
+     * Validates a computer QR locally and creates the body for the authenticated owner request.
+     */
+    fun `ownerComputerCreateRequest`(`qrJson`: kotlin.String): NativeOwnerComputerCreateRequest
+    
+    /**
+     * Returns local prompt identity and the locally derived comparison code, never server SAS.
+     */
+    fun `ownerComputerView`(): NativeOwnerComputerView
+    
     fun `ownerPassphraseMatches`(`passphrase`: kotlin.String): kotlin.Boolean
     
     fun `ownerPhoneInvitationId`(): kotlin.String?
@@ -6291,6 +6365,117 @@ open class NativeEnrollmentClient: Disposable, AutoCloseable, NativeEnrollmentCl
     callWithHandle {
     uniffiRustCallWithError(MobileBindingsException) { _status ->
     UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Verifies the separately prompted vault key phrase, requires an unlocked native core, and
+     * emits the authenticated approval only after an explicit comparison-code confirmation.
+     */
+    @Throws(MobileBindingsException::class)override fun `approveOwnerComputerRequest`(`invitationId`: kotlin.String, `promptDigest`: kotlin.String, `codesMatch`: kotlin.Boolean, `vaultKeyPhrase`: kotlin.String, `nativeClient`: NativeClient): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_approve_owner_computer_request(
+        it,
+        
+        FfiConverterString.lower(`invitationId`),
+        FfiConverterString.lower(`promptDigest`),
+        FfiConverterBoolean.lower(`codesMatch`),
+        FfiConverterString.lower(`vaultKeyPhrase`),
+        FfiConverterTypeNativeClient.lower(`nativeClient`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Clears only local computer-enrollment state; it does not cancel the server enrollment.
+     */
+    @Throws(MobileBindingsException::class)override fun `cancelOwnerComputerFlow`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_cancel_owner_computer_flow(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Supplies the enrolled owner UUID from protected native identity storage. The shared client
+     * rejects scans until this has been configured; it never uses its local enrollment UUID.
+     */
+    @Throws(MobileBindingsException::class)override fun `configureOwnerComputerDevice`(`deviceId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_configure_owner_computer_device(
+        it,
+        
+        FfiConverterString.lower(`deviceId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Pins one create response only when it belongs to the currently displayed QR prompt.
+     */
+    @Throws(MobileBindingsException::class)override fun `consumeOwnerComputerCreated`(`invitationId`: kotlin.String, `promptDigest`: kotlin.String, `createdJson`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_owner_computer_created(
+        it,
+        
+        FfiConverterString.lower(`invitationId`),
+        FfiConverterString.lower(`promptDigest`),
+        FfiConverterString.lower(`createdJson`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Validates a computer QR locally and creates the body for the authenticated owner request.
+     */
+    @Throws(MobileBindingsException::class)override fun `ownerComputerCreateRequest`(`qrJson`: kotlin.String): NativeOwnerComputerCreateRequest {
+            return FfiConverterTypeNativeOwnerComputerCreateRequest.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_computer_create_request(
+        it,
+        
+        FfiConverterString.lower(`qrJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Returns local prompt identity and the locally derived comparison code, never server SAS.
+     */
+    @Throws(MobileBindingsException::class)override fun `ownerComputerView`(): NativeOwnerComputerView {
+            return FfiConverterTypeNativeOwnerComputerView.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_computer_view(
         it,
         _status)
 }
@@ -10186,6 +10371,119 @@ public object FfiConverterTypeNativeOpenConfig: FfiConverterRustBuffer<NativeOpe
             FfiConverterString.write(value.`vaultId`, buf)
             FfiConverterString.write(value.`deviceId`, buf)
             FfiConverterByteArray.write(value.`databaseKey`, buf)
+    }
+}
+
+
+
+data class NativeOwnerComputerCreateRequest (
+    /**
+     * Canonical hosted API origin validated against the scanned QR.
+     */
+    var `origin`: kotlin.String
+    , 
+    var `invitationId`: kotlin.String
+    , 
+    /**
+     * Digest of the exact scanned QR payload. Return it with asynchronous responses.
+     */
+    var `promptDigest`: kotlin.String
+    , 
+    /**
+     * The canonical hosted API create request body; native hosts add their owner session.
+     */
+    var `requestJson`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeOwnerComputerCreateRequest: FfiConverterRustBuffer<NativeOwnerComputerCreateRequest> {
+    override fun read(buf: ByteBuffer): NativeOwnerComputerCreateRequest {
+        return NativeOwnerComputerCreateRequest(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeOwnerComputerCreateRequest) = (
+            FfiConverterString.allocationSize(value.`origin`) +
+            FfiConverterString.allocationSize(value.`invitationId`) +
+            FfiConverterString.allocationSize(value.`promptDigest`) +
+            FfiConverterString.allocationSize(value.`requestJson`)
+    )
+
+    override fun write(value: NativeOwnerComputerCreateRequest, buf: ByteBuffer) {
+            FfiConverterString.write(value.`origin`, buf)
+            FfiConverterString.write(value.`invitationId`, buf)
+            FfiConverterString.write(value.`promptDigest`, buf)
+            FfiConverterString.write(value.`requestJson`, buf)
+    }
+}
+
+
+
+data class NativeOwnerComputerView (
+    var `origin`: kotlin.String
+    , 
+    var `invitationId`: kotlin.String
+    , 
+    var `promptDigest`: kotlin.String
+    , 
+    var `created`: kotlin.Boolean
+    , 
+    /**
+     * Locally derived after the server nonce has been pinned.
+     */
+    var `sas`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNativeOwnerComputerView: FfiConverterRustBuffer<NativeOwnerComputerView> {
+    override fun read(buf: ByteBuffer): NativeOwnerComputerView {
+        return NativeOwnerComputerView(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NativeOwnerComputerView) = (
+            FfiConverterString.allocationSize(value.`origin`) +
+            FfiConverterString.allocationSize(value.`invitationId`) +
+            FfiConverterString.allocationSize(value.`promptDigest`) +
+            FfiConverterBoolean.allocationSize(value.`created`) +
+            FfiConverterOptionalString.allocationSize(value.`sas`)
+    )
+
+    override fun write(value: NativeOwnerComputerView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`origin`, buf)
+            FfiConverterString.write(value.`invitationId`, buf)
+            FfiConverterString.write(value.`promptDigest`, buf)
+            FfiConverterBoolean.write(value.`created`, buf)
+            FfiConverterOptionalString.write(value.`sas`, buf)
     }
 }
 

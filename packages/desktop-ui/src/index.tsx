@@ -36,6 +36,7 @@ export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
 export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
 export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
+export { SyncProgress, type SyncProgressProps } from "./SyncProgress";
 export { Modal, type ModalProps } from "./Modal";
 export { installOverlayScrollbars, OVERLAY_SCROLL_HIDE_DELAY } from "./overlayScroll";
 export {

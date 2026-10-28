@@ -60,6 +60,11 @@ pub enum EnrollmentOperation {
     ApproveInvitation,
     ConfirmInvitation,
     CancelInvitation,
+    CreateComputerEnrollment,
+    ReadComputerEnrollment,
+    ApproveComputerEnrollment,
+    ConfirmComputerEnrollment,
+    CancelComputerEnrollment,
 }
 
 #[derive(Clone, Debug)]
@@ -424,6 +429,10 @@ fn spawn_instance_maintenance(db: PgPool) {
             if let Err(error) = result {
                 tracing::warn!(%error, "instance invite retention sweep failed");
             }
+            let result = crate::enrollment::computers::cleanup_expired_enrollments(&db).await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "computer enrollment retention sweep failed");
+            }
         }
     });
 }
@@ -585,6 +594,22 @@ pub(crate) fn build_router(
         .ok()
     }) {
         Some(state) => router.merge(crate::enrollment::invitations::router(state)),
+        None => router,
+    };
+    let router = match config
+        .as_ref()
+        .and_then(|config| config.public_api_url.as_ref())
+        .map(|origin| origin.origin().ascii_serialization())
+        .and_then(|origin| {
+            crate::enrollment::computers::ComputerEnrollmentRouterState::new(
+                db.clone(),
+                enrollment_authorization,
+                row_security,
+                origin,
+            )
+            .ok()
+        }) {
+        Some(state) => router.merge(crate::enrollment::computers::router(state)),
         None => router,
     };
     (

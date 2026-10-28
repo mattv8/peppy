@@ -87,6 +87,36 @@ pub struct Snapshot {
     /// Active conversation tone presets. Omitted until vault keys are unlocked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tone_overrides: Option<BTreeMap<String, u8>>,
+    /// Durable replay frontiers only. Hosts omit this until their sync lane can provide it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_progress: Option<SyncProgress>,
+}
+
+/// Sanitized, exact replay status. Cursors and snapshot counts remain decimal strings so JS never
+/// loses precision. `target_high_water` is a transient authenticated server cut, not a total.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub phase: SyncProgressPhase,
+    pub received_through: String,
+    pub processed_through: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_high_water: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_received: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_remaining: Option<String>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncProgressPhase {
+    Receiving,
+    Applying,
+    WaitingForKeys,
+    Current,
 }
 
 #[derive(Clone, Serialize)]

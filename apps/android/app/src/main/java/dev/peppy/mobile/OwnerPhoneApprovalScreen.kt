@@ -83,7 +83,7 @@ internal fun canRevealSharedSecret(result: OwnerPhoneApprovalHost.Result): Boole
     result is OwnerPhoneApprovalHost.Result.View && result.status.stage == OwnerPhoneStage.WAITING
 
 /** Bridges the host's suspending secret request to the approval-fallback dialog. Never saved. */
-private class ApprovalPromptBridge : SecretPrompt {
+internal class ApprovalPromptBridge : SecretPrompt {
     val request = mutableStateOf<CompletableDeferred<CharArray?>?>(null)
 
     override suspend fun ask(): CharArray? {

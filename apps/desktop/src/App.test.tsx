@@ -4395,6 +4395,58 @@ describe("host state display", () => {
 });
 
 describe("desktop presentation controls", () => {
+  const stubNarrowBrowserMedia = () => {
+    let matches = true;
+    const listeners = new Set<(event: MediaQueryListEvent) => void>();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      get matches() { return matches; },
+      media: "(max-width: 640px)",
+      addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+      addListener: (listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+      removeListener: (listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+      dispatchEvent: () => true,
+    })));
+    return (next: boolean) => {
+      matches = next;
+      listeners.forEach((listener) => listener({ matches, media: "(max-width: 640px)" } as MediaQueryListEvent));
+    };
+  };
+
+  it("uses one browser pane on a narrow viewport without changing the saved desktop layout", async () => {
+    localStorage.setItem("peppy.layout.v1", JSON.stringify({ listWidth: 342, listCollapsed: false }));
+    const setNarrow = stubNarrowBrowserMedia();
+    render(<App hostKind="browser" fixedOrigin="https://example.test" />);
+
+    await screen.findByText("Hello from Aurora");
+    await waitFor(() => expect(document.getElementById("thread-list")).not.toBeVisible());
+    expect(document.getElementById("desktop-shell")).toHaveAttribute("data-narrow-browser", "true");
+    expect(document.getElementById("handle-h1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle conversation list" }));
+    expect(document.getElementById("thread-list")).toBeVisible();
+    expect(document.getElementById("conversation-pane")).toHaveAttribute("data-mobile-list", "true");
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+    await waitFor(() => expect(document.getElementById("thread-list")).not.toBeVisible());
+    expect(document.getElementById("conversation-pane")).not.toHaveAttribute("data-mobile-list");
+
+    setNarrow(false);
+    await waitFor(() => expect(document.getElementById("thread-list")).toBeVisible());
+    expect(document.getElementById("thread-list")).toHaveStyle({ width: "342px" });
+    expect(document.getElementById("handle-h1")).toBeInTheDocument();
+    expect(localStorage.getItem("peppy.layout.v1")).toBe(JSON.stringify({ listWidth: 342, listCollapsed: false }));
+  });
+
+  it("leaves a narrow native desktop layout unchanged", async () => {
+    stubNarrowBrowserMedia();
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    expect(document.getElementById("desktop-shell")).not.toHaveAttribute("data-narrow-browser");
+    expect(document.getElementById("thread-list")).toBeVisible();
+    expect(document.getElementById("handle-h1")).toBeInTheDocument();
+  });
+
   it("does not treat a released geometry correction as an upward history scroll", async () => {
     const geometry = { overlay: 100, viewport: 300 };
     const restoreGeometry = mockMessageListGeometry(geometry);

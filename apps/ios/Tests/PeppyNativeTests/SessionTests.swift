@@ -61,6 +61,21 @@ import Testing
         #expect(store.accounts.isEmpty)
     }
 
+    @Test func computerApprovalFactoryRequiresUnlockedOwnerKeys() async throws {
+        let server = try FakeServer(passphrase: passphrase)
+        server.mutate { $0.role = "owner" }
+        let store = InMemorySecureStore()
+        let deviceId = UUID().uuidString.lowercased()
+        let session = session(server, store: store, deviceId: deviceId, directory: temporaryDirectory())
+        _ = try await session.importCredential(server.credential(deviceId: deviceId))
+        await #expect(throws: ClientError.notEnrolled) {
+            try await session.ownerComputerApprovalHost(deviceName: "iPhone")
+        }
+        _ = try await session.unlock(passphrase: passphrase)
+        _ = try await session.ownerComputerApprovalHost(deviceName: "iPhone")
+        await session.close()
+    }
+
     @Test func nothingIsStoredWhenTheTokenIsRejected() async throws {
         let server = try FakeServer(passphrase: passphrase)
         server.mutate { $0.override = { request in HTTPResponse(status: 401, url: request.url, body: Data("{}".utf8)) } }

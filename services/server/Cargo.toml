@@ -39,6 +39,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 peppy-client-core.workspace = true
+peppy-hosted-client = { path = "../../crates/hosted-client", version = "0.1.0" }
 peppy-crypto.workspace = true
 tempfile.workspace = true
 http-body-util.workspace = true

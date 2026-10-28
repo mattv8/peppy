@@ -1,5 +1,5 @@
 import type {
-  AppLockStatus, AttachmentView, BridgeError, ContactBookView, ContactEditOutcome,
+  AppLockStatus, AttachmentView, BridgeError, ComputerClaimantView, ContactBookView, ContactEditOutcome,
   ContactEditRequestInput, ContactEditStatus, ContactScanStatus, ContactSyncStatus, ContactView,
   DesktopBridge, DesktopSnapshot, DeviceRosterView, Draft, DraftInput, HistoryPage,
   HistorySearchAttemptInput, HistorySearchSnapshot, LocalSearchPage, LocalSearchRequest, MediaCursor, MediaOpen, MediaPage, MessageWindow,
@@ -179,13 +179,13 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
     form.method = "dialog";
     const heading = document.createElement("h2");
     heading.id = `${id}-heading`;
-    heading.textContent = "Save your vault shared secret";
+    heading.textContent = "Save your Vault key phrase";
     const description = document.createElement("p");
     description.id = `${id}-description`;
-    description.textContent = "Save this shared secret before continuing. You need it to recover and connect other devices.";
+    description.textContent = "Save your Vault key phrase before continuing. Generated phrases usually have six words. This is not your account or admin password. You need it to recover and connect other devices.";
     const label = document.createElement("label");
     label.htmlFor = `${id}-passphrase`;
-    label.textContent = "Vault shared secret";
+    label.textContent = "Vault key phrase";
     const secret = document.createElement("input");
     secret.id = `${id}-passphrase`;
     secret.name = "passphrase";
@@ -197,7 +197,7 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
     const copy = document.createElement("button");
     copy.id = `${id}-copy`;
     copy.type = "button";
-    copy.textContent = "Copy secret";
+    copy.textContent = "Copy Vault key phrase";
     const copyStatus = document.createElement("span");
     copyStatus.id = `${id}-copy-status`;
     copyStatus.className = "visually-hidden";
@@ -208,7 +208,7 @@ function generatedSecretDialog(passphrase: string): Promise<boolean> {
     checkbox.id = `${id}-acknowledged`;
     checkbox.type = "checkbox";
     acknowledgement.htmlFor = checkbox.id;
-    acknowledgement.append(checkbox, " I saved this shared secret");
+    acknowledgement.append(checkbox, " I saved my Vault key phrase");
     const cancel = document.createElement("button");
     cancel.id = `${id}-cancel`;
     cancel.type = "button";
@@ -482,7 +482,7 @@ export class BrowserBridge implements DesktopBridge {
   public subscribe_lifecycle_finished(): () => void { return () => undefined; }
   public lock_sync(): Promise<void> { return this.call("lock_sync"); }
 
-  public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your device sync passphrase to access your messages.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Passphrase", autocomplete: "current-password" }] }); if (secret) await this.call("unlock", secret); }
+  public async unlock_sync(): Promise<void> { const secret = await secretDialog({ id: "browser-unlock", title: "Unlock Peppy", description: "Enter your Vault key phrase to access your messages. This is not your account or admin password.", confirm: "Unlock", fields: [{ name: "passphrase", label: "Vault key phrase", autocomplete: "current-password" }] }); if (secret) await this.call("unlock", secret); }
   public configure_server(origin: string): Promise<void> { return origin === location.origin ? Promise.resolve() : Promise.reject(new BrowserBridgeError("invalid-origin", "The browser uses its own secure origin.")); }
   public hosted_origin_url(): Promise<string> { return Promise.resolve(location.origin); }
   public get_app_lock_status(): Promise<AppLockStatus> { return unsupported("App lock"); }
@@ -603,6 +603,10 @@ export class BrowserBridge implements DesktopBridge {
   public enrollment_approve_vault_request(requestId: string): Promise<void> { return this.call("enrollment_approve_vault_request", { requestId }); }
   public enrollment_deny_vault_request(requestId: string): Promise<void> { return this.call("enrollment_deny_vault_request", { requestId }); }
   public async enrollment_add_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> { return this.finishOwnerClaim(await this.call("enrollment_add_phone", { method })); }
+  public enrollment_connect_computer(): Promise<ComputerClaimantView> { return this.call("enrollment_connect_computer"); }
+  public enrollment_computer_status(): Promise<ComputerClaimantView> { return this.call("enrollment_computer_status"); }
+  public enrollment_confirm_computer(): Promise<ComputerClaimantView> { return this.call("enrollment_confirm_computer"); }
+  public enrollment_cancel_computer(): Promise<ComputerClaimantView> { return this.call("enrollment_cancel_computer"); }
   public async enrollment_rotate_phone(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
     const view = await this.enrollment_status();
     if (view.stage !== "waiting_phone" && view.stage !== "expired") return view;
@@ -615,7 +619,7 @@ export class BrowserBridge implements DesktopBridge {
     if (view.stage !== "waiting_phone" && view.stage !== "expired") return view;
     return this.finishOwnerClaim(await this.call("enrollment_cancel", { waitingOnly: true }));
   }
-  public reveal_vault_secret(): Promise<void> { return Promise.reject(new BrowserBridgeError("unavailable", "Vault shared secret reveal is unavailable in the browser.")); }
+  public reveal_vault_secret(): Promise<void> { return Promise.reject(new BrowserBridgeError("unavailable", "Vault key phrase reveal is unavailable in the browser.")); }
   public async enrollment_create_owner(input?: { username?: string }): Promise<EnrollmentView> {
     let draft = this.ownerClaimDraft;
     if (draft && this.enrollmentMode === "community" && this.setupCodeRequired && !draft.setupToken) {
@@ -645,7 +649,7 @@ export class BrowserBridge implements DesktopBridge {
     return this.enrollmentSecretAction("enrollment_sign_in", "browser-enrollment-signin", "Sign in to Peppy", "Enter your account password.", "Sign in", [{ name: "adminPassword", label: "Password", autocomplete: "current-password" }], input);
   }
   public async enrollment_connect_shared_secret(input?: { vaultOwner?: string }): Promise<EnrollmentView> {
-    return this.enrollmentSecretAction("enrollment_connect_shared_secret", "browser-enrollment-secret", "Enter device secret", "Enter the vault shared secret provided by an owner.", "Connect", [{ name: "passphrase", label: "Vault shared secret", autocomplete: "one-time-code" }], input);
+    return this.enrollmentSecretAction("enrollment_connect_shared_secret", "browser-enrollment-secret", "Enter Vault key phrase", "Enter the Vault key phrase provided by an owner. This is not your account or admin password.", "Connect", [{ name: "passphrase", label: "Vault key phrase", autocomplete: "one-time-code" }], input);
   }
   public async enrollment_approve(): Promise<EnrollmentView> {
     return this.call<EnrollmentView>("enrollment_approve");

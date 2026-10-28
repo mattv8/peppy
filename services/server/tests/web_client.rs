@@ -3,7 +3,8 @@ use std::fs;
 use axum::{
     Router,
     body::Body,
-    http::{Request, StatusCode, header},
+    extract::Path,
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     routing::{get, post},
 };
 use http_body_util::BodyExt;
@@ -11,6 +12,7 @@ use peppy_server::web_client::{WebClientConfig, wrap};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use url::Url;
+use uuid::Uuid;
 
 fn app() -> (TempDir, Router) {
     app_for_host("App.Example.Test.")
@@ -329,6 +331,114 @@ async fn app_host_forwards_only_exact_enrollment_paths_with_method_unchanged() {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
         }
+    }
+}
+
+#[tokio::test]
+async fn app_host_forwards_computer_claims_to_the_canonical_api_router() {
+    let assets = assets();
+    let config = WebClientConfig::new(
+        "app.example.test".into(),
+        assets.path().into(),
+        Url::parse("https://api.example.test/v1").unwrap(),
+    )
+    .unwrap();
+    let canonical_id = Uuid::parse_str("0f8fad5b-d9cb-469f-a165-70867728950e").unwrap();
+    let inner = Router::new()
+        .route(
+            "/v1/enrollment/computers/{id}/status",
+            post(move |Path(id): Path<Uuid>, headers: HeaderMap| async move {
+                assert_eq!(id, canonical_id);
+                assert_eq!(headers[header::COOKIE], "web-session=claimant");
+                StatusCode::ACCEPTED
+            }),
+        )
+        .route(
+            "/v1/enrollment/computers/{id}/confirm",
+            post(move |Path(id): Path<Uuid>, headers: HeaderMap| async move {
+                assert_eq!(id, canonical_id);
+                assert_eq!(headers[header::COOKIE], "web-session=claimant");
+                StatusCode::CREATED
+            }),
+        )
+        // Owner creation remains a canonical API authorization decision, not an
+        // anonymous app-host capability.
+        .route(
+            "/v1/enrollment/computers",
+            post(|| async { StatusCode::UNAUTHORIZED }),
+        )
+        .fallback(|| async { StatusCode::NOT_FOUND });
+    let app = wrap(inner, config);
+    let id = canonical_id.to_string();
+
+    for (path, status) in [
+        (
+            format!("/v1/enrollment/computers/{id}/status"),
+            StatusCode::ACCEPTED,
+        ),
+        (
+            format!("/v1/enrollment/computers/{id}/confirm"),
+            StatusCode::CREATED,
+        ),
+    ] {
+        let mut claim = request(&path, Some("app.example.test"), "POST");
+        claim.headers_mut().insert(
+            header::COOKIE,
+            HeaderValue::from_static("web-session=claimant"),
+        );
+        let response = app.clone().oneshot(claim).await.unwrap();
+        assert_eq!(response.status(), status, "POST {path}");
+    }
+
+    let owner_create = app
+        .clone()
+        .oneshot(request(
+            "/v1/enrollment/computers",
+            Some("app.example.test"),
+            "POST",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(owner_create.status(), StatusCode::UNAUTHORIZED);
+
+    for (path, method, status) in [
+        (
+            format!("/v1/enrollment/computers/{id}/status"),
+            "GET",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            format!("/v1/enrollment/computers/{id}/approve"),
+            "POST",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/v1/enrollment/computers/{id}/status/extra"),
+            "POST",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/v1/enrollment/computers/not-a-uuid/status".into(),
+            "POST",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("/v1/enrollment/computers/{id}%2Fextra/status"),
+            "POST",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("/v1/enrollment/computers/{id}/%2e%2e/status"),
+            "POST",
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(&path, Some("app.example.test"), method))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
     }
 }
 

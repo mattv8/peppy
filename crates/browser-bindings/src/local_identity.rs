@@ -7,6 +7,7 @@
 //! wrapping epoch that differs from the persisted database active epoch; this module never resets
 //! either state.
 
+use peppy_client_core::{Client, Error as CoreError};
 use peppy_crypto::{
     CryptoError, EncryptedEnvelope, KeyProfile, KeyPurpose, VaultCheckHeader, decrypt,
     derive_purpose_key, derive_root_key, encrypt, verify_vault_check_header,
@@ -147,6 +148,27 @@ pub fn seal_identity(
     Ok(WrappedIdentity { metadata, envelope })
 }
 
+/// Seals the same v1 identity format using the active core's verified LocalWrap capability.
+/// The root and derived key remain core-owned.
+pub(crate) fn seal_identity_with_client(
+    metadata: IdentityMetadata,
+    secrets: &IdentitySecrets,
+    client: &Client,
+) -> Result<WrappedIdentity, IdentityError> {
+    validate_metadata(&metadata)?;
+    let aad = metadata_aad(&metadata)?;
+    let plaintext = encode_secrets(secrets);
+    let envelope = client
+        .seal_local_identity(&metadata.profile, &metadata.header, &aad, &plaintext)
+        .map_err(map_core_error)?;
+    if envelope.ciphertext.len() != CIPHERTEXT_BYTES
+        || encoded_len(&metadata, &envelope)? > MAX_ENCODED_BYTES
+    {
+        return Err(IdentityError::Invalid);
+    }
+    Ok(WrappedIdentity { metadata, envelope })
+}
+
 /// Opens an envelope only for the exact trusted Worker location origin.
 pub fn open_identity(
     serialized: &[u8],
@@ -234,6 +256,14 @@ fn decode_secrets(plaintext: &[u8]) -> Result<IdentitySecrets, IdentityError> {
             .to_owned(),
     );
     IdentitySecrets::from_parts(database_key, token)
+}
+
+fn map_core_error(error: CoreError) -> IdentityError {
+    match error {
+        CoreError::InvalidProfile | CoreError::IdentityMismatch => IdentityError::Invalid,
+        CoreError::KeysUnavailable => IdentityError::Unavailable,
+        _ => IdentityError::Unavailable,
+    }
 }
 
 fn map_crypto_error(error: CryptoError) -> IdentityError {
@@ -403,7 +433,12 @@ fn encoded_len(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peppy_client_core::{Client, ClientConfig, DatabaseKey, DeviceId, VaultId};
     use peppy_crypto::create_vault_check_header;
+    use peppy_crypto::enrollment::{
+        EnrollmentContext, EnrollmentPurpose, EnrollmentRole, HandoffRootPackage, TransferKeypair,
+        open_handoff, seal_handoff,
+    };
     use std::sync::OnceLock;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -782,5 +817,84 @@ mod tests {
         reopened
             .secrets()
             .with_device_token(|token| assert_eq!(token, TOKEN));
+    }
+    #[test]
+    fn verified_computer_handoff_seals_restartable_identity_without_a_phrase() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let profile = KeyProfile::new(vault_id, 7).unwrap();
+        let root = derive_root_key(PHRASE, &profile).unwrap();
+        let header = create_vault_check_header(&root, profile.clone()).unwrap();
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let context = EnrollmentContext {
+            purpose: EnrollmentPurpose::Computer,
+            canonical_origin: "https://peppy.test".into(),
+            vault_id,
+            fingerprint: peppy_crypto::profile_fingerprint_bytes(&profile).unwrap(),
+            key_epoch: profile.key_epoch,
+            enrollment_id: Uuid::new_v4(),
+            server_nonce: [2; 32],
+            owner_transfer_public_key: sender.public_key(),
+            recipient_transfer_public_key: recipient.public_key(),
+            recipient_signing_public_key: [3; 32],
+            device_id,
+            credential_digest: [4; 32],
+            role: EnrollmentRole::Device,
+        };
+        let package = HandoffRootPackage::new(root, profile.clone(), header.clone()).unwrap();
+        let encrypted = seal_handoff(&sender, &recipient.public_key(), &context, package).unwrap();
+        let handoff = open_handoff(&recipient, &sender.public_key(), &context, &encrypted).unwrap();
+        let client = Client::open(
+            ClientConfig {
+                database_path: directory.path().join("client.db"),
+                vault_id: VaultId(vault_id),
+                device_id: DeviceId(device_id),
+            },
+            DatabaseKey::new(&[42; 32]).unwrap(),
+        )
+        .unwrap();
+        client.import_verified_handoff(handoff).unwrap();
+
+        let metadata = IdentityMetadata {
+            version: VERSION,
+            origin: "https://peppy.test".into(),
+            vault_id,
+            device_id,
+            role: DeviceRole::Device,
+            profile,
+            header,
+        };
+        let attacker_root = derive_root_key("attacker phrase", &metadata.profile).unwrap();
+        let mut attacker_header = metadata.clone();
+        attacker_header.header =
+            create_vault_check_header(&attacker_root, metadata.profile.clone()).unwrap();
+        assert!(seal_identity_with_client(attacker_header, &secrets(), &client).is_err());
+
+        let foreign_profile = KeyProfile::new(Uuid::new_v4(), 7).unwrap();
+        let foreign_root = derive_root_key(PHRASE, &foreign_profile).unwrap();
+        let mut foreign = metadata.clone();
+        foreign.vault_id = foreign_profile.vault_id;
+        foreign.profile = foreign_profile.clone();
+        foreign.header = create_vault_check_header(&foreign_root, foreign_profile).unwrap();
+        assert!(seal_identity_with_client(foreign, &secrets(), &client).is_err());
+
+        let next_profile = KeyProfile::new(vault_id, 8).unwrap();
+        let next_root = derive_root_key(PHRASE, &next_profile).unwrap();
+        let mut next_epoch = metadata.clone();
+        next_epoch.profile = next_profile.clone();
+        next_epoch.header = create_vault_check_header(&next_root, next_profile).unwrap();
+        assert!(seal_identity_with_client(next_epoch, &secrets(), &client).is_err());
+
+        let wrapped = seal_identity_with_client(metadata.clone(), &secrets(), &client).unwrap();
+        let serialized = serde_json::to_vec(&wrapped).unwrap();
+        assert_eq!(
+            open_identity(&serialized, "https://peppy.test", PHRASE)
+                .unwrap()
+                .metadata(),
+            &metadata
+        );
+        assert!(seal_identity_with_client(metadata, &secrets(), &client).is_err());
     }
 }

@@ -30,7 +30,13 @@ This reference records non-obvious Peppy domain constraints. Related references:
   are explicit verified key-installation paths; a handoff also binds the
   enrollment context and recipient identity before pinning its profile and
   epoch. Import initializes an absent active epoch; it is not an implicit
-  cutover from an already-active epoch. See [key lifecycle](../crates/client-core/src/lib.rs).
+  cutover from an already-active epoch. On browser, a verified handoff import
+  also grants a one-shot core `LocalWrap` capability (`seal_local_identity`) that
+  seals the same encrypted identity checkpoint format. It creates no independent
+  persistent plaintext key, and browser restart still requires the vault
+  passphrase (`open_identity`); do not describe the handoff path as restart
+  recovery. See [key lifecycle](../crates/client-core/src/lib.rs) and
+  [browser identity](../crates/browser-bindings/src/local_identity.rs).
 - Phone transfer approval on desktop and browser uses the active Rust client's
   verified root handoff capability, without collecting an approval passphrase.
   Passphrase/header unlock and owner-role `VerifiedHandoff` import establish it;
@@ -152,8 +158,9 @@ This reference records non-obvious Peppy domain constraints. Related references:
   retries; do not put it in logs, process arguments, Tauri IPC, Android saved
   state, or browser local/session storage. Recover protected prepared material
   after a restart using the saved secret, not a silently regenerated phrase.
-- Enrollment has one `connect_phone` QR: version, purpose, canonical origin,
-  invitation secret, and transfer public key. The invitation secret stays on
+- Phone admission uses the `connect_phone` QR, shown by the existing owner and
+  scanned by the new phone: version, purpose, canonical origin, invitation
+  secret, and transfer public key. The invitation secret stays on
   the two clients: the claimant supplies an HMAC-bound claim, the owner checks
   it locally, both compare the derived SAS, and the owner explicitly approves.
   The approved result is a `VerifiedHandoff` for transfer or a local shared-
@@ -164,6 +171,24 @@ This reference records non-obvious Peppy domain constraints. Related references:
   before accepting any server claim or transcript. Matching a server-supplied
   key to a server-supplied transcript is not authentication. A short SAS does
   not replace either endpoint's out-of-band key/claim verification.
+- Computer admission uses a separate `connect_computer` QR, shown by the new
+  unconnected desktop or browser recipient and scanned by an existing owner
+  phone. The recipient generates its invitation secret, transfer key, and
+  identity commitment before any network request, and renders them in the QR
+  payload (`ComputerPairingQr`). That rendered payload necessarily includes the
+  invitation secret, so do not claim the secret never reaches the renderer's QR
+  DTO. The owner's create request carries the claim-token digest, never the QR
+  secret or claim token. The owner
+  response is authenticated by `computer_owner_proof`, a MAC keyed from the
+  QR-only secret (`computer_enrollment_owner_proof_key`, distinct from the
+  server claim token). It covers the full transcript, the owner device ID,
+  granted role, transfer nonce, and ciphertext hash. The recipient verifies it
+  with `verify_computer_owner_proof` before accepting the owner key or opening
+  the handoff, and only then signs confirmation. The owner must send its actual
+  enrolled device ID (`configure_computer_owner_device`), which the server
+  authorizes. A gateway device never becomes owner through this flow. The
+  granted role is `device`; the recipient gets no owner or gateway authority
+  from it. Transfer private keys and the root stay in Rust and are not rendered.
 - Owner-instance claim retries and phone-invitation claim retries differ. An
   owner claim can replay the same protected operation and request after password
   verification; repeating a phone invitation claim cannot recover a lost claim
@@ -228,9 +253,11 @@ This reference records non-obvious Peppy domain constraints. Related references:
   Authenticate the account and bind its vault before scoped database reads;
   a valid device bearer alone must not bypass hosted enrollment policy.
 - First setup uses `/v1/instance/*`; device admission uses `/v1/enrollment/*`.
-  The old `/v1/pairing` routes, reversed computer-join protocol, and
-  `create-owner` CLI are removed. Keep the single QR in onboarding or the main
-  Add phone flow, never Settings; do not add a Save QR action. Owner phones
+  The old `/v1/pairing` routes and `create-owner` CLI are removed. Each
+  enrollment screen shows one QR for its own flow: `connect_phone` in onboarding
+  or the main Add phone flow, and `connect_computer` on the unconnected
+  computer's setup. Never show either QR in Settings, and do not add a Save QR
+  action. Owner phones
   (desktop, Android, iOS) share the Rust owner view in
   [hosted-client enrollment](../crates/hosted-client/src/newenrollment.rs)
   (`owner_phone_view`): it validates status against the active invitation,
@@ -238,7 +265,7 @@ This reference records non-obvious Peppy domain constraints. Related references:
   compare invitation id and that digest before and after any awaited secret
   prompt and require the owner's explicit codes-match confirmation. Rotate a
   waiting invitation only near expiry or when the requested method changes;
-  **Enter shared secret on phone** switches a waiting invitation to the
+  **Enter Vault key phrase on phone** switches a waiting invitation to the
   shared-secret method before revealing the secret. Once the invitation is
   approved, stop treating it as rotatable: the server can report an approved
   invitation as expired before the phone confirms, and that must not offer

@@ -557,7 +557,12 @@ fn route_method(operation: EnrollmentOperation) -> Method {
         | EnrollmentOperation::ManualComplete
         | EnrollmentOperation::CreateInvitation
         | EnrollmentOperation::ApproveInvitation
-        | EnrollmentOperation::ConfirmInvitation => Method::POST,
+        | EnrollmentOperation::ConfirmInvitation
+        | EnrollmentOperation::CreateComputerEnrollment
+        | EnrollmentOperation::ReadComputerEnrollment
+        | EnrollmentOperation::ApproveComputerEnrollment
+        | EnrollmentOperation::ConfirmComputerEnrollment => Method::POST,
+        EnrollmentOperation::CancelComputerEnrollment => Method::DELETE,
     }
 }
 async fn authorize_hosted(

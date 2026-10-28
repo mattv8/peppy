@@ -43,7 +43,7 @@ semantic Kotlin and Swift names.
   the private claim header is not UI data or a general HTTP capability. See
   [Android enrollment host](../apps/android/app/src/main/java/dev/peppy/mobile/EnrollmentHost.kt)
   and [iOS enrollment host](../apps/ios/PeppyNative/EnrollmentHost.swift).
-- The phone UI scans one `connect_phone` code and shows the SAS for the owner to
+- The phone UI scans the `connect_phone` code and shows the SAS for the owner to
   compare. A transfer pairing confirms automatically after owner approval and
   advances only after verified native installation; a shared-secret pairing
   still requires the secret and an explicit submit.
@@ -60,20 +60,43 @@ semantic Kotlin and Swift names.
 
 - Offer **Add phone** only when the `owner` role's vault keys are unlocked,
   on the Account tab on both platforms, outside the separate Settings
-  screen. Hide or disable the entry otherwise. Show the QR, then the locally
-  derived SAS with an owner-specific codes-match control (`owner_phone_*` copy,
-  not recipient pairing copy) before **Confirm and approve**.
+  screen. Hide or disable the entry otherwise. Show the `connect_phone` QR, then
+  the locally derived SAS with an owner-specific codes-match control
+  (`owner_phone_*` copy, not recipient pairing copy) before **Confirm and
+  approve**.
 - After approval, retain approved-waiting until the phone connects, even if a
   later status reports expiry; offer neither a replacement nor **Start again**.
   Denied or unapproved-expired states can restart. Invitation rotation and
   cancellation rules are in [domain guidance](AGENTS.md#hosted-enrollment-and-pairing).
-- Approval uses the stored vault secret; when it is missing, prompt once with
+- Approval uses the stored Vault key phrase; when it is missing, prompt once with
   the "not your admin password" copy and save only after verification. **Enter
-  shared secret on phone** switches the waiting invitation to the shared-secret
-  method, then reveals the secret only after device authentication, transiently,
-  never in saved UI state, and clears it when the app leaves the foreground. See
-  [Android owner flow](../apps/android/app/src/main/java/dev/peppy/mobile/OwnerPhoneApprovalScreen.kt)
+  Vault key phrase on phone** switches the waiting `connect_phone` invitation to
+  the shared-secret method, then reveals the Vault key phrase only after device
+  authentication, transiently, never in saved UI state, and clears it when the
+  app leaves the foreground. This control does not apply to `connect_computer`.
+  See [Android owner flow](../apps/android/app/src/main/java/dev/peppy/mobile/OwnerPhoneApprovalScreen.kt)
   and [iOS owner flow](../apps/ios/PeppyMobile/OwnerPhoneApprovalView.swift).
+
+### Computer approval
+
+- Owner phones may scan a `connect_computer` QR from the same owner-only entry
+  point as **Add phone**: the `owner` role's vault keys must be unlocked, and the
+  control is hidden or disabled otherwise. Never place it in Settings. The
+  camera starts only from the explicit scan action. Gateway phones cannot
+  approve.
+- Pass the scanned payload to Rust, and configure the owner's actual enrolled
+  device ID first with `configure_owner_computer_device` from the protected
+  credential. Never use a generated or placeholder identifier. Create requests
+  come from `owner_computer_create_request`.
+- Show the locally derived SAS with the owner's explicit codes-match control,
+  then approve with `approve_owner_computer_request`. Approval uses the stored
+  Vault key phrase, with the same missing-secret prompt and verification rules
+  as `connect_phone`. Nothing here offers **Enter Vault key phrase on phone**.
+- After approval, show approved-waiting until the computer completes. Offer
+  neither a replacement nor **Start again** for an approved invitation.
+  Denied or unapproved-expired states may restart.
+- The computer's QR payload necessarily includes its invitation secret. Do not
+  describe that secret as absent from the renderer.
 
 ### Community and hosted setup
 

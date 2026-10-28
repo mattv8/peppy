@@ -1,6 +1,7 @@
 use super::*;
 use peppy_client_core::{
-    Cursor, EnvelopeId, IngestResult, RawSnapshotRecord, SnapshotProgress, SnapshotPurpose,
+    Cursor, EnvelopeId, IngestResult, MAX_REPLAY_PAGE, RawReplayRecord, RawSnapshotRecord,
+    SnapshotProgress, SnapshotPurpose,
 };
 
 const MAX_BATCH: usize = 1_000;
@@ -14,6 +15,8 @@ pub(super) fn handles(command: &str) -> bool {
             | "pending_outbox"
             | "ack_outbox"
             | "ingest"
+            | "ingest_batch"
+            | "sync_progress"
             | "key_status"
             | "activate_epoch"
             | "seal_pending"
@@ -37,6 +40,8 @@ impl BrowserCore {
             "pending_outbox" => self.pending_outbox(args),
             "ack_outbox" => self.ack_outbox(args),
             "ingest" => self.ingest(args),
+            "ingest_batch" => self.ingest_batch(args),
+            "sync_progress" => self.sync_progress(),
             "key_status" => self.key_status(),
             "activate_epoch" => self.activate_epoch(args),
             "seal_pending" => self.seal_pending(args),
@@ -111,6 +116,41 @@ impl BrowserCore {
             .ingest_raw(&envelope_json, cursor)
             .map_err(core)?;
         Ok(ingest_result_view(result))
+    }
+
+    fn ingest_batch(&self, args: Value) -> Result<Value, Failure> {
+        let events = args
+            .get("events")
+            .and_then(Value::as_array)
+            .filter(|events| !events.is_empty() && events.len() <= MAX_REPLAY_PAGE)
+            .ok_or_else(invalid)?;
+        let records = events
+            .iter()
+            .map(|event| {
+                let cursor = parse_replay_cursor(required_string(event, "cursor")?)?;
+                let envelope = event.get("envelope").ok_or_else(invalid)?;
+                Ok(RawReplayRecord {
+                    cursor,
+                    envelope_json: serde_json::to_vec(envelope).map_err(|_| invalid())?,
+                })
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        let report = self.client()?.ingest_raw_batch(&records).map_err(core)?;
+        Ok(json!({
+            "journaled": report.journaled,
+            "duplicate": report.duplicate,
+            "quarantined": report.quarantined,
+            "receiveCursor": report.receive_cursor.0.to_string(),
+        }))
+    }
+
+    fn sync_progress(&self) -> Result<Value, Failure> {
+        let progress = self.client()?.replay_progress().map_err(core)?;
+        Ok(json!({
+            "receivedThrough": progress.received_through.0.to_string(),
+            "processedThrough": progress.processed_through.0.to_string(),
+            "waitingForKeys": progress.waiting_for_keys.to_string(),
+        }))
     }
 
     fn key_status(&self) -> Result<Value, Failure> {
@@ -252,6 +292,11 @@ fn parse_cursor(value: &str) -> Result<Cursor, Failure> {
     Ok(Cursor(parse_u64(value)?))
 }
 
+fn parse_replay_cursor(value: &str) -> Result<Cursor, Failure> {
+    let cursor = parse_cursor(value)?;
+    (cursor.0 > 0).then_some(cursor).ok_or_else(invalid)
+}
+
 fn parse_u32(value: &str) -> Result<u32, Failure> {
     canonical_decimal(value)?.parse().map_err(|_| invalid())
 }
@@ -356,6 +401,106 @@ mod tests {
         assert_eq!(
             response(&mut core, "receive_cursor", json!({}))["value"]["cursor"],
             "2"
+        );
+    }
+
+    #[test]
+    fn ingest_batch_quarantines_malformed_records_and_reports_the_contiguous_frontier() {
+        let mut core = open_core();
+        let result = response(
+            &mut core,
+            "ingest_batch",
+            json!({"events": [
+                {"cursor": "2", "envelope": {}},
+                {"cursor": "3", "envelope": {}}
+            ]}),
+        );
+        assert_eq!(
+            result["value"],
+            json!({
+                "journaled": 0,
+                "duplicate": 0,
+                "quarantined": 2,
+                "receiveCursor": "0"
+            })
+        );
+
+        let result = response(
+            &mut core,
+            "ingest_batch",
+            json!({"events": [{"cursor": "1", "envelope": {}}]}),
+        );
+        assert_eq!(result["value"]["receiveCursor"], "3");
+    }
+
+    #[test]
+    fn ingest_batch_conflict_rolls_back_the_entire_page() {
+        let mut core = open_core();
+        assert_eq!(
+            response(
+                &mut core,
+                "ingest_batch",
+                json!({"events": [{"cursor": "2", "envelope": {}}]}),
+            )["ok"],
+            true
+        );
+
+        let result = response(
+            &mut core,
+            "ingest_batch",
+            json!({"events": [
+                {"cursor": "1", "envelope": {}},
+                {"cursor": "2", "envelope": []}
+            ]}),
+        );
+        assert_eq!(result["error"]["code"], "core");
+        assert_eq!(
+            response(&mut core, "receive_cursor", json!({}))["value"]["cursor"],
+            "0"
+        );
+
+        let result = response(
+            &mut core,
+            "ingest_batch",
+            json!({"events": [{"cursor": "1", "envelope": {}}]}),
+        );
+        assert_eq!(result["value"]["receiveCursor"], "2");
+    }
+
+    #[test]
+    fn ingest_batch_rejects_noncanonical_cursors_and_out_of_bounds_event_counts() {
+        let mut core = open_core();
+        for cursor in [
+            json!(1),
+            json!("01"),
+            json!("0"),
+            json!("18446744073709551616"),
+        ] {
+            let result = response(
+                &mut core,
+                "ingest_batch",
+                json!({"events": [{"cursor": cursor, "envelope": {}}]}),
+            );
+            assert_eq!(result["error"]["code"], "invalid-request");
+        }
+
+        let events = (1..=201)
+            .map(|cursor| json!({"cursor": cursor.to_string(), "envelope": {}}))
+            .collect::<Vec<_>>();
+        let result = response(&mut core, "ingest_batch", json!({"events": events}));
+        assert_eq!(result["error"]["code"], "invalid-request");
+    }
+
+    #[test]
+    fn sync_progress_returns_decimal_string_dto() {
+        let mut core = open_core();
+        assert_eq!(
+            response(&mut core, "sync_progress", json!({}))["value"],
+            json!({
+                "receivedThrough": "0",
+                "processedThrough": "0",
+                "waitingForKeys": "0"
+            })
         );
     }
 

@@ -33,6 +33,7 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
     let lock = NSLock()
     /// Bearer tokens the fake accepts (the real server maps each token to one device).
     var tokens: Set<String>
+    var role = "device"
     var log: [(cursor: UInt64, envelope: [String: Any])] = []
     /// Replay requests below this cursor answer `409 resync_required`.
     var replayFloor: UInt64 = 0
@@ -174,7 +175,7 @@ final class FakeServer: HTTPTransport, @unchecked Sendable {
         [
             "vault_id": vaultId,
             "device_id": deviceId,
-            "role": "device",
+            "role": role,
             "key_epoch": 1,
             "profile_fingerprint": "unused",
             "public_key_profile": try! JSONSerialization.jsonObject(with: Data(material.profileJson.utf8)),

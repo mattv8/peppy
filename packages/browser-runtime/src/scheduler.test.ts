@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BrowserScheduler } from "./scheduler.js";
 import { transferMedia } from "./scheduler-media.js";
+import { CoreRejectedError } from "./core.js";
 
 describe("BrowserScheduler", () => {
   it("acknowledges an outbox envelope only after its byte-identical upload succeeds", async () => {
@@ -206,7 +207,7 @@ describe("BrowserScheduler", () => {
         return {};
       }, upload: async () => undefined, download: async () => new Uint8Array(),
     }).poll();
-    replayed = mutations.includes("ingest");
+    replayed = mutations.includes("ingest_batch");
     expect(mutations).not.toContain("ack_outbox");
     expect(replayed).toBe(true);
   });
@@ -418,6 +419,362 @@ describe("BrowserScheduler", () => {
     expect(scheduler.epochStatus?.state).toBe("current");
     expect(woke).toBe(1);
   });
+
+  it("checkpoints one 100-event replay page before applying it", async () => {
+    const mutations: [string, Record<string, unknown>][] = [];
+    const events = Array.from({ length: 100 }, (_, index) => ({ cursor: String(index + 1), envelope: { index } }));
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string, args: Record<string, unknown>) => {
+        mutations.push([command, args]);
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events, next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }).poll();
+
+    const ingest = mutations.filter(([command]) => command === "ingest_batch");
+    expect(ingest).toEqual([["ingest_batch", { events }]]);
+    expect(mutations.findIndex(([command]) => command === "apply_pending")).toBeGreaterThan(mutations.findIndex(([command]) => command === "ingest_batch"));
+  });
+
+  it("publishes exact replay cursors only after durable ingest and apply checkpoints", async () => {
+    const mutations: string[] = [];
+    const progress = [] as Array<{ phase: string; receivedThrough: string; processedThrough: string; targetHighWater?: string }>;
+    let applied = false;
+    let applySteps = 0;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "sync_progress") return applied
+          ? { receivedThrough: "2", processedThrough: "2", waitingForKeys: "0" }
+          : { receivedThrough: "2", processedThrough: "0", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string) => {
+        mutations.push(command);
+        if (command === "apply_pending") {
+          applySteps += 1;
+          if (applySteps > 1) return { applied: 0, quarantined: 0, drained: 0 };
+          applied = true;
+          return { applied: 2, quarantined: 0, drained: 0 };
+        }
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }, { cursor: "2", envelope: {} }], high_water_cursor: "2", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value) }).poll();
+
+    expect(mutations.slice(0, 2)).toEqual(["ingest_batch", "apply_pending"]);
+    expect(progress).toEqual([
+      { phase: "receiving", receivedThrough: "2", processedThrough: "0", targetHighWater: "2" },
+      { phase: "current", receivedThrough: "2", processedThrough: "2", targetHighWater: "2" },
+    ]);
+  });
+
+  it("reports waiting-for-keys without claiming replay is current", async () => {
+    const progress: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "sync_progress") return { receivedThrough: "1", processedThrough: "0", waitingForKeys: "1" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string) => command === "apply_pending"
+        ? { applied: 0, quarantined: 0, drained: 0 }
+        : { applied: 0, quarantined: 0, drained: 0 },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }], high_water_cursor: "1", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value.phase) }).poll();
+
+    expect(progress).toEqual(["waitingForKeys"]);
+  });
+
+  it("settles an empty caught-up page to current instead of leaving receiving", async () => {
+    const progress: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "5" };
+        if (command === "sync_progress") return { receivedThrough: "5", processedThrough: "5", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [], high_water_cursor: "5", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value.phase) }).poll();
+
+    expect(progress).toEqual(["current"]);
+  });
+
+  it("settles a duplicates-only page to current after its ingest checkpoint", async () => {
+    const mutations: string[] = [];
+    const progress: Array<{ phase: string; receivedThrough: string; processedThrough: string }> = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "2" };
+        if (command === "sync_progress") return { receivedThrough: "2", processedThrough: "2", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string) => {
+        mutations.push(command);
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }, { cursor: "2", envelope: {} }], high_water_cursor: "2", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value) }).poll();
+
+    expect(mutations).toContain("ingest_batch");
+    expect(progress.map(value => value.phase)).toEqual(["receiving", "current"]);
+    expect(progress.at(-1)).toEqual({ phase: "current", receivedThrough: "2", processedThrough: "2", targetHighWater: "2" });
+  });
+
+  it("settles a quarantine-only page to current once apply reports the work done", async () => {
+    const progress: string[] = [];
+    let applyCalls = 0;
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "1" };
+        if (command === "sync_progress") return { receivedThrough: "1", processedThrough: "1", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string) => {
+        if (command !== "apply_pending") return {};
+        applyCalls += 1;
+        return applyCalls === 1 ? { applied: 0, quarantined: 1, drained: 0 } : { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }], high_water_cursor: "1", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value.phase) }).poll();
+
+    expect(applyCalls).toBeGreaterThan(0);
+    expect(progress.at(-1)).toBe("current");
+  });
+
+  it("keeps the page applying while pending apply work remains, even when frontiers match the target", async () => {
+    const progress: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "2" };
+        if (command === "sync_progress") return { receivedThrough: "2", processedThrough: "2", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: true };
+        return [];
+      },
+      mutate: async () => ({ applied: 0, quarantined: 0, drained: 0 }),
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }, { cursor: "2", envelope: {} }], high_water_cursor: "2", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value.phase) }).poll();
+
+    expect(progress).toEqual(["receiving", "applying"]);
+  });
+
+  it("never publishes a post-checkpoint phase when apply fails after ingest", async () => {
+    const progress: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "sync_progress") return { receivedThrough: "1", processedThrough: "1", waitingForKeys: "0" };
+        if (command === "sync_work_status") return { pendingApply: false };
+        return [];
+      },
+      mutate: async (command: string) => {
+        if (command === "apply_pending") throw new Error("apply failed");
+        return {};
+      },
+    };
+    await expect(new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }], high_water_cursor: "1", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value.phase) }).poll()).resolves.toEqual({ connection: "error" });
+
+    expect(progress).toEqual(["receiving"]);
+  });
+
+  it("splits replay batches by encoded dispatch size without reordering events", async () => {
+    const batches: unknown[][] = [];
+    const events = Array.from({ length: 3 }, (_, index) => ({ cursor: String(index + 1), envelope: { payload: "x".repeat(3_000_000) } }));
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [] } : command === "receive_cursor" ? { cursor: "0" } : command === "sync_work_status" ? { pendingApply: false } : [],
+      mutate: async (command: string, args: Record<string, unknown>) => {
+        if (command === "ingest_batch") batches.push(args.events as unknown[]);
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events, next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(batches.map(batch => batch.length)).toEqual([2, 1]);
+    expect(batches.flat().map(event => (event as { cursor: string }).cursor)).toEqual(["1", "2", "3"]);
+    for (const batch of batches) {
+      expect(new TextEncoder().encode(JSON.stringify({ command: "ingest_batch", args: { events: batch } })).byteLength).toBeLessThanOrEqual(8 * 1024 * 1024 - 64 * 1024);
+    }
+  });
+
+  it.each([
+    ["ASCII", (n: number) => "x".repeat(n)],
+    ["multi-byte UTF-8", (n: number) => "é".repeat(Math.floor(n / 2)) + "x".repeat(n % 2)],
+  ])("packs replay batches to the exact dispatch byte boundary (%s)", async (_label, payloadOf) => {
+    const cap = 8 * 1024 * 1024 - 64 * 1024;
+    const encoder = new TextEncoder();
+    const dispatchBytes = (events: unknown[]) => encoder.encode(JSON.stringify({ command: "ingest_batch", args: { events } })).byteLength;
+    const eventWithBytes = (cursor: string, target: number) => {
+      const base = encoder.encode(JSON.stringify({ cursor, envelope: { payload: "" } })).byteLength;
+      return { cursor, envelope: { payload: payloadOf(target - base) } };
+    };
+    const emptyBytes = dispatchBytes([]);
+    const runWith = async (events: unknown[]) => {
+      const batches: unknown[][] = [];
+      const session = {
+        hydrate: async () => undefined,
+        query: async (command: string) => command === "pending_outbox" ? { envelopes: [] } : command === "receive_cursor" ? { cursor: "0" } : command === "sync_work_status" ? { pendingApply: false } : [],
+        mutate: async (command: string, args: Record<string, unknown>) => {
+          if (command === "ingest_batch") batches.push(args.events as unknown[]);
+          return { applied: 0, quarantined: 0, drained: 0 };
+        },
+      };
+      await new BrowserScheduler(session, {
+        json: async path => path.startsWith("/v1/events") ? { events, next_after: null } : {},
+        upload: async () => undefined,
+        download: async () => new Uint8Array(),
+      }).poll();
+      return batches;
+    };
+
+    // Two events whose exact dispatch body (wrapper + events + one comma) lands precisely on the cap.
+    const total = cap - emptyBytes;
+    const first = eventWithBytes("1", Math.floor((total - 1) / 2));
+    const second = eventWithBytes("2", total - 1 - Math.floor((total - 1) / 2));
+    const fits = [first, second];
+    const fitBatches = await runWith(fits);
+    expect(fitBatches).toEqual([fits]);
+    expect(dispatchBytes(fitBatches[0])).toBe(cap);
+
+    // One byte more must split without reordering.
+    const overBy = eventWithBytes("2", total - 1 - Math.floor((total - 1) / 2) + 1);
+    const splitBatches = await runWith([first, overBy]);
+    expect(splitBatches).toEqual([[first], [overBy]]);
+    for (const batch of splitBatches) expect(dispatchBytes(batch)).toBeLessThanOrEqual(cap);
+  });
+
+  it("caps replay batches at 100 events even when bytes remain", async () => {
+    const events = Array.from({ length: 101 }, (_, index) => ({ cursor: String(index + 1), envelope: { payload: "é" } }));
+    const batches: unknown[][] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [] } : command === "receive_cursor" ? { cursor: "0" } : command === "sync_work_status" ? { pendingApply: false } : [],
+      mutate: async (command: string, args: Record<string, unknown>) => {
+        if (command === "ingest_batch") batches.push(args.events as unknown[]);
+        return { applied: 0, quarantined: 0, drained: 0 };
+      },
+    };
+    await new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events, next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }).poll();
+
+    expect(batches.map(batch => batch.length)).toEqual([100, 1]);
+    expect(batches.flat()).toEqual(events);
+  });
+
+  it("rejects an oversized replay event before a checkpoint or apply", async () => {
+    const mutations: string[] = [];
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => command === "pending_outbox" ? { envelopes: [] } : command === "receive_cursor" ? { cursor: "0" } : [],
+      mutate: async (command: string) => { mutations.push(command); return {}; },
+    };
+    const scheduler = new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: { payload: "x".repeat(9_000_000) } }], next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    });
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "error" });
+    expect(mutations).not.toContain("ingest_batch");
+    expect(mutations).not.toContain("apply_pending");
+  });
+
+  it.each([new CoreRejectedError("core"), new Error("checkpoint failed")])("does not apply or observe history after a failed batch checkpoint", async failure => {
+    const mutations: string[] = [];
+    const progress: unknown[] = [];
+    const attemptId = "018f2c5e-6a3b-7c4d-8e5f-0123456789ab";
+    const session = {
+      hydrate: async () => undefined,
+      query: async (command: string) => {
+        if (command === "pending_outbox") return { envelopes: [] };
+        if (command === "receive_cursor") return { cursor: "0" };
+        if (command === "_worker_history_search_sync_context") return {};
+        return [];
+      },
+      mutate: async (command: string) => {
+        mutations.push(command);
+        if (command === "ingest_batch") throw failure;
+        return {};
+      },
+    };
+    const scheduler = new BrowserScheduler(session, {
+      json: async path => path.startsWith("/v1/events") ? { events: [{ cursor: "1", envelope: {} }], high_water_cursor: "1", next_after: null } : {},
+      upload: async () => undefined,
+      download: async () => new Uint8Array(),
+    }, { onProgress: value => progress.push(value) });
+    scheduler.trackHistorySearch(attemptId);
+
+    await expect(scheduler.poll()).resolves.toEqual({ connection: "error" });
+    expect(mutations).not.toContain("apply_pending");
+    expect(mutations).not.toContain("_worker_observe_history_search_sync");
+    expect(progress).toEqual([]);
+  });
 });
 
 it("replays and applies server events after a photo reference request fails", async () => {
@@ -460,7 +817,7 @@ it("replays and applies server events after a photo reference request fails", as
   };
 
   await expect(new BrowserScheduler(session, transport).poll()).resolves.toEqual({ connection: "connected" });
-  expect(mutations).toContain("ingest");
+  expect(mutations).toContain("ingest_batch");
   expect(mutations).toContain("apply_pending");
 });
 
@@ -501,7 +858,7 @@ it("replays and applies server events when a photo release proof requests resync
   };
 
   await expect(new BrowserScheduler(session, transport).poll()).resolves.toEqual({ connection: "connected" });
-  expect(mutations).toContain("ingest");
+  expect(mutations).toContain("ingest_batch");
   expect(mutations).toContain("apply_pending");
 });
 

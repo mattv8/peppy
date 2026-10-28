@@ -162,6 +162,18 @@ public struct EnrollmentHost: Sendable {
         _ = try await exchange(method: "DELETE", path: "/v1/enrollment/invitations/\(try enrollmentID(id))", body: nil, headers: ownerEnrollmentHeaders(credential))
     }
 
+    public func createComputerEnrollment(_ request: String, credential: String) async throws -> String {
+        try await exchange(method: "POST", path: "/v1/enrollment/computers", body: request, headers: ownerEnrollmentHeaders(credential))
+    }
+
+    public func approveComputerEnrollment(id: String, request: String, credential: String) async throws -> String {
+        try await exchange(method: "POST", path: "/v1/enrollment/computers/\(try enrollmentID(id))/approve", body: request, headers: ownerEnrollmentHeaders(credential))
+    }
+
+    public func cancelComputerEnrollment(id: String, credential: String) async throws {
+        _ = try await exchange(method: "DELETE", path: "/v1/enrollment/computers/\(try enrollmentID(id))", body: nil, headers: ownerEnrollmentHeaders(credential))
+    }
+
     /// Runs a Rust-produced, claimant-authenticated descriptor. Its restricted
     /// grammar prevents the opaque claim secret from becoming a general HTTP
     /// capability or a UI-visible value.

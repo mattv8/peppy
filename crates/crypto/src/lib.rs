@@ -1,4 +1,5 @@
 //! Generic cryptographic building blocks. Protocol envelope integration is deliberately external.
+pub mod computer_enrollment;
 pub mod enrollment;
 pub mod filesystem;
 pub mod passphrase;
