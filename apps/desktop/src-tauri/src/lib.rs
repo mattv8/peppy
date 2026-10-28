@@ -703,7 +703,11 @@ async fn load_state(
         return Ok(empty_snapshot(origin));
     };
     session.consume_deferred_follow_up();
-    let preferences = state.notifications.preferences();
+    let preferences = {
+        let session = session.clone();
+        let settings = state.notifications.clone();
+        blocking(move || session.notification_preferences(&settings)).await?
+    };
     let (mut snapshot, deferred) = load_state_for_window_with_options(
         &state,
         window.label(),
@@ -3761,14 +3765,22 @@ async fn mark_notifications_seen(
 }
 
 #[tauri::command]
-fn set_notification_preferences(
+async fn set_notification_preferences(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     preferences: NotificationPreferences,
 ) -> BridgeResult<()> {
-    let _operation = admit_update_operation(&state)?;
+    let operation = admit_update_operation(&state)?;
     require_main(window.label())?;
-    state.notifications.set_preferences(preferences)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let client = session.client.clone();
+    blocking(move || {
+        client
+            .set_notification_preferences(preferences)
+            .map_err(core_error)
+    })
+    .await?;
+    session.notify();
     (state.notifier)();
     Ok(())
 }
@@ -4556,6 +4568,9 @@ pub fn run() {
                             Err(_) => Ok(false),
                         };
                         // `true` means this bounded drain acknowledged candidates and more remain.
+                        if let Err(error) = &more {
+                            eprintln!("peppy: notification banner drain failed: {}", error.code);
+                        }
                         if matches!(more, Ok(true)) {
                             let _ = handle.emit(STATE_EVENT, ());
                         }

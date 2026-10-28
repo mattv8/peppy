@@ -20,9 +20,77 @@ const check = (status: NotificationCheck["status"], extra: Partial<NotificationC
   ({ status, testSent: status !== "denied", canOpenSettings: true, ...extra });
 const props = () => ({
   notifications: [notification], filters: [filter], sources: [{ id: "one", name: "Pixel" }],
-  preferences, headsSupported: true, onPreferences: vi.fn().mockResolvedValue(undefined),
+  preferences, headsSupported: true, locked: false, onPreferences: vi.fn().mockResolvedValue(undefined),
   onMute: vi.fn().mockResolvedValue(undefined), onPermission: vi.fn().mockResolvedValue(undefined),
   onOpenSettings: vi.fn().mockResolvedValue(undefined),
+});
+const LOCKED_NOTE = "Unlock Peppy to change banner settings.";
+const SYNC_NOTE = /Banner choices apply to every computer and browser in this vault/;
+
+it("explains that banner choices sync to the vault and that permission stays per device", () => {
+  render(<NotificationSettings {...props()} />);
+  expect(screen.getByText(SYNC_NOTE)).toHaveAttribute("id", "notification-banner-sync-note");
+  expect(screen.getByText(/System notification permission is set on each device/)).toBeVisible();
+  expect(screen.queryByText(LOCKED_NOTE)).not.toBeInTheDocument();
+});
+
+it("keeps the existing mute hint as the only description on unlocked heads toggle", () => {
+  render(<NotificationSettings {...props()} />);
+  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-mute-with-heads-hint");
+  expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).not.toHaveAttribute("aria-describedby");
+  expect(screen.getByLabelText("Banner preview")).toBeEnabled();
+});
+
+it("disables vault-synced banner controls while locked and explains why", () => {
+  const input = props();
+  render(<NotificationSettings {...input} locked />);
+
+  expect(screen.getByText(SYNC_NOTE)).toBeVisible();
+  expect(screen.getByText(LOCKED_NOTE)).toHaveAttribute("id", "notification-banner-locked-note");
+  expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toBeDisabled();
+  expect(screen.getByRole("switch", { name: MUTE })).toBeDisabled();
+  expect(screen.getByRole("switch", { name: "App notification banners" })).toBeDisabled();
+  expect(screen.getByLabelText("Banner preview")).toBeDisabled();
+  expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
+  expect(screen.getByRole("switch", { name: "App notification banners" })).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
+  expect(screen.getByLabelText("Banner preview")).toHaveAttribute("aria-describedby", "notification-banner-locked-note");
+  expect(screen.getByRole("switch", { name: MUTE })).toHaveAttribute("aria-describedby", "notification-mute-with-heads-hint notification-banner-locked-note");
+});
+
+it("keeps local permission checks and per-app mute controls available while locked", async () => {
+  const input = props();
+  input.onPermission.mockResolvedValue(check("granted"));
+  render(<NotificationSettings {...input} locked />);
+
+  expect(screen.getByRole("button", { name: CHECK })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: CHECK }));
+  expect(await screen.findByRole("status")).toHaveTextContent(/allowed to show notifications/i);
+  fireEvent.click(screen.getByText("Per-app mirroring"));
+  const control = screen.getByRole("switch", { name: "Mirror Chat from Pixel" });
+  expect(control).toBeEnabled();
+  fireEvent.click(control);
+  await waitFor(() => expect(input.onMute).toHaveBeenCalledWith({ ...filter, muted: false }));
+});
+
+it("never saves a banner preference while locked", () => {
+  const input = props();
+  render(<NotificationSettings {...input} locked />);
+  fireEvent.click(screen.getByRole("switch", { name: "SMS/MMS banners" }));
+  fireEvent.click(screen.getByRole("switch", { name: MUTE }));
+  fireEvent.click(screen.getByRole("switch", { name: "App notification banners" }));
+  fireEvent.change(screen.getByLabelText("Banner preview"), { target: { value: "hidden" } });
+
+  expect(input.onPreferences).not.toHaveBeenCalled();
+});
+
+it("re-enables banner controls once unlocked", () => {
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} locked />);
+  rerender(<NotificationSettings {...input} locked={false} />);
+
+  expect(screen.queryByText(LOCKED_NOTE)).not.toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toBeEnabled();
+  expect(screen.getByLabelText("Banner preview")).toBeEnabled();
 });
 
 it("shows banner controls when either desktop banner preference is enabled", () => {

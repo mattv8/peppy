@@ -6,7 +6,7 @@ import { BrowserSession, BrowserSessionError, type BrowserSessionPhase } from ".
 import { BrowserEnrollment, type EnrollmentView, type InstanceManagement, type VaultInviteView, type VaultRequestView, type VaultSummary } from "./enrollment.js";
 import { BrowserScheduler, type SchedulerSyncProgress } from "./scheduler.js";
 import { OriginTransport, TransportError } from "./transport.js";
-import { BannerPresenter, BrowserNotificationAdapter, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationSettings } from "./presentation.js";
+import { BannerPresenter, BrowserNotificationAdapter, CoreNotificationSettings, DEFAULT_NOTIFICATION_PREFERENCES, IndexedDbNotificationSettings, notificationPreferences, type BannerContext, type NotificationAdapter, type NotificationPreferences, type NotificationSettings } from "./presentation.js";
 import { publishAttachment, type PublicCopyTransport } from "./publication.js";
 
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -100,10 +100,15 @@ export interface BrowserHostDependencies {
   locks?: OwnerLockManager;
   terminate?(): void;
   network?: BrowserNetwork;
-  settings?: NotificationSettings;
+  legacySettings?: LegacyNotificationSettings;
   publisher?: PublicCopyTransport & { origin: string };
   notification?: NotificationAdapter;
 }
+
+type LegacyNotificationSettings = {
+  claimForVault(vaultId: string): Promise<NotificationPreferences | undefined>;
+  clear(): Promise<void>;
+};
 
 type Invocation = { coreCommand: string; mutation: boolean };
 
@@ -300,22 +305,21 @@ type MediaLeases = {
   release(id: string): boolean;
 };
 
-export async function dispatchBrowserRpc(session: HostSession, request: unknown, settings?: NotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
+export async function dispatchBrowserRpc(session: HostSession, request: unknown, legacySettings?: LegacyNotificationSettings, publisher?: PublicCopyTransport & { origin: string }, mediaLeases?: MediaLeases, syncProgress?: SchedulerSyncProgress): Promise<RpcResponse> {
   if (!validRequest(request)) return { id: requestId(request), ok: false, error: { code: "invalid-request", message: "The request is invalid." } };
   const { id, command, args } = request;
   try {
     if (command === "load_state" && session.phase !== "ready") return { id, ok: true, value: safeSnapshot(session.phase) };
     if (command === "load_history" && session.phase !== "ready") throw { code: "locked" };
     if (command === "load_state") {
-      // Settings are restored before the Rust snapshot is presented, never as message state.
-      const savedPreferences = await settings?.load();
+      if (legacySettings) await adoptLegacyPreferences(session, legacySettings).catch(() => undefined);
       const snapshot = await session.query("snapshot", args);
       if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) throw { code: "invalid-request" };
       const metadataOnly = args.metadataOnly === true;
       const contacts = await session.query("contact_snapshot", { addresses: contactAddresses(snapshot as Record<string, unknown>) });
       if (typeof contacts !== "object" || contacts === null || Array.isArray(contacts)) throw { code: "invalid-request" };
       const enriched = metadataOnly ? snapshot as Record<string, unknown> : await addVisiblePreviews(session, snapshot as Record<string, unknown>, MAX_PREVIEWS_PER_SNAPSHOT);
-      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(savedPreferences ? { notificationPreferences: savedPreferences } : {}), ...(syncProgress ? { syncProgress } : {}) } };
+      return { id, ok: true, value: { ...enriched, ...contacts as Record<string, unknown>, ...(syncProgress ? { syncProgress } : {}) } };
     }
     if (command === "load_history") {
       const page = await session.query("load_history", args);
@@ -388,8 +392,7 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
     const invocationArgs = coreArgs(command, args);
     if (command === "set_notification_preferences") {
       const preferences = notificationPreferences(invocationArgs);
-      if (settings) await settings.save(preferences);
-      const value = await session.mutate(invocation.coreCommand, invocationArgs);
+      const value = await session.mutate(invocation.coreCommand, preferences);
       return { id, ok: true, value };
     }
     const value = invocation.mutation
@@ -398,6 +401,54 @@ export async function dispatchBrowserRpc(session: HostSession, request: unknown,
     return { id, ok: true, value };
   } catch (error: unknown) {
     return { id, ok: false, error: errorFor(error) };
+  }
+}
+
+async function adoptLegacyPreferences(session: HostSession, legacy: LegacyNotificationSettings): Promise<boolean> {
+  const identity = object(await session.query("_worker_identity_metadata", {}));
+  const vaultId = canonicalUuid(identity.vaultId);
+  if (!vaultId) throw { code: "unavailable" };
+  const preferences = await legacy.claimForVault(vaultId);
+  if (!preferences) return false;
+  if (sameNotificationPreferences(preferences, DEFAULT_NOTIFICATION_PREFERENCES)) {
+    await legacy.clear().catch(() => undefined);
+    return false;
+  }
+  const hasVaultValue = async (): Promise<boolean> => (await session.query("notification_preferences", {})) != null;
+  let adopted = false;
+  if (!(await hasVaultValue())) {
+    const result = await session.mutate("adopt_legacy_notification_preferences", preferences) as { adopted?: boolean } | undefined;
+    adopted = result?.adopted === true;
+    if (!adopted && !(await hasVaultValue())) throw { code: "unavailable" };
+  }
+  await legacy.clear().catch(() => undefined);
+  return adopted;
+}
+
+function sameNotificationPreferences(left: NotificationPreferences, right: NotificationPreferences): boolean {
+  return left.messageBanners === right.messageBanners && left.mirroredBanners === right.mirroredBanners
+    && left.preview === right.preview && left.muteWithHeads === right.muteWithHeads;
+}
+
+class MigratingCoreNotificationSettings implements NotificationSettings {
+  private migration?: Promise<boolean>;
+
+  public constructor(
+    private readonly session: HostSession,
+    private readonly legacy?: LegacyNotificationSettings,
+    private readonly onAdopted?: () => void,
+  ) {}
+
+  public async load(): Promise<NotificationPreferences | undefined> {
+    if (this.legacy) {
+      this.migration ??= adoptLegacyPreferences(this.session, this.legacy);
+      try {
+        if (await this.migration) this.onAdopted?.();
+      } finally {
+        this.migration = undefined;
+      }
+    }
+    return new CoreNotificationSettings(this.session).load();
   }
 }
 
@@ -678,7 +729,7 @@ export class BrowserWorkerHost {
 
   private async acquire(): Promise<void> {
     this.owner = await acquireWorkerOwner({ locks: this.dependencies.locks, name: OWNER_NAME, start: signal => this.dependencies.boot(signal, error => { void this.fatal(error); }), stop: async session => { session.shutdown(); await session.drain?.(); } });
-    this.presenter = new BannerPresenter(this.owner.owner, this.dependencies.settings ?? new IndexedDbNotificationSettings(`${OWNER_NAME}-presentation`), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
+    this.presenter = new BannerPresenter(this.owner.owner, new MigratingCoreNotificationSettings(this.owner.owner, this.dependencies.legacySettings, () => { this.changed(); this.dependencies.network?.wake?.(); }), this.dependencies.notification ?? new BrowserNotificationAdapter(), () => this.presentationPort ? candidate => this.presentationPort?.postMessage({ event: "banner", candidate }) : undefined);
     this.unsubscribeNetwork = this.dependencies.network?.subscribeChanges?.(() => this.changed());
     void this.startSearchIndexWhenReady();
   }
@@ -755,7 +806,7 @@ export class BrowserWorkerHost {
     let response: RpcResponse;
     this.dispatchesInFlight += 1;
     try {
-      response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.settings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
+      response = await dispatchBrowserRpc(this.owner.owner, request, this.dependencies.legacySettings, this.dependencies.publisher, this.portMediaLeases(port), this.dependencies.network?.syncProgress?.());
     } finally {
       this.dispatchesInFlight -= 1;
     }
@@ -781,6 +832,7 @@ export class BrowserWorkerHost {
         await this.dependencies.network?.start();
         void this.startSearchIndexWhenReady();
       }
+      if (command === "load_state" && generationChanged) this.dependencies.network?.wake?.();
       if (command === "retry_attachment" && validRequest(request)) this.dependencies.network?.retryAttachment?.(requiredId(request.args));
       if (command === "send_draft" || command === "retry_attachment" || command === "request_contact_sync" || command === "request_attachment_download" || command === "media_sync_request" || command === "load_media" || command === "save_attachment") this.dependencies.network?.wake?.();
     }
@@ -1267,7 +1319,7 @@ export function browserHostDependencies(locks: OwnerLockManager | undefined, ter
       );
       return session;
     },
-    settings: new IndexedDbNotificationSettings(`${OWNER_NAME}-presentation`),
+    legacySettings: new IndexedDbNotificationSettings(`${OWNER_NAME}-presentation`),
     publisher: {
       origin: self.location.origin,
       postPublicCopy: (path, bytes, request) => {

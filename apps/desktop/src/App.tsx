@@ -1166,6 +1166,7 @@ function SettingsView({
         onPermission={onPermission}
         onOpenSettings={onOpenSettings}
         headsSupported={headsSupported}
+        locked={encryption !== "unlocked" || Boolean(appLock?.locked)}
       />
       <ReactionSettings show={showReactions} onShow={onShowReactions} />
       <section id="settings-theme" className="settings-card" data-settings-section="theme">

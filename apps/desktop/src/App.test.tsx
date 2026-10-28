@@ -4069,6 +4069,19 @@ describe("host state display", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this draft");
   });
 
+  it("locks vault-synced banner controls in settings while encryption is locked", async () => {
+    host.encryption = { state: "locked" } as DesktopSnapshot["encryption"];
+    render(<App />);
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
+    expect(document.getElementById("notification-banner-locked-note")).toHaveTextContent("Unlock Peppy to change banner settings.");
+    expect(screen.getByRole("switch", { name: "SMS/MMS banners" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "App notification banners" })).toBeDisabled();
+    expect(screen.getByLabelText("Banner preview")).toBeDisabled();
+  });
+
   it("switches to settings from the rail and applies the selected theme class", async () => {
     render(<App />);
     await screen.findByText("Hello from Aurora");
