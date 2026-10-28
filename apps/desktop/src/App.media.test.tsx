@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { formatDateTime } from "@peppy/desktop-ui";
 import { App } from "./App";
 import { bridge, type AttachmentView, type DesktopSnapshot, type MediaOpen, type MediaPageItem, type MessageView } from "./bridge";
 
@@ -133,6 +134,21 @@ describe("App media wiring", () => {
     expect(await screen.findByRole("dialog", { name: "Media viewer" })).toBeInTheDocument();
     expect(bridge.load_media).toHaveBeenCalledTimes(1);
     expect(bridge.load_media).toHaveBeenCalledWith("first-image");
+  });
+
+  it("puts hidden timestamps on their media hover surfaces while retaining the burst keeper metadata", async () => {
+    const first = message("first", image("first-image"));
+    const second = message("second", image("second-image"));
+    currentSnapshot = snapshot([first, second]);
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Photo, 1 of 2" });
+    const slides = document.querySelectorAll<HTMLElement>("[data-media-slide]");
+    expect(slides[0]).toHaveAttribute("title", formatDateTime(first.timestamp)!);
+    expect(slides[1]).not.toHaveAttribute("title");
+    expect(document.querySelector('[data-message-meta="first"] time')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-message-meta="second"] time')).toHaveTextContent(formatDateTime(second.timestamp)!);
   });
 
   it("preserves captions and renders a v3 ready thumbnail while its original is remote", async () => {

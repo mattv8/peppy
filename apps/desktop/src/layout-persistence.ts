@@ -10,6 +10,7 @@ type LayoutPatch = {
   recipientPosition?: RecipientPosition;
   navigationPosition?: NavigationPosition;
   contactsDetailWidth?: number;
+  compactTimestamps?: boolean;
 };
 
 type StoredLayout = Record<string, unknown>;
@@ -22,6 +23,17 @@ export function readContactsDetailWidth(): number | undefined {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
   } catch {
     return undefined;
+  }
+}
+
+export function readCompactTimestamps(): boolean {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "{}");
+    if (typeof stored !== "object" || stored === null || Array.isArray(stored)) return true;
+    const value = (stored as StoredLayout).compactTimestamps;
+    return typeof value === "boolean" ? value : true;
+  } catch {
+    return true;
   }
 }
 

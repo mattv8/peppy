@@ -32,6 +32,18 @@ describe("MediaGrid", () => {
     expect(view.container.querySelector("[data-media-tile][data-variant='single']")).toBeInTheDocument();
   });
 
+  it("uses per-message titles on single images and carousel slides", () => {
+    const title = (value: { id: string }) => `Sent at ${value.id}`;
+    const single = render(<MediaGrid messages={[message("1")]} onOpen={vi.fn()} messageTitle={title} />);
+    expect(single.container.querySelector("article")).toHaveAttribute("title", "Sent at 1");
+    single.unmount();
+
+    const carousel = render(<MediaGrid messages={[message("1"), message("2")]} onOpen={vi.fn()} messageTitle={title} />);
+    expect(carousel.container.querySelectorAll("[data-media-slide]")[0]).toHaveAttribute("title", "Sent at 1");
+    expect(carousel.container.querySelectorAll("[data-media-slide]")[1]).toHaveAttribute("title", "Sent at 2");
+    expect(carousel.container.querySelector("[data-media-carousel]")).not.toHaveAttribute("title");
+  });
+
   it("renders multiple attachments as a carousel and moves slide focus with arrow keys", () => {
     const first = message("1");
     const second = message("2");
