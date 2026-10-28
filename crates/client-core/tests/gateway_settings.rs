@@ -197,7 +197,7 @@ fn version_25_upgrade_adds_null_status_time_without_resetting_status() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(version, 37);
+    assert_eq!(version, 38);
     assert_eq!(status, (42, "sent".into(), None));
 }
 

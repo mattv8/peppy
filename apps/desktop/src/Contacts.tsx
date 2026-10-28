@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { Check, ContactAvatar, Clock, ListFilter, ResizeHandle, RotateCw, Smartphone, UserPlus, X, contactSeed, formatPhoneNumber } from "@peppy/desktop-ui";
+import { Check, ContactAvatar, Clock, ListFilter, ResizeHandle, RotateCw, Smartphone, UserPlus, X, contactSeed, formatPhoneNumber, seedKey } from "@peppy/desktop-ui";
 import { bridge, type ContactBookView, type ContactScanStatus, type ContactSort, type ContactSyncStatus, type ContactView, type RestorableContact } from "./bridge";
 import { ContactForm, type ContactEditDraft } from "./ContactForm";
 import { CONTACTS_PAGE_SIZE, findContactTarget } from "./contact-target";
@@ -52,13 +52,18 @@ const scanStatusText = (status: ContactScanStatus) => ({
 export type ContactNavigationGuard = (navigate: () => void, onCancel?: () => void) => boolean | void;
 export type ContactTarget = { bookId: string; contactId: string; requestId?: number };
 
-export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, headerHost }: {
+export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard, target, onTargetConsumed, headerHost, toneOverrides = {}, toneDisabled = false, pendingToneSeeds = {}, toneErrors = {}, onSelectTone }: {
   books?: ContactBookView[];
   sync?: ContactSyncStatus;
   onNavigationGuard?(guard: ContactNavigationGuard | null): void;
   target?: ContactTarget | null;
   onTargetConsumed?(requestId: number): void;
   headerHost?: Element | null;
+  toneOverrides?: Record<string, number>;
+  toneDisabled?: boolean;
+  pendingToneSeeds?: Record<string, true>;
+  toneErrors?: Record<string, string>;
+  onSelectTone?(seed: string, index: number | null): void;
 }) {
   const [books, setBooks] = useState(initialBooks);
   const [booksLoaded, setBooksLoaded] = useState(initialBooks.length > 0);
@@ -733,6 +738,10 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
   const resizeDetail = (delta: number) => setDetailSize((detailDragActive.current ? detailDragWidth.current : renderedDetailWidth) - delta);
   const resetDetailWidth = () => { detailDragActive.current = false; setDetailWidth(DETAIL_DEFAULT_WIDTH); detailDragWidth.current = DETAIL_DEFAULT_WIDTH; persistLayoutPatch({ contactsDetailWidth: DETAIL_DEFAULT_WIDTH }); };
 
+  const editorToneSeed = editing && editing !== "create"
+    ? (() => { const identity = contactSeed(editing.phones, editing.id); return identity.startsWith("contact:") ? undefined : identity; })()
+    : undefined;
+
   return (
     <section ref={contactsViewRef} id="contacts-view" role="region" aria-label="Contacts browser">
       {sortMenu && (sortPortalHost ? createPortal(sortMenu, sortPortalHost) : sortMenu)}
@@ -900,6 +909,10 @@ export function ContactsView({ books: initialBooks = [], sync, onNavigationGuard
               validationError={validationError}
               busy={busy}
               bookCapabilities={book?.capabilities}
+              toneControl={editing === "create" ? undefined : (() => {
+                return { value: editorToneSeed ? toneOverrides[editorToneSeed] : undefined, pending: Boolean(editorToneSeed && pendingToneSeeds[editorToneSeed]), error: editorToneSeed ? toneErrors[editorToneSeed] : undefined, disabled: toneDisabled, onSelect: (index: number | null) => { if (editorToneSeed) onSelectTone?.(editorToneSeed, index); } };
+              })()}
+              savedToneSeed={editorToneSeed}
             />
           ) : (
             selected && (

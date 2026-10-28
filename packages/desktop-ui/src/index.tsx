@@ -32,6 +32,8 @@ import {
 } from "./phone";
 import { conversationAvatar, seedKey, type AvatarIdentity } from "./avatar";
 import { ContactAvatar } from "./ContactAvatar";
+export { TonePicker, TONE_PRESETS, type TonePickerProps } from "./TonePicker";
+export { ToneOverridesProvider, incomingToneSeed, toneIndex, toneStyle, useToneOverrides, useToneStyle, type ToneOverrides } from "./tone";
 export { OmniSearch, type OmniSearchProps } from "./OmniSearch";
 export { ResizeHandle, type ResizeHandleProps } from "./ResizeHandle";
 export { Modal, type ModalProps } from "./Modal";
@@ -87,6 +89,7 @@ export {
   Lock,
   LockKeyhole,
   LockOpen,
+  Palette,
   MessageSquare,
   MessageSquarePlus,
   Minus,

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { User, Users } from "lucide-react";
-import { initials, paletteIndex, type AvatarKind } from "./avatar";
+import { initials, type AvatarKind } from "./avatar";
+import { toneIndex, type ToneOverrides, useToneOverrides, useToneStyle } from "./tone";
 
 type ContactAvatarProps = {
   seed: string;
@@ -11,6 +12,7 @@ type ContactAvatarProps = {
   id?: string;
   className?: string;
   "data-contact-id"?: string;
+  toneOverrides?: ToneOverrides;
 };
 
 const GLYPH_SIZES = {
@@ -29,11 +31,15 @@ export function ContactAvatar({
   id,
   className,
   "data-contact-id": contactId,
+  toneOverrides,
 }: ContactAvatarProps) {
+  const inheritedOverrides = useToneOverrides();
+  const resolvedOverrides = toneOverrides ?? inheritedOverrides;
   const [failedUrl, setFailedUrl] = useState<string | undefined>(undefined);
   const glyphSize = GLYPH_SIZES[size];
   const avatarInitials = initials(name, size >= 36 ? 2 : 1);
-  const colorIndex = paletteIndex(seed);
+  const tone = useToneStyle(seed);
+  const colorIndex = toneIndex(seed, resolvedOverrides);
   const photoFailed = photoDataUrl !== undefined && failedUrl === photoDataUrl;
 
   const avatarKind = kind === "group"
@@ -56,8 +62,10 @@ export function ContactAvatar({
         width: size,
         height: size,
         flex: `0 0 ${size}px`,
-        background: `var(--peppy-avatar-${colorIndex}, var(--peppy-accent))`,
-        color: "var(--peppy-avatar-glyph, var(--peppy-accent-text))",
+        ...tone,
+        ...(toneOverrides ? { "--peppy-tone": `var(--peppy-avatar-${colorIndex}, var(--peppy-accent))` } : {}),
+        background: "var(--peppy-tone)",
+        color: "var(--peppy-tone-text)",
       }}
     >
       {avatarKind === "group" ? (

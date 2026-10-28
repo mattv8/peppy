@@ -32,7 +32,7 @@
 use crate::{
     AppFilter, Client, Ctx, Cursor, Error, MAX_SNAPSHOT_PAGE_BYTES, NotificationTarget,
     NotificationWire, Opened, PrivatePayload, contact_media, contacts, conversation_pinning,
-    notifications, open_payload, parse_wire, take_within_budget, to_i64,
+    conversation_tones, notifications, open_payload, parse_wire, take_within_budget, to_i64,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS projection_filters(generation INTEGER NOT NULL, sourc
 CREATE TABLE IF NOT EXISTS projection_conversation_pins(generation INTEGER NOT NULL, conversation_id TEXT NOT NULL,
    pinned INTEGER NOT NULL, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
    logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, PRIMARY KEY(generation,conversation_id));
+CREATE TABLE IF NOT EXISTS projection_conversation_tones(generation INTEGER NOT NULL, seed TEXT NOT NULL,
+    palette_index INTEGER, source_sequence INTEGER NOT NULL, producer_device_id TEXT NOT NULL,
+    logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL, PRIMARY KEY(generation,seed));
 ",
     )?;
     if upgrading {
@@ -460,6 +463,24 @@ pub(super) fn reduce(
             conn.execute("INSERT INTO projection_conversation_pins(generation,conversation_id,pinned,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(generation,conversation_id) DO UPDATE SET pinned=excluded.pinned,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_pins.logical_revision OR (excluded.logical_revision=projection_conversation_pins.logical_revision AND excluded.writer_device_id>projection_conversation_pins.writer_device_id)", params![generation, conversation_id.to_string(), pinned, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
             Ok(true)
         }
+        PrivatePayload::ConversationTone {
+            seed,
+            palette_index,
+            logical_revision,
+            writer_device_id,
+        } => {
+            if !conversation_tones::valid_event(
+                &seed,
+                palette_index,
+                logical_revision,
+                &writer_device_id,
+                producer,
+            ) {
+                return Ok(false);
+            }
+            conn.execute("INSERT INTO projection_conversation_tones(generation,seed,palette_index,source_sequence,producer_device_id,logical_revision,writer_device_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(generation,seed) DO UPDATE SET palette_index=excluded.palette_index,source_sequence=excluded.source_sequence,producer_device_id=excluded.producer_device_id,logical_revision=excluded.logical_revision,writer_device_id=excluded.writer_device_id WHERE excluded.logical_revision>projection_conversation_tones.logical_revision OR (excluded.logical_revision=projection_conversation_tones.logical_revision AND excluded.writer_device_id>projection_conversation_tones.writer_device_id)", params![generation, seed, palette_index, sequence, producer, to_i64(logical_revision)?, writer_device_id])?;
+            Ok(true)
+        }
         // Edit requests/results, dismissals and unknown kinds carry no staged state.
         _ => Ok(true),
     }
@@ -740,6 +761,26 @@ fn promote(conn: &Connection, generation: i64, high_water: i64, me: &str) -> Res
             )?;
         }
     }
+    conn.execute("DELETE FROM conversation_tones WHERE logical_revision>0 AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones s WHERE s.generation=?2 AND s.seed=conversation_tones.seed) AND NOT (conversation_tones.producer_device_id=?1 AND EXISTS(SELECT 1 FROM outbox o WHERE o.seq=conversation_tones.source_sequence AND NOT EXISTS(SELECT 1 FROM journal j WHERE j.envelope_id=o.envelope_id AND j.cursor<=?3)))", params![me, generation, high_water])?;
+    let mut after_tone = String::new();
+    loop {
+        let page: Vec<(String, Option<u8>, i64, String, i64, String)> = conn.prepare("SELECT seed,palette_index,source_sequence,producer_device_id,logical_revision,writer_device_id FROM projection_conversation_tones WHERE generation=? AND seed>? ORDER BY seed LIMIT ?")?.query_map(params![generation, after_tone, PROMOTE_PAGE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<Result<_, _>>()?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after_tone = last.0.clone();
+        for (seed, palette_index, sequence, producer, revision, writer) in page {
+            conversation_tones::apply(
+                conn,
+                &seed,
+                palette_index,
+                u64::try_from(revision).map_err(|_| Error::Database)?,
+                &writer,
+                &producer,
+                u64::try_from(sequence).map_err(|_| Error::Database)?,
+            )?;
+        }
+    }
     let mut after = (String::new(), String::new());
     loop {
         type Row = (String, String, String, bool, i64, String, i64, String);
@@ -849,6 +890,7 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
         "projection_tombstones",
         "projection_filters",
         "projection_conversation_pins",
+        "projection_conversation_tones",
     ] {
         conn.execute(
             &format!("DELETE FROM {table} WHERE rowid IN (SELECT t.rowid FROM {table} t JOIN projection_generations g ON g.generation=t.generation WHERE g.state IN ('promoted','failed','superseded') LIMIT ?)"),
@@ -866,7 +908,8 @@ pub(crate) fn collect_garbage(conn: &Connection) -> Result<(), Error> {
            AND NOT EXISTS(SELECT 1 FROM projection_notifications r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_tombstones r WHERE r.generation=projection_generations.generation)
            AND NOT EXISTS(SELECT 1 FROM projection_filters r WHERE r.generation=projection_generations.generation)
-           AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins r WHERE r.generation=projection_generations.generation)",
+           AND NOT EXISTS(SELECT 1 FROM projection_conversation_pins r WHERE r.generation=projection_generations.generation)
+           AND NOT EXISTS(SELECT 1 FROM projection_conversation_tones r WHERE r.generation=projection_generations.generation)",
         [],
     )?;
     Ok(())

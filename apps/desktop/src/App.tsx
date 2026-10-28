@@ -60,6 +60,11 @@ import {
   seedKey,
   type RecipientPosition,
   type RecipientSuggestion,
+  ToneOverridesProvider,
+  TonePicker,
+  incomingToneSeed,
+  toneStyle,
+  paletteIndex,
 } from "@peppy/desktop-ui";
 import "./settings.css";
 import "./vibrancy.css";
@@ -635,6 +640,7 @@ function MessageList({
   onOpenReactionTarget,
   pendingReactionId,
   reactionFeedback,
+  toneOverrides = {},
 }: {
   conversation?: ConversationView;
   loading: boolean;
@@ -670,6 +676,7 @@ function MessageList({
   onOpenReactionTarget(reaction: MessageView, notice: ReactionNoticeInfo): void;
   pendingReactionId?: string;
   reactionFeedback?: { reactionId: string; message: string };
+  toneOverrides?: Record<string, number>;
 }) {
   const reactions = useMemo(() => showReactions && conversation ? linkReactions(conversation.messages) : NO_REACTIONS, [showReactions, conversation?.messages]);
   if (loading)
@@ -723,6 +730,7 @@ function MessageList({
         </div>
       </div>
     );
+  const conversationToneSeed = conversationAvatar({ id: conversation.id, name: conversation.name, participants: conversation.participants, recipientless: conversation.recipientlessDraft }).seed;
   const timeIsShown = (message: MessageView) => {
     const displayedTime = messageTime(message).displayedTime;
     return Boolean(formatDateTime(displayedTime) && isoDateTime(displayedTime));
@@ -778,6 +786,8 @@ function MessageList({
                 aria-describedby={searchTargetId === message.id ? "search-result-message-hint" : undefined}
                 tabIndex={searchTargetId === message.id ? -1 : undefined}
                 className={`message-bubble ${message.sender}`}
+                data-peppy-tone={message.sender === "other" || undefined}
+                style={message.sender === "other" ? toneStyle(incomingToneSeed(conversationToneSeed, message.senderAddress), toneOverrides) : undefined}
                 title={hiddenTimeTitle(message)}
               >
                 {message.body && <p><MessageText text={message.body} onOpenExternal={onOpenExternal} /></p>}
@@ -1313,6 +1323,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [showReactions, setShowReactions] = useShowReactions();
   const [pendingReactionId, setPendingReactionId] = useState<string>();
   const [reactionFeedback, setReactionFeedback] = useState<{ reactionId: string; message: string }>();
+  const [pendingToneSeeds, setPendingToneSeeds] = useState<Record<string, true>>({});
+  const [toneErrors, setToneErrors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setPendingToneSeeds({});
+    setToneErrors({});
+  }, [snapshot?.encryption.profileFingerprint, snapshot?.encryption.state]);
   const [activeView, setActiveViewNow] = useState<"conversations" | "notifications" | "settings" | "contacts">(
     "conversations",
   );
@@ -1421,6 +1437,8 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const pinFocusRestoreRef = useRef<PinFocusRestoreIntent | undefined>(undefined);
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef<RefreshRequest | undefined>(undefined);
+  const toneOperationRef = useRef(new Map<string, number>());
+  const toneOperationSequence = useRef(0);
   const retryPendingSavesInFlightRef = useRef(false);
   const retryPendingSavesQueuedRef = useRef(false);
   const overlayHeightRef = useRef(overlayHeight);
@@ -3146,6 +3164,46 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const activeDisplay = active
     ? displayConversation(active.name, active.participants, resolution, active.id, active.recipientlessDraft)
     : undefined;
+  const toneOverrides = snapshot?.toneOverrides ?? {};
+  const saveTone = async (seed: string, paletteIndex: number | null) => {
+    const current = snapshotRef.current;
+    if (!mountedRef.current || !current || current.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    if (toneOperationRef.current.has(seed)) return;
+    const operation = ++toneOperationSequence.current;
+    const session = currentSearchSessionKey();
+    toneOperationRef.current.set(seed, operation);
+    setPendingToneSeeds((pending) => ({ ...pending, [seed]: true }));
+    setToneErrors((errors) => ({ ...errors, [seed]: "" }));
+    try {
+      await bridge.set_conversation_tone(seed, paletteIndex);
+      try {
+        const refreshed = await bridge.load_state(undefined, undefined, { metadataOnly: true });
+        const responseSession = createSearchSessionKey(refreshed, Boolean(appLockRef.current?.locked));
+        if (mountedRef.current && toneOperationRef.current.get(seed) === operation && session === currentSearchSessionKey() && responseSession === session) {
+          const hasOverride = Object.hasOwn(refreshed.toneOverrides ?? {}, seed);
+          setSnapshot((currentSnapshot) => {
+            if (!currentSnapshot) return currentSnapshot;
+            const next = { ...(currentSnapshot.toneOverrides ?? {}) };
+            if (hasOverride) next[seed] = refreshed.toneOverrides![seed];
+            else delete next[seed];
+            return { ...currentSnapshot, toneOverrides: next };
+          });
+        }
+      } catch {
+        if (mountedRef.current && toneOperationRef.current.get(seed) === operation && session === currentSearchSessionKey()) setToneErrors((errors) => ({ ...errors, [seed]: "Color saved; waiting for the latest state." }));
+      }
+    } catch {
+      if (mountedRef.current && toneOperationRef.current.get(seed) === operation && session === currentSearchSessionKey()) setToneErrors((errors) => ({ ...errors, [seed]: "Couldn't save the color. Try again." }));
+    } finally {
+      if (toneOperationRef.current.get(seed) !== operation) return;
+      toneOperationRef.current.delete(seed);
+      setPendingToneSeeds((pending) => {
+        if (!pending[seed]) return pending;
+        const { [seed]: _, ...remaining } = pending;
+        return remaining;
+      });
+    }
+  };
   const actorName: ActorName = (actor) => {
     if (actor.sender === "self") return "You";
     if (!actor.senderAddress) return activeDisplay?.name ?? "Someone";
@@ -3500,6 +3558,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onOpenReactionTarget={(reaction, notice) => { void openReactionTarget(reaction, notice); }}
       pendingReactionId={pendingReactionId}
       reactionFeedback={reactionFeedback}
+      toneOverrides={toneOverrides}
     />
       </div>
       {conversationTab === "media" && <div id="tabpanel-media" role="tabpanel" aria-labelledby="tab-media">
@@ -3611,6 +3670,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }
 
   return (
+    <ToneOverridesProvider overrides={toneOverrides}>
     <main
       ref={mainRef}
       id="desktop-shell"
@@ -3756,9 +3816,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         >
           <header id="thread-pane-header">
             {!settingsOpen && !notificationsOpen && !contactsOpen && activeDisplay && (
-              <span id="thread-contact-avatar">
-                <ContactAvatar {...activeDisplay.avatar} size={36} />
-              </span>
+              <TonePicker id="thread-tone-picker" seed={activeDisplay.avatar.seed} value={toneOverrides[activeDisplay.avatar.seed]} automaticIndex={paletteIndex(activeDisplay.avatar.seed)} scope={activeDisplay.avatar.kind === "group" ? "group" : "contact"} disabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pending={Boolean(pendingToneSeeds[activeDisplay.avatar.seed])} error={toneErrors[activeDisplay.avatar.seed]} onSelect={(index) => { void saveTone(activeDisplay.avatar.seed, index); }} renderTrigger={(props) => <button {...props} id="thread-contact-avatar" aria-label="Change conversation color"><ContactAvatar {...activeDisplay.avatar} toneOverrides={toneOverrides} size={36} /></button>} />
             )}
             <div className="header-copy">
               {settingsOpen ? (
@@ -3908,7 +3966,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onSettings={() => { setNotificationSettingsRequested(true); setActiveView("settings"); }}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} toneOverrides={toneOverrides} toneDisabled={!snapshot || snapshot.encryption.state === "locked" || Boolean(appLock?.locked)} pendingToneSeeds={pendingToneSeeds} toneErrors={toneErrors} onSelectTone={(seed, index) => { void saveTone(seed, index); }} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
           ) : (
             <>
               {showSetup && snapshot ? (
@@ -3957,5 +4015,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         </>}
       </div>
     </main>
+    </ToneOverridesProvider>
   );
 }

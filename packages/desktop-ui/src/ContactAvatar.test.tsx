@@ -42,6 +42,6 @@ describe("ContactAvatar", () => {
     const avatar = document.querySelector(".contact-avatar")!;
     const index = paletteIndex("+18015551234");
     expect(avatar).toHaveAttribute("data-avatar-color", String(index));
-    expect(avatar).toHaveStyle(`background: var(--peppy-avatar-${index}, var(--peppy-accent))`);
+    expect(avatar).toHaveStyle(`--peppy-tone: var(--peppy-avatar-${index}, var(--peppy-accent))`);
   });
 });

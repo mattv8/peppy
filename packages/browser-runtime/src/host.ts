@@ -116,6 +116,7 @@ const INVOCATIONS: Readonly<Record<string, Invocation>> = {
   dismiss_all_notifications: { coreCommand: "dismiss_all_notifications", mutation: true },
   set_app_muted: { coreCommand: "set_app_muted", mutation: true },
   set_conversation_pinned: { coreCommand: "set_conversation_pinned", mutation: true },
+  set_conversation_tone: { coreCommand: "set_conversation_tone", mutation: true },
   mark_notifications_seen: { coreCommand: "mark_notifications_seen", mutation: true },
   set_notification_preferences: { coreCommand: "set_notification_preferences", mutation: true },
   list_contact_books: { coreCommand: "list_contact_books", mutation: false },

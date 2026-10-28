@@ -585,6 +585,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         contact_books: None,
         contacts_pending_count: None,
         contact_sync: None,
+        tone_overrides: None,
     }
 }
 
@@ -3719,6 +3720,27 @@ async fn set_conversation_pinned(
 }
 
 #[tauri::command]
+async fn set_conversation_tone(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    seed: String,
+    palette_index: Option<u8>,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    require_main(window.label())?;
+    let session = state.require_session_admitted(&operation).await?;
+    let client = session.client.clone();
+    blocking(move || {
+        client
+            .set_conversation_tone(&seed, palette_index)
+            .map_err(core_error)
+    })
+    .await?;
+    session.notify();
+    Ok(())
+}
+
+#[tauri::command]
 async fn mark_notifications_seen(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -4755,6 +4777,7 @@ pub fn run() {
         dismiss_all_notifications,
         set_app_muted,
         set_conversation_pinned,
+        set_conversation_tone,
         mark_notifications_seen,
         set_notification_preferences,
         set_notification_context,

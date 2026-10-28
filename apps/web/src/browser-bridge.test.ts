@@ -67,6 +67,17 @@ describe("BrowserBridge", () => {
     bridge.dispose();
   });
 
+  it("forwards tone reset with a JSON null palette index", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const updated = bridge.set_conversation_tone("contact:+15555550100", null);
+
+    expect(port.sent).toEqual([{ id: 1, command: "set_conversation_tone", args: { seed: "contact:+15555550100", paletteIndex: null } }]);
+    port.reply({ id: 1, ok: true, value: {} });
+    await expect(updated).resolves.toEqual({});
+    bridge.dispose();
+  });
+
   it("sums frozen unread batches after each checkpointed batch acknowledgement", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

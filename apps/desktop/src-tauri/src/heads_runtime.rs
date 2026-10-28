@@ -15,7 +15,7 @@ use peppy_desktop_api::{
     images::avatar_rgba,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -635,6 +635,7 @@ fn resolve_heads(
     if !session_displayable(session)? {
         return Ok(None);
     }
+    let tone_overrides = unlocked_tone_overrides(session)?;
     let conversations = session.client.list_conversations().map_err(core_error)?;
     let drafts = session.client.compose_drafts().map_err(core_error)?;
     let drafts_by_conversation = drafts
@@ -690,7 +691,12 @@ fn resolve_heads(
         });
         emitted_ids.insert(id);
     }
-    Ok(Some(resolve_raw_heads(session, raw_heads, photos)))
+    Ok(Some(resolve_raw_heads(
+        session,
+        raw_heads,
+        photos,
+        &tone_overrides,
+    )))
 }
 
 fn resolve_one(
@@ -704,6 +710,7 @@ fn resolve_one(
             "The local account is no longer available for floating conversations.",
         ));
     }
+    let tone_overrides = unlocked_tone_overrides(session)?;
     let drafts = session.client.compose_drafts().map_err(core_error)?;
     if let Some(found) = session
         .client
@@ -740,6 +747,7 @@ fn resolve_one(
                 unread: found.unread_count,
             },
             photos,
+            &tone_overrides,
         ));
     }
     if let Some(draft) = drafts
@@ -757,6 +765,7 @@ fn resolve_one(
                 unread: 0,
             },
             photos,
+            &tone_overrides,
         ));
     }
     Err(BridgeError::new(
@@ -769,6 +778,7 @@ fn resolve_raw_heads(
     session: &crate::session::Session,
     heads: Vec<RawHead>,
     photos: &PhotoCache,
+    tone_overrides: &BTreeMap<String, u8>,
 ) -> Vec<HeadData> {
     let addresses = heads
         .iter()
@@ -778,7 +788,7 @@ fn resolve_raw_heads(
     let resolved = crate::contacts::resolve_addresses(&session.client, &addresses);
     heads
         .into_iter()
-        .map(|head| resolve_raw_head(session, head, &resolved, photos))
+        .map(|head| resolve_raw_head(session, head, &resolved, photos, tone_overrides))
         .collect()
 }
 
@@ -786,13 +796,14 @@ fn resolve_one_raw_head(
     session: &crate::session::Session,
     head: RawHead,
     photos: &PhotoCache,
+    tone_overrides: &BTreeMap<String, u8>,
 ) -> HeadData {
     let addresses = raw_addresses(&head)
         .into_iter()
         .map(|address| (address, None))
         .collect::<Vec<_>>();
     let resolved = crate::contacts::resolve_addresses(&session.client, &addresses);
-    resolve_raw_head(session, head, &resolved, photos)
+    resolve_raw_head(session, head, &resolved, photos, tone_overrides)
 }
 
 fn raw_addresses(head: &RawHead) -> Vec<String> {
@@ -817,6 +828,7 @@ fn resolve_raw_head(
     head: RawHead,
     resolved: &HashMap<String, crate::contacts::Resolved>,
     photos: &PhotoCache,
+    tone_overrides: &BTreeMap<String, u8>,
 ) -> HeadData {
     let avatar = conversation_avatar(
         &head.id,
@@ -863,7 +875,13 @@ fn resolve_raw_head(
     HeadData {
         id: head.id,
         name: label.clone(),
-        color: crate::head_palette::head_color(palette_index(&avatar.seed)),
+        color: crate::head_palette::head_color(
+            tone_overrides
+                .get(&avatar.seed)
+                .copied()
+                .map(usize::from)
+                .unwrap_or_else(|| palette_index(&avatar.seed)),
+        ),
         glyph,
         label,
         unread: head.unread,
@@ -956,6 +974,20 @@ fn session_displayable(session: &crate::session::Session) -> BridgeResult<bool> 
         .lock()
         .map_err(|_| BridgeError::host_state())?;
     Ok(!status.revoked && !session.cancel.is_cancelled())
+}
+
+fn unlocked_tone_overrides(
+    session: &crate::session::Session,
+) -> BridgeResult<BTreeMap<String, u8>> {
+    let keys = session.client.key_status().map_err(core_error)?;
+    if keys
+        .active_epoch
+        .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch))
+    {
+        session.client.conversation_tones().map_err(core_error)
+    } else {
+        Ok(BTreeMap::new())
+    }
 }
 
 fn begin_binding(
@@ -2317,7 +2349,20 @@ mod tests {
                     "0",
                 ))
                 .unwrap();
-            ConversationId::from_str(&draft.conversation_id).unwrap()
+            let conversation = ConversationId::from_str(&draft.conversation_id).unwrap();
+            let avatar = conversation_avatar(
+                &conversation.to_string(),
+                "+15555550100",
+                Some(&["+15555550100".into()]),
+                false,
+            );
+            let automatic_index = palette_index(&avatar.seed);
+            let override_index = (automatic_index + 1) % 120;
+            session
+                .client
+                .set_conversation_tone(&avatar.seed, Some(override_index as u8))
+                .unwrap();
+            conversation
         };
         let session = Arc::new(open(&fixture, &fixture.binding, &[]));
         let keys = session.client.key_status().unwrap();
@@ -2328,12 +2373,18 @@ mod tests {
             fingerprint: "newer-sync-epoch".into(),
         });
 
-        assert_eq!(
-            resolve_one(&session, conversation, &photo_cache())
-                .unwrap()
-                .id,
-            conversation.to_string()
-        );
+        let automatic_color = crate::head_palette::head_color(palette_index(
+            &conversation_avatar(
+                &conversation.to_string(),
+                "+15555550100",
+                Some(&["+15555550100".into()]),
+                false,
+            )
+            .seed,
+        ));
+        let head = resolve_one(&session, conversation, &photo_cache()).unwrap();
+        assert_eq!(head.id, conversation.to_string());
+        assert_eq!(head.color, automatic_color);
         let restored = resolve_heads(
             &session,
             &HashSet::from([conversation.to_string()]),

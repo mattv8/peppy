@@ -10,6 +10,7 @@
 .message-bubble.self .message-text-link {
   color: inherit;
 }
+.message-bubble[data-peppy-tone] .message-text-link { color: inherit; text-decoration-color: currentColor; }
 
 [data-message-text-link-label],
 [data-message-text-link]::after {
@@ -47,6 +48,7 @@
 .message-bubble.self [data-message-text-link]:focus-visible {
   outline-color: currentColor;
 }
+.message-bubble[data-peppy-tone] [data-message-text-link]:focus-visible { outline-color: currentColor; }
 
 @media (forced-colors: active) {
   .message-bubble.self .message-text-link {

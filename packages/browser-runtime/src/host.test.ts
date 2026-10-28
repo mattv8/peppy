@@ -136,6 +136,16 @@ describe("browser host RPC", () => {
     expect(session.calls).toEqual([{ command: "set_conversation_pinned", args, mutation: true }]);
   });
 
+  it("routes tone reset through the checkpointed mutation allowlist", async () => {
+    const session = new FakeSession();
+    const args = { seed: "contact:+15555550100", paletteIndex: null };
+
+    await expect(dispatchBrowserRpc(session, { id: 1, command: "set_conversation_tone", args }))
+      .resolves.toMatchObject({ ok: true });
+
+    expect(session.calls).toEqual([{ command: "set_conversation_tone", args, mutation: true }]);
+  });
+
     it("checkpoints media demand and cache release instead of exposing generic core dispatch", async () => {
     const session = new FakeSession();
     const id = "00000000-0000-0000-0000-000000000001";

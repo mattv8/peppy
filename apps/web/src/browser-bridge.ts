@@ -454,6 +454,7 @@ export class BrowserBridge implements DesktopBridge {
     return changed.toString();
   }
   public set_conversation_pinned(conversationId: string, pinned: boolean): Promise<void> { return this.call("set_conversation_pinned", { conversationId, pinned }); }
+  public set_conversation_tone(seed: string, paletteIndex: number | null): Promise<void> { return this.call("set_conversation_tone", { seed, paletteIndex }); }
   public dismiss_notification(target: NotificationTarget): Promise<void> { return this.call("dismiss_notification", { target }); }
   public dismiss_all_notifications(): Promise<void> { return this.call("dismiss_all_notifications"); }
   public set_app_muted(sourceDeviceId: string, packageName: string, appName: string, muted: boolean): Promise<void> { return this.call("set_app_muted", { sourceDeviceId, packageName, appName, muted }); }
