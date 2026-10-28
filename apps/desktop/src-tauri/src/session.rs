@@ -11,10 +11,11 @@ use crate::{
     net::Api,
     notifications::NotificationPreferences,
     secure_store::SecretStore,
+    sync::DownloadRetryState,
 };
 use peppy_client_core::{
-    AttachmentId, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId, DraftId,
-    MediaCursor, Message, MessageId, NativeKeyCache, VaultId,
+    AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId,
+    DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -37,7 +38,13 @@ const MAX_PREVIEWS_PER_SNAPSHOT: usize = 12;
 /// Per-session decoded attachment preview entries. Snapshot hydration adds at most 12 entries.
 const MAX_PREVIEW_CACHE: usize = 256;
 const MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT: usize = MAX_PREVIEW_CACHE / 2;
-const MAX_DEFERRED_FOLLOW_UPS: usize = 8;
+/// The initial snapshot plus these follow-ups can cover every bounded eligible preview.
+const MAX_DEFERRED_FOLLOW_UPS: usize =
+    (MAX_ELIGIBLE_PREVIEWS_PER_SNAPSHOT + MAX_PREVIEWS_PER_SNAPSHOT - 1)
+        / MAX_PREVIEWS_PER_SNAPSHOT
+        - 1;
+const PREVIEW_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_PREVIEW_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Per-session decoded contact avatar entries, isolated from attachment previews.
 const MAX_AVATAR_CACHE: usize = 256;
 const MAX_SEEN_IDS: usize = 1000;
@@ -107,6 +114,7 @@ pub struct Session {
     previews: Mutex<BoundedCache>,
     avatars: Mutex<BoundedCache>,
     pub transfer_errors: Mutex<HashMap<AttachmentId, String>>,
+    pub download_retries: Mutex<HashMap<AttachmentId, DownloadRetryState>>,
     pub remote_ids: Mutex<RemoteIds>,
     /// Wakes the outbound/media worker only (send, read state, unlock).
     pub work_wake: Notify,
@@ -143,7 +151,13 @@ pub struct Session {
 struct BoundedCache {
     entries: HashMap<AttachmentId, Option<String>>,
     insertion_order: VecDeque<AttachmentId>,
+    retry_after: HashMap<AttachmentId, PreviewRetry>,
     capacity: usize,
+}
+
+struct PreviewRetry {
+    after: std::time::Instant,
+    failures: u32,
 }
 
 impl BoundedCache {
@@ -151,6 +165,7 @@ impl BoundedCache {
         Self {
             entries: HashMap::new(),
             insertion_order: VecDeque::new(),
+            retry_after: HashMap::new(),
             capacity,
         }
     }
@@ -160,6 +175,7 @@ impl BoundedCache {
     }
 
     fn insert(&mut self, id: AttachmentId, value: Option<String>) {
+        self.retry_after.remove(&id);
         if self.entries.insert(id, value).is_some() {
             return;
         }
@@ -175,7 +191,46 @@ impl BoundedCache {
         if self.entries.remove(id).is_some() {
             self.insertion_order.retain(|cached| cached != id);
         }
+        self.retry_after.remove(id);
     }
+
+    fn cooling_down(&mut self, id: &AttachmentId) -> bool {
+        self.retry_after
+            .get(id)
+            .is_some_and(|retry| retry.after > std::time::Instant::now())
+    }
+
+    fn record_failure(&mut self, id: AttachmentId) {
+        if !self.retry_after.contains_key(&id) && self.retry_after.len() == self.capacity {
+            if let Some(evicted) = self.retry_after.keys().next().copied() {
+                self.retry_after.remove(&evicted);
+            }
+        }
+        let failures = self
+            .retry_after
+            .get(&id)
+            .map_or(1, |retry| retry.failures.saturating_add(1));
+        let multiplier = 1_u32
+            .checked_shl(failures.saturating_sub(1))
+            .unwrap_or(u32::MAX);
+        let cooldown = PREVIEW_RETRY_COOLDOWN
+            .checked_mul(multiplier)
+            .unwrap_or(MAX_PREVIEW_RETRY_COOLDOWN)
+            .min(MAX_PREVIEW_RETRY_COOLDOWN);
+        self.retry_after.insert(
+            id,
+            PreviewRetry {
+                after: std::time::Instant::now() + cooldown,
+                failures,
+            },
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PreviewSlot {
+    Thumbnail,
+    Original,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,6 +354,7 @@ pub fn open_session(
         previews: Mutex::new(BoundedCache::new(MAX_PREVIEW_CACHE)),
         avatars: Mutex::new(BoundedCache::new(MAX_AVATAR_CACHE)),
         transfer_errors: Mutex::new(HashMap::new()),
+        download_retries: Mutex::new(HashMap::new()),
         work_wake: Notify::new(),
         reconnect_wake: Notify::new(),
         replay_wake: Notify::new(),
@@ -697,7 +753,9 @@ impl Session {
         let preview = media::is_previewable(media_type)
             .then(|| media::read_capped(path).and_then(|bytes| media::preview_data_url(&bytes)))
             .flatten();
-        self.cache_preview(info.attachment_id, preview.clone());
+        if let Some(preview) = preview.clone() {
+            self.cache_preview(info.attachment_id, preview);
+        }
         Ok(dto::attachment_view(&info, None, preview))
     }
 
@@ -707,6 +765,7 @@ impl Session {
         let id = AttachmentId::from_str(id)
             .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
         self.client.attachment_info(id).map_err(core_error)?;
+        crate::sync::clear_download_retry(self, &id);
         let removed = self
             .transfer_errors
             .lock()
@@ -766,12 +825,12 @@ impl Session {
         )
     }
 
-    fn cache_preview(&self, id: AttachmentId, preview: Option<String>) {
+    fn cache_preview(&self, id: AttachmentId, preview: String) {
         let mut cache = self
             .previews
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        cache.insert(id, preview);
+        cache.insert(id, Some(preview));
     }
 
     #[cfg(test)]
@@ -805,6 +864,169 @@ impl Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(id);
+    }
+
+    fn preview_source<'a>(
+        original: &'a AttachmentInfo,
+        metadata: Option<&'a MediaMetadata>,
+    ) -> Option<(&'a AttachmentInfo, PreviewSlot)> {
+        metadata
+            .and_then(|metadata| metadata.thumbnail.as_ref())
+            .filter(|thumbnail| {
+                thumbnail.state.is_local() && media::is_previewable(&thumbnail.media_type)
+            })
+            .map(|thumbnail| (thumbnail, PreviewSlot::Thumbnail))
+            .or_else(|| {
+                (original.state.is_local() && media::is_previewable(&original.media_type))
+                    .then_some((original, PreviewSlot::Original))
+            })
+    }
+
+    /// Reads one local source into the bounded preview cache. Failed reads are deliberately not
+    /// cached: a transient plaintext/read failure can recover after the cooldown.
+    fn hydrate_preview_source(
+        &self,
+        source: &AttachmentInfo,
+        budget: &mut usize,
+        hydration: &mut DeferredHydration,
+        eligible: bool,
+    ) -> Option<String> {
+        let mut cache = self
+            .previews
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(Some(preview)) = cache.get(&source.attachment_id) {
+            return Some(preview);
+        }
+        if !eligible || *budget == 0 {
+            hydration.eligible_remain |= eligible;
+            return None;
+        }
+        if cache.cooling_down(&source.attachment_id) {
+            return None;
+        }
+        if source.plaintext_bytes > media::MAX_IMAGE_SOURCE_BYTES {
+            return None;
+        }
+        *budget -= 1;
+        drop(cache);
+
+        let preview = self
+            .client
+            .open_native_plaintext(source.attachment_id)
+            .ok()
+            .and_then(|file| media::read_capped(file.path()))
+            .and_then(|bytes| media::preview_data_url(&bytes));
+        let mut cache = self
+            .previews
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(preview) = preview {
+            cache.insert(source.attachment_id, Some(preview.clone()));
+            hydration.hydrated += 1;
+            Some(preview)
+        } else {
+            cache.record_failure(source.attachment_id);
+            None
+        }
+    }
+
+    fn apply_attachment_preview(
+        &self,
+        attachment: &mut AttachmentView,
+        info: &AttachmentInfo,
+        metadata: Option<&MediaMetadata>,
+        budget: &mut usize,
+        hydration: &mut DeferredHydration,
+        eligible: bool,
+    ) {
+        let Some((source, slot)) = Self::preview_source(info, metadata) else {
+            return;
+        };
+        let preview = self.hydrate_preview_source(source, budget, hydration, eligible);
+        match slot {
+            PreviewSlot::Thumbnail => {
+                if let Some(thumbnail) = attachment
+                    .media_meta
+                    .as_mut()
+                    .and_then(|metadata| metadata.thumbnail.as_mut())
+                {
+                    thumbnail.preview_url = preview;
+                }
+            }
+            PreviewSlot::Original => attachment.preview_url = preview,
+        }
+    }
+
+    /// Hydrates one original attachment's local preview for a visible native tile. This never
+    /// schedules a download and returns the original attachment view, not a thumbnail view.
+    pub fn hydrate_media_preview(
+        &self,
+        message_id: &str,
+        original_id: &str,
+    ) -> BridgeResult<AttachmentView> {
+        let message_id = MessageId::from_str(message_id)
+            .map_err(|_| BridgeError::new("invalid-message", "The message ID is invalid."))?;
+        let original_id = AttachmentId::from_str(original_id)
+            .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+        let message = self
+            .client
+            .message_by_id(message_id)
+            .map_err(core_error)?
+            .ok_or_else(|| BridgeError::new("not-found", "The message was not found."))?;
+        if !message
+            .payload
+            .record
+            .attachments
+            .iter()
+            .any(|attachment| attachment.attachment_id == original_id)
+        {
+            return Err(BridgeError::new(
+                "not-found",
+                "The message does not reference this media attachment.",
+            ));
+        }
+        let info = self
+            .client
+            .attachment_info(original_id)
+            .map_err(core_error)?;
+        let metadata = self
+            .client
+            .message_attachment_media_metadata(message_id, original_id)
+            .map_err(core_error)?;
+        let mut attachment = dto::snapshot_attachment_view(
+            &info,
+            self.transfer_errors
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .get(&original_id)
+                .cloned(),
+            self.client.deferred_media_status(original_id),
+        );
+        if let Some(metadata) = metadata.as_ref() {
+            attachment.media_meta = Some(Box::new(dto::media_metadata_view(metadata.clone())));
+        }
+        let mut budget = 1;
+        self.apply_attachment_preview(
+            &mut attachment,
+            &info,
+            metadata.as_ref(),
+            &mut budget,
+            &mut DeferredHydration::default(),
+            true,
+        );
+        Ok(attachment)
+    }
+
+    /// Resolves the message's durable conversation identity for native window scope checks.
+    pub fn media_preview_message_conversation(&self, message_id: &str) -> BridgeResult<String> {
+        let message_id = MessageId::from_str(message_id)
+            .map_err(|_| BridgeError::new("invalid-message", "The message ID is invalid."))?;
+        self.client
+            .message_by_id(message_id)
+            .map_err(core_error)?
+            .map(|message| message.payload.record.conversation_id.to_string())
+            .ok_or_else(|| BridgeError::new("not-found", "The message was not found."))
     }
 
     fn attachment_views(
@@ -846,56 +1068,31 @@ impl Session {
                     .message_attachment_media_metadata(message.payload.record.message_id, id)
                     .ok()
                     .flatten();
-                let preview_info = media_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.thumbnail.as_ref())
-                    .unwrap_or(&info);
-                let mut preview = None;
-                if media::is_previewable(&preview_info.media_type) && preview_info.state.is_local()
-                {
-                    let preview_id = preview_info.attachment_id;
-                    let cached = self
-                        .previews
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .get(&preview_id);
-                    preview = match cached {
-                        Some(value) => value,
-                        None if eligible.is_none_or(|ids| ids.contains(&preview_id))
-                            && *budget > 0 =>
-                        {
-                            *budget -= 1;
-                            hydration.hydrated += 1;
-                            let value = self
-                                .client
-                                .open_native_plaintext(preview_id)
-                                .ok()
-                                .and_then(|file| media::read_capped(file.path()))
-                                .and_then(|bytes| media::preview_data_url(&bytes));
-                            self.cache_preview(preview_id, value.clone());
-                            value
-                        }
-                        None => {
-                            if eligible.is_none_or(|ids| ids.contains(&preview_id)) {
-                                hydration.eligible_remain = true;
-                            }
-                            None
-                        }
-                    };
-                }
                 let mut attachment = dto::snapshot_attachment_view(
                     &info,
                     errors.get(&id).cloned(),
                     self.client.deferred_media_status(id),
                 );
                 if let Some(metadata) = media_metadata {
-                    let mut media_meta = dto::media_metadata_view(metadata);
-                    if let Some(thumbnail) = media_meta.thumbnail.as_mut() {
-                        thumbnail.preview_url = preview;
-                    }
-                    attachment.media_meta = Some(Box::new(media_meta));
+                    attachment.media_meta =
+                        Some(Box::new(dto::media_metadata_view(metadata.clone())));
+                    self.apply_attachment_preview(
+                        &mut attachment,
+                        &info,
+                        Some(&metadata),
+                        budget,
+                        hydration,
+                        eligible.is_none_or(|ids| ids.contains(&id)),
+                    );
                 } else {
-                    attachment.preview_url = preview;
+                    self.apply_attachment_preview(
+                        &mut attachment,
+                        &info,
+                        None,
+                        budget,
+                        hydration,
+                        eligible.is_none_or(|ids| ids.contains(&id)),
+                    );
                 }
                 attachment
             })
@@ -976,46 +1173,49 @@ impl Session {
             .client
             .media_page(conversation, cursor, limit.min(MAX_PREVIEWS_PER_SNAPSHOT))
             .map_err(core_error)?;
+        let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
+        let mut hydration = DeferredHydration::default();
+        let previews = page
+            .items
+            .iter()
+            .map(|item| -> BridgeResult<_> {
+                let mut attachment = dto::attachment_view_with_media_status(
+                    &item.attachment,
+                    None,
+                    None,
+                    self.client
+                        .deferred_media_status(item.attachment.attachment_id)
+                        .map_err(core_error)?,
+                );
+                if let Some(metadata) = item.media_meta.as_ref() {
+                    attachment.media_meta =
+                        Some(Box::new(dto::media_metadata_view(metadata.clone())));
+                }
+                self.apply_attachment_preview(
+                    &mut attachment,
+                    &item.attachment,
+                    item.media_meta.as_ref(),
+                    &mut budget,
+                    &mut hydration,
+                    true,
+                );
+                Ok(attachment)
+            })
+            .collect::<BridgeResult<Vec<_>>>()?;
         let mut view = peppy_desktop_api::media_page_view_with_media_status(&self.client, page)
             .map_err(core_error)?;
-        let mut budget = MAX_PREVIEWS_PER_SNAPSHOT;
-        for item in &mut view.items {
-            let Some(thumbnail) = item
-                .media_meta
-                .as_mut()
-                .and_then(|meta| meta.thumbnail.as_mut())
-            else {
-                continue;
-            };
-            if budget == 0
-                || !media::is_previewable(&thumbnail.media_type)
-                || thumbnail.state != "ready"
+        for (item, attachment) in view.items.iter_mut().zip(previews) {
+            item.attachment.preview_url = attachment.preview_url;
+            if let (Some(media_meta), Some(preview_meta)) =
+                (item.media_meta.as_mut(), attachment.media_meta.as_deref())
             {
-                continue;
-            }
-            let Ok(id) = AttachmentId::from_str(&thumbnail.id) else {
-                continue;
-            };
-            let cached = self
-                .previews
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .get(&id);
-            let preview = match cached {
-                Some(value) => value,
-                None => {
-                    budget -= 1;
-                    let value = self
-                        .client
-                        .open_native_plaintext(id)
-                        .ok()
-                        .and_then(|file| media::read_capped(file.path()))
-                        .and_then(|bytes| media::preview_data_url(&bytes));
-                    self.cache_preview(id, value.clone());
-                    value
+                if let (Some(thumbnail), Some(preview_thumbnail)) = (
+                    media_meta.thumbnail.as_mut(),
+                    preview_meta.thumbnail.as_ref(),
+                ) {
+                    thumbnail.preview_url = preview_thumbnail.preview_url.clone();
                 }
-            };
-            thumbnail.preview_url = preview;
+            }
         }
         Ok(view)
     }
@@ -1761,6 +1961,32 @@ mod tests {
     }
 
     #[test]
+    fn failed_preview_reads_are_not_cached_and_are_cooldown_bounded() {
+        let id = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let mut cache = BoundedCache::new(1);
+
+        cache.record_failure(id);
+
+        assert_eq!(cache.get(&id), None);
+        assert!(cache.cooling_down(&id));
+        cache.remove(&id);
+        assert!(!cache.cooling_down(&id));
+    }
+
+    #[test]
+    fn failed_preview_cooldown_grows_and_caps_at_five_minutes() {
+        let id = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let mut cache = BoundedCache::new(1);
+        for _ in 0..32 {
+            cache.record_failure(id);
+        }
+
+        let retry = cache.retry_after.get(&id).unwrap();
+        assert_eq!(retry.failures, 32);
+        assert!(retry.after <= std::time::Instant::now() + MAX_PREVIEW_RETRY_COOLDOWN);
+    }
+
+    #[test]
     fn preview_and_avatar_caches_are_isolated() {
         let fixture = fixture_at("http://127.0.0.1:9");
         let session = open_session(
@@ -1773,7 +1999,7 @@ mod tests {
         .unwrap();
         let id = AttachmentId::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
 
-        session.cache_preview(id, Some("preview".into()));
+        session.cache_preview(id, "preview".into());
         session.cache_avatar(id, Some("avatar".into()));
 
         assert_eq!(session.cached_preview(&id), Some(Some("preview".into())));
@@ -1798,7 +2024,7 @@ mod tests {
 
         assert!(!follow_up.schedule(no_progress));
         assert!(!follow_up.schedule(complete));
-        for _ in 0..8 {
+        for _ in 0..MAX_DEFERRED_FOLLOW_UPS {
             assert!(follow_up.schedule(progress));
             follow_up.consume();
         }

@@ -105,6 +105,15 @@ use zeroize::Zeroizing;
 const SCHEMA_VERSION: i64 = 37;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
+
+/// An eligible attachment download with its durable demand classification.
+///
+/// Hosts apply their own bounded scheduling policy after filtering failed work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDownload {
+    pub object: CipherObject,
+    pub demanded: bool,
+}
 /// Records per `append_snapshot_page` call.
 pub const MAX_SNAPSHOT_PAGE: usize = 500;
 /// Records per staged snapshot generation.
@@ -2733,6 +2742,21 @@ impl Client {
             .transpose()
     }
 
+    /// Returns one validated, decrypted message by its durable ID.
+    pub fn message_by_id(&self, message_id: MessageId) -> Result<Option<Message>, Error> {
+        let store = self.lock()?;
+        store
+            .conn
+            .query_row(
+                MESSAGE_BY_ID_SELECT,
+                params![message_id.to_string()],
+                message_row,
+            )
+            .optional()?
+            .map(|row| message_from_row(&store.conn, row))
+            .transpose()
+    }
+
     /// Returns up to `limit` newest messages, chronologically, before an optional durable anchor.
     pub fn messages_page(
         &self,
@@ -3294,12 +3318,39 @@ impl Client {
 
     /// Received objects whose ciphertext must be downloaded and installed.
     pub fn pending_downloads(&self) -> Result<Vec<CipherObject>, Error> {
-        self.cipher_objects(
-            &format!(
-                "SELECT attachment_id FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
+        Ok(self
+            .pending_download_candidates()?
+            .into_iter()
+            .map(|candidate| candidate.object)
+            .collect())
+    }
+
+    /// Eligible received objects with their durable demand classification.
+    pub fn pending_download_candidates(&self) -> Result<Vec<PendingDownload>, Error> {
+        let store = self.lock()?;
+        let rows: Vec<(String, bool)> = store
+            .conn
+            .prepare(&format!(
+                "SELECT attachment_id,attachment_id IN (SELECT attachment_id FROM attachment_demand) FROM attachments a WHERE state='pending_download' AND remote_object_id IS NOT NULL AND attachment_id NOT IN ({}) AND (attachment_id IN (SELECT attachment_id FROM attachment_demand) OR (NOT EXISTS(SELECT 1 FROM gateway_mms_media_evictions e WHERE e.attachment_id=a.attachment_id) AND (attachment_id IN (SELECT thumbnail_attachment_id FROM message_media_meta WHERE thumbnail_attachment_id IS NOT NULL) OR (plaintext_bytes<={} AND attachment_id NOT IN (SELECT attachment_id FROM message_media_meta))))) ORDER BY rowid",
                 contact_media::REJECTED_DOWNLOADS_SQL, EAGER_MEDIA_PLAINTEXT_BYTES
-            ),
-        )
+            ))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        rows.into_iter()
+            .map(|(id, demanded)| {
+                let attachment_id = parse(&id)?;
+                let row = attachment_row(&store.conn, attachment_id)?.ok_or(Error::Database)?;
+                Ok(PendingDownload {
+                    object: CipherObject {
+                        attachment_id,
+                        ciphertext_bytes: row.ciphertext_bytes,
+                        ciphertext_sha256: row.ciphertext_sha256,
+                        remote_object_id: row.remote_object_id,
+                    },
+                    demanded,
+                })
+            })
+            .collect()
     }
 
     /// Reports whether a remote original has durable download demand.
@@ -3995,6 +4046,7 @@ const MESSAGE_FULL_SELECT: &str =
 const LATEST_MESSAGE_SELECT: &str = message_select!(
     "WHERE m.conversation_id=? ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT 1"
 );
+const MESSAGE_BY_ID_SELECT: &str = message_select!("WHERE m.id=? LIMIT 1");
 const MESSAGE_PAGE_SELECT: &str = message_select!(
     "WHERE m.conversation_id=?1 AND (?2 IS NULL OR m.sort_at_ms < ?2 OR (m.sort_at_ms = ?2 AND m.local_order < ?3)) ORDER BY m.sort_at_ms DESC,m.local_order DESC LIMIT ?4"
 );

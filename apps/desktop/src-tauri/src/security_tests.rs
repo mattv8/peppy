@@ -194,7 +194,10 @@ fn main_window_has_exactly_the_privacy_opener() {
             "allow": [{"url": "https://peppy.pro/privacy"}]
         })]
     );
-    let composer = permissions(include_str!("../capabilities/composer.json"));
+    let composer_json = include_str!("../capabilities/composer.json");
+    let composer_manifest: Value = serde_json::from_str(composer_json).unwrap();
+    assert_eq!(composer_manifest["windows"], json!(["composer-*"]));
+    let composer = permissions(composer_json);
     assert!(
         composer.iter().all(|id| !id.starts_with("opener:")),
         "composer windows must not open URLs"
@@ -265,6 +268,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "media_page",
         "open_media",
         "load_media",
+        "hydrate_media_preview",
+        "copy_attachment_image",
         "close_media",
     ] {
         assert!(commands.contains(&command.to_owned()));

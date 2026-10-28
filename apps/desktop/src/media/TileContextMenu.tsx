@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { Copy, Download, Link } from "@peppy/desktop-ui";
+import { Copy, Download, Link, RotateCw } from "@peppy/desktop-ui";
 import type { GalleryAttachment } from "./grouping";
 import type { MediaActions } from "./MediaActionsContext";
+import { originalPending } from "./mediaState";
 
 type MenuPosition = { left: number; top: number };
 
@@ -10,6 +11,8 @@ export type TileContextMenuProps = {
   attachment: GalleryAttachment;
   actions: MediaActions;
   anchor: MenuPosition;
+  /** Set only when native hydration gave up on this tile; re-arms it explicitly. */
+  onRetryPreview?(): void;
   returnFocus(): void;
   onClose(): void;
 };
@@ -22,16 +25,22 @@ function clampPosition(position: MenuPosition, menu: HTMLDivElement): MenuPositi
   };
 }
 
-export function TileContextMenu({ attachment, actions, anchor, returnFocus, onClose }: TileContextMenuProps) {
+export function TileContextMenu({ attachment, actions, anchor, onRetryPreview, returnFocus, onClose }: TileContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [position, setPosition] = useState(anchor);
-  const originalIsPending = attachment.state === "pending" && attachment.transfer === "download";
-  const items = [
-    actions.canCopyImage ? { label: "Copy image", icon: Copy, disabled: originalIsPending, title: originalIsPending ? "Still downloading from your phone" : undefined, action: () => actions.copyImage(attachment) } : undefined,
-    { label: "Save image", icon: Download, disabled: false, action: () => actions.save(attachment) },
-    { label: actions.publicCopy(attachment.id) ? "Copy public link" : "Create public link", icon: Link, disabled: false, action: () => actions.shareLink(attachment) },
-  ].filter((item): item is NonNullable<typeof item> => Boolean(item));
+  // A held original offers only Copy: Save and public links need the original on this phone-less device.
+  const originalHeld = originalPending(attachment);
+  // Native Copy demands the original itself, so a held original stays enabled there; the browser path cannot.
+  const copyBlocked = originalHeld && !actions.nativeCopy;
+  const copyItem = actions.canCopyImage ? { label: "Copy image", icon: Copy, disabled: copyBlocked, title: copyBlocked ? "Still downloading from your phone" : undefined, action: () => actions.copyImage(attachment) } : undefined;
+  const otherItems = originalHeld ? [] : [
+    onRetryPreview ? { label: "Retry preview", icon: RotateCw, disabled: false, title: undefined, action: onRetryPreview } : undefined,
+    attachment.state === "failed" ? { label: "Retry download", icon: RotateCw, disabled: false, title: undefined, action: () => actions.retry(attachment) } : undefined,
+    { label: "Save image", icon: Download, disabled: false, title: undefined, action: () => actions.save(attachment) },
+    { label: actions.publicCopy(attachment.id) ? "Copy public link" : "Create public link", icon: Link, disabled: false, title: undefined, action: () => actions.shareLink(attachment) },
+  ];
+  const items = [copyItem, ...otherItems].filter((item): item is NonNullable<typeof item> => Boolean(item));
 
   const close = (restoreFocus: boolean) => {
     onClose();

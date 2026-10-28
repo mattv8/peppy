@@ -48,7 +48,7 @@ semver = "1"
 plist = "1"
 time = { version = "0.3", features = ["formatting"] }
 zeroize = "1"
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }
 # Maintained OS secure stores: macOS/iOS Keychain (Security.framework), Windows Credential
 # Manager, Linux Secret Service. No secret ever reaches a process argv.
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }

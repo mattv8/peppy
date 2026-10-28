@@ -31,6 +31,8 @@ const COMMANDS: &[&str] = &[
     "media_page_newer",
     "open_media",
     "load_media",
+    "hydrate_media_preview",
+    "copy_attachment_image",
     "close_media",
     "publish_attachment",
     "open_composer",
