@@ -3,6 +3,13 @@
 //!
 //! The native update coordinator supplies only a previously verified private-cache
 //! path. PackageKit owns authorization through Polkit.
+#![cfg_attr(
+    all(test, not(target_os = "linux")),
+    allow(
+        dead_code,
+        reason = "Linux PackageKit interfaces are exercised only by Linux builds"
+    )
+)]
 
 use std::path::Path;
 #[cfg(target_os = "linux")]

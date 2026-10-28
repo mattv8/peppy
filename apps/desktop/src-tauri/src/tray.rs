@@ -43,7 +43,7 @@ fn menu_state() -> &'static Mutex<MenuState> {
 #[cfg(any(target_os = "macos", test))]
 const MACOS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/macos-template.png");
 #[cfg(any(target_os = "windows", test))]
-const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/windows-color.png");
+pub(crate) const WINDOWS_TRAY_ICON: &[u8] = include_bytes!("../icons/tray/windows-color.png");
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const DEFAULT_TRAY_ICON: &[u8] = include_bytes!("../icons/icon.png");
 
@@ -54,6 +54,10 @@ fn tray_icon() -> tauri::Result<Image<'static>> {
     return Image::from_bytes(WINDOWS_TRAY_ICON);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Image::from_bytes(DEFAULT_TRAY_ICON)
+}
+
+pub(crate) fn icon(app: &AppHandle) -> Option<tauri::tray::TrayIcon<tauri::Wry>> {
+    app.tray_by_id(TRAY_ID)
 }
 
 /// Builds the tray; returns false when the platform/session offers no tray.

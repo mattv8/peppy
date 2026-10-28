@@ -55,17 +55,12 @@ enum FakeAuthConfig {
     Status(u16),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 enum FakeRenewalResponse {
+    #[default]
     Success,
     Invalid200,
     Error(StatusCode),
-}
-
-impl Default for FakeRenewalResponse {
-    fn default() -> Self {
-        Self::Success
-    }
 }
 
 #[derive(Clone)]

@@ -209,7 +209,7 @@ pub(crate) fn hosted_origin() -> BridgeResult<String> {
 fn resolve_hosted_origin(override_origin: Option<&str>) -> BridgeResult<String> {
     #[cfg(debug_assertions)]
     if let Some(value) = override_origin {
-        let url = url::Url::parse(&value).map_err(|_| {
+        let url = url::Url::parse(value).map_err(|_| {
             BridgeError::new(
                 "invalid-origin",
                 "The hosted development origin is invalid.",
