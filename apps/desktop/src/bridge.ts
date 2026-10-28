@@ -287,6 +287,7 @@ const fixtureSave = (input: DraftInput): Draft => {
   fixtureDrafts.set(saved.conversationId, saved);
   return saved;
 };
+let fixtureNotificationSound = false;
 export const fixtureBridge: DesktopBridge = {
   load_state: async (conversationId, historyFromMessageId, options) => {
     const active = conversationId && fixtureConversationIds().includes(conversationId) ? conversationId : fixtureSnapshot.activeConversationId!;
@@ -386,6 +387,8 @@ export const fixtureBridge: DesktopBridge = {
   publish_attachment: async () => null,
   open_composer: async () => undefined,
   set_start_at_login: async enabled => { fixtureSnapshot.desktop = { trayAvailable: true, startAtLogin: enabled, startupSupported: true, background: false }; },
+  get_notification_sound: async () => fixtureNotificationSound,
+  set_notification_sound: async enabled => { fixtureNotificationSound = enabled; },
   popout_conversation: async conversationId => {
     if (!fixtureConversationIds().includes(conversationId)) throw fixtureError("not-found", "The requested conversation was not found.");
     fixtureSnapshot.head = { ...fixtureSnapshot.head, enabled: true, capability: "unconfirmed", pinnedConversationIds: [...new Set([...(fixtureSnapshot.head.pinnedConversationIds ?? []), conversationId])] };
@@ -517,6 +520,8 @@ export const renewHostedSession = () => "__TAURI_INTERNALS__" in window
   ? invoke<void>("hosted_session_renew")
   : Promise.resolve();
 export const tauriBridge: DesktopBridge = {
+  get_notification_sound: () => invoke("get_notification_sound"),
+  set_notification_sound: enabled => invoke("set_notification_sound", { enabled }),
   media_sync_request: attachmentIds => invoke("media_sync_request", { attachmentIds }),
   media_page_around: (conversationId, attachmentId, messageId, limit) => invoke("media_page_around", { conversationId, attachmentId, messageId, limit }),
   media_page_newer: (conversationId, cursor, limit) => invoke("media_page_newer", { conversationId, cursor, limit }),

@@ -346,6 +346,8 @@ fn app_acl_restricts_composer_windows_to_conversation_operations() {
         "discard_draft",
         "open_composer",
         "set_start_at_login",
+        "get_notification_sound",
+        "set_notification_sound",
         "popout_conversation",
         "hide_head",
         "mark_all_read",

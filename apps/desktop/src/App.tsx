@@ -1169,6 +1169,8 @@ function SettingsView({
         onOpenSettings={onOpenSettings}
         headsSupported={headsSupported}
         locked={encryption !== "unlocked" || Boolean(appLock?.locked)}
+        soundSettings={!browserHost && bridge.get_notification_sound && bridge.set_notification_sound
+          ? { load: bridge.get_notification_sound, save: bridge.set_notification_sound } : undefined}
       />
       <ReactionSettings show={showReactions} onShow={onShowReactions} />
       <section id="settings-theme" className="settings-card" data-settings-section="theme">

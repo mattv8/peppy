@@ -15,6 +15,15 @@ mod owner;
 mod windows;
 
 pub const EVENT: &str = "peppy://notification-activation";
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_audio(sound: bool) -> &'static str {
+    if sound {
+        "<audio src=\"ms-winsoundevent:Notification.Default\"/>"
+    } else {
+        "<audio silent=\"true\"/>"
+    }
+}
 pub(crate) mod fallback;
 
 #[derive(Default)]
@@ -75,6 +84,7 @@ pub fn post(
                     destination,
                 },
                 cancel: session.cancel.clone(),
+                sound: state.notifications.sound_enabled(),
                 title,
                 body,
             });
@@ -250,6 +260,12 @@ impl Pending {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_sound_windows_requests_default_audio_only_when_enabled() {
+        assert_eq!(windows_audio(false), "<audio silent=\"true\"/>");
+        assert_eq!(windows_audio(true), "<audio src=\"ms-winsoundevent:Notification.Default\"/>");
+    }
     use peppy_desktop_api::NotificationActivationDestination;
 
     fn activation(request: &str, generation: &str) -> NotificationActivation {

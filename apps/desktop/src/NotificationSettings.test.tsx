@@ -27,6 +27,41 @@ const props = () => ({
 const LOCKED_NOTE = "Unlock Peppy to change banner settings.";
 const SYNC_NOTE = /Banner choices apply to every computer and browser in this vault/;
 
+it("loads local notification sound and saves only after the user toggles it", async () => {
+  const soundSettings = { load: vi.fn().mockResolvedValue(false), save: vi.fn().mockResolvedValue(undefined) };
+  const input = props();
+  render(<NotificationSettings {...input} soundSettings={soundSettings} />);
+  const toggle = screen.getByRole("switch", { name: "Notification sounds" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  expect(toggle).not.toBeChecked();
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toBeChecked());
+  expect(soundSettings.save).toHaveBeenCalledWith(true);
+  expect(input.onPreferences).not.toHaveBeenCalled();
+});
+
+it("keeps sound off and reports a failed local save", async () => {
+  const soundSettings = { load: vi.fn().mockResolvedValue(false), save: vi.fn().mockRejectedValue(new Error("disk")) };
+  render(<NotificationSettings {...props()} soundSettings={soundSettings} />);
+  const toggle = screen.getByRole("switch", { name: "Notification sounds" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+  await screen.findByRole("alert");
+  expect(toggle).not.toBeChecked();
+});
+
+it("does not expose native sound settings without a native adapter or mutate them while locked", () => {
+  const input = props();
+  const { rerender } = render(<NotificationSettings {...input} />);
+  expect(screen.queryByRole("switch", { name: "Notification sounds" })).not.toBeInTheDocument();
+  const soundSettings = { load: vi.fn().mockResolvedValue(true), save: vi.fn() };
+  rerender(<NotificationSettings {...input} locked soundSettings={soundSettings} />);
+  const toggle = screen.getByRole("switch", { name: "Notification sounds" });
+  expect(toggle).toBeDisabled();
+  fireEvent.click(toggle);
+  expect(soundSettings.save).not.toHaveBeenCalled();
+});
+
 it("explains that banner choices sync to the vault and that permission stays per device", () => {
   render(<NotificationSettings {...props()} />);
   expect(screen.getByText(SYNC_NOTE)).toHaveAttribute("id", "notification-banner-sync-note");

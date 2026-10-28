@@ -188,6 +188,8 @@ export interface DesktopBridge {
   /** Explicit user action only; omitting the ID starts a new-conversation draft. */
   open_composer(conversationId?: string): Promise<void>;
   set_start_at_login(enabled: boolean): Promise<void>;
+  get_notification_sound?(): Promise<boolean>;
+  set_notification_sound?(enabled: boolean): Promise<void>;
   popout_conversation(conversationId: string): Promise<{ headCreated: boolean; warning?: string }>;
   hide_head(conversationId: string): Promise<void>;
   close_composer(): Promise<void>;
