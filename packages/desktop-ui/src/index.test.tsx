@@ -174,6 +174,116 @@ function firePointer(target: Element, type: string, pointerId: number, clientX: 
   fireEvent(target, event);
 }
 
+describe("ConversationList interactions", () => {
+  const threads = [
+    { id: "conv-a", name: "Aurora", preview: "Hi", unread: 0 },
+    { id: "conv-b", name: "Bravo", preview: "Yo", unread: 0 },
+    { id: "conv-c", name: "Cobalt", preview: "Hey", unread: 0 },
+  ];
+  const drafts = [
+    { id: "draft-a", name: "Draft one", preview: "Draft", unread: 0, recipientlessDraft: true, draftOnly: true },
+    { id: "draft-b", name: "Draft two", preview: "Draft", unread: 0, recipientlessDraft: true, draftOnly: true },
+  ];
+  const warning = "Deleting this draft permanently removes its text and attachments.";
+
+  it("keeps selection and popout independent across rows", () => {
+    const onSelect = vi.fn();
+    const onPopout = vi.fn();
+    render(<ConversationList conversations={threads} selectedId="conv-a" onSelect={onSelect} onPopout={onPopout} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bravo Yo" }));
+    expect(onSelect).toHaveBeenLastCalledWith("conv-b");
+    expect(onPopout).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTitle("Open Cobalt as floating conversation"));
+    expect(onPopout).toHaveBeenCalledOnce();
+    expect(onPopout).toHaveBeenCalledWith("conv-c");
+    expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("marks only the selected row as the current location", () => {
+    render(<ConversationList conversations={threads} selectedId="conv-b" onSelect={() => {}} />);
+    expect(screen.getByRole("button", { name: "Bravo Yo" })).toHaveAttribute("aria-current", "location");
+    expect(screen.getByRole("button", { name: "Aurora Hi" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("button", { name: "Cobalt Hey" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("omits popout and delete actions when their callbacks are absent", () => {
+    const onSelect = vi.fn();
+    render(<ConversationList conversations={[...threads, ...drafts]} selectedId="conv-a" onSelect={onSelect} />);
+
+    expect(screen.queryByRole("button", { name: "Open as floating conversation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Delete draft for/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Draft two Draft" }));
+    expect(onSelect).toHaveBeenCalledWith("draft-b");
+  });
+
+  it("describes a confirming delete with its warning across multiple drafts", () => {
+    const onDelete = vi.fn();
+    render(<ConversationList conversations={drafts} selectedId="draft-a" onSelect={() => {}} onDelete={onDelete} onCancelDelete={() => {}} deleteConfirmationId="draft-b" />);
+
+    expect(screen.getByRole("button", { name: "Delete draft for Draft one" })).not.toHaveAttribute("aria-describedby");
+    const confirmation = screen.getByRole("button", { name: "Confirm delete draft for Draft two" });
+    expect(confirmation).toHaveAccessibleDescription(warning);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("resolves a supplied delete warning id for the confirming draft", () => {
+    render(<ConversationList conversations={drafts} selectedId="draft-b" onSelect={() => {}} onDelete={() => {}} onCancelDelete={() => {}} deleteConfirmationId="draft-b" deleteWarningId="custom-delete-warning" />);
+
+    const confirmation = screen.getByRole("button", { name: "Confirm delete draft for Draft two" });
+    expect(confirmation).toHaveAttribute("aria-describedby", "custom-delete-warning");
+    expect(confirmation).toHaveAccessibleDescription(warning);
+  });
+
+  it("does not invoke delete for a disabled deleting draft while other drafts stay deletable", () => {
+    const onDelete = vi.fn();
+    render(<ConversationList conversations={drafts} selectedId="draft-a" onSelect={() => {}} onDelete={onDelete} deletingId="draft-b" />);
+
+    const deleting = screen.getByRole("button", { name: "Delete draft for Draft two" });
+    expect(deleting).toBeDisabled();
+    fireEvent.click(deleting);
+    expect(onDelete).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft for Draft one" }));
+    expect(onDelete).toHaveBeenCalledOnce();
+    expect(onDelete).toHaveBeenCalledWith("draft-a");
+  });
+
+  it("shows the delete warning as a visible status in place of the draft preview while confirming", () => {
+    const unsent = [{ id: "draft-b", name: "Draft two", preview: "Unsent words", unread: 0, recipientlessDraft: true, draftOnly: true }];
+    render(<ConversationList conversations={unsent} selectedId="draft-b" onSelect={() => {}} onDelete={() => {}} onCancelDelete={() => {}} deleteConfirmationId="draft-b" />);
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/permanently removes its text and attachments/);
+    expect(status).not.toHaveClass("sr-only");
+    expect(status.closest("[hidden], [aria-hidden='true']")).toBeNull();
+    expect(screen.queryByText("Unsent words")).not.toBeInTheDocument();
+  });
+
+  it("restores the draft preview and removes the warning when confirmation is cancelled", () => {
+    const unsent = [{ id: "draft-b", name: "Draft two", preview: "Unsent words", unread: 0, recipientlessDraft: true, draftOnly: true }];
+    const { rerender } = render(<ConversationList conversations={unsent} selectedId="draft-b" onSelect={() => {}} onDelete={() => {}} onCancelDelete={() => {}} deleteConfirmationId="draft-b" />);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    rerender(<ConversationList conversations={unsent} selectedId="draft-b" onSelect={() => {}} onDelete={() => {}} onCancelDelete={() => {}} />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText("Unsent words")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete draft for Draft two" })).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("exposes the default warning id as a visible status that the confirming delete describes", () => {
+    render(<ConversationList conversations={drafts} selectedId="draft-b" onSelect={() => {}} onDelete={() => {}} onCancelDelete={() => {}} deleteConfirmationId="draft-b" />);
+
+    const status = document.getElementById("delete-draft-warning-draft-b");
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveTextContent(/permanently removes its text and attachments/);
+    expect(status).not.toHaveClass("sr-only");
+    expect(screen.getByRole("button", { name: "Confirm delete draft for Draft two" })).toHaveAccessibleDescription(warning);
+  });
+
+});
+
 describe("desktop UI controls", () => {
   it("uses a deterministic fallback avatar for conversations without an identity", () => {
     render(<ConversationList conversations={people} selectedId="conv-a" onSelect={() => {}} />);
