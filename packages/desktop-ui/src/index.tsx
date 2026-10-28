@@ -892,8 +892,10 @@ export function ConversationList({
                 <button data-conversation-id={c.id} className="conversation-select" aria-current={selectedId === c.id ? "location" : undefined} onClick={() => onSelect(c.id)}>
                   <ContactAvatar {...(c.avatar ?? conversationAvatar({ id: c.id, name: c.name }))} size={36} className="avatar" />
                   <span className="conversation-copy">
-                    <b title={c.name}>{c.name}</b>
-                    <small>{c.preview}</small>
+                    <b title={c.name} className={isDeleteConfirmation ? "sr-only" : undefined}>{c.name}</b>
+                    {isDeleteConfirmation ? (
+                      <small id={deleteWarningId ?? `delete-draft-warning-${c.id}`} className="conversation-delete-warning" role="status">Deleting this draft permanently removes its text and attachments.</small>
+                    ) : <small>{c.preview}</small>}
                   </span>
                   {c.unread > 0 && (
                     <span aria-label={`${c.unread} unread messages`} className="unread">
@@ -901,30 +903,31 @@ export function ConversationList({
                     </span>
                   )}
                 </button>
-                {c.recipientlessDraft && c.draftOnly && onDelete && <button
-                  type="button"
-                  className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}
-                  data-delete-conversation-id={c.id}
-                  aria-describedby={isDeleteConfirmation ? deleteWarningId ?? `delete-draft-warning-${c.id}` : undefined}
-                  aria-label={`${isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"} for ${c.name}`}
-                  title={isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"}
-                  disabled={deletingId === c.id}
-                  onBlur={() => isDeleteConfirmation && onCancelDelete?.()}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Escape" || !isDeleteConfirmation) return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onCancelDelete?.();
-                  }}
-                  onClick={(event) => {
-                    event.currentTarget.focus();
-                    onDelete(c.id);
-                  }}
-                >
-                  {deletingId === c.id ? <Loader size={15} aria-hidden /> : <Trash2 size={16} aria-hidden />}
-                </button>}
-                {isDeleteConfirmation && <span id={deleteWarningId ?? `delete-draft-warning-${c.id}`} role="status">Deleting this draft permanently removes its text and attachments.</span>}
-                {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
+                {((c.recipientlessDraft && c.draftOnly && onDelete) || onPopout) && <div data-conversation-actions>
+                  {c.recipientlessDraft && c.draftOnly && onDelete && <button
+                    type="button"
+                    className={`conversation-delete ${isDeleteConfirmation ? "confirming" : ""}`}
+                    data-delete-conversation-id={c.id}
+                    aria-describedby={isDeleteConfirmation ? deleteWarningId ?? `delete-draft-warning-${c.id}` : undefined}
+                    aria-label={`${isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"} for ${c.name}`}
+                    title={isDeleteConfirmation ? "Confirm delete draft" : "Delete draft"}
+                    disabled={deletingId === c.id}
+                    onBlur={() => isDeleteConfirmation && onCancelDelete?.()}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Escape" || !isDeleteConfirmation) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onCancelDelete?.();
+                    }}
+                    onClick={(event) => {
+                      event.currentTarget.focus();
+                      onDelete(c.id);
+                    }}
+                  >
+                    {deletingId === c.id ? <Loader size={15} aria-hidden /> : <Trash2 size={16} aria-hidden />}
+                  </button>}
+                  {onPopout && <button type="button" className="conversation-popout" data-popout-conversation-id={c.id} aria-label="Open as floating conversation" title={`Open ${c.name} as floating conversation`} onClick={() => onPopout(c.id)}><ExternalLink size={15} aria-hidden /></button>}
+                </div>}
               </div>
             </li>;
           })
