@@ -517,7 +517,7 @@ describe("setup landing routing", () => {
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
     expect(document.getElementById("setup-landing")).not.toBeInTheDocument();
-    expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
+    await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy"));
   });
 
   it("shows the neutral Peppy header for a deferred owner without a phone", async () => {
@@ -783,33 +783,6 @@ class TestResizeObserver {
     TestResizeObserver.observers = [];
   }
 }
-class TestIntersectionObserver {
-  static observers: TestIntersectionObserver[] = [];
-  readonly targets = new Set<Element>();
-
-  constructor(private readonly callback: IntersectionObserverCallback) {
-    TestIntersectionObserver.observers.push(this);
-  }
-
-  observe(target: Element) {
-    this.targets.add(target);
-  }
-
-  disconnect() {
-    this.targets.clear();
-  }
-
-  static intersect(target: Element) {
-    for (const observer of TestIntersectionObserver.observers) {
-      if (observer.targets.has(target))
-        observer.callback([{ target, isIntersecting: true } as IntersectionObserverEntry], observer as unknown as IntersectionObserver);
-    }
-  }
-
-  static reset() {
-    TestIntersectionObserver.observers = [];
-  }
-}
 const mockMessageListGeometry = (geometry: { overlay: number; viewport: number; scrollHeight?: number }) => {
   const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
   const clientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
@@ -917,6 +890,262 @@ afterEach(() => {
 });
 
 describe("lazy conversation history", () => {
+  it("marks the initial conversation load busy", async () => {
+    render(<App />);
+    await screen.findByText("Hello from Aurora");
+    const refresh = deferred<DesktopSnapshot>();
+    vi.mocked(bridge.load_state).mockReturnValueOnce(refresh.promise);
+    fireEvent.click(screen.getByRole("button", { name: /River/ }));
+
+    expect(await screen.findByRole("log", { name: "Messages" })).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("loads older history after an upward scroll enters one list viewport from the top", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    const loadHistory = vi.spyOn(bridge, "load_history").mockReturnValue(page.promise);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      list.scrollTop = 300;
+      fireEvent.scroll(list);
+      list.scrollTop = 100;
+      fireEvent.scroll(list);
+
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
+      list.scrollTop = 0;
+      fireEvent.scroll(list);
+      expect(loadHistory).toHaveBeenCalledOnce();
+
+      await act(async () => page.resolve({ conversationId: conversation.id, messages: [], hasMore: true }));
+      expect(loadHistory).toHaveBeenCalledOnce();
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("does not auto-load history for downward or programmatic scrolls", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    host.conversations[0].hasOlderMessages = true;
+    const loadHistory = vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: "aurora",
+      messages: [],
+      hasMore: true,
+    });
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      list.setAttribute("data-scroll-programmatic", "");
+      list.scrollTop = 50;
+      fireEvent.scroll(list);
+      list.removeAttribute("data-scroll-programmatic");
+      list.scrollTop = 150;
+      fireEvent.scroll(list);
+      list.setAttribute("data-scroll-programmatic", "");
+      list.scrollTop = 0;
+      fireEvent.scroll(list);
+
+      expect(loadHistory).not.toHaveBeenCalled();
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("loads history from upward wheel input at the top of a short list", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 100 });
+    host.conversations[0].hasOlderMessages = true;
+    const loadHistory = vi.spyOn(bridge, "load_history").mockResolvedValue({
+      conversationId: "aurora",
+      messages: [],
+      hasMore: false,
+    });
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      list.scrollTop = 0;
+      fireEvent.wheel(list, { deltaY: -1 });
+
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("blocks automatic history input after an error until Retry is explicitly activated", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const loadHistory = vi.spyOn(bridge, "load_history")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ conversationId: conversation.id, messages: [], hasMore: false });
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      fireEvent.click(await screen.findByRole("button", { name: "Load older messages" }));
+      await screen.findByRole("button", { name: "Retry loading older messages" });
+      list.scrollTop = 0;
+      fireEvent.scroll(list);
+      fireEvent.wheel(list, { deltaY: -1 });
+      expect(loadHistory).toHaveBeenCalledOnce();
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry loading older messages" }));
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledTimes(2));
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("ignores downward wheels and duplicate upward wheels while a history page is in flight", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    const loadHistory = vi.spyOn(bridge, "load_history").mockReturnValue(page.promise);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      list.scrollTop = 0;
+      fireEvent.wheel(list, { deltaY: 1 });
+      expect(loadHistory).not.toHaveBeenCalled();
+      fireEvent.wheel(list, { deltaY: -1 });
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
+      fireEvent.wheel(list, { deltaY: -1 });
+      expect(loadHistory).toHaveBeenCalledOnce();
+      await act(async () => page.resolve({ conversationId: conversation.id, messages: [], hasMore: false }));
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("stops automatic history input after exhaustion", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const loadHistory = vi.spyOn(bridge, "load_history").mockResolvedValue({ conversationId: conversation.id, messages: [], hasMore: false });
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      list.scrollTop = 0;
+      fireEvent.wheel(list, { deltaY: -1 });
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
+      await screen.findByText("Beginning of conversation");
+      list.scrollTop = 0;
+      fireEvent.scroll(list);
+      fireEvent.wheel(list, { deltaY: -1 });
+      expect(loadHistory).toHaveBeenCalledOnce();
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("loads a second history page only after a fresh upward wheel", async () => {
+    const restoreGeometry = mockMessageListGeometry({ overlay: 0, viewport: 100, scrollHeight: 1_000 });
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const loadHistory = vi.spyOn(bridge, "load_history")
+      .mockResolvedValueOnce({ conversationId: conversation.id, messages: [], hasMore: true })
+      .mockResolvedValueOnce({ conversationId: conversation.id, messages: [], hasMore: false });
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      list.scrollTop = 0;
+      fireEvent.wheel(list, { deltaY: -1 });
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
+      await waitFor(() => expect(document.getElementById("history-load-band")).toHaveAttribute("data-history-state", "idle"));
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      expect(loadHistory).toHaveBeenCalledOnce();
+      fireEvent.wheel(list, { deltaY: -1 });
+      await waitFor(() => expect(loadHistory).toHaveBeenCalledTimes(2));
+    } finally {
+      restoreGeometry();
+    }
+  });
+
+  it("clears a detached older-page pending state and reports a mismatched conversation response", async () => {
+    const conversation = host.conversations[0];
+    const target = conversation.messages[0];
+    const older = deferred<Awaited<ReturnType<typeof bridge.load_message_window>>>();
+    vi.spyOn(bridge, "search_local").mockResolvedValue({
+      query: "target",
+      items: [{ kind: "message", conversationId: conversation.id, messageId: target.id, title: "Aurora", snippet: target.body, timestamp: target.timestamp }],
+      indexState: "ready",
+      hasMore: { conversation: false, message: false, contact: false },
+    });
+    vi.spyOn(bridge, "load_message_window")
+      .mockResolvedValueOnce({ conversationId: conversation.id, messages: [target], hasOlder: true, hasNewer: true })
+      .mockReturnValueOnce(older.promise);
+    render(<App />);
+    await screen.findByText(target.body);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "target" } });
+    const result = await waitFor(() => {
+      const hit = document.querySelector<HTMLElement>("[data-search-hit]");
+      expect(hit).not.toBeNull();
+      return hit!;
+    });
+    fireEvent.click(result!);
+    await screen.findByRole("button", { name: "Load older messages" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    expect((await screen.findByRole("button", { name: "Load newer messages" }))).toBeDisabled();
+    await act(async () => older.resolve({ conversationId: "river", messages: [], hasOlder: true, hasNewer: true }));
+    await screen.findByRole("alert");
+    expect(screen.getByRole("button", { name: "Load newer messages" })).not.toBeDisabled();
+  });
+
+  it("keeps keyboard focus in history controls while loading and returns it to the list at exhaustion", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValue(page.promise);
+    render(<App />);
+
+    const load = await screen.findByRole("button", { name: "Load older messages" });
+    load.focus();
+    fireEvent.click(load);
+
+    const status = await waitFor(() => {
+      const indicator = document.getElementById("history-load-indicator");
+      expect(indicator).toHaveAttribute("role", "status");
+      return indicator!;
+    });
+    expect(document.activeElement).toBe(document.getElementById("history-load-band"));
+    expect(status.closest("[aria-busy='true']")).toBeNull();
+
+    await act(async () => page.resolve({ conversationId: conversation.id, messages: [], hasMore: false }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("log", { name: "Messages" })));
+  });
+
+  it("does not steal focus after a manual history load when the reader moves to the composer", async () => {
+    const conversation = host.conversations[0];
+    conversation.hasOlderMessages = true;
+    const page = deferred<{ conversationId: string; messages: ConversationView["messages"]; hasMore: boolean }>();
+    vi.spyOn(bridge, "load_history").mockReturnValue(page.promise);
+    render(<App />);
+
+    const load = await screen.findByRole("button", { name: "Load older messages" });
+    load.focus();
+    fireEvent.click(load);
+    const composer = await screen.findByLabelText("Message");
+    composer.focus();
+    await act(async () => page.resolve({ conversationId: conversation.id, messages: [], hasMore: false }));
+
+    await waitFor(() => expect(document.activeElement).toBe(composer));
+  });
+
   it("adopts a draft payload without loading state again", async () => {
     render(<App />);
     await screen.findByLabelText("Message");
@@ -1816,11 +2045,159 @@ describe("new-recipient drafts", () => {
     render(<App />);
     await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
     expect(document.querySelector("[data-header-title]")?.textContent).toBe("Peppy");
-    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
-    fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
-    fireEvent.keyDown(picker, { key: "Enter" });
+    const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
     await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["+12025550100"]));
     await waitFor(() => expect(document.querySelector("[data-header-title]")?.textContent).toBe("(202) 555-0100"));
+  });
+
+  it("continues a guarded Omni start after a real outside pointer closes search", async () => {
+    vi.spyOn(bridge, "list_contact_books").mockResolvedValue([{
+      id: "book", deviceName: "Phone", state: "active", contactCount: 0,
+      capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true },
+      lastSyncAt: "now", pendingEditCount: 0,
+    }]);
+    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    await screen.findByRole("region", { name: "Contacts browser" });
+    const newContact = await screen.findByLabelText("New contact");
+    await waitFor(() => expect(newContact).toBeEnabled());
+    fireEvent.click(newContact);
+    fireEvent.change(await screen.findByLabelText("Given name"), { target: { value: "Unsaved" } });
+
+    const omni = screen.getByRole("combobox", { name: "Search Peppy" });
+    const startGuardedConversation = async () => {
+      fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
+      fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
+    };
+    await startGuardedConversation();
+    const keepEditing = await screen.findByRole("button", { name: "Keep editing" });
+    await waitFor(() => expect(omni).toHaveValue(""));
+    expect(document.querySelector("[data-omni-search-results]")).not.toBeInTheDocument();
+    fireEvent.pointerDown(keepEditing);
+    fireEvent.click(keepEditing);
+    expect(screen.getByLabelText("Given name")).toHaveValue("Unsaved");
+    expect(host.drafts.has("conv-new-1")).toBe(false);
+
+    await startGuardedConversation();
+    const discard = await screen.findByRole("button", { name: "Discard" });
+    await waitFor(() => expect(omni).toHaveValue(""));
+    fireEvent.pointerDown(discard);
+    fireEvent.click(discard);
+
+    await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["+12025550100"]));
+  });
+
+  it("resolves an exact later-page contact identity and preserves its stored short address", async () => {
+    const firstPage = Array.from({ length: 200 }, (_, index) => ({
+      id: `other-${index}`, bookId: "book", revision: "1", displayName: "Other", phones: [], emails: [], addresses: [],
+    }));
+    vi.spyOn(bridge, "search_local").mockResolvedValue({
+      query: "Ada", items: [{ kind: "contact", bookId: "book", contactId: "ada", title: "Ada", subtitle: "Contact" }], indexState: "ready",
+      hasMore: { conversation: false, message: false, contact: false },
+    });
+    const listContacts = vi.spyOn(bridge, "list_contacts").mockImplementation(async (_book, _query, offset) => offset === 0
+      ? firstPage
+      : [{ id: "ada", bookId: "book", revision: "1", displayName: "Ada", phones: [{ label: "Work", number: "short code / 1" }], emails: [], addresses: [] }]);
+    render(<App />);
+    const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(omni, { target: { value: "Ada" } });
+    fireEvent.click(await screen.findByRole("option", { name: "Start conversation with Ada" }));
+
+    await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["short code / 1"]));
+    expect(listContacts).toHaveBeenNthCalledWith(2, "book", "", 200, { key: "family", direction: "asc" });
+  });
+
+  it("keeps a missing contact lookup inline and does not create a draft", async () => {
+    vi.spyOn(bridge, "search_local").mockResolvedValue({
+      query: "Missing", items: [{ kind: "contact", bookId: "book", contactId: "missing", title: "Missing", subtitle: "Contact" }], indexState: "ready",
+      hasMore: { conversation: false, message: false, contact: false },
+    });
+    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    render(<App />);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Search Peppy" }), { target: { value: "Missing" } });
+    fireEvent.click(await screen.findByRole("option", { name: "Start conversation with Missing" }));
+
+    expect(await screen.findByText("This contact is no longer available.")).toBeInTheDocument();
+    expect(host.drafts.size).toBe(0);
+  });
+
+  it("reuses a singleton or local draft but never a group conversation", async () => {
+    host.conversations.push({ id: "single", name: "Single", preview: "", unread: 0, messages: [], participants: ["+12025550100"] });
+    host.conversations.push({ id: "group", name: "Group", preview: "", unread: 0, messages: [], participants: ["+12025550101", "+12025550102"] });
+    render(<App />);
+    const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
+
+    fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
+    await waitFor(() => expect(bridge.load_state).toHaveBeenLastCalledWith("single"));
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById("composer-textarea")));
+
+    host.failSaves = { code: "offline", message: "offline" };
+    fireEvent.change(omni, { target: { value: "+1 202 555 0103" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0103"));
+    await screen.findByRole("alert");
+    host.failSaves = undefined;
+    fireEvent.change(omni, { target: { value: "+1 202 555 0103" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0103"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove (202) 555-0103" })).toBeInTheDocument());
+    expect(host.drafts.size).toBe(0);
+
+    fireEvent.change(omni, { target: { value: "+1 202 555 0101" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0101"));
+    await waitFor(() => expect([...host.drafts.values()].some((draft) => draft.recipientIds[0] === "+12025550101")).toBe(true));
+  });
+
+  it("cancels an immediate clean-Contacts start when search closes during a pending flush", async () => {
+    vi.spyOn(bridge, "list_contact_books").mockResolvedValue([{
+      id: "book", deviceName: "Phone", state: "active", contactCount: 0,
+      capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true }, lastSyncAt: "now", pendingEditCount: 0,
+    }]);
+    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    const pendingSave = deferred<Draft>();
+    vi.spyOn(bridge, "save_draft").mockReturnValueOnce(pendingSave.promise);
+    render(<App />);
+    await screen.findByLabelText("Message");
+    type("pending flush");
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    const omni = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
+    fireEvent.keyDown(omni, { key: "Escape" });
+    pendingSave.resolve({ id: "draft-aurora", conversationId: "aurora", text: "pending flush", recipientIds: [], attachmentIds: [], revision: "1" });
+    await act(async () => {
+      await pendingSave.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(vi.mocked(bridge.save_draft).mock.calls.some(
+      ([input]) => input.recipientIds.includes("+12025550100"),
+    )).toBe(false);
+    expect(screen.getByRole("region", { name: "Contacts browser" })).toBeInTheDocument();
+  });
+
+  it("keeps an immediate clean-Contacts flush failure inline in Omni", async () => {
+    vi.spyOn(bridge, "list_contact_books").mockResolvedValue([{
+      id: "book", deviceName: "Phone", state: "active", contactCount: 0,
+      capabilities: { canWrite: true, canDelete: true, supportsNotes: true, supportsPhoto: true, supportsBirthday: true }, lastSyncAt: "now", pendingEditCount: 0,
+    }]);
+    vi.spyOn(bridge, "list_contacts").mockResolvedValue([]);
+    render(<App />);
+    await screen.findByLabelText("Message");
+    host.failSaves = { code: "offline", message: "offline" };
+    type("will fail");
+    await waitFor(() => expect(bridge.save_draft).toHaveBeenCalledOnce());
+    fireEvent.click(await screen.findByRole("button", { name: "Contacts" }));
+    const omni = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
+
+    expect(await screen.findByText("Could not start the conversation.")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Retry starting conversation" })).toBeInTheDocument();
+    expect(host.drafts.has("conv-new-1")).toBe(false);
   });
 
   it("deletes an empty recipientless draft directly and confirms before deleting content", async () => {
@@ -1843,11 +2220,9 @@ describe("new-recipient drafts", () => {
   it("creates the draft with empty IDs, then saves and sends with the host-assigned IDs", async () => {
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
-    fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
-    fireEvent.keyDown(picker, { key: "Enter" });
+    const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(omni, { target: { value: "+1 202 555 0100" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0100"));
 
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(save.mock.calls[0][0]).toMatchObject({
@@ -1898,9 +2273,8 @@ describe("new-recipient drafts", () => {
       code: "invalid-recipient",
       message: "Recipients must be phone numbers.",
     };
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -1927,9 +2301,10 @@ describe("new-recipient drafts", () => {
   it("does not save an invalid new recipient", async () => {
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    save.mockClear();
     fireEvent.change(picker, { target: { value: "alice@example" } });
     fireEvent.keyDown(picker, { key: "Enter" });
 
@@ -1941,9 +2316,8 @@ describe("new-recipient drafts", () => {
   it("blocks Send while a recipient is pending, then saves the canonical number on commit", async () => {
     host.gateways = [MMS_SIM];
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() => expect(host.drafts.get("conv-new-1")?.recipientIds).toEqual(["+12025550100"]));
@@ -1972,9 +2346,8 @@ describe("new-recipient drafts", () => {
   it("keeps new-compose recipient editing after an incoming history match", async () => {
     host.gateways = [MMS_SIM];
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() => expect(host.drafts.get("conv-new-1")).toBeDefined());
@@ -2009,7 +2382,8 @@ describe("new-recipient drafts", () => {
     const firstSave = deferred<Draft>();
     const save = vi.mocked(bridge.save_draft).mockImplementationOnce(() => firstSave.promise);
     render(<App />);
-    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
@@ -2029,9 +2403,8 @@ describe("new-recipient drafts", () => {
     host.gateways = [MMS_SIM];
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() => expect(host.drafts.get("conv-new-1")).toBeDefined());
@@ -2053,9 +2426,8 @@ describe("new-recipient drafts", () => {
 
   it("removes the exact stored ID from a multi-recipient draft", async () => {
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() =>
@@ -2105,7 +2477,8 @@ describe("floating conversation actions", () => {
 
   it("uses the persisted conversation ID after a local draft is rekeyed", async () => {
     render(<App />);
-    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() => expect(bridge.load_state).toHaveBeenLastCalledWith("conv-new-1"));
@@ -3702,6 +4075,31 @@ describe("host state display", () => {
 });
 
 describe("desktop presentation controls", () => {
+  it("does not treat a released geometry correction as an upward history scroll", async () => {
+    const geometry = { overlay: 100, viewport: 300 };
+    const restoreGeometry = mockMessageListGeometry(geometry);
+    host.conversations[0].hasOlderMessages = true;
+    const loadHistory = vi.spyOn(bridge, "load_history").mockResolvedValue({ conversationId: "aurora", messages: [], hasMore: false });
+    TestResizeObserver.reset();
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    try {
+      render(<App />);
+      const list = await screen.findByRole("log", { name: "Messages" });
+      await screen.findByRole("button", { name: "Load older messages" });
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+      list.scrollTop = 400;
+      fireEvent.scroll(list);
+      geometry.overlay = 150;
+      await act(async () => TestResizeObserver.resize(document.getElementById("composer-area")!));
+      await waitFor(() => expect(list).not.toHaveAttribute("data-scroll-programmatic"));
+      fireEvent.scroll(list);
+
+      expect(loadHistory).not.toHaveBeenCalled();
+    } finally {
+      restoreGeometry();
+    }
+  });
+
   describe("navigation position", () => {
     it("defaults to the side rail without writing layout storage", async () => {
       const storedLayout = localStorage.getItem("peppy.layout.v1");
@@ -4058,9 +4456,7 @@ describe("desktop presentation controls", () => {
     });
     host.conversations[0].hasOlderMessages = true;
     TestResizeObserver.reset();
-    TestIntersectionObserver.reset();
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
-    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
     try {
       render(<App />);
       const list = await screen.findByRole("log", { name: "Messages" });
@@ -4076,15 +4472,14 @@ describe("desktop presentation controls", () => {
       fireEvent.click(screen.getByRole("tab", { name: "Messages" }));
       geometry.viewport = 300;
       await act(async () => TestResizeObserver.resize(list));
-      await act(async () => TestIntersectionObserver.intersect(document.getElementById("history-page-sentinel")!));
 
       expect(list.scrollTop).toBe(400);
       expect(loadHistory).not.toHaveBeenCalled();
       await waitFor(() =>
         expect(list).not.toHaveAttribute("data-scroll-programmatic"),
       );
+      list.scrollTop = 300;
       fireEvent.scroll(list);
-      await act(async () => TestIntersectionObserver.intersect(document.getElementById("history-page-sentinel")!));
       await waitFor(() => expect(loadHistory).toHaveBeenCalledOnce());
     } finally {
       restoreGeometry();
@@ -4233,9 +4628,8 @@ describe("desktop presentation controls", () => {
 
   it("renders the recipient panel in the safe rail layer between messages and composer", async () => {
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() =>
@@ -4258,9 +4652,8 @@ describe("desktop presentation controls", () => {
       JSON.stringify({ listWidth: 320, recipientPosition: { x: 37, y: 53 } }),
     );
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() =>
@@ -4279,9 +4672,8 @@ describe("desktop presentation controls", () => {
       JSON.stringify({ listWidth: 320, recipientAnchor: "bottom-left", sibling: true, recipientPosition: { x: -1, y: 53 } }),
     );
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
     fireEvent.change(picker, { target: { value: "+1 202 555 0100" } });
     fireEvent.keyDown(picker, { key: "Enter" });
     await waitFor(() =>
@@ -4448,9 +4840,7 @@ describe("development fixture bridge", () => {
   it("runs the new-recipient flow in fixture mode without debug labels", async () => {
     const save = vi.spyOn(fixtureBridge, "save_draft");
     render(<App />);
-    const picker = await screen.findByRole("combobox", {
-      name: "Search recipients",
-    });
+    const omni = await screen.findByRole("combobox", { name: "Search Peppy" });
     for (const debugText of [
       "SIMULATED UI",
       "DEVELOPMENT FIXTURE",
@@ -4458,8 +4848,8 @@ describe("development fixture bridge", () => {
       "sim-fixture",
     ])
       expect(document.body.textContent).not.toContain(debugText);
-    fireEvent.change(picker, { target: { value: "+1 202 555 0199" } });
-    fireEvent.keyDown(picker, { key: "Enter" });
+    fireEvent.change(omni, { target: { value: "+1 202 555 0199" } });
+    fireEvent.click(await screen.findByText("Start conversation with (202) 555-0199"));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     const assigned = await save.mock.results[0].value;
     expect(assigned.conversationId).not.toBe("");
@@ -4540,7 +4930,10 @@ describe("display-only contact names", () => {
     ]);
     const save = vi.mocked(bridge.save_draft);
     render(<App />);
-    const picker = await screen.findByRole("combobox", { name: "Search recipients" });
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    const picker = await screen.findByLabelText("Recipients");
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    save.mockClear();
     fireEvent.change(picker, { target: { value: "Sol" } });
     const work = await screen.findByText("work · (202) 555-0161");
     expect(screen.getByText("mobile · (202) 555-0160")).toBeInTheDocument();
