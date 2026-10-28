@@ -256,6 +256,10 @@ describe("BrowserBridge", () => {
       const secret = document.getElementById("browser-enrollment-owner-secret-passphrase") as HTMLInputElement;
       const acknowledgement = document.getElementById("browser-enrollment-owner-secret-acknowledged") as HTMLInputElement;
       const submit = document.getElementById("browser-enrollment-owner-secret-submit") as HTMLButtonElement;
+      expect(document.getElementById("browser-enrollment-owner-secret-heading")!.textContent).toBe("Save your Vault key phrase");
+      expect(document.getElementById("browser-enrollment-owner-secret-description")!.textContent).toContain("usually have six words");
+      expect(document.getElementById("browser-enrollment-owner-secret-description")!.textContent).toContain("not your account or admin password");
+      expect(acknowledgement.parentElement!.textContent).toContain("I saved my Vault key phrase");
       expect(secret.value).toBe("generated-vault-secret");
       expect(secret.readOnly).toBe(true);
       expect(submit.disabled).toBe(true);
@@ -389,7 +393,7 @@ describe("BrowserBridge", () => {
 
       settleCopy?.();
       await Promise.resolve();
-      expect(copy.textContent).toBe("Copy secret");
+      expect(copy.textContent).toBe("Copy Vault key phrase");
       expect(status.textContent).toBe("");
       expect(document.getElementById("browser-enrollment-owner-secret")).toBeNull();
       await vi.waitFor(() => expect(port.sent).toHaveLength(3));

@@ -535,6 +535,34 @@ public actor NativeSession {
         )
     }
 
+    public func ownerComputerApprovalHost(deviceName: String) async throws -> OwnerComputerApprovalHost {
+        guard let record, record.role == "owner", status.keysUnlocked, let nativeClient = client else {
+            throw ClientError.notEnrolled
+        }
+        let origin = try ServerOrigin(canonical: record.identity.origin, allowLoopbackHTTP: allowLoopbackHTTP)
+        let enrollmentClient = try newNativeExistingOwnerEnrollmentClient(
+            origin: origin.serialized,
+            kind: .ios,
+            deviceName: deviceName,
+            profileJson: record.profileJson,
+            headerJson: record.headerJson
+        )
+        // The binding's generated existing-owner ID is not an enrolled credential. Always bind the
+        // owner proof to the protected active device identity before scanning any QR.
+        try enrollmentClient.configureOwnerComputerDevice(deviceId: record.identity.deviceId)
+        let accountSession = try await hostedSession(for: origin)
+        let host = EnrollmentHost(origin: origin, transport: transport, accountSession: accountSession)
+        return OwnerComputerApprovalHost(
+            producer: NativeOwnerComputerProducer(client: enrollmentClient, nativeClient: nativeClient),
+            transport: EnrollmentOwnerComputerTransport(host: host),
+            secrets: VaultSecretStore(secure: store.secure),
+            identity: record.identity,
+            credential: try store.token(record.identity),
+            isHosted: origin.serialized == "https://peppy.pro",
+            accountSession: accountSession
+        )
+    }
+
     public func ownerVaultSecret() throws -> String {
         guard let record else { throw ClientError.notEnrolled }
         guard let secret = try VaultSecretStore(secure: store.secure).read(record.identity) else {

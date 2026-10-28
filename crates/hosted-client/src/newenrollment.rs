@@ -27,6 +27,10 @@ use std::cell::Cell;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+mod computer;
+pub use computer::ComputerClaimantView;
+use computer::ComputerFlow;
+
 const CHECKPOINT_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,7 +47,9 @@ pub struct EnrollmentClient {
     signing_seed: Zeroizing<[u8; 32]>,
     credential: Zeroizing<String>,
     owner: Option<OwnerMaterial>,
+    computer_owner_device_id: Option<Uuid>,
     phone: Option<PhoneFlow>,
+    computer: Option<ComputerFlow>,
     manual: Option<ManualAdmission>,
     vault_request: Option<VaultRequest>,
     mode: EnrollmentMode,
@@ -60,6 +66,7 @@ pub struct OwnerPhoneView {
     pub claim_digest: Option<String>,
 }
 
+#[derive(Clone)]
 struct OwnerMaterial {
     operation_id: Uuid,
     profile: KeyProfile,
@@ -89,6 +96,12 @@ impl NativeIdentityActivation {
     pub fn activate(self, client: &peppy_client_core::Client) -> Result<(), HostedClientError> {
         client
             .import_verified_handoff(self.0)
+            .map_err(|_| HostedClientError::Crypto)
+    }
+
+    fn prepare(&self, client: &peppy_client_core::Client) -> Result<(), HostedClientError> {
+        client
+            .import_verified_handoff_retryable(&self.0)
             .map_err(|_| HostedClientError::Crypto)
     }
 }
@@ -128,6 +141,37 @@ impl NativeEnrollmentIdentity {
 
     pub fn into_activation(self) -> Option<NativeIdentityActivation> {
         self.activation
+    }
+
+    /// Imports the opaque verified handoff only after the native host has durably installed this
+    /// identity. A failed import retains the capability for retry; success consumes it.
+    pub fn activate_verified_handoff(
+        &mut self,
+        client: &peppy_client_core::Client,
+    ) -> Result<bool, HostedClientError> {
+        if !self.prepare_verified_handoff_activation(client)? {
+            return Ok(false);
+        }
+        self.commit_verified_handoff_activation();
+        Ok(true)
+    }
+
+    /// Installs a duplicate import attempt while retaining the opaque capability until the host's
+    /// surrounding identity transaction (for example browser LocalWrap sealing) succeeds.
+    pub fn prepare_verified_handoff_activation(
+        &self,
+        client: &peppy_client_core::Client,
+    ) -> Result<bool, HostedClientError> {
+        let Some(activation) = self.activation.as_ref() else {
+            return Ok(false);
+        };
+        activation.prepare(client)?;
+        Ok(true)
+    }
+
+    /// Commits a successful surrounding install transaction by dropping the retained capability.
+    pub fn commit_verified_handoff_activation(&mut self) -> bool {
+        self.activation.take().is_some()
     }
 }
 
@@ -258,7 +302,9 @@ impl EnrollmentClient {
             signing_seed: Zeroizing::new(signing_seed),
             credential: Zeroizing::new(credential),
             owner: None,
+            computer_owner_device_id: None,
             phone: None,
+            computer: None,
             manual: None,
             vault_request: None,
             mode: EnrollmentMode::Fresh,
@@ -291,6 +337,20 @@ impl EnrollmentClient {
         });
         client.mode = EnrollmentMode::ExistingOwner;
         Ok(client)
+    }
+
+    /// Binds computer approval to the actual enrolled owner device id read from protected
+    /// credentials. Mobile hosts must call this after `for_existing_owner` using their protected
+    /// device credential's id; a generated enrollment-client id is never used for this purpose.
+    pub fn configure_computer_owner_device(
+        &mut self,
+        owner_device_id: Uuid,
+    ) -> Result<(), HostedClientError> {
+        if self.mode != EnrollmentMode::ExistingOwner || owner_device_id.is_nil() {
+            return Err(HostedClientError::InvalidRequest);
+        }
+        self.computer_owner_device_id = Some(owner_device_id);
+        Ok(())
     }
 
     /// Confirms that protected pending first-owner state belongs to this canonical origin.
@@ -1195,12 +1255,13 @@ impl EnrollmentClient {
         complete_json: String,
     ) -> Result<NativeEnrollmentIdentity, HostedClientError> {
         let complete: AdmissionComplete = parse(&complete_json)?;
-        let flow = self.phone.take().ok_or(HostedClientError::InvalidRequest)?;
-        let (context, root, handoff) = match flow {
-            PhoneFlow::PendingAdmission { context, root } => (context, Some(root), None),
-            PhoneFlow::PendingTransferAdmission { context, handoff } => {
-                (context, None, Some(*handoff))
-            }
+        let flow = self
+            .phone
+            .as_ref()
+            .ok_or(HostedClientError::InvalidRequest)?;
+        let context = match flow {
+            PhoneFlow::PendingAdmission { context, .. }
+            | PhoneFlow::PendingTransferAdmission { context, .. } => context,
             _ => return Err(HostedClientError::InvalidRequest),
         };
         if complete.vault_id != context.vault_id
@@ -1210,7 +1271,22 @@ impl EnrollmentClient {
             return Err(HostedClientError::InvalidRequest);
         }
         let (profile, header) = material_profile_header(&complete.material)?;
-        validate_profile_for_context(&profile, &context)?;
+        match flow {
+            PhoneFlow::PendingAdmission { .. } => validate_profile_for_context(&profile, context)?,
+            PhoneFlow::PendingTransferAdmission { handoff, .. } => {
+                validate_verified_handoff_material(handoff, &profile, &header, context)?
+            }
+            _ => return Err(HostedClientError::InvalidRequest),
+        }
+
+        let flow = self.phone.take().ok_or(HostedClientError::InvalidRequest)?;
+        let (context, root, handoff) = match flow {
+            PhoneFlow::PendingAdmission { context, root } => (context, Some(root), None),
+            PhoneFlow::PendingTransferAdmission { context, handoff } => {
+                (context, None, Some(*handoff))
+            }
+            _ => return Err(HostedClientError::InvalidRequest),
+        };
         if let Some(root) = root {
             let _package = HandoffRootPackage::new(root, profile.clone(), header.clone())
                 .map_err(|_| HostedClientError::Crypto)?;
@@ -1268,7 +1344,7 @@ impl EnrollmentClient {
     pub fn checkpoint(&self) -> Result<Vec<u8>, HostedClientError> {
         // `TransferKeypair` intentionally has no secret export API. Refusing to serialize an
         // active phone flow is safer than silently replacing its key after a restart.
-        if self.phone.is_some() {
+        if self.phone.is_some() || self.computer.is_some() {
             return Err(HostedClientError::InvalidRequest);
         }
         serde_json::to_vec(&Checkpoint {
@@ -1388,7 +1464,9 @@ impl EnrollmentClient {
             signing_seed: Zeroizing::new(seed),
             credential: Zeroizing::new(std::mem::take(&mut checkpoint.credential)),
             owner,
+            computer_owner_device_id: None,
             phone: None,
+            computer: None,
             manual: None,
             vault_request,
             mode: if checkpoint.existing_owner {
@@ -1564,6 +1642,19 @@ fn validate_profile_for_context(
     }
     Ok(())
 }
+fn validate_verified_handoff_material(
+    handoff: &VerifiedHandoff,
+    profile: &KeyProfile,
+    header: &VaultCheckHeader,
+    context: &EnrollmentContext,
+) -> Result<(), HostedClientError> {
+    validate_profile_for_context(profile, context)?;
+    if handoff.verified_header() != header {
+        return Err(HostedClientError::InvalidProfile);
+    }
+    Ok(())
+}
+
 fn material_profile_header(
     material: &VaultMaterial,
 ) -> Result<(KeyProfile, VaultCheckHeader), HostedClientError> {
@@ -2101,6 +2192,41 @@ mod tests {
             recipient
                 .finish_phone_admission(serde_json::to_string(&wrong).unwrap())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn phone_finish_rejects_same_profile_wrong_root_header_without_consuming_handoff() {
+        let (mut recipient, approved, material) = phone_roundtrip();
+        recipient
+            .confirm_phone_invitation(serde_json::to_string(&approved).unwrap(), None)
+            .unwrap();
+        let transcript = approved.transcript.as_ref().unwrap();
+        let profile: KeyProfile = serde_json::from_value(material.profile.clone()).unwrap();
+        let attacker_root = derive_root_key("attacker phrase", &profile).unwrap();
+        let attacker_header = create_vault_check_header(&attacker_root, profile.clone()).unwrap();
+        let wrong = AdmissionComplete {
+            vault_id: transcript.vault_id,
+            device_id: transcript.device_id,
+            role: EnrollmentRole::Gateway,
+            material: vault_material(&profile, &attacker_header, [0; 32]).unwrap(),
+        };
+        assert!(
+            recipient
+                .finish_phone_admission(serde_json::to_string(&wrong).unwrap())
+                .is_err()
+        );
+
+        let correct = AdmissionComplete {
+            vault_id: transcript.vault_id,
+            device_id: transcript.device_id,
+            role: EnrollmentRole::Gateway,
+            material,
+        };
+        assert!(
+            recipient
+                .finish_phone_admission(serde_json::to_string(&correct).unwrap())
+                .is_ok()
         );
     }
 

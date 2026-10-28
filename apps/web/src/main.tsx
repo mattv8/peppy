@@ -11,10 +11,15 @@ import { startBrowserApplication } from "./browser-startup";
 import type { HostedWebConfig } from "./newhosted-app-auth";
 import { createSingleFlightTrailingScheduler } from "./single-flight-scheduler";
 import { appSessionRenewal, armHostedSessionRenewal, restoreAfterPersistedPageShow } from "./app-session-renewal";
+import { UNSUPPORTED_DOWNLOADS_ID, renderAccountDownloadLink, unsupportedPageMarkup } from "./browser-unsupported";
 
 function unsupported(reasons: string[]): void {
-  document.getElementById("root")!.innerHTML = `<main id="browser-unsupported" data-browser-screen="browser-unsupported" role="main" aria-label="Browser not supported"><section><h1 id="unsupported-heading" tabindex="-1">This browser isn't supported</h1><p>Peppy requires a recent desktop browser with SharedWorker, WebAssembly, IndexedDB, and Web Locks support.</p><ul data-unsupported-reasons>${reasons.map((reason) => `<li>${reason}</li>`).join("")}</ul></section></main>`;
+  document.getElementById("root")!.innerHTML = unsupportedPageMarkup(reasons);
   document.getElementById("unsupported-heading")?.focus();
+  void fetchHostedWebConfig().then((config) => {
+    const container = document.getElementById(UNSUPPORTED_DOWNLOADS_ID);
+    if (container) renderAccountDownloadLink(container, config?.accountUrl);
+  });
 }
 
 function missingCapabilities(): string[] {

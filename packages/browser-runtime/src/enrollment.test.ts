@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { BrowserEnrollment, type EnrollmentIdentity, type EnrollmentSession } from "./enrollment.js";
+import { CheckpointError } from "./checkpoint.js";
+import { CoreRejectedError } from "./core.js";
 
 const origin = "https://peppy.test";
 const vaultId = "00000000-0000-0000-0000-000000000001";
@@ -20,6 +22,7 @@ class TestSession implements EnrollmentSession {
     this.phase = "ready";
     this.identity = { role: "owner" };
   });
+  public finishComputerEnrollment?: (responseJson: string) => Promise<void>;
   public tokenForTransport(): string { return "device-token"; }
   public publicIdentity(): EnrollmentIdentity | undefined { return this.identity; }
 }
@@ -96,6 +99,283 @@ function lifecycleFetcher(statuses: Array<Record<string, unknown>> = []) {
 }
 
 describe("BrowserEnrollment", () => {
+  it("keeps a computer claimant waiting on a status 404, then checkpoint-activates only after local confirmation", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: "/v1/enrollment/computers/00000000-0000-0000-0000-000000000003/status", body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_awaiting_owner_view") return { awaitingOwner: true, state: "waiting", expiresInSeconds: 0 };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+      if (command === "_worker_enrollment_confirm_computer") return { request: JSON.stringify({ claim_token: "private" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishComputerEnrollment = vi.fn(async () => { session.phase = "ready"; session.identity = { role: "device" }; });
+    let statusCalls = 0;
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      if (path.endsWith("/status")) return statusCalls++ === 0 ? json({ code: "computer_enrollment_not_found" }, { status: 404 }) : json({ state: "approved", expires_in_seconds: 60 });
+      if (path.endsWith("/confirm")) return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: {} });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await expect(enrollment.connectComputer()).resolves.toMatchObject({ stage: "computer_waiting", computerClaimant: true, awaitingOwner: true, qrPayload: "computer-qr" });
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_waiting", awaitingOwner: true });
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_approved", verificationCode: "123 456", awaitingOwner: false });
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_connected", computerClaimant: true });
+    expect(session.finishComputerEnrollment).toHaveBeenCalledWith(expect.stringContaining('"role":"device"'));
+    expect(core.invoke).not.toHaveBeenCalledWith(expect.objectContaining({ command: "_worker_enrollment_finish_computer", args: expect.objectContaining({ passphrase: expect.anything() }) }));
+  });
+
+  it("keeps waiting after a transient status failure and retries the cached computer confirmation without another status request", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: `/v1/enrollment/computers/${invitationId}/status`, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+      if (command === "_worker_enrollment_confirm_computer") return { request: JSON.stringify({ claim_token: "private" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishComputerEnrollment = vi.fn()
+      .mockRejectedValueOnce(new Error("checkpoint unavailable"))
+      .mockImplementation(async () => { session.phase = "ready"; session.identity = { role: "device" }; });
+    let statusRequests = 0;
+    let confirmRequests = 0;
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      if (path.endsWith("/status")) {
+        statusRequests += 1;
+        if (statusRequests === 1) throw new TypeError("network down");
+        return json({ state: "approved", expires_in_seconds: 60 });
+      }
+      if (path.endsWith("/confirm")) {
+        confirmRequests += 1;
+        if (confirmRequests === 1) throw new TypeError("connection lost");
+        return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: {} });
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.connectComputer();
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_waiting" });
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_approved" });
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_finishing" });
+    expect(enrollment.view()).toMatchObject({ errorCode: "computer_transient" });
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_finishing" });
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_connected" });
+
+    expect(statusRequests).toBe(3);
+    expect(confirmRequests).toBe(2);
+    expect(session.finishComputerEnrollment).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts a fresh claimant after expiry and restores the prior locked view on cancellation", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: `/v1/enrollment/computers/${invitationId}/status`, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "expired", expiresInSeconds: 0 };
+      return {};
+    }) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({ mode: "hosted" });
+      if (path === "/hosted/v1/web/app-session") return json({ signed_in: true, csrf_token: "csrf" });
+      if (path === "/hosted/v1/web/app-account") return json({ vault_id: vaultId });
+      if (path.endsWith("/status")) return json({ state: "expired", expires_in_seconds: 0 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await expect(enrollment.discover()).resolves.toMatchObject({ stage: "locked" });
+    await enrollment.connectComputer();
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_expired" });
+    await expect(enrollment.connectComputer()).resolves.toMatchObject({ stage: "computer_waiting" });
+    await expect(enrollment.cancelComputer()).resolves.toMatchObject({ stage: "locked" });
+    expect(core.invoke).toHaveBeenCalledWith({ command: "_worker_enrollment_cancel_computer_claimant", args: {} });
+  });
+
+  it("does not treat a remotely consumed claimant as locally connected", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: `/v1/enrollment/computers/${invitationId}/status`, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "consumed", expiresInSeconds: 0 };
+      return {};
+    }) };
+    const session = new TestSession();
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      if (path.endsWith("/status")) return json({ state: "consumed", expires_in_seconds: 0 });
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.connectComputer();
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_error", errorCode: "computer_remote_consumed" });
+    expect(session.phase).toBe("unenrolled");
+  });
+
+  it("surfaces foreign-vault and failed owner-proof statuses as distinct terminal claimant errors", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: `/v1/enrollment/computers/${invitationId}/status`, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") throw new Error("invalid-request");
+      return {};
+    }) };
+    const session = new TestSession();
+    const foreignVault = new BrowserEnrollment(core, session, origin, async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      return json({ error: "foreign_vault" }, { status: 403 });
+    });
+
+    await foreignVault.discover();
+    await foreignVault.connectComputer();
+    await expect(foreignVault.computerStatus()).resolves.toMatchObject({ stage: "computer_error", errorCode: "foreign_vault" });
+
+    const failedProof = new BrowserEnrollment(core, new TestSession(), origin, async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      return json({ state: "approved", expires_in_seconds: 60 });
+    });
+    await failedProof.discover();
+    await failedProof.connectComputer();
+    await expect(failedProof.computerStatus()).resolves.toMatchObject({ stage: "computer_error", errorCode: "computer_verification_failed" });
+  });
+
+  it.each([
+    ["network TypeError", () => { throw new TypeError("network down"); }],
+    ["408", () => json({ code: "timeout" }, { status: 408 })],
+    ["429", () => json({ code: "rate_limited" }, { status: 429 })],
+    ["503", () => json({ code: "unavailable" }, { status: 503 })],
+  ])("keeps a valid approval after a transient %s during confirmation and retries the same invitation", async (_label, failure) => {
+    const statusPath = `/v1/enrollment/computers/${invitationId}/status`;
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: statusPath, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+      if (command === "_worker_enrollment_confirm_computer") return { request: JSON.stringify({ claim_token: "private" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishComputerEnrollment = vi.fn(async () => { session.phase = "ready"; session.identity = { role: "device" }; });
+    const statusPaths: string[] = [];
+    let confirmRequests = 0;
+    const fetcher = vi.fn<typeof fetch>(async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      if (path.endsWith("/status")) {
+        statusPaths.push(path);
+        if (statusPaths.length === 2) return failure();
+        return json({ state: "approved", expires_in_seconds: 60 });
+      }
+      if (path.endsWith("/confirm")) {
+        confirmRequests += 1;
+        return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: {} });
+      }
+      throw new Error(`unexpected ${path}`);
+    });
+    const enrollment = new BrowserEnrollment(core, session, origin, fetcher);
+
+    await enrollment.discover();
+    await enrollment.connectComputer();
+    await expect(enrollment.computerStatus()).resolves.toMatchObject({ stage: "computer_approved", verificationCode: "123 456" });
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_approved", errorCode: "computer_transient", verificationCode: "123 456" });
+    expect(session.finishComputerEnrollment).not.toHaveBeenCalled();
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_connected", computerClaimant: true });
+
+    expect(statusPaths).toEqual([statusPath, statusPath, statusPath]);
+    expect(confirmRequests).toBe(1);
+    expect(session.finishComputerEnrollment).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a bad-MAC approval a nontransient verification failure", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: `/v1/enrollment/computers/${invitationId}/status`, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+      if (command === "_worker_enrollment_confirm_computer") throw new CoreRejectedError("invalid-mac");
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishComputerEnrollment = vi.fn();
+    const enrollment = new BrowserEnrollment(core, session, origin, async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      if (path.endsWith("/status")) return json({ state: "approved", expires_in_seconds: 60 });
+      throw new Error(`unexpected ${path}`);
+    });
+
+    await enrollment.discover();
+    await enrollment.connectComputer();
+    await enrollment.computerStatus();
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_error", errorCode: "computer_verification_failed" });
+    expect(session.finishComputerEnrollment).not.toHaveBeenCalled();
+  });
+
+  it("requires reopening after a poisoned checkpoint instead of retrying activation", async () => {
+    const core = { invoke: vi.fn(async ({ command }: { command: string }) => {
+      if (command === "_worker_enrollment_new") return {};
+      if (command === "_worker_enrollment_pending_vault_request") return null;
+      if (command === "_worker_enrollment_begin_computer_claimant") return { qr: "computer-qr" };
+      if (command === "_worker_enrollment_computer_status_request") return { request: JSON.stringify({ method: "POST", path: `/v1/enrollment/computers/${invitationId}/status`, body: { claim_token: "private" } }) };
+      if (command === "_worker_enrollment_computer_claimant_view") return { awaitingOwner: false, state: "approved", expiresInSeconds: 60, sas: "123 456" };
+      if (command === "_worker_enrollment_confirm_computer") return { request: JSON.stringify({ claim_token: "private" }) };
+      return {};
+    }) };
+    const session = new TestSession();
+    session.finishComputerEnrollment = vi.fn().mockRejectedValue(new CheckpointError("storage-unavailable"));
+    const enrollment = new BrowserEnrollment(core, session, origin, async input => {
+      const path = pathOf(input);
+      if (path === "/hosted/v1/enrollment/config") return json({}, { status: 404 });
+      if (path === "/v1/instance") return json(instanceInfo(true));
+      if (path === "/v1/instance/session") return json({ code: "invalid_session" }, { status: 401 });
+      if (path.endsWith("/status")) return json({ state: "approved", expires_in_seconds: 60 });
+      if (path.endsWith("/confirm")) return json({ vault_id: vaultId, device_id: deviceId, role: "device", material: {} });
+      throw new Error(`unexpected ${path}`);
+    });
+
+    await enrollment.discover();
+    await enrollment.connectComputer();
+    await enrollment.computerStatus();
+    await expect(enrollment.confirmComputer()).resolves.toMatchObject({ stage: "computer_error", errorCode: "computer_reopen_required" });
+  });
+
   it("restores community CSRF before a fresh worker sends a mutation", async () => {
     const core = new LifecycleCore();
     const session = new TestSession();

@@ -1,11 +1,14 @@
+import { CheckpointError, RuntimeCoreError } from "./checkpoint.js";
+import { BrowserCoreError, CoreRejectedError } from "./core.js";
+
 const MAX_JSON_BYTES = 64 * 1024;
 const DEVICE_NAME = "Peppy Browser";
 
 type DeploymentMode = "community" | "hosted";
-type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
+type EnrollmentStage = "server" | "setup" | "signin" | "locked" | "ready" | "waiting_phone" | "verify_phone" | "phone_approved" | "phone_connected" | "computer_waiting" | "computer_approved" | "computer_finishing" | "computer_connected" | "computer_expired" | "computer_denied" | "computer_error" | "expired" | "error" | "invite_request" | "invite_waiting" | "invite_approved" | "invite_denied" | "invite_expired";
 type SessionPhase = "unenrolled" | "locked" | "ready" | "closed";
 
-export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string };
+export type EnrollmentView = { mode: DeploymentMode; stage: EnrollmentStage; origin?: string; owner?: boolean; hasGateway?: boolean; qrPayload?: string; verificationCode?: string; expiresInSeconds?: number; errorCode?: string; setupCodeRequired?: boolean; vaultOwnerRequired?: boolean; displayName?: string; username?: string; computerClaimant?: boolean; awaitingOwner?: boolean };
 export type EnrollmentSecrets = { setupToken?: string; adminPassword?: string; passphrase?: string };
 export type EnrollmentDevice = { device_id: string; name: string; kind: "browser" | "desktop" | "android" | "ios"; role: "owner" | "device" | "gateway"; revoked: boolean; gateway_online: boolean; presence?: { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null }; wake_route?: boolean };
 export type InstanceManagement = { vault_id: string; devices: EnrollmentDevice[]; storage_bytes: number; quota_bytes: number; replay_retention_days: number; isAdmin: boolean; username: string };
@@ -17,6 +20,7 @@ export interface EnrollmentCore { invoke(request: { command: string; args: Recor
 export interface EnrollmentSession {
   readonly phase: SessionPhase;
   finishEnrollment(command: "_worker_enrollment_finish_owner" | "_worker_enrollment_finish_manual" | "_worker_enrollment_finish_hosted_owner", responseJson: string, passphrase: string): Promise<void>;
+  finishComputerEnrollment?(responseJson: string): Promise<void>;
   unlock(passphrase: string): Promise<void>;
   publicIdentity(): EnrollmentIdentity | undefined;
   tokenForTransport(): string;
@@ -33,6 +37,10 @@ export class BrowserEnrollment {
   private addPhonePending?: Promise<EnrollmentView>;
   private vaultRequestGeneration = 0;
   private vaultRequestStatusPending?: Promise<EnrollmentView>;
+  private computerClaimPending?: Promise<EnrollmentView>;
+  private computerClaimPreviousView?: EnrollmentView;
+  private computerComplete?: string;
+  private computerConfirmEndpoint?: string;
   private setupCodeRequired = true;
   private readonly fetchBase: string;
 
@@ -149,6 +157,141 @@ export class BrowserEnrollment {
     const pending = this.createPhoneInvitation(method);
     this.addPhonePending = pending;
     return pending.finally(() => { if (this.addPhonePending === pending) this.addPhonePending = undefined; });
+  }
+
+  public connectComputer(): Promise<EnrollmentView> {
+    if (this.computerClaimPending) return this.computerClaimPending;
+    const pending = this.beginComputerClaimant();
+    this.computerClaimPending = pending;
+    return pending.finally(() => { if (this.computerClaimPending === pending) this.computerClaimPending = undefined; });
+  }
+
+  private async beginComputerClaimant(): Promise<EnrollmentView> {
+    try {
+      if (this.session.phase !== "unenrolled") throw new Error("enrollment-state");
+      if (this.canRestartComputerClaimant()) {
+        await this.cancelComputerClaimant();
+      } else if (this.viewValue.computerClaimant) {
+        throw new Error("enrollment-state");
+      }
+      await this.initializeFresh(this.viewValue.origin ?? this.origin);
+      this.computerClaimPreviousView = { ...this.viewValue };
+      this.computerComplete = undefined;
+      this.computerConfirmEndpoint = undefined;
+      const qr = await this.core.invoke({ command: "_worker_enrollment_begin_computer_claimant", args: {} });
+      this.viewValue = { ...this.viewValue, stage: "computer_waiting", qrPayload: required(qr, "qr"), verificationCode: undefined, computerClaimant: true, awaitingOwner: true };
+    } catch (error) {
+      this.fail(error);
+    }
+    return this.view();
+  }
+
+  public async computerStatus(): Promise<EnrollmentView> {
+    try {
+      if (!this.viewValue.computerClaimant) throw new Error("enrollment-state");
+      const request = privateRequest(await this.core.invoke({ command: "_worker_enrollment_computer_status_request", args: {} }));
+      let status: Record<string, unknown>;
+      try {
+        status = record(await this.privateEnrollmentRequest(request));
+      } catch (error) {
+        if (!hasHttpStatus(error, 404)) throw error;
+        const waiting = record(await this.core.invoke({ command: "_worker_enrollment_computer_awaiting_owner_view", args: {} }));
+        this.viewValue = this.computerView(waiting, "computer_waiting");
+        return this.view();
+      }
+      const claimant = record(await this.core.invoke({ command: "_worker_enrollment_computer_claimant_view", args: { statusJson: JSON.stringify(status) } }));
+      const state = required(claimant, "state");
+      if (state === "approved") this.viewValue = this.computerView(claimant, "computer_approved");
+      else if (state === "waiting") this.viewValue = this.computerView(claimant, "computer_waiting");
+      else if (state === "expired") this.viewValue = this.computerView(claimant, "computer_expired");
+      else if (state === "denied") this.viewValue = this.computerView(claimant, "computer_denied");
+      else if (state === "consumed") this.setComputerError("computer_remote_consumed");
+      else throw new Error("enrollment-response");
+    } catch (error) {
+      if (this.viewValue.stage === "computer_waiting" && isTransientComputerFailure(error)) {
+        this.viewValue = { ...this.viewValue, errorCode: "computer_transient" };
+        return this.view();
+      }
+      if (this.viewValue.stage !== "computer_finishing") this.setComputerError(computerFailureCode(error));
+    }
+    return this.view();
+  }
+
+  public async confirmComputer(): Promise<EnrollmentView> {
+    try {
+      if (this.viewValue.stage !== "computer_approved" && this.viewValue.stage !== "computer_finishing") throw new Error("enrollment-state");
+      if (!this.computerComplete) {
+        const { endpoint, confirmation } = this.viewValue.stage === "computer_approved"
+          ? await this.prepareComputerConfirmation()
+          : await this.retryComputerConfirmation();
+        this.viewValue = { ...this.viewValue, stage: "computer_finishing", qrPayload: undefined, awaitingOwner: false };
+        this.computerConfirmEndpoint = endpoint;
+        this.computerComplete = JSON.stringify(await this.request(endpoint, "POST", confirmation));
+      }
+      if (!this.session.finishComputerEnrollment) throw new Error("enrollment-state");
+      await this.session.finishComputerEnrollment(this.computerComplete);
+      this.enrollmentClient = undefined;
+      this.computerComplete = undefined;
+      this.computerConfirmEndpoint = undefined;
+      this.computerClaimPreviousView = undefined;
+      this.viewValue = { ...(await this.readyView(this.viewValue.mode, this.viewValue.origin ?? this.origin, this.requireIdentity())), computerClaimant: true, awaitingOwner: false, stage: "computer_connected" };
+    } catch (error) {
+      if (isFatalComputerActivationFailure(error)) this.setComputerError("computer_reopen_required");
+      else if (this.viewValue.stage === "computer_finishing") this.viewValue = { ...this.viewValue, errorCode: "computer_transient" };
+      else if (this.viewValue.stage === "computer_approved" && isTransientComputerFailure(error)) this.viewValue = { ...this.viewValue, errorCode: "computer_transient" };
+      else this.setComputerError(computerFailureCode(error));
+    }
+    return this.view();
+  }
+
+  public async cancelComputer(): Promise<EnrollmentView> {
+    if (!this.viewValue.computerClaimant || !["computer_waiting", "computer_expired", "computer_denied", "computer_error"].includes(this.viewValue.stage)) return this.view();
+    await this.cancelComputerClaimant();
+    return this.view();
+  }
+
+  private async cancelComputerClaimant(): Promise<void> {
+    await this.core.invoke({ command: "_worker_enrollment_cancel_computer_claimant", args: {} });
+    this.enrollmentClient = undefined;
+    this.computerComplete = undefined;
+    this.computerConfirmEndpoint = undefined;
+    this.viewValue = this.computerClaimPreviousView ?? { mode: this.viewValue.mode, stage: "locked", origin: this.viewValue.origin ?? this.origin };
+    this.computerClaimPreviousView = undefined;
+  }
+
+  private async prepareComputerConfirmation(): Promise<{ endpoint: string; confirmation: unknown }> {
+    const statusRequest = privateRequest(await this.core.invoke({ command: "_worker_enrollment_computer_status_request", args: {} }));
+    const status = await this.privateEnrollmentRequest(statusRequest);
+    return {
+      endpoint: computerEndpoint(statusRequest, "confirm"),
+      confirmation: await this.rustRequest("_worker_enrollment_confirm_computer", { statusJson: JSON.stringify(status) }),
+    };
+  }
+
+  private async retryComputerConfirmation(): Promise<{ endpoint: string; confirmation: unknown }> {
+    if (!this.computerConfirmEndpoint) throw new Error("enrollment-state");
+    return {
+      endpoint: this.computerConfirmEndpoint,
+      confirmation: await this.rustRequest("_worker_enrollment_confirm_computer", { statusJson: "{}" }),
+    };
+  }
+
+  private canRestartComputerClaimant(): boolean {
+    return ["computer_expired", "computer_denied"].includes(this.viewValue.stage)
+      || (this.viewValue.stage === "computer_error" && !this.computerConfirmEndpoint);
+  }
+
+  private setComputerError(errorCode: string): void {
+    this.viewValue = {
+      ...this.viewValue,
+      stage: "computer_error",
+      qrPayload: undefined,
+      verificationCode: undefined,
+      expiresInSeconds: undefined,
+      errorCode,
+      computerClaimant: true,
+      awaitingOwner: false,
+    };
   }
 
   private async createPhoneInvitation(method: "transfer" | "shared_secret"): Promise<EnrollmentView> {
@@ -520,6 +663,18 @@ export class BrowserEnrollment {
     return JSON.parse(required(result, "request")) as unknown;
   }
 
+  private computerView(value: Record<string, unknown>, stage: Extract<EnrollmentStage, "computer_waiting" | "computer_approved" | "computer_finishing" | "computer_expired" | "computer_denied">): EnrollmentView {
+    const { errorCode: _errorCode, ...view } = this.viewValue;
+    return { ...view, stage, qrPayload: stage === "computer_waiting" ? this.viewValue.qrPayload : undefined, verificationCode: stage === "computer_approved" && typeof value.sas === "string" ? value.sas : undefined, expiresInSeconds: safeInteger(value.expiresInSeconds), computerClaimant: true, awaitingOwner: value.awaitingOwner === true };
+  }
+
+  private async privateEnrollmentRequest(request: Record<string, unknown>): Promise<unknown> {
+    const path = required(request, "path");
+    const method = required(request, "method");
+    if (method !== "POST" || !path.startsWith("/v1/enrollment/computers/") || typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) throw new Error("enrollment-response");
+    return this.request(path, "POST", request.body);
+  }
+
   private async managementRequest(path: string, method: "GET" | "POST"): Promise<InstanceManagement> {
     try {
       return management(await this.request(path, method));
@@ -573,13 +728,42 @@ function isTransientVaultRequestFailure(error: unknown): boolean {
   return !(error instanceof HttpStatusError) || error.status === 408 || error.status === 429 || error.status >= 500;
 }
 
+function isTransientComputerFailure(error: unknown): boolean {
+  return error instanceof TypeError
+    || error instanceof HttpStatusError && (error.status === 408 || error.status === 429 || error.status >= 500);
+}
+
+function isFatalComputerActivationFailure(error: unknown): boolean {
+  return error instanceof CheckpointError || error instanceof RuntimeCoreError || error instanceof BrowserCoreError && !(error instanceof CoreRejectedError);
+}
+
+function computerFailureCode(error: unknown): string {
+  if (error instanceof HttpStatusError && error.code === "foreign_vault") return "foreign_vault";
+  return "computer_verification_failed";
+}
+
+function hasHttpStatus(error: unknown, status: number): boolean {
+  return typeof error === "object" && error !== null && "status" in error && error.status === status;
+}
+
+function computerEndpoint(request: Record<string, unknown>, action: "confirm"): string {
+  const path = required(request, "path");
+  if (!/^\/v1\/enrollment\/computers\/[0-9a-f-]{36}\/status$/.test(path)) throw new Error("enrollment-response");
+  return path.replace("/status", `/${action}`);
+}
+
+function privateRequest(value: unknown): Record<string, unknown> {
+  return record(JSON.parse(required(value, "request")) as unknown);
+}
+
 class HttpStatusError extends Error {
   public constructor(public readonly status: number, public readonly code?: string) { super(code ?? `http-${status}`); }
 
   public static async fromResponse(response: Response): Promise<HttpStatusError> {
     try {
       const body: unknown = JSON.parse(await readBoundedText(response));
-      const code = record(body).code;
+      const parsed = record(body);
+      const code = typeof parsed.code === "string" ? parsed.code : parsed.error;
       if (typeof code === "string") return new HttpStatusError(response.status, code);
     } catch {}
     return new HttpStatusError(response.status);

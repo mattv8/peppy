@@ -884,8 +884,25 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   color: var(--peppy-text-secondary);
 }
 @media (max-width: 480px) {
+  #desktop-shell[data-browser-setup="true"] #desktop-rail,
+  #desktop-shell[data-browser-setup="true"] #thread-list {
+    display: none;
+  }
+  #desktop-shell[data-browser-setup="true"] .conversation-pane {
+    min-width: 0;
+  }
   #onboarding-view:not([data-compact="true"]) {
     padding: 16px 12px;
+  }
+}
+@media (max-width: 640px) {
+  #desktop-shell[data-narrow-browser="true"] #thread-list[data-mobile-list="true"] {
+    width: auto !important;
+    flex: 1 1 0 !important;
+    border-right: 0;
+  }
+  #desktop-shell[data-narrow-browser="true"] #conversation-pane[data-mobile-list="true"] {
+    display: none;
   }
 }
 #settings-view {

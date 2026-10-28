@@ -355,6 +355,15 @@ final class AppModel {
         }
     }
 
+    func ownerComputerApprovalHost() async -> OwnerComputerApprovalHost? {
+        do {
+            return try await session.ownerComputerApprovalHost(deviceName: UIDevice.current.name)
+        } catch {
+            lastError = (error as? ClientError)?.userMessage ?? "Could not prepare computer approval."
+            return nil
+        }
+    }
+
     enum OwnerVaultSecretRevealOutcome {
         case revealed(String)
         case cancelled

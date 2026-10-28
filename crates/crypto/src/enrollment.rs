@@ -23,12 +23,14 @@ const MAX_CANONICAL_ORIGIN_BYTES: usize = 2_048;
 pub enum EnrollmentPurpose {
     Manual,
     Phone,
+    Computer,
 }
 impl EnrollmentPurpose {
-    fn bytes(self) -> &'static [u8] {
+    pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
             Self::Manual => b"manual",
             Self::Phone => b"phone",
+            Self::Computer => b"computer",
         }
     }
 }
@@ -40,7 +42,7 @@ pub enum EnrollmentRole {
     Gateway,
 }
 impl EnrollmentRole {
-    fn bytes(self) -> &'static [u8] {
+    pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
             Self::Owner => b"owner",
             Self::Device => b"device",
@@ -297,6 +299,27 @@ pub struct VerifiedHandoff {
     context: EnrollmentContext,
 }
 impl VerifiedHandoff {
+    /// Returns the vault-check header authenticated inside this handoff without exposing its root.
+    pub fn verified_header(&self) -> &VaultCheckHeader {
+        self.package.header()
+    }
+
+    /// Creates an opaque duplicate for one core import attempt. No root or serialized secret is
+    /// exposed; callers retain the original verified capability when the import fails.
+    #[doc(hidden)]
+    pub fn duplicate_for_core_import(&self) -> Result<Self, CryptoError> {
+        let root = RootKey::from_bytes(&self.package.root.0)?;
+        let package = HandoffRootPackage::new(
+            root,
+            self.package.profile.clone(),
+            self.package.header.clone(),
+        )?;
+        Ok(Self {
+            package,
+            context: self.context.clone(),
+        })
+    }
+
     pub fn into_parts(self) -> (HandoffRootPackage, EnrollmentContext) {
         (self.package, self.context)
     }
@@ -330,7 +353,7 @@ fn seal_package(
     package: &HandoffRootPackage,
 ) -> Result<EncryptedHandoff, CryptoError> {
     ensure_sodium()?;
-    validate_phone_handoff_context(context)?;
+    validate_transfer_handoff_context(context)?;
     if sender.public_key() != context.owner_transfer_public_key
         || recipient_public_key != &context.recipient_transfer_public_key
     {
@@ -363,7 +386,7 @@ pub fn open_handoff(
     encrypted: &EncryptedHandoff,
 ) -> Result<VerifiedHandoff, CryptoError> {
     ensure_sodium()?;
-    validate_phone_handoff_context(expected_context)?;
+    validate_transfer_handoff_context(expected_context)?;
     if recipient.public_key() != expected_context.recipient_transfer_public_key
         || sender_public_key != &expected_context.owner_transfer_public_key
     {
@@ -410,9 +433,11 @@ fn encode_package(package: &HandoffRootPackage) -> Result<Zeroizing<Vec<u8>>, Cr
     }
     Ok(out)
 }
-fn validate_phone_handoff_context(context: &EnrollmentContext) -> Result<(), CryptoError> {
-    if context.purpose != EnrollmentPurpose::Phone
-        || context.owner_transfer_public_key == [0; 32]
+fn validate_transfer_handoff_context(context: &EnrollmentContext) -> Result<(), CryptoError> {
+    if !matches!(
+        context.purpose,
+        EnrollmentPurpose::Phone | EnrollmentPurpose::Computer
+    ) || context.owner_transfer_public_key == [0; 32]
         || context.recipient_transfer_public_key == [0; 32]
     {
         return Err(CryptoError::AuthenticationFailed);
@@ -714,6 +739,26 @@ mod tests {
         assert!(
             seal_handoff(&sender, &recipient.public_key(), &manual, package(&profile)).is_err()
         );
+    }
+
+    #[test]
+    fn computer_handoff_is_purpose_separated_from_phone() {
+        let sender = TransferKeypair::generate().unwrap();
+        let recipient = TransferKeypair::generate().unwrap();
+        let profile = KeyProfile::new(Uuid::from_u128(1), 3).unwrap();
+        let mut computer = handoff_context(&profile, &sender, &recipient);
+        computer.purpose = EnrollmentPurpose::Computer;
+        let encrypted = seal_handoff(
+            &sender,
+            &recipient.public_key(),
+            &computer,
+            package(&profile),
+        )
+        .unwrap();
+        assert!(open_handoff(&recipient, &sender.public_key(), &computer, &encrypted).is_ok());
+        let mut phone = computer;
+        phone.purpose = EnrollmentPurpose::Phone;
+        assert!(open_handoff(&recipient, &sender.public_key(), &phone, &encrypted).is_err());
     }
 
     #[test]

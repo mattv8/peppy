@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+hkdf.workspace = true
 hmac.workspace = true
 libc = "0.2.189"
 libsodium-rs.workspace = true

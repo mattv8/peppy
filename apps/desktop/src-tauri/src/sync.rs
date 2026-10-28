@@ -12,8 +12,8 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use peppy_client_core::{
     Client, Cursor, EnvelopePurpose, HistorySearchReplayProof, HistorySearchSyncFacts, KeyProfile,
-    RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH, MAX_SEAL_BATCH,
-    MAX_SNAPSHOT_PAGE,
+    RawReplayRecord, RawSnapshotRecord, SnapshotPurpose, VaultCheckHeader, MAX_APPLY_BATCH,
+    MAX_SEAL_BATCH, MAX_SNAPSHOT_PAGE,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -331,6 +331,15 @@ fn parse_cursor(value: &str) -> BridgeResult<u64> {
         .ok_or_else(|| NetError::Invalid.into())
 }
 
+fn parse_high_water(value: &str) -> BridgeResult<Cursor> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|cursor| *cursor <= i64::MAX as u64 && cursor.to_string() == value)
+        .map(Cursor)
+        .ok_or_else(|| NetError::Invalid.into())
+}
+
 fn parse_compaction_generation(start: &SnapshotStart) -> BridgeResult<Option<u64>> {
     if !start.compaction_supported {
         return Ok(None);
@@ -352,20 +361,14 @@ async fn ingest_page(session: &Arc<Session>, records: Vec<RawRecord>) -> BridgeR
     let parsed = records
         .into_iter()
         .map(|r| {
-            Ok((
-                parse_cursor(&r.cursor)?,
-                r.envelope.get().as_bytes().to_vec(),
-            ))
+            Ok(RawReplayRecord {
+                cursor: Cursor(parse_cursor(&r.cursor)?),
+                envelope_json: r.envelope.get().as_bytes().to_vec(),
+            })
         })
         .collect::<BridgeResult<Vec<_>>>()?;
     let c = client(session);
-    blocking(move || {
-        for (cursor, bytes) in parsed {
-            c.ingest_raw(&bytes, Cursor(cursor)).map_err(core_error)?;
-        }
-        Ok(())
-    })
-    .await
+    blocking(move || c.ingest_raw_batch(&parsed).map(|_| ()).map_err(core_error)).await
 }
 
 /// Staged snapshot import after `resync_required`; resumes a persisted generation when possible.
@@ -603,6 +606,11 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
             Err(error) => return Err(error.into()),
         };
         let count = page.events.len();
+        let replay_target = page
+            .high_water_cursor
+            .as_deref()
+            .map(parse_high_water)
+            .transpose()?;
         let proof =
             page.high_water_cursor
                 .as_ref()
@@ -619,7 +627,18 @@ async fn replay(session: &Arc<Session>) -> BridgeResult<()> {
             let _ = observe_history_replay(session, contexts, proof).await;
             break;
         }
-        ingest_page(session, page.events).await?;
+        match ingest_page(session, page.events).await {
+            Ok(()) => {}
+            Err(error) if error.code == "invalid-request" && limit > 1 => {
+                limit /= 2;
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        // Both the receive frontier and this target are now safe to expose: receipt committed in
+        // one SQLite transaction. Do not notify when the HTTP page is merely fetched.
+        session.set_replay_target_high_water(replay_target);
+        session.notify();
         drain_apply(session, APPLY_STEPS).await?;
         let _ = observe_history_replay(session, contexts, proof).await;
         pages += 1;
@@ -1526,6 +1545,8 @@ async fn ws_session(session: &Arc<Session>) -> WsEnd {
                             session.set_status(|status| status.error_code = Some(error.code));
                             return ended(error.code);
                         }
+                        // The live record is durable before observers receive a new snapshot.
+                        session.notify();
                         if drain_apply(session, APPLY_STEPS).await.is_err() {
                             return ended("core");
                         }
@@ -1678,6 +1699,37 @@ mod transport_status_tests {
         assert!(matches!(terminal.next_after, OptionalField::Present(None)));
         assert!(
             matches!(more.next_after, OptionalField::Present(Some(ref cursor)) if cursor == "42")
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_page_conflict_rolls_back_its_prefix_before_apply() {
+        let fixture = crate::tests::fixture_at("http://127.0.0.1:9");
+        let session = Arc::new(crate::tests::open(&fixture, &fixture.binding, &[]));
+        session.client.ingest_raw(b"old", Cursor(2)).unwrap();
+        let records = vec![
+            RawRecord {
+                cursor: "1".into(),
+                envelope: serde_json::from_str(r#""new""#).unwrap(),
+            },
+            RawRecord {
+                cursor: "2".into(),
+                envelope: serde_json::from_str(r#""different""#).unwrap(),
+            },
+        ];
+
+        let error = ingest_page(&session, records).await.unwrap_err();
+
+        assert_eq!(error.code, "sync-conflict");
+        assert_eq!(session.client.receive_cursor().unwrap(), Cursor(0));
+        assert_eq!(session.client.quarantined().unwrap().len(), 1);
+        assert_eq!(
+            session
+                .client
+                .apply_pending(MAX_APPLY_BATCH)
+                .unwrap()
+                .applied,
+            0
         );
     }
 }

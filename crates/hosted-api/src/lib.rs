@@ -973,6 +973,7 @@ mod tests {
 }
 pub mod auth_web;
 pub mod billing_web;
+pub mod computer_enrollment;
 pub mod devices;
 pub mod enrollment;
 pub mod presence;

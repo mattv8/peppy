@@ -43,7 +43,7 @@ internal fun createOwnerPhoneApprovalHost(context: Context): OwnerPhoneApprovalH
 internal fun ownerPhoneAccountSession(origin: String, sessionHeader: () -> String?): String? =
     if (origin == HostedAccountClient.ORIGIN) sessionHeader() else null
 
-private fun ownerPhoneRequest(
+internal fun ownerPhoneRequest(
     credential: GatewayAccountCredential,
     method: String,
     path: String,

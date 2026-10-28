@@ -50,7 +50,9 @@ export type GatewayAvailability = "unknown" | "connected" | "delayed" | "offline
 export type GatewayPresence = { state: "connected" | "seen" | "never"; last_seen_age_seconds: number | null };
 export type GatewayView = { id: string; name: string; simId: string; online: boolean; simulated: boolean; supportsSms: boolean; supportsMms: boolean; availability?: GatewayAvailability; lastSeenAgeSeconds?: number; presence?: GatewayPresence; wakeRoute?: boolean; capabilityNote?: string; mmsContentVersion?: number; mmsMaxBytes?: number; mmsLimitSource?: "carrier" | "fallback"; mmsMaxRecipients?: number };
 export type Draft = { id: string; conversationId: string; text: string; recipientIds: string[]; attachmentIds: string[]; gatewayId?: string; simId?: string; revision: string };
-export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number> };
+/** Exact durable cursors only; `targetHighWater` is a transient authenticated replay cut, not a percentage denominator. */
+export type SyncProgress = { phase: "receiving" | "applying" | "waitingForKeys" | "current"; receivedThrough: string; processedThrough: string; targetHighWater?: string; snapshotReceived?: string; snapshotExpected?: string; snapshotRemaining?: string };
+export type DesktopSnapshot = { version: "1"; mode: "fixture" | "native" | "browser"; connection: { state: ConnectionState; origin?: string; errorCode?: string }; encryption: { state: "locked" | "unlocked" | "preview" | "mismatch"; profileFingerprint?: string }; gateways: GatewayView[]; conversations: ConversationView[]; activeConversationId?: string; draft?: Draft; desktop?: { trayAvailable: boolean; startAtLogin: boolean; startupSupported: boolean; background: boolean }; deviceRole?: string; head: { enabled: boolean; capability: "available" | "supported" | "unsupported" | "unconfirmed"; note?: string; panel?: boolean; pinnedConversationIds?: string[] }; pendingCount: number; quarantineCount: number; notifications: MirroredNotification[]; appFilters: AppFilter[]; notificationPreferences: NotificationPreferences; contactResolution?: ContactResolutionMap; contactBooks?: ContactBookView[]; contactsPendingCount?: number; contactSync?: ContactSyncStatus; toneOverrides?: Record<string, number>; syncProgress?: SyncProgress };
 /** gatewayId/simId are optional on saves (omitted = keep the stored route) and required on sends. */
 export type DraftInput = Pick<Draft, "id" | "conversationId" | "text" | "recipientIds" | "attachmentIds"> & { expectedRevision: string; gatewayId?: string; simId?: string };
 export type DiscardDraftInput = Pick<Draft, "id" | "conversationId"> & { expectedRevision: string };
@@ -106,8 +108,20 @@ export type EnrollmentView = {
   setupCodeRequired?: boolean;
   ownerResumePending?: boolean;
   vaultOwnerRequired?: boolean;
+  /** Host-authoritative: this local identity has no saved binding and may request owner approval. */
+  canConnectComputer?: boolean;
   displayName?: string;
   username?: string;
+};
+/** Sanitized computer-claimant state. The QR and comparison code are not credentials. */
+export type ComputerClaimantView = {
+  stage: "computer_waiting" | "computer_approved" | "computer_finishing" | "computer_connected" | "computer_expired" | "computer_denied" | "computer_error";
+  qrPayload?: string;
+  verificationCode?: string;
+  expiresInSeconds?: number;
+  awaitingOwner: boolean;
+  computerClaimant: true;
+  errorCode?: string;
 };
 export type HostedPreviewView = {
   scenario: string; screen: string; accountState: string; entitlementState: string;
@@ -223,5 +237,9 @@ export interface DesktopBridge {
   enrollment_approve(): Promise<EnrollmentView>;
   enrollment_cancel(): Promise<void>;
   enrollment_sign_out(): Promise<void>;
+  enrollment_connect_computer(): Promise<ComputerClaimantView>;
+  enrollment_computer_status(): Promise<ComputerClaimantView>;
+  enrollment_confirm_computer(): Promise<ComputerClaimantView>;
+  enrollment_cancel_computer(): Promise<ComputerClaimantView | void>;
 
 }

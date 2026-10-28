@@ -14,8 +14,9 @@ use crate::{
     sync::DownloadRetryState,
 };
 use peppy_client_core::{
-    AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationId, DatabaseKey, DeviceId,
-    DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache, VaultId,
+    AttachmentId, AttachmentInfo, Client, ClientConfig, ConversationId, Cursor, DatabaseKey,
+    DeviceId, DraftId, MediaCursor, MediaMetadata, Message, MessageId, NativeKeyCache,
+    ReplayProgress, VaultId,
 };
 use peppy_desktop_api::compose::{self, ComposeError};
 use std::{
@@ -179,6 +180,9 @@ pub struct Session {
     history_replay_wakes: Mutex<HashMap<uuid::Uuid, i64>>,
     /// A staged snapshot generation known to be impossible to complete; never resumed.
     pub abandoned_snapshot: Mutex<Option<u64>>,
+    /// Authenticated high-water mark for the current replay round. This is transient because it
+    /// describes a server replay cut rather than local durable state.
+    replay_target_high_water: Mutex<Option<Cursor>>,
     deferred_follow_up: DeferredFollowUp,
 }
 
@@ -397,6 +401,7 @@ pub fn open_session(
         notifier,
         mismatch: AtomicBool::new(false),
         abandoned_snapshot: Mutex::new(None),
+        replay_target_high_water: Mutex::new(None),
         repair_wake: Notify::new(),
         repair_attempted: AtomicBool::new(false),
         index_driver_running: AtomicBool::new(false),
@@ -599,6 +604,50 @@ impl Session {
     pub fn notify(&self) {
         self.deferred_follow_up.reset();
         (self.notifier)();
+    }
+
+    /// Reads the committed replay frontiers for the next sanitized snapshot.
+    pub fn replay_progress(&self) -> BridgeResult<ReplayProgress> {
+        self.client.replay_progress().map_err(core_error)
+    }
+
+    /// Records the authenticated replay cut only after its page has committed locally.
+    pub fn set_replay_target_high_water(&self, target: Option<Cursor>) {
+        *self
+            .replay_target_high_water
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = target;
+    }
+
+    /// Returns the transient authenticated replay cut for sanitized snapshot construction.
+    pub fn replay_target_high_water(&self) -> Option<Cursor> {
+        *self
+            .replay_target_high_water
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn sync_progress(&self) -> BridgeResult<dto::SyncProgress> {
+        let progress = self.replay_progress()?;
+        let target_high_water = self.replay_target_high_water();
+        let phase = if progress.waiting_for_keys > 0 {
+            dto::SyncProgressPhase::WaitingForKeys
+        } else if target_high_water.is_some_and(|target| progress.received_through < target) {
+            dto::SyncProgressPhase::Receiving
+        } else if progress.processed_through < progress.received_through {
+            dto::SyncProgressPhase::Applying
+        } else {
+            dto::SyncProgressPhase::Current
+        };
+        Ok(dto::SyncProgress {
+            phase,
+            received_through: progress.received_through.0.to_string(),
+            processed_through: progress.processed_through.0.to_string(),
+            target_high_water: target_high_water.map(|target| target.0.to_string()),
+            snapshot_received: None,
+            snapshot_expected: None,
+            snapshot_remaining: None,
+        })
     }
 
     pub fn notify_deferred_follow_up(&self) {
@@ -1538,6 +1587,7 @@ impl Session {
             ));
         }
         let contacts = crate::contacts::snapshot_contacts(self, &addresses);
+        let sync_progress = self.sync_progress()?;
         let status = self
             .status
             .lock()
@@ -1564,6 +1614,7 @@ impl Session {
             contacts_pending_count: contacts.pending_count,
             contact_sync: contacts.sync,
             tone_overrides,
+            sync_progress: Some(sync_progress),
         };
         Ok((snapshot, hydration))
     }

@@ -54,6 +54,8 @@ internal fun GatewayAccountSettings(
     onOpenSettings: () -> Unit = {},
     onAddPhone: () -> Unit = {},
     canAddPhone: Boolean = false,
+    onConnectComputer: () -> Unit = {},
+    canConnectComputer: Boolean = false,
     settingsMode: Boolean = false,
     onDetailChanged: (Boolean) -> Unit = {},
 ) {
@@ -129,6 +131,15 @@ internal fun GatewayAccountSettings(
                     AccountNavigationRow("account-devices-row", stringResource(R.string.peppy_toggle_android_account_devices)) { devicesOpen = true }
                     if (AccountSettingsPolicy.canAddPhone(account.self.role, canAddPhone)) {
                         AccountNavigationRow("add-phone-row", stringResource(R.string.peppy_toggle_android_account_add_phone), onAddPhone)
+                    }
+                    if (canConnectComputer) {
+                        AccountNavigationRow("connect-computer-row", stringResource(R.string.peppy_owner_computer_add_cta), onConnectComputer)
+                    } else {
+                        Text(
+                            stringResource(R.string.peppy_owner_computer_owner_required),
+                            modifier = Modifier.testTag("connect-computer-owner-help"),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     if (gatewayStatus?.origin == "https://peppy.pro") {
                         AccountNavigationRow("account-hosted-row", stringResource(R.string.peppy_toggle_android_account_billing)) {

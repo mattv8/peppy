@@ -2774,6 +2774,38 @@ public protocol NativeEnrollmentClientProtocol: AnyObject, Sendable {
     
     func vaultRequestHeader() throws  -> String
     
+    /**
+     * Verifies the separately prompted vault key phrase, requires an unlocked native core, and
+     * emits the authenticated approval only after an explicit comparison-code confirmation.
+     */
+    func approveOwnerComputerRequest(invitationId: String, promptDigest: String, codesMatch: Bool, vaultKeyPhrase: String, nativeClient: NativeClient) throws  -> String
+    
+    /**
+     * Clears only local computer-enrollment state; it does not cancel the server enrollment.
+     */
+    func cancelOwnerComputerFlow() throws 
+    
+    /**
+     * Supplies the enrolled owner UUID from protected native identity storage. The shared client
+     * rejects scans until this has been configured; it never uses its local enrollment UUID.
+     */
+    func configureOwnerComputerDevice(deviceId: String) throws 
+    
+    /**
+     * Pins one create response only when it belongs to the currently displayed QR prompt.
+     */
+    func consumeOwnerComputerCreated(invitationId: String, promptDigest: String, createdJson: String) throws 
+    
+    /**
+     * Validates a computer QR locally and creates the body for the authenticated owner request.
+     */
+    func ownerComputerCreateRequest(qrJson: String) throws  -> NativeOwnerComputerCreateRequest
+    
+    /**
+     * Returns local prompt identity and the locally derived comparison code, never server SAS.
+     */
+    func ownerComputerView() throws  -> NativeOwnerComputerView
+    
     func ownerPassphraseMatches(passphrase: String) throws  -> Bool
     
     func ownerPhoneInvitationId() throws  -> String?
@@ -3089,6 +3121,87 @@ open func vaultRequestHeader()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
         uniffiCallStatus in
     uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_vault_request_header(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Verifies the separately prompted vault key phrase, requires an unlocked native core, and
+     * emits the authenticated approval only after an explicit comparison-code confirmation.
+     */
+open func approveOwnerComputerRequest(invitationId: String, promptDigest: String, codesMatch: Bool, vaultKeyPhrase: String, nativeClient: NativeClient)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_approve_owner_computer_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(invitationId),
+        FfiConverterString.lower(promptDigest),
+        FfiConverterBool.lower(codesMatch),
+        FfiConverterString.lower(vaultKeyPhrase),
+        FfiConverterTypeNativeClient_lower(nativeClient),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Clears only local computer-enrollment state; it does not cancel the server enrollment.
+     */
+open func cancelOwnerComputerFlow()throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_cancel_owner_computer_flow(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Supplies the enrolled owner UUID from protected native identity storage. The shared client
+     * rejects scans until this has been configured; it never uses its local enrollment UUID.
+     */
+open func configureOwnerComputerDevice(deviceId: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_configure_owner_computer_device(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(deviceId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Pins one create response only when it belongs to the currently displayed QR prompt.
+     */
+open func consumeOwnerComputerCreated(invitationId: String, promptDigest: String, createdJson: String)throws   {try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_consume_owner_computer_created(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(invitationId),
+        FfiConverterString.lower(promptDigest),
+        FfiConverterString.lower(createdJson),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Validates a computer QR locally and creates the body for the authenticated owner request.
+     */
+open func ownerComputerCreateRequest(qrJson: String)throws  -> NativeOwnerComputerCreateRequest  {
+    return try  FfiConverterTypeNativeOwnerComputerCreateRequest_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_computer_create_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(qrJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Returns local prompt identity and the locally derived comparison code, never server SAS.
+     */
+open func ownerComputerView()throws  -> NativeOwnerComputerView  {
+    return try  FfiConverterTypeNativeOwnerComputerView_lift(try rustCallWithError(FfiConverterTypeMobileBindingsError_lift) {
+        uniffiCallStatus in
+    uniffi_peppy_mobile_bindings_fn_method_nativeenrollmentclient_owner_computer_view(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -6765,6 +6878,158 @@ public func FfiConverterTypeNativeOpenConfig_lift(_ buf: RustBuffer) throws -> N
 #endif
 public func FfiConverterTypeNativeOpenConfig_lower(_ value: NativeOpenConfig) -> RustBuffer {
     return FfiConverterTypeNativeOpenConfig.lower(value)
+}
+
+
+public struct NativeOwnerComputerCreateRequest: Equatable, Hashable {
+    /**
+     * Canonical hosted API origin validated against the scanned QR.
+     */
+    public var origin: String
+    public var invitationId: String
+    /**
+     * Digest of the exact scanned QR payload. Return it with asynchronous responses.
+     */
+    public var promptDigest: String
+    /**
+     * The canonical hosted API create request body; native hosts add their owner session.
+     */
+    public var requestJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Canonical hosted API origin validated against the scanned QR.
+         */origin: String, invitationId: String, 
+        /**
+         * Digest of the exact scanned QR payload. Return it with asynchronous responses.
+         */promptDigest: String, 
+        /**
+         * The canonical hosted API create request body; native hosts add their owner session.
+         */requestJson: String) {
+        self.origin = origin
+        self.invitationId = invitationId
+        self.promptDigest = promptDigest
+        self.requestJson = requestJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeOwnerComputerCreateRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeOwnerComputerCreateRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerComputerCreateRequest {
+        return
+            try NativeOwnerComputerCreateRequest(
+                origin: FfiConverterString.read(from: &buf), 
+                invitationId: FfiConverterString.read(from: &buf), 
+                promptDigest: FfiConverterString.read(from: &buf), 
+                requestJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeOwnerComputerCreateRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterString.write(value.invitationId, into: &buf)
+        FfiConverterString.write(value.promptDigest, into: &buf)
+        FfiConverterString.write(value.requestJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerComputerCreateRequest_lift(_ buf: RustBuffer) throws -> NativeOwnerComputerCreateRequest {
+    return try FfiConverterTypeNativeOwnerComputerCreateRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerComputerCreateRequest_lower(_ value: NativeOwnerComputerCreateRequest) -> RustBuffer {
+    return FfiConverterTypeNativeOwnerComputerCreateRequest.lower(value)
+}
+
+
+public struct NativeOwnerComputerView: Equatable, Hashable {
+    public var origin: String
+    public var invitationId: String
+    public var promptDigest: String
+    public var created: Bool
+    /**
+     * Locally derived after the server nonce has been pinned.
+     */
+    public var sas: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(origin: String, invitationId: String, promptDigest: String, created: Bool, 
+        /**
+         * Locally derived after the server nonce has been pinned.
+         */sas: String?) {
+        self.origin = origin
+        self.invitationId = invitationId
+        self.promptDigest = promptDigest
+        self.created = created
+        self.sas = sas
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NativeOwnerComputerView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNativeOwnerComputerView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NativeOwnerComputerView {
+        return
+            try NativeOwnerComputerView(
+                origin: FfiConverterString.read(from: &buf), 
+                invitationId: FfiConverterString.read(from: &buf), 
+                promptDigest: FfiConverterString.read(from: &buf), 
+                created: FfiConverterBool.read(from: &buf), 
+                sas: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NativeOwnerComputerView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.origin, into: &buf)
+        FfiConverterString.write(value.invitationId, into: &buf)
+        FfiConverterString.write(value.promptDigest, into: &buf)
+        FfiConverterBool.write(value.created, into: &buf)
+        FfiConverterOptionString.write(value.sas, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerComputerView_lift(_ buf: RustBuffer) throws -> NativeOwnerComputerView {
+    return try FfiConverterTypeNativeOwnerComputerView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNativeOwnerComputerView_lower(_ value: NativeOwnerComputerView) -> RustBuffer {
+    return FfiConverterTypeNativeOwnerComputerView.lower(value)
 }
 
 
@@ -11500,6 +11765,24 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_vault_request_header() != 50961) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_approve_owner_computer_request() != 59108) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_cancel_owner_computer_flow() != 56080) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_configure_owner_computer_device() != 13459) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_consume_owner_computer_created() != 48909) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_computer_create_request() != 28487) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_computer_view() != 1365) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_peppy_mobile_bindings_checksum_method_nativeenrollmentclient_owner_passphrase_matches() != 22026) {

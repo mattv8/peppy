@@ -213,8 +213,10 @@ private fun CompanionScreen(activity: ComponentActivity) {
     var accountDetailsOpen by remember { mutableStateOf(false) }
     var welcomeDestination by rememberSaveable { mutableStateOf(WelcomeDestination.HOSTED) }
     var ownerPhoneHost by remember { mutableStateOf<OwnerPhoneApprovalHost?>(null) }
+    var ownerComputerHost by remember { mutableStateOf<OwnerComputerApprovalHost?>(null) }
     // Plain remember: the owner flow is transient, so it must not outlive its live host (no saved state).
     var addPhoneOpen by remember { mutableStateOf(false) }
+    var connectComputerOpen by remember { mutableStateOf(false) }
     var ownerPhoneAvailable by remember { mutableStateOf(false) }
     val ownerDeviceAuth = rememberDeviceAuthenticator(
         title = stringResource(R.string.peppy_owner_phone_secret_reveal_cta),
@@ -274,6 +276,19 @@ private fun CompanionScreen(activity: ComponentActivity) {
             onDone = { ownerPhoneHost = null; addPhoneOpen = false },
             revealSecret = { revealOwnerVaultSecret(context, ownerDeviceAuth) },
         )
+        return
+    }
+
+    if (connectComputerOpen && ownerComputerHost != null) {
+        BackHandler { scope.launch {
+            when (ownerComputerHost?.cancel()) {
+                OwnerComputerApprovalHost.Result.Cancelled, is OwnerComputerApprovalHost.Result.Approved -> {
+                    ownerComputerHost?.close(); ownerComputerHost = null; connectComputerOpen = false
+                }
+                else -> Unit
+            }
+        } }
+        OwnerComputerApprovalScreen(ownerComputerHost!!, onDone = { ownerComputerHost?.close(); ownerComputerHost = null; connectComputerOpen = false })
         return
     }
 
@@ -434,7 +449,9 @@ private fun CompanionScreen(activity: ComponentActivity) {
         }
         if (!settingsOpen && status?.enrolled == true && status?.sharedKeysReady == true && destination == "account") GatewayAccountSettings(onChanged = { refresh++ }, onOpenSettings = { settingsOpen = true }, onAddPhone = {
             scope.launch { ownerPhoneHost = withContext(Dispatchers.IO) { createOwnerPhoneApprovalHost(context) }; addPhoneOpen = ownerPhoneHost != null }
-        }, canAddPhone = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it })
+        }, canAddPhone = ownerPhoneAvailable, onConnectComputer = {
+            scope.launch { ownerComputerHost = withContext(Dispatchers.IO) { createOwnerComputerApprovalHost(context) }; connectComputerOpen = ownerComputerHost != null }
+        }, canConnectComputer = ownerPhoneAvailable, onDetailChanged = { accountDetailsOpen = it })
         if (settingsOpen) {
             ScreenBody("settings-screen") {
                 Section("about-section", "About") {

@@ -167,7 +167,7 @@ describe("SetupLanding", () => {
     renderLanding({ fixedOrigin: "https://app.example.com", accountUrl: "https://account.example.com/account" });
 
     const link = await screen.findByRole("link", { name: /manage account & billing/i });
-    expect(document.querySelector("#self-hosted-panel > h2")).toHaveTextContent(peppyCopy.hosted_join_headline);
+    expect(document.querySelector("#self-hosted-panel > h2")).toHaveTextContent("Connect this device");
     expect(link).toHaveAttribute("href", "https://account.example.com/account");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
@@ -443,6 +443,11 @@ describe("SetupLanding", () => {
     expect(screen.queryByLabelText("Server mode")).not.toBeInTheDocument();
     expect(bridge.enrollment_status).toHaveBeenCalled();
     expect(bridge.hosted_account).not.toHaveBeenCalled();
+  });
+
+  it("keeps the phone heading when explicitly adding a phone", async () => {
+    renderLanding({ addingPhone: true });
+    expect(await screen.findByRole("heading", { name: "Connect your phone" })).toBeInTheDocument();
   });
 
   it("keeps cancellation pending until the native cancellation settles and does not recreate the invitation", async () => {
@@ -1417,7 +1422,7 @@ describe("SetupLanding", () => {
       fireEvent.click(await screen.findByRole("button", { name: /sign in with your username/i }));
       fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
       await waitFor(() => expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce());
-      expect(document.body).not.toHaveTextContent(/admin password/i);
+      expect(document.body).toHaveTextContent(/not your account or admin password/i);
     });
 
     it("signs in to a hosted stage through the enrollment bridge exactly once", async () => {
@@ -1426,7 +1431,7 @@ describe("SetupLanding", () => {
       renderLanding();
       fireEvent.click(await screen.findByRole("button", { name: /already use peppy/i }));
       fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
-      expect(await screen.findByRole("button", { name: "Enter shared secret" })).toBeInTheDocument();
+      expect(await screen.findByRole("button", { name: "Enter Vault key phrase" })).toBeInTheDocument();
       expect(bridge.enrollment_sign_in).toHaveBeenCalledOnce();
       expect(bridge.hosted_sign_in).not.toHaveBeenCalled();
       expect(bridge.enrollment_discover).toHaveBeenCalledTimes(1);
@@ -1452,7 +1457,7 @@ describe("SetupLanding", () => {
       fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
 
       expect(await screen.findByLabelText(peppyCopy.enrollment_vault_owner_label)).toBeVisible();
-      expect(screen.getByRole("button", { name: "Enter shared secret" })).toBeVisible();
+      expect(screen.getByRole("button", { name: "Enter Vault key phrase" })).toBeVisible();
     });
 
     it("lets a community user connect with the shared secret without an admin sign-in", async () => {
@@ -1500,7 +1505,7 @@ describe("SetupLanding", () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase" }));
       await waitFor(() => expect(bridge.enrollment_connect_shared_secret).toHaveBeenCalledOnce());
       expect(document.querySelector("input[type=password]")).not.toBeInTheDocument();
     });
@@ -1510,11 +1515,11 @@ describe("SetupLanding", () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
       await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
       expect(bridge.reveal_vault_secret).not.toHaveBeenCalled();
       Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
-      fireEvent.click(screen.getByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(screen.getByRole("button", { name: "Enter Vault key phrase on phone" }));
       await waitFor(() => expect(bridge.reveal_vault_secret).toHaveBeenCalledOnce());
       delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     });
@@ -1526,7 +1531,7 @@ describe("SetupLanding", () => {
       renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
 
       expect(await screen.findByRole("alert")).toHaveAttribute("id", "enrollment-shared-secret-error");
       delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -2156,7 +2161,7 @@ describe("SetupLanding", () => {
 
       expect(await screen.findByText(peppyCopy.production_pairing_refreshing)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Enter shared secret on phone" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Enter Vault key phrase on phone" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "Set up phone later" })).toBeDisabled();
 
       await act(async () => rotation.resolve(waitingView({ expiresInSeconds: 300 })));
@@ -2179,7 +2184,7 @@ describe("SetupLanding", () => {
       expect(bridge.enrollment_status).toHaveBeenCalledOnce();
       expect(pendingIndicator()).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
-      expect(screen.getByRole("button", { name: "Enter shared secret on phone" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Enter Vault key phrase on phone" })).toBeEnabled();
       await act(async () => poll.resolve(waitingView()));
     });
 
@@ -2189,13 +2194,13 @@ describe("SetupLanding", () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
       vi.spyOn(bridge, "reveal_vault_secret").mockReturnValue(reveal.promise);
       renderLanding({ fixedOrigin: "https://community.example" });
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
 
       await waitFor(() => expect(bridge.reveal_vault_secret).toHaveBeenCalledOnce());
       expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret");
       expect(pendingIndicator()).toHaveTextContent(peppyCopy.production_pairing_revealing);
       expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Enter shared secret on phone" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Enter Vault key phrase on phone" })).toBeDisabled();
 
       await act(async () => reveal.resolve());
       await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
@@ -2208,10 +2213,10 @@ describe("SetupLanding", () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
       vi.spyOn(bridge, "enrollment_status").mockResolvedValue(waitingView({ expiresInSeconds: 10 }));
       renderLanding({ fixedOrigin: "https://community.example" });
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
       await waitFor(() => expect(bridge.reveal_vault_secret).toHaveBeenCalledOnce());
       await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
-      expect(screen.getByText("After scanning, your phone asks for the vault shared secret. Enter it there, then compare the codes.")).toBeInTheDocument();
+      expect(screen.getByText("After scanning, your phone asks for the vault key phrase. Enter it there, then compare the codes.")).toBeInTheDocument();
 
       await advance();
 
@@ -2225,7 +2230,7 @@ describe("SetupLanding", () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
       vi.spyOn(bridge, "enrollment_rotate_phone").mockResolvedValue(view({ stage, owner: true, verificationCode: "123456" }));
       renderLanding({ fixedOrigin: "https://community.example" });
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
 
       await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
       await waitFor(() => expect(pendingIndicator()).not.toBeInTheDocument());
@@ -2238,7 +2243,7 @@ describe("SetupLanding", () => {
       vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(waitingView());
       vi.spyOn(bridge, "enrollment_rotate_phone").mockReturnValue(rotation.promise);
       const rendered = renderLanding({ fixedOrigin: "https://community.example" });
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
       await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
 
       rendered.unmount();
@@ -2255,7 +2260,7 @@ describe("SetupLanding", () => {
       const rendered = renderLanding({ mode: "self-hosted" });
       fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "https://server.example" } });
       fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-      fireEvent.click(await screen.findByRole("button", { name: "Enter shared secret on phone" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Enter Vault key phrase on phone" }));
       await waitFor(() => expect(bridge.enrollment_rotate_phone).toHaveBeenCalledWith("shared_secret"));
 
       rendered.rerender(<SetupLanding mode="hosted" onMode={vi.fn()} enrolledWithoutPhone={false} onJoined={vi.fn()} />);
@@ -2263,6 +2268,170 @@ describe("SetupLanding", () => {
 
       expect(bridge.reveal_vault_secret).not.toHaveBeenCalled();
       expect(pendingIndicator()).not.toBeInTheDocument();
+    });
+
+    it("starts and cancels a new computer claimant without using the vault key phrase", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_waiting", qrPayload: "computer-qr", awaitingOwner: true, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_cancel_computer").mockResolvedValue();
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      expect(await screen.findByRole("img", { name: /computer connection qr code/i })).toBeInTheDocument();
+      expect(bridge.enrollment_connect_shared_secret).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel connection" }));
+      await waitFor(() => expect(bridge.enrollment_cancel_computer).toHaveBeenCalledOnce());
+    });
+
+    it("does not offer a new computer claimant for a locked saved identity", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("heading", { name: "Unlock this device" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /connect this computer/i })).not.toBeInTheDocument();
+    });
+
+    it("offers the native claimant only when discovery reports no saved binding", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked", canConnectComputer: true }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("button", { name: "Connect this computer" })).toBeInTheDocument();
+    });
+
+    it("guides a narrow new browser identity to the verified download page before continuing", async () => {
+      Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }) });
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      renderLanding({ fixedOrigin: "https://community.example", hostKind: "browser", newIdentity: true, accountUrl: "https://peppy.pro/account" });
+
+      expect(await screen.findByRole("heading", { name: "Use Peppy in this browser" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /peppy downloads \(computers\)/i })).toHaveAttribute("href", "https://peppy.pro/account");
+      expect(screen.getByText(/cannot scan its own connection code/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /continue in this browser/i }));
+      expect(await screen.findByRole("button", { name: "Connect this browser" })).toBeInTheDocument();
+    });
+
+    it("keeps browser continuation available without an unverified download link", async () => {
+      Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }) });
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      renderLanding({ fixedOrigin: "https://community.example", hostKind: "browser", newIdentity: true });
+
+      await screen.findByRole("heading", { name: "Use Peppy in this browser" });
+      expect(screen.queryByRole("link", { name: /peppy downloads \(computers\)/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /continue in this browser/i })).toBeInTheDocument();
+    });
+
+    it("shows a retryable claimant error without claiming approval", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_error", awaitingOwner: false, computerClaimant: true });
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      expect(await screen.findByRole("heading", { name: /connection needs attention/i })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /finish connection/i })).not.toBeInTheDocument();
+    });
+
+    it("retries a finishing browser claimant through confirm without polling status", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_finishing", awaitingOwner: false, computerClaimant: true, errorCode: "computer_transient" });
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockResolvedValue({ stage: "computer_finishing", awaitingOwner: false, computerClaimant: true, errorCode: "computer_transient" });
+      vi.spyOn(bridge, "enrollment_computer_status");
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Retry finishing" }));
+
+      await waitFor(() => expect(bridge.enrollment_confirm_computer).toHaveBeenCalledOnce());
+      expect(bridge.enrollment_computer_status).not.toHaveBeenCalled();
+    });
+
+    it("offers reopening, not an activation retry, after a poisoned claimant checkpoint", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_error", awaitingOwner: false, computerClaimant: true, errorCode: "computer_reopen_required" });
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      expect(await screen.findByRole("button", { name: "Reopen Peppy" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Start again" })).not.toBeInTheDocument();
+    });
+
+    it("opens the connected device after durable claimant completion", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_connected", awaitingOwner: false, computerClaimant: true });
+      const onJoined = vi.fn();
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true, onJoined });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      await waitFor(() => expect(onJoined).toHaveBeenCalledOnce());
+    });
+
+    it("explains the browser restart unlock as a visible notice, not a muted hint", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_waiting", qrPayload: "computer-qr", awaitingOwner: true, computerClaimant: true });
+      renderLanding({ fixedOrigin: "https://community.example", hostKind: "browser", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this browser" }));
+      const notice = await waitFor(() => {
+        const element = document.getElementById("computer-browser-restart-notice");
+        expect(element).not.toBeNull();
+        return element!;
+      });
+      expect(notice).toHaveTextContent("After restarting this browser, unlock it with your Vault key phrase. On an already connected phone, use Show Vault key phrase.");
+      expect(notice).toHaveClass("setup-notice");
+      expect(notice).not.toHaveClass("setup-hint");
+    });
+
+    it("shows the approved code with a visible caption and no decline action", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true, verificationCode: "654321" });
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      expect(await screen.findByRole("group", { name: "Verification code" })).toBeInTheDocument();
+      expect(screen.getByText("Verification code", { selector: "p" })).toBeVisible();
+      expect(screen.getByLabelText("Verification code: 654321")).toBeInTheDocument();
+      expect(screen.getByText(peppyCopy.computer_approved_body)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /decline|deny|cancel/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Finish connection" })).toHaveClass("primary-button");
+    });
+
+    it("keeps an approved claimant retryable after a transient finish failure without restarting", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      vi.spyOn(bridge, "enrollment_connect_computer").mockResolvedValue({ stage: "computer_approved", awaitingOwner: false, computerClaimant: true, verificationCode: "654321", errorCode: "computer_transient" });
+      vi.spyOn(bridge, "enrollment_confirm_computer").mockResolvedValue({ stage: "computer_connected", awaitingOwner: false, computerClaimant: true });
+      vi.spyOn(bridge, "enrollment_cancel_computer");
+      const onJoined = vi.fn();
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true, onJoined });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Connect this computer" }));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(peppyCopy.computer_approved_transient_body);
+      expect(alert).toHaveTextContent(/check your network connection/i);
+      expect(screen.getByLabelText("Verification code: 654321")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Finish connection" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /cancel|start again|decline/i })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry finishing" }));
+
+      await waitFor(() => expect(bridge.enrollment_confirm_computer).toHaveBeenCalledOnce());
+      expect(bridge.enrollment_cancel_computer).not.toHaveBeenCalled();
+      await waitFor(() => expect(onJoined).toHaveBeenCalledOnce());
+    });
+
+    it("keeps the Vault key phrase fallback secondary beside a computer connect action", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      renderLanding({ fixedOrigin: "https://community.example", newIdentity: true });
+
+      expect(await screen.findByRole("button", { name: "Connect this computer" })).toHaveClass("primary-button");
+      expect(screen.getByRole("button", { name: "Enter Vault key phrase" })).toHaveClass("secondary-button");
+      expect(screen.getByText(/usually six words, and a custom phrase also works/i)).toBeInTheDocument();
+      expect(screen.getByText(/not your account or admin password/i, { selector: "p" })).toBeInTheDocument();
+    });
+
+    it("keeps the Vault key phrase as the primary action when no computer connect is offered", async () => {
+      vi.spyOn(bridge, "enrollment_discover").mockResolvedValue(view({ stage: "locked" }));
+      renderLanding({ fixedOrigin: "https://community.example" });
+
+      expect(await screen.findByRole("button", { name: "Enter Vault key phrase" })).toHaveClass("primary-button");
+      expect(screen.queryByText(/usually six words/i)).not.toBeInTheDocument();
     });
   });
 });

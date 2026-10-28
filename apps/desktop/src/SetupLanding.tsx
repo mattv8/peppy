@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
 import { BusyIndicator } from "@peppy/desktop-ui";
-import { bridge, type EnrollmentView, type HostedAccountView } from "./bridge";
+import { bridge, type ComputerClaimantView, type EnrollmentView, type HostedAccountView } from "./bridge";
 import { peppyCopy, type PeppyCopyKey } from "./generated/peppyCopy";
 import "./setup-landing.css";
 
@@ -9,7 +9,7 @@ type Mode = "hosted" | "self-hosted";
 type HostedPath = "chooser" | "existing" | "new";
 type Route = "checking" | "chooser" | "new" | "enrollment" | "lapsed" | "billing" | "provisioning" | "passphrase";
 type Method = "transfer" | "shared_secret";
-type Stage = EnrollmentView["stage"];
+type Stage = EnrollmentView["stage"] | ComputerClaimantView["stage"];
 type InvitationAttempt = "idle" | "starting" | "active" | "stopped";
 type PendingOperation = { id: number; label: PeppyCopyKey };
 type EnrollmentOperation = { action: (isCurrent: () => boolean) => Promise<EnrollmentView>; retry: () => void; label: PeppyCopyKey; startOver?: boolean; reconcileCreateOwner?: boolean };
@@ -24,7 +24,7 @@ const invitePollBackoffMs = [1_000, 2_000, 5_000, 10_000];
 const qrOptions = { errorCorrectionLevel: "M" as const, margin: 4, width: 512 };
 const methodHints: Record<Method, string> = {
   transfer: "Approve only after the codes match. Your phone then receives this device's vault keys directly.",
-  shared_secret: "After scanning, your phone asks for the vault shared secret. Enter it there, then compare the codes.",
+  shared_secret: "After scanning, your phone asks for the vault key phrase. Enter it there, then compare the codes.",
 };
 
 const nativeSetupPromptHint = (mode: "open" | "protected") => {
@@ -33,8 +33,8 @@ const nativeSetupPromptHint = (mode: "open" | "protected") => {
     return copy(mode === "open" ? "setup_self_hosted_prompts_hint_open" : "setup_self_hosted_prompts_hint_protected");
   }
   return mode === "open"
-    ? "Your admin password and vault shared secret will be requested securely."
-    : "Your setup code, admin password, and vault shared secret will be requested securely.";
+    ? "Your admin password and vault key phrase will be requested separately."
+    : "Your setup code, admin password, and vault key phrase will be requested separately.";
 };
 
 // Native transport/host codes and the enrollment domain codes that have their own message.
@@ -66,8 +66,8 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "host-config") return "Peppy's native host configuration could not be read or saved. Try again.";
   if (errorCode === "server-response") return "The server's response could not be read or verified by this device. Check the server and this Peppy build, then try again.";
   if (errorCode === "revoked") return "The server no longer accepts this device's saved credential. It was revoked or is invalid.";
-  if (errorCode === "wrong-passphrase") return "That vault shared secret does not match the pending vault. Check it and try again.";
-  if (errorCode === "vault-secret-mismatch") return "The vault shared secret saved on this computer does not match this vault, so the phone was not approved. The saved secret was not changed.";
+  if (errorCode === "wrong-passphrase") return "That vault key phrase does not match the pending vault. Check it and try again.";
+  if (errorCode === "vault-secret-mismatch") return "The vault key phrase saved on this device does not match this vault, so the phone was not approved. The saved phrase was not changed.";
   if (errorCode === "credential-changed") return "The saved credential changed while setup was running. Try again.";
   if (errorCode === "enrollment-state") return "The phone has not finished its connection request yet. Wait for it to finish, then try again.";
   if (errorCode === "database-key-conflict") return "A protected database key already exists on this device and was not replaced. Try again.";
@@ -86,7 +86,7 @@ const enrollmentErrorMessage = (errorCode: EnrollmentView["errorCode"]) => {
   if (errorCode === "vault_request_completed") return "This vault request was already completed. Contact an owner if you need access.";
   if (errorCode === "request_completed_without_material") return "This vault request was already completed. Start a new request to try again.";
   if (errorCode === "admin-password-length") return copy("admin_password_length");
-  if (errorCode === "vault-secret-unavailable") return "This device's vault shared secret is not stored. Open Settings, choose Unlock sync natively in Sync encryption, then retry phone approval.";
+  if (errorCode === "vault-secret-unavailable") return "This device's vault key phrase is not stored. Open Settings, choose Unlock sync natively in Sync encryption, then retry phone approval.";
   if (errorCode === "owner-status-pending") return "This device is set up, but its status is still being confirmed. Try again.";
   return "Peppy could not complete this step. Your server address was kept.";
 };
@@ -125,7 +125,7 @@ function Stage({ stage, setupMode, children }: { stage: Stage; setupMode?: "open
   return <div id={`enrollment-${stage}`} className="enrollment-stage" data-stage={stage} data-setup-mode={setupMode}>{children}</div>;
 }
 
-export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl }: {
+export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEstablished = false, addingPhone = false, connectionPending = false, onExit, onDeferPhone, onJoined, onInitialEnrollmentStart, fixedOrigin, accountUrl, newIdentity = false, hostKind = "native" }: {
   mode: Mode;
   onMode(mode: Mode): void;
   enrolledWithoutPhone: boolean;
@@ -138,6 +138,9 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   onInitialEnrollmentStart?(): void;
   fixedOrigin?: string;
   accountUrl?: string;
+  /** Host-provided local identity state; a locked saved identity must not start a claimant flow. */
+  newIdentity?: boolean;
+  hostKind?: "native" | "browser";
 }) {
   const [account, setAccount] = useState<HostedAccountView | null>(null);
   const [accountLoading, setAccountLoading] = useState(!fixedOrigin && mode === "hosted" && !enrolledWithoutPhone);
@@ -146,6 +149,11 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const [recoveryPending, setRecoveryPending] = useState(false);
   const [hostedPath, setHostedPath] = useState<HostedPath>("chooser");
   const [view, setView] = useState<EnrollmentView | null>(null);
+  const [computerClaimant, setComputerClaimant] = useState<ComputerClaimantView | null>(null);
+  const [computerClaimantError, setComputerClaimantError] = useState<string | null>(null);
+  const [computerPollError, setComputerPollError] = useState(false);
+  const [continueInBrowser, setContinueInBrowser] = useState(false);
+  const [narrowBrowser, setNarrowBrowser] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(max-width: 640px)")?.matches === true);
   const [qr, setQr] = useState("");
   const [method, setMethod] = useState<Method>("transfer");
   const [qrRetry, setQrRetry] = useState(0);
@@ -180,6 +188,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const startOverConfirmButton = useRef<HTMLButtonElement>(null);
   const inviteLinkInput = useRef<HTMLInputElement>(null);
   const joined = useRef(false);
+  const computerJoined = useRef(false);
   const provisioning = useRef(false);
   const discoverStarted = useRef(false);
   const fixedStarted = useRef(false);
@@ -208,6 +217,15 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const previousRoute = useRef<Route | null>(null);
   const latestRoutingState = useRef({ enrolledWithoutPhone, addingPhone });
   latestRoutingState.current = { enrolledWithoutPhone, addingPhone };
+  const connectHeading = copy(hostKind === "browser" ? "computer_connect_heading_browser" : "computer_connect_heading_computer");
+
+  useEffect(() => {
+    const query = hostKind === "browser" ? window.matchMedia?.("(max-width: 640px)") : undefined;
+    if (!query) return;
+    const update = () => setNarrowBrowser(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, [hostKind]);
 
   const community = Boolean(fixedOrigin) || mode === "self-hosted" || enrolledWithoutPhone || addingPhone;
   const hostedBrowser = Boolean(fixedOrigin && accountUrl);
@@ -339,6 +357,58 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   const connectSharedSecret = () => {
     onInitialEnrollmentStart?.();
     return runEnrollment({ action: () => bridge.enrollment_connect_shared_secret(vaultOwner ? { vaultOwner } : undefined), retry: connectSharedSecret, label: "production_pairing_connecting" });
+  };
+  const applyComputerClaimant = (next: ComputerClaimantView) => {
+    setComputerPollError(false);
+    setComputerClaimant(current => (current && (current.stage === "computer_approved" || current.stage === "computer_finishing") && next.stage === "computer_expired" ? current : next));
+  };
+  const beginComputerClaimant = async () => {
+    setComputerClaimantError(null);
+    const pendingId = beginPending("production_pairing_preparing");
+    try {
+      applyComputerClaimant(await bridge.enrollment_connect_computer());
+    } catch (error) {
+      setComputerClaimantError(enrollmentErrorMessage(thrownErrorCode(error)));
+    } finally {
+      endPending(pendingId);
+    }
+  };
+  const finishComputerClaimant = async () => {
+    const pendingId = beginPending("production_pairing_finishing");
+    try {
+      applyComputerClaimant(await bridge.enrollment_confirm_computer());
+    } catch (error) {
+      setComputerClaimantError(enrollmentErrorMessage(thrownErrorCode(error)));
+    } finally {
+      endPending(pendingId);
+    }
+  };
+  const reopenComputerClaimant = () => window.location.reload();
+  const cancelComputerClaimant = async () => {
+    if (computerClaimant?.stage !== "computer_waiting") return;
+    const pendingId = beginPending("production_pairing_cancelling");
+    try {
+      await bridge.enrollment_cancel_computer();
+      setComputerClaimant(null);
+      return true;
+    } catch (error) {
+      setComputerClaimantError(enrollmentErrorMessage(thrownErrorCode(error)));
+    } finally {
+      endPending(pendingId);
+    }
+    return false;
+  };
+  const useComputerPhraseInstead = async () => {
+    if (!await cancelComputerClaimant()) return;
+    void connectSharedSecret();
+  };
+  const retryComputerStatus = async () => {
+    setComputerPollError(false);
+    try {
+      applyComputerClaimant(await bridge.enrollment_computer_status());
+    } catch {
+      setComputerPollError(true);
+    }
   };
   const beginVaultRequest = () => {
     onInitialEnrollmentStart?.();
@@ -704,7 +774,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     void poll();
     return () => { invitePollEpoch.current += 1; if (timer !== undefined) window.clearTimeout(timer); };
   }, [pageVisible, stage]);
-  const payload = stage === "waiting_phone" ? view?.qrPayload : undefined;
+  const payload = computerClaimant?.stage === "computer_waiting" ? computerClaimant.qrPayload : stage === "waiting_phone" ? view?.qrPayload : undefined;
   useEffect(() => {
     if (payload && payload !== rotatedInvitation.current) {
       rotatedInvitation.current = null;
@@ -745,6 +815,13 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     return () => window.clearInterval(timer);
   }, [stage]);
   useEffect(() => {
+    if (!computerClaimant || !["computer_waiting", "computer_approved"].includes(computerClaimant.stage)) return;
+    const timer = window.setInterval(() => {
+      void bridge.enrollment_computer_status().then(applyComputerClaimant).catch(() => setComputerPollError(true));
+    }, pollIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [computerClaimant?.stage]);
+  useEffect(() => {
     const invitation = stage === "waiting_phone" ? view?.qrPayload : stage === "expired" ? `expired:${view?.qrPayload ?? ""}` : null;
     const nearExpiry = stage === "waiting_phone" && (view?.expiresInSeconds ?? Infinity) <= 15;
     if (!invitation || invitationAttemptRef.current === "stopped" || (!nearExpiry && stage !== "expired") || mutationInFlight.current || rotatedInvitation.current === invitation) return;
@@ -770,6 +847,14 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     })();
   }, [joinedNow, onJoined]);
   useEffect(() => {
+    if (computerClaimant?.stage !== "computer_connected" || computerJoined.current) return;
+    computerJoined.current = true;
+    void Promise.resolve(onJoined()).catch(() => {
+      computerJoined.current = false;
+      setComputerClaimantError(copy("computer_connected_open_error"));
+    });
+  }, [computerClaimant?.stage, onJoined]);
+  useEffect(() => {
     if (route === "checking") return;
     if (recoveryActive) {
       requestAnimationFrame(() => bodyRef.current?.querySelector<HTMLElement>("h2")?.focus());
@@ -784,7 +869,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       else if (!fixedOrigin && mode === "self-hosted" && !connectedOrigin) modeSelect.current?.focus();
       else bodyRef.current?.querySelector<HTMLElement>("h2")?.focus();
     });
-  }, [fixedOrigin, mode, route, stage, connectedOrigin, community, recoveryActive]);
+  }, [fixedOrigin, mode, route, stage, computerClaimant?.stage, connectedOrigin, community, recoveryActive]);
 
   const recordModeChoice = (next: Mode) => {
     if (!fixedOrigin) window.localStorage.setItem("peppy.setup.mode", next);
@@ -872,7 +957,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
       : null;
     return (
       <>
-        {view ? renderStage(view) : <p id="enrollment-checking" role="status">Checking this server…</p>}
+        {computerClaimant ? renderComputerClaimant(computerClaimant) : computerClaimantError ? <Stage stage="locked"><Heading>Something went wrong</Heading><p id="computer-claimant-error" role="alert">{computerClaimantError}</p><div className="enrollment-actions"><button id="computer-retry-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>Retry</button></div></Stage> : view ? renderStage(view) : <p id="enrollment-checking" role="status">Checking this server…</p>}
         {back}
       </>
     );
@@ -893,6 +978,26 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     </>;
   };
 
+  const renderComputerClaimant = (claimant: ComputerClaimantView): ReactNode => {
+    if (claimant.stage === "computer_waiting") return <Stage stage={claimant.stage}><Heading>{connectHeading}</Heading><p>{copy("computer_waiting_instructions")}</p>{qrState === "generating" && <BusyIndicator id="computer-qr-generating" label={copy("computer_qr_generating")} />}{qrState === "error" && <p id="computer-qr-error" role="alert">{copy("computer_qr_error")} <button className="secondary-button" onClick={() => setQrRetry(current => current + 1)}>{copy("computer_retry_cta")}</button></p>}{computerPollError && <p id="computer-status-error" role="alert">{copy("computer_status_error")} <button className="secondary-button" onClick={() => void retryComputerStatus()}>Retry</button></p>}{qr && <div id="computer-qr-hero"><img id="computer-qr-image" src={qr} alt="" aria-hidden="true" /><span className="visually-hidden" role="img" aria-label={copy("computer_qr_accessibility")} />{(claimant.expiresInSeconds ?? 0) > 0 && <span id="computer-countdown" role="timer" aria-live="off">{copy("computer_expires_in")} {claimant.expiresInSeconds}s</span>}</div>}<p className="setup-hint">{copy("computer_qr_hint")}</p>{hostKind === "browser" && <p id="computer-browser-restart-notice" className="setup-notice">{copy("computer_browser_phrase_hint")}</p>}<div className="enrollment-actions"><button id="computer-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelComputerClaimant()}>{copy("computer_cancel_cta")}</button><button id="computer-use-phrase-button" className="secondary-button" disabled={busy} onClick={() => void useComputerPhraseInstead()}>{copy("computer_use_phrase_cta")}</button></div></Stage>;
+    if (claimant.stage === "computer_approved") {
+      const transient = claimant.errorCode === "computer_transient";
+      return <Stage stage={claimant.stage}><Heading>{copy("computer_approved_heading")}</Heading><p>{copy("computer_approved_body")}</p>{claimant.verificationCode && <div id="computer-verification" role="group" aria-labelledby="computer-verification-caption"><p id="computer-verification-caption" className="setup-hint">Verification code</p><output id="computer-verification-code" aria-label={`Verification code: ${claimant.verificationCode}`}>{claimant.verificationCode}</output></div>}{transient && <p id="computer-approved-transient" role="alert">{copy("computer_approved_transient_body")}</p>}{computerClaimantError && <p id="computer-confirm-error" role="alert">{computerClaimantError}</p>}<div className="enrollment-actions"><button id="computer-finish-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy(transient ? "computer_finishing_retry_cta" : "computer_finish_cta")}</button></div></Stage>;
+    }
+    if (claimant.stage === "computer_finishing") return <Stage stage={claimant.stage}><Heading>{copy("computer_finishing_heading")}</Heading>{claimant.errorCode === "computer_transient" ? <><p id="computer-finishing-error" role="alert">{copy("computer_finishing_retry_body")}</p><div className="enrollment-actions"><button id="computer-finishing-retry-button" className="primary-button" disabled={busy} onClick={() => void finishComputerClaimant()}>{copy("computer_finishing_retry_cta")}</button></div></> : <BusyIndicator id="computer-finishing-status" label="Installing verified connection" />}</Stage>;
+    if (claimant.stage === "computer_connected") return <Stage stage={claimant.stage}><Heading>{copy("computer_connected_heading")}</Heading><p role="status">{copy("computer_connected_body")}</p>{computerClaimantError && <p id="computer-connected-error" role="alert">{computerClaimantError}</p>}</Stage>;
+    if (claimant.stage === "computer_error") {
+      const recovery = claimant.errorCode === "computer_reopen_required";
+      const errorKey = claimant.errorCode === "foreign_vault" ? "computer_error_foreign_vault"
+        : claimant.errorCode === "computer_reopen_required" ? "computer_error_reopen_required"
+          : claimant.errorCode === "computer_remote_consumed" ? "computer_error_remote_consumed"
+            : "computer_error_verification_failed";
+      return <Stage stage={claimant.stage}><Heading>{copy("computer_error_heading")}</Heading><p id="computer-stage-error" role="alert">{copy(errorKey)}</p><div className="enrollment-actions"><button id="computer-error-action" className="primary-button" disabled={busy} onClick={recovery ? reopenComputerClaimant : () => void beginComputerClaimant()}>{copy(recovery ? "computer_reopen_cta" : "computer_restart_cta")}</button></div></Stage>;
+    }
+    const denied = claimant.stage === "computer_denied";
+    return <Stage stage={claimant.stage}><Heading>{copy(denied ? "computer_denied_heading" : "computer_expired_heading")}</Heading><p role="alert">{copy(denied ? "computer_denied_body" : "computer_expired_body")}</p><div className="enrollment-actions"><button id="computer-restart-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>{copy("computer_restart_cta")}</button></div></Stage>;
+  };
+
   const renderStage = (view: EnrollmentView): ReactNode => {
     const hosted = view.mode === "hosted";
     switch (view.stage) {
@@ -907,7 +1012,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
         return hosted ? (
           <Stage stage="setup">
             <Heading>Create your vault</Heading>
-            <p>Peppy will create your vault and a shared secret. Each one is confirmed in a secure prompt.</p>
+            <p>Peppy will create your vault and a vault key phrase. Follow the prompts to confirm them.</p>
             <div className="enrollment-actions">
               <button id="enrollment-create-owner-button" className="primary-button" disabled={busy} onClick={() => void createOwner()}>Create vault</button>
               <button id="enrollment-cancel-setup-button" className="secondary-button" disabled={busy} onClick={changeServer}>Cancel</button>
@@ -950,7 +1055,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
         if (!hosted && signinPath === "invite") return <Stage stage="invite_request"><Heading>{copy("enrollment_invite_request_headline")}</Heading><p>{copy("enrollment_invite_request_body")}</p>{renderInviteRequestFields()}<div className="enrollment-actions"><button id="enrollment-invite-submit-button" className="primary-button" disabled={busy || !inviteLink || !displayName} onClick={() => void beginVaultRequest()}>{copy("enrollment_invite_request_cta")}</button><button id="enrollment-invite-cancel-button" className="secondary-button" onClick={() => setSigninPath("chooser")}>{copy("enrollment_invite_cancel_cta")}</button></div></Stage>;
         return (
           <Stage stage="signin">
-            <Heading>{hosted ? copy("hosted_sign_in_headline") : "Sign in to your server"}</Heading>
+            <Heading>{hosted ? "Sign in to your Peppy account" : "Sign in to your server"}</Heading>
             <p>{hosted ? "Sign in to your Peppy account to continue. Signing in does not unlock your vault." : copy("enrollment_signin_body")}</p>
             <div className={hosted ? "enrollment-actions" : "chooser-buttons"}>
               {!hosted && view.ownerResumePending && <button id="enrollment-signin-resume-button" className="chooser-button" disabled={busy} onClick={() => void createOwner()}><span className="chooser-button-label">{copy("setup_owner_resume_signin_label")}</span><span className="chooser-button-hint">{copy("setup_owner_resume_signin_hint")}</span></button>}
@@ -961,14 +1066,26 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
           </Stage>
         );
       case "locked":
+        if (newIdentity && hostKind === "browser" && narrowBrowser && !continueInBrowser) return (
+          <Stage stage="locked">
+            <Heading>Use Peppy in this browser</Heading>
+            <p>To continue here, use an unlocked owner device to approve this browser. This browser cannot scan its own connection code.</p>
+            <div className="enrollment-actions">
+              <button id="browser-continue-button" className="primary-button" onClick={() => setContinueInBrowser(true)}>Continue in this browser</button>
+              {accountUrl && <a id="browser-downloads-link" className="secondary-button" href={accountUrl} target="_blank" rel="noopener noreferrer">Peppy downloads (computers)<span className="visually-hidden"> (opens in a new tab)</span></a>}
+            </div>
+          </Stage>
+        );
         return (
           <Stage stage="locked">
-            <Heading>Connect this device</Heading>
-            <p>Enter the shared secret from your server owner in the secure prompt. Signing in alone does not unlock messages.</p>
+            <Heading>{(newIdentity || view.canConnectComputer) ? connectHeading : copy("computer_unlock_heading")}</Heading>
+            <p>{(newIdentity || view.canConnectComputer) ? "An unlocked owner device must approve this connection. A connected phone may not be an owner." : "Enter the Vault key phrase you saved when the vault was created. It is not your account or admin password."}</p>
             {view.vaultOwnerRequired && <div id="enrollment-vault-owner-field" className="setup-url-field"><label>{copy("enrollment_vault_owner_label")}<input id="enrollment-vault-owner" type="text" autoComplete="username" value={vaultOwner} onChange={event => setVaultOwner(event.target.value)} /></label><span className="setup-hint">{copy("enrollment_vault_owner_hint")}</span></div>}
             <div className="enrollment-actions">
-              <button id="enrollment-shared-secret-button" className="primary-button" disabled={busy} onClick={() => void connectSharedSecret()}>Enter shared secret</button>
+              {(newIdentity || view.canConnectComputer) && <button id="computer-connect-button" className="primary-button" disabled={busy} onClick={() => void beginComputerClaimant()}>{connectHeading}</button>}
+              <button id="enrollment-shared-secret-button" className={(newIdentity || view.canConnectComputer) ? "secondary-button" : "primary-button"} disabled={busy} onClick={() => void connectSharedSecret()}>Enter Vault key phrase</button>
             </div>
+            {(newIdentity || view.canConnectComputer) && <p id="enrollment-shared-secret-hint" className="setup-hint">Use the Vault key phrase you saved when you set up Peppy. It is usually six words, and a custom phrase also works. It is not your account or admin password.</p>}
           </Stage>
         );
       case "invite_request":
@@ -1025,7 +1142,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
             <p className="setup-hint">This QR connects your phone to this server. It does not grant any permissions by itself.</p>
             <div className="enrollment-actions">
               <button id="enrollment-cancel-button" className="secondary-button" disabled={busy} onClick={() => void cancelPairing()}>Cancel</button>
-              <button id="enrollment-shared-secret-phone-button" className="secondary-button" disabled={busy} onClick={useSharedSecretPhone}>Enter shared secret on phone</button>
+              <button id="enrollment-shared-secret-phone-button" className="secondary-button" disabled={busy} onClick={useSharedSecretPhone}>Enter Vault key phrase on phone</button>
               <button id="enrollment-defer-phone-button" className="secondary-button" disabled={busy} onClick={deferPhone}>Set up phone later</button>
             </div>
           </Stage>
@@ -1109,7 +1226,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
     <>
       {route === "checking" && <section id="hosted-account-checking" aria-busy="true"><h2 tabIndex={-1}>{copy("hosted_account_checking")}</h2></section>}
       {route === "chooser" && <div id="hosted-path-chooser">{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}<div className="chooser-buttons"><button ref={choice} id="hosted-choice-existing" className="chooser-button" onClick={chooseExisting}><span className="chooser-button-label">{copy("setup_choice_existing")}</span><span className="chooser-button-hint">{copy("setup_choice_existing_hint")}</span></button><button id="hosted-choice-new" className="chooser-button" onClick={chooseNew}><span className="chooser-button-label">{copy("setup_choice_new")}</span><span className="chooser-button-hint">{copy("setup_choice_new_hint")}</span></button></div></div>}
-      {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>{copy("hosted_sign_in_headline")}</h2><p>{copy("hosted_sign_in_body")}</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
+      {route === "new" && <section id="hosted-signin-panel" data-section="signin"><h2 tabIndex={-1}>Sign in to your Peppy account</h2><p>{copy("hosted_sign_in_body")} Signing in does not unlock your vault.</p><button id="hosted-signin-google-button" className="primary-button" disabled={!account?.available || busy} onClick={() => void signIn()}>{copy("hosted_sign_in_google")}</button>{account && !account.available && <p id="hosted-signin-unavailable" role="alert">{copy("production_hosted_unavailable")}</p>}{accountError && <p id="hosted-account-check-error" role="alert">{copy("hosted_account_check_failed")} <button className="secondary-button" onClick={() => void refreshAccount()}>{copy("try_again")}</button></p>}{signInError && <p id="hosted-signin-error" role="alert">{copy("production_signin_failed")} <button className="secondary-button" onClick={() => void signIn()}>{copy("try_again")}</button></p>}<button id="setup-back-button" className="secondary-button" onClick={backToChooser}>{copy("back")}</button></section>}
       {route === "enrollment" && <div id="enrollment-panel">{renderEnrollment()}</div>}
       {route === "lapsed" && <section id="hosted-lapsed-card"><h2 tabIndex={-1}>{copy("hosted_lapsed_headline")}</h2><p>{copy("hosted_lapsed_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button><button className="secondary-button" onClick={() => void bridge.hosted_sign_out()}>{copy("settings_server_sign_out")}</button></section>}
       {route === "billing" && <section id="hosted-billing-card"><h2 tabIndex={-1}>{copy("hosted_subscribe_headline")}</h2><p>{copy("production_billing_body")}</p><button className="primary-button" onClick={() => void bridge.hosted_open_billing()}>{copy("production_billing_open")}</button><button className="secondary-button" onClick={() => void refreshAccount()}>{copy("production_billing_check")}</button></section>}
@@ -1122,7 +1239,7 @@ export function SetupLanding({ mode, onMode, enrolledWithoutPhone, enrollmentEst
   if (recoveryActive) {
     content = recoveryPanel;
   } else if (community) {
-    const headline = hostedBrowser ? copy("hosted_join_headline") : copy("self_hosted_headline");
+    const headline = hostedBrowser ? "Connect this device" : copy("self_hosted_headline");
     const body = fixedOrigin ? copy("setup_choice_existing_hint") : copy("setup_self_hosted_join_body");
     content = (
       <section id="self-hosted-panel" aria-label={headline}>

@@ -586,6 +586,7 @@ fn empty_snapshot(origin: Option<String>) -> Snapshot {
         contacts_pending_count: None,
         contact_sync: None,
         tone_overrides: None,
+        sync_progress: None,
     }
 }
 
@@ -4848,6 +4849,10 @@ pub fn run() {
             enrollment::enrollment_begin_vault_request,
             enrollment::enrollment_vault_request_status,
             enrollment::enrollment_create_vault,
+            enrollment::computer::enrollment_begin_computer_claimant,
+            enrollment::computer::enrollment_computer_claimant_status,
+            enrollment::computer::enrollment_confirm_computer_claimant,
+            enrollment::computer::enrollment_cancel_computer_claimant,
             enrollment::enrollment_add_phone,
             enrollment::enrollment_rotate_phone,
             enrollment::enrollment_cancel_phone,

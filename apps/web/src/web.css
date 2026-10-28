@@ -34,6 +34,8 @@
   padding: 28px;
 }
 
+#browser-unsupported-downloads { display: grid; margin-top: 16px; }
+
 #browser-stopped h1,
 #browser-startup-failure h1,
 #browser-stopped p,

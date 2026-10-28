@@ -169,6 +169,8 @@ pub struct BrowserCore {
     trusted_origin: Option<String>,
     identity_session: Option<identity_session::IdentitySession>,
     enrollment: Option<peppy_hosted_client::newenrollment::EnrollmentClient>,
+    prepared_enrollment_identity:
+        Option<peppy_hosted_client::newenrollment::NativeEnrollmentIdentity>,
     hosted_provisioning: Option<peppy_hosted_client::HostedProvisioning>,
 }
 
@@ -206,6 +208,7 @@ impl BrowserCore {
             trusted_origin: None,
             identity_session: None,
             enrollment: None,
+            prepared_enrollment_identity: None,
             hosted_provisioning: None,
         }
     }
@@ -264,7 +267,14 @@ impl BrowserCore {
             | "_worker_enrollment_consume_phone_claim"
             | "_worker_enrollment_phone_status"
             | "_worker_enrollment_approve_phone_invitation"
-            | "_worker_enrollment_confirm_phone_invitation" => {
+            | "_worker_enrollment_confirm_phone_invitation"
+            | "_worker_enrollment_begin_computer_claimant"
+            | "_worker_enrollment_computer_status_request"
+            | "_worker_enrollment_computer_claimant_view"
+            | "_worker_enrollment_computer_awaiting_owner_view"
+            | "_worker_enrollment_confirm_computer"
+            | "_worker_enrollment_finish_computer"
+            | "_worker_enrollment_cancel_computer_claimant" => {
                 self.new_enrollment_command(command, raw_args.ok_or_else(invalid)?)
             }
             "_worker_enrollment_prepare_hosted_owner"
@@ -551,6 +561,7 @@ impl BrowserCore {
             .active_epoch
             .is_some_and(|epoch| keys.unlocked_epochs.contains(&epoch));
         let notices = client.notification_snapshot().map_err(core)?;
+        let replay_progress = client.replay_progress().map_err(core)?;
         let (connection_state, connection_error_code) = connection_snapshot(&self.context);
         serde_json::to_value(dto::Snapshot {
             version: "1",
@@ -596,6 +607,19 @@ impl BrowserCore {
             tone_overrides: unlocked
                 .then(|| client.conversation_tones().map_err(core))
                 .transpose()?,
+            sync_progress: Some(dto::SyncProgress {
+                phase: if replay_progress.waiting_for_keys > 0 {
+                    dto::SyncProgressPhase::WaitingForKeys
+                } else {
+                    dto::SyncProgressPhase::Current
+                },
+                received_through: replay_progress.received_through.0.to_string(),
+                processed_through: replay_progress.processed_through.0.to_string(),
+                target_high_water: None,
+                snapshot_received: None,
+                snapshot_expected: None,
+                snapshot_remaining: None,
+            }),
         })
         .map_err(|_| core(CoreError::Database))
     }
@@ -1219,6 +1243,14 @@ mod tests {
         let initial = value(&core.dispatch(
             &json!({"command":"snapshot","args":{"conversationId":conversation}}).to_string(),
         ));
+        assert_eq!(
+            initial["syncProgress"],
+            json!({
+                "phase": "current",
+                "receivedThrough": "0",
+                "processedThrough": "0",
+            })
+        );
         let view = initial["conversations"]
             .as_array()
             .unwrap()

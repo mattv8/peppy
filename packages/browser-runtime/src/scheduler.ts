@@ -11,6 +11,11 @@ const APPLY_LIMIT = 8;
 const HISTORY_WORK_STEP_LIMIT = 8;
 const MAX_SNAPSHOT_ATTEMPTS = 3;
 const PAGE_BYTES = 8 * 1024 * 1024;
+const REPLAY_DISPATCH_BYTES = PAGE_BYTES - 64 * 1024;
+/** Exact UTF-8 size of the ingest_batch dispatch body with an empty events array. */
+const EMPTY_INGEST_DISPATCH_BYTES = utf8ByteLength(JSON.stringify({ command: "ingest_batch", args: { events: [] } }));
+
+type ReplayEvent = { cursor: string; envelope: unknown };
 
 export interface SchedulerSession {
   query(command: string, args: Record<string, unknown>): Promise<unknown>;
@@ -26,11 +31,22 @@ export interface SchedulerTransport {
 
 export type SchedulerConnection = "connected" | "offline" | "revoked" | "key-mismatch" | "error";
 export interface SchedulerStatus { connection: SchedulerConnection; }
+export type SchedulerSyncProgress = {
+  phase: "receiving" | "applying" | "waitingForKeys" | "current";
+  receivedThrough: string;
+  processedThrough: string;
+  targetHighWater?: string;
+  snapshotReceived?: string;
+  snapshotExpected?: string;
+  snapshotRemaining?: string;
+};
+type SnapshotCounts = { snapshotReceived: string; snapshotExpected: string; snapshotRemaining: string };
 export interface BrowserSchedulerOptions {
   media?: WorkerMediaBridge;
   hasPendingProjectionWork?: () => Promise<boolean>;
   rotateEpoch?: (profile: unknown, header: unknown, passphrase: string) => Promise<void>;
   onEpochUnlocked?: () => void;
+  onProgress?: (progress: SchedulerSyncProgress) => void;
 }
 
 /** Bounded, single-flight Worker sync round. BrowserSession checkpoints every mutation before it resolves. */
@@ -41,7 +57,9 @@ export class BrowserScheduler {
   private readonly deferredMediaIds = new Set<string>();
   private protocol?: SchedulerProtocol;
   private epochValue?: VaultRefresh;
+  private targetHighWater?: string;
   private readonly historyAttempts = new Set<string>();
+  private lastPublishedProgress?: string;
 
   public constructor(
     private readonly session: SchedulerSession,
@@ -86,6 +104,7 @@ export class BrowserScheduler {
   }
 
   private async round(signal: AbortSignal): Promise<void> {
+    this.lastPublishedProgress = undefined;
     try {
       throwIfAborted(signal);
       if (this.transport.discard) {
@@ -104,6 +123,7 @@ export class BrowserScheduler {
       if (await this.hasPendingProjectionWork()) await this.apply(signal);
       await this.driveHistorySearch(signal);
       await this.refreshServerContext(signal);
+      await this.publishProgress("applying");
     } catch (error) {
       await this.refreshOfflineContext(statusFor(error), signal);
       throw error;
@@ -170,16 +190,20 @@ export class BrowserScheduler {
         throw error;
       }
       const events = array(page.events);
+      this.targetHighWater = optionalDecimal(page.high_water_cursor);
       if (events.length === 0) {
+        await this.publishProgress("applying");
         await this.observeHistorySearch(attempts, context, page);
         return;
       }
-      for (const event of events) {
+      for (const batch of replayBatches(events)) {
         throwIfAborted(signal);
-        const record = object(event);
-        await this.session.mutate("ingest", { cursor: requiredString(record.cursor), envelope: record.envelope });
+        await this.session.mutate("ingest_batch", { events: batch });
+        await this.publishProgress("receiving");
       }
       await this.apply(signal);
+      // Duplicate or quarantine-only pages may apply nothing; settle the page's final phase from durable frontiers.
+      await this.publishProgress("applying");
       await this.observeHistorySearch(attempts, context, page);
       if (events.length < PAGE_LIMIT || page.next_after === null) return;
     }
@@ -259,12 +283,14 @@ export class BrowserScheduler {
       }
     }
     const start = object(await this.transport.json("/v1/snapshot", { method: "GET", signal }));
-    return object(await this.session.mutate("begin_snapshot", {
+    const progress = object(await this.session.mutate("begin_snapshot", {
       highWater: requiredString(start.high_water_cursor),
       recordCount: requiredString(start.record_count),
       purpose: "bootstrap",
       serverCompactionGeneration: start.compaction_supported === true ? requiredString(start.compaction_generation) : undefined,
     }));
+    await this.publishSnapshotProgress("receiving", progress);
+    return progress;
   }
 
   private async importSnapshotCut(progress: Record<string, unknown>, signal: AbortSignal): Promise<void> {
@@ -281,8 +307,10 @@ export class BrowserScheduler {
       const records = array(page.records);
       if (records.length === 0) throw new TransportError("status", 409, "resync_required");
       current = object(await this.session.mutate("append_snapshot_page", { generation, records }));
+      await this.publishSnapshotProgress("receiving", current);
     }
     await this.session.mutate("finish_snapshot", { generation: requiredString(current.generation) });
+    await this.publishSnapshotProgress("applying", current);
   }
 
   private async apply(signal: AbortSignal): Promise<void> {
@@ -290,6 +318,42 @@ export class BrowserScheduler {
       throwIfAborted(signal);
       const report = object(await this.session.mutate("apply_pending", { limit: 1000 }));
       if (nonNegative(report.applied) + nonNegative(report.quarantined) + nonNegative(report.drained) === 0) return;
+      await this.publishProgress("applying");
+    }
+  }
+
+  /** Publishes the phase implied by durable frontiers, pending apply work, and waiting keys; never a stale or unsettled "current". */
+  private async publishProgress(requested: "receiving" | "applying", snapshot?: SnapshotCounts): Promise<void> {
+    if (!this.options.onProgress) return;
+    const progress = object(await this.session.query("sync_progress", {}));
+    const phase = progressPhase(requested, progress, this.targetHighWater, await this.hasPendingProjectionWork(), snapshot !== undefined && snapshot.snapshotRemaining !== "0");
+    this.publish({
+      phase,
+      receivedThrough: decimalString(progress.receivedThrough),
+      processedThrough: decimalString(progress.processedThrough),
+      ...(this.targetHighWater ? { targetHighWater: this.targetHighWater } : {}),
+      ...snapshot,
+    });
+  }
+
+  private async publishSnapshotProgress(phase: "receiving" | "applying", snapshot: Record<string, unknown>): Promise<void> {
+    if (!this.options.onProgress) return;
+    this.targetHighWater = decimalString(snapshot.highWater);
+    const snapshotReceived = decimalString(snapshot.receivedRecords);
+    const snapshotExpected = decimalString(snapshot.expectedRecords);
+    const snapshotRemaining = BigInt(snapshotExpected) - BigInt(snapshotReceived);
+    if (snapshotRemaining < 0n) throw new TransportError("invalid");
+    await this.publishProgress(phase, { snapshotReceived, snapshotExpected, snapshotRemaining: snapshotRemaining.toString() });
+  }
+
+  private publish(progress: SchedulerSyncProgress): void {
+    const key = JSON.stringify(progress);
+    if (key === this.lastPublishedProgress) return;
+    this.lastPublishedProgress = key;
+    try {
+      this.options.onProgress?.(progress);
+    } catch {
+      // UI notification failures cannot make a committed replay checkpoint fail.
     }
   }
 
@@ -352,9 +416,54 @@ function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TransportError("invalid");
   return value as Record<string, unknown>;
 }
+function replayBatches(events: readonly unknown[]): ReplayEvent[][] {
+  const batches: ReplayEvent[][] = [];
+  let batch: ReplayEvent[] = [];
+  let batchBytes = EMPTY_INGEST_DISPATCH_BYTES;
+  for (const event of events) {
+    const record = object(event);
+    const replayEvent = { cursor: requiredString(record.cursor), envelope: record.envelope };
+    const eventBytes = utf8ByteLength(JSON.stringify(replayEvent));
+    if (EMPTY_INGEST_DISPATCH_BYTES + eventBytes > REPLAY_DISPATCH_BYTES) throw new TransportError("invalid");
+    const separatorBytes = batch.length === 0 ? 0 : 1;
+    if (batch.length === PAGE_LIMIT || batchBytes + separatorBytes + eventBytes > REPLAY_DISPATCH_BYTES) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = EMPTY_INGEST_DISPATCH_BYTES;
+    }
+    batchBytes += (batch.length === 0 ? 0 : 1) + eventBytes;
+    batch.push(replayEvent);
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
 function array(value: unknown): unknown[] { if (!Array.isArray(value)) throw new TransportError("invalid"); return value; }
 function requiredString(value: unknown): string { if (typeof value !== "string" || value.length === 0) throw new TransportError("invalid"); return value; }
 function optionalString(value: unknown): string | undefined { return typeof value === "string" && value.length > 0 ? value : undefined; }
+function optionalDecimal(value: unknown): string | undefined { return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/.test(value) ? value : undefined; }
+function decimalString(value: unknown): string {
+  const result = optionalDecimal(value);
+  if (result === undefined) throw new TransportError("invalid");
+  return result;
+}
+/** Waiting keys win; "current" needs received and processed frontiers at the authenticated target, no pending apply, and no open snapshot. */
+function progressPhase(
+  requested: "receiving" | "applying",
+  progress: Record<string, unknown>,
+  targetHighWater: string | undefined,
+  pendingWork: boolean,
+  snapshotOpen: boolean,
+): SchedulerSyncProgress["phase"] {
+  if (decimalString(progress.waitingForKeys) !== "0") return "waitingForKeys";
+  if (requested === "receiving" || snapshotOpen || targetHighWater === undefined) return "receiving";
+  const target = BigInt(targetHighWater);
+  if (BigInt(decimalString(progress.receivedThrough)) < target) return "receiving";
+  if (pendingWork || BigInt(decimalString(progress.processedThrough)) < target) return "applying";
+  return "current";
+}
 function nonNegative(value: unknown): number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0; }
 function isTerminalHistoryStatus(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;

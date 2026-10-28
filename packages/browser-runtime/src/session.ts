@@ -120,6 +120,18 @@ export class BrowserSession {
     });
   }
 
+  public async finishComputerEnrollment(responseJson: string, signal?: AbortSignal): Promise<void> {
+    return this.lifecycle("unenrolled", signal, async () => {
+      const identity = await this.options.core.invoke({ command: "_worker_enrollment_finish_computer", args: { completeJson: responseJson } });
+      this.publicIdentityValue = publicIdentity(identity);
+      await this.commitCheckpoint();
+      this.throwIfAborted(signal);
+      await this.loadTransportToken();
+      this.throwIfAborted(signal);
+      this.phaseValue = "ready";
+    });
+  }
+
   public async unlock(passphrase: string, signal?: AbortSignal): Promise<void> {
     return this.lifecycle("locked", signal, async () => {
       const wrappedIdentity = this.wrappedIdentity;

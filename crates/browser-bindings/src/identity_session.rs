@@ -5,6 +5,43 @@ use super::*;
 use crate::local_identity::{self, IdentityMetadata, IdentitySecrets, WrappedIdentity};
 use serde::Deserialize;
 
+struct FreshIdentityDatabaseAttempt {
+    paths: [PathBuf; 3],
+}
+
+impl FreshIdentityDatabaseAttempt {
+    fn begin(root: &Path) -> Result<Self, Failure> {
+        let paths = [
+            root.join("client.db"),
+            root.join("client.db-shm"),
+            root.join("client.db-wal"),
+        ];
+        for path in &paths {
+            match std::fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) | Err(_) => {
+                    return Err(Failure::new(
+                        "identity-exists",
+                        "A local identity already exists. Nothing was reset.",
+                    ));
+                }
+            }
+        }
+        Ok(Self { paths })
+    }
+
+    fn discard_created_regular_files(&self) {
+        for path in &self.paths {
+            let Ok(metadata) = std::fs::symlink_metadata(path) else {
+                continue;
+            };
+            if metadata.file_type().is_file() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 pub(super) struct IdentitySession {
     metadata: IdentityMetadata,
     secrets: IdentitySecrets,
@@ -150,8 +187,25 @@ impl BrowserCore {
 
     pub(super) fn install_enrollment_identity(
         &mut self,
-        identity: peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
+        mut identity: peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
         passphrase: String,
+    ) -> Result<Value, Failure> {
+        self.install_enrollment_identity_inner(&mut identity, Some(passphrase))
+    }
+
+    /// Activates a retained authenticated handoff and seals the browser identity with the
+    /// core-owned LocalWrap capability. Failed pre-checkpoint installs leave `identity` retryable.
+    pub(super) fn install_prepared_verified_enrollment_identity(
+        &mut self,
+        identity: &mut peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
+    ) -> Result<Value, Failure> {
+        self.install_enrollment_identity_inner(identity, None)
+    }
+
+    fn install_enrollment_identity_inner(
+        &mut self,
+        identity: &mut peppy_hosted_client::newenrollment::NativeEnrollmentIdentity,
+        passphrase: Option<String>,
     ) -> Result<Value, Failure> {
         let origin = self.trusted_origin.as_deref().ok_or_else(invalid)?;
         if self.client.is_some()
@@ -186,6 +240,7 @@ impl BrowserCore {
             header: enrollment.header,
         };
         local_identity::validate_metadata(&metadata).map_err(identity_failure)?;
+        let database_attempt = FreshIdentityDatabaseAttempt::begin(&self.root)?;
 
         let mut database_key = Zeroizing::new([0_u8; 32]);
         libsodium_rs::ensure_init()
@@ -193,19 +248,61 @@ impl BrowserCore {
         libsodium_rs::random::fill_bytes(&mut *database_key);
         let credential = identity.device_credential_for_native_secure_store();
         let secrets = IdentitySecrets::new(*database_key, credential).map_err(identity_failure)?;
-        let wrapped = local_identity::seal_identity(metadata.clone(), &secrets, &passphrase)
-            .map_err(identity_failure)?;
-        let serialized = serialize_wrapped(&wrapped)?;
-        let client = open_client(&self.root, &metadata, &secrets)?;
-        let activated = match identity.into_activation() {
-            Some(activation) => activation.activate(&client).is_ok(),
-            None => client
-                .unlock(&metadata.profile, &metadata.header, &passphrase)
-                .is_ok(),
+        let client = match open_client(&self.root, &metadata, &secrets) {
+            Ok(client) => client,
+            Err(error) => {
+                database_attempt.discard_created_regular_files();
+                return Err(error);
+            }
         };
-        if !activated {
+
+        let retain_activation_until_sealed = passphrase.is_none();
+        let wrapped = if let Some(passphrase) = passphrase.as_deref() {
+            let wrapped = local_identity::seal_identity(metadata.clone(), &secrets, passphrase)
+                .map_err(identity_failure);
+            wrapped.and_then(|wrapped| {
+                if !identity
+                    .activate_verified_handoff(&client)
+                    .map_err(|_| invalid())?
+                {
+                    client
+                        .unlock(&metadata.profile, &metadata.header, passphrase)
+                        .map_err(core)?;
+                }
+                Ok(wrapped)
+            })
+        } else {
+            match identity
+                .prepare_verified_handoff_activation(&client)
+                .map_err(|_| invalid())
+            {
+                Ok(true) => {
+                    local_identity::seal_identity_with_client(metadata.clone(), &secrets, &client)
+                        .map_err(identity_failure)
+                }
+                Ok(false) => Err(invalid()),
+                Err(error) => Err(error),
+            }
+        };
+        let wrapped = match wrapped {
+            Ok(wrapped) => wrapped,
+            Err(error) => {
+                drop(client);
+                database_attempt.discard_created_regular_files();
+                return Err(error);
+            }
+        };
+        let serialized = match serialize_wrapped(&wrapped) {
+            Ok(serialized) => serialized,
+            Err(error) => {
+                drop(client);
+                database_attempt.discard_created_regular_files();
+                return Err(error);
+            }
+        };
+        if retain_activation_until_sealed && !identity.commit_verified_handoff_activation() {
             drop(client);
-            discard_new_identity_database(&self.root);
+            database_attempt.discard_created_regular_files();
             return Err(invalid());
         }
 
