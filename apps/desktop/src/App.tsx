@@ -133,6 +133,7 @@ type RefreshRequest = {
 
 type ActionNotice = Omit<AppNotice, "source">;
 type ComposerFeedback = Pick<AppNotice, "message" | "severity"> & { key: string };
+type StoredDraftConflict = { key: string; draft?: Draft; generation: number; revision: string };
 type PinFocusRestoreIntent = {
   conversationId: string;
   origin: HTMLElement;
@@ -1264,7 +1265,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingPinId, setPendingPinId] = useState<string | null>(null);
-  const [storedConflict, setStoredConflict] = useState<{ key: string; draft?: Draft; generation: number; revision: string } | null>(null);
+  const [storedConflict, setStoredConflict] = useState<StoredDraftConflict | null>(null);
   const [resolutionPendingKey, setResolutionPendingKey] = useState<string | null>(null);
   const [conflictFeedback, setConflictFeedback] = useState<string>();
   const [overlayHeight, setOverlayHeight] = useState<number | null>(
@@ -1303,6 +1304,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const historyFocusPendingRef = useRef(false);
   const mountedRef = useRef(true);
   const focusRestorePendingRef = useRef(false);
+  const conflictFocusIntentRef = useRef<StoredDraftConflict | null>(null);
   const pinFocusRestoreRef = useRef<PinFocusRestoreIntent | undefined>(undefined);
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef<RefreshRequest | undefined>(undefined);
@@ -1322,6 +1324,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const previousSearchSessionKeyRef = useRef("");
   const activateSearchHitHandlerRef = useRef<(hit: LocalSearchHit) => void>(() => undefined);
   const messageRows = useRef(new Map<string, HTMLElement>());
+  useLayoutEffect(() => {
+    const intent = conflictFocusIntentRef.current;
+    if (!intent || intent !== storedConflict) return;
+    conflictFocusIntentRef.current = null;
+    document.getElementById("draft-conflict-comparison-title")?.focus();
+  }, [storedConflict]);
   useEffect(() => {
     const intent = pinFocusRestoreRef.current;
     if (!intent || pendingPinId) return;
@@ -2543,8 +2551,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
           setConflictFeedback("The saved draft could not be verified. Your local draft remains unchanged.");
           return;
         }
-        setStoredConflict({ key: current.key, draft: state.draft, generation: current.generation, revision: current.revision });
-        requestAnimationFrame(() => document.getElementById("draft-conflict-comparison-title")?.focus());
+        const conflict = { key: current.key, draft: state.draft, generation: current.generation, revision: current.revision };
+        conflictFocusIntentRef.current = conflict;
+        setStoredConflict(conflict);
       } catch (error) {
         setConflictFeedback(errorText(error));
       } finally {
