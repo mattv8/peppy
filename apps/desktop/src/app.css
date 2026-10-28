@@ -933,16 +933,16 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   align-items: end;
   gap: 8px;
 }
-#notification-settings .settings-control-row:has(.settings-switch) {
+:is(#notification-settings, #settings-messages) .settings-control-row:has(.settings-switch) {
   align-items: center;
 }
-#notification-settings .settings-switch {
+:is(#notification-settings, #settings-messages) .settings-switch {
   position: relative;
   width: 32px;
   height: 18px;
   flex: 0 0 32px;
 }
-#notification-settings .settings-switch > input[role="switch"] {
+:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"] {
   position: absolute;
   z-index: 1;
   inset: 0;
@@ -952,7 +952,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   cursor: pointer;
   opacity: 0;
 }
-#notification-settings .settings-switch > span {
+:is(#notification-settings, #settings-messages) .settings-switch > span {
   position: absolute;
   inset: 0;
   border: 1px solid var(--peppy-border-strong);
@@ -960,7 +960,7 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   background: var(--peppy-surface-active);
   transition: background-color var(--peppy-duration-fast) var(--peppy-ease-out), border-color var(--peppy-duration-fast) var(--peppy-ease-out);
 }
-#notification-settings .settings-switch > span::before {
+:is(#notification-settings, #settings-messages) .settings-switch > span::before {
   display: block;
   width: 12px;
   height: 12px;
@@ -970,37 +970,37 @@ html[data-window-rounded="false"] #composer-shell { border-radius: 0; }
   content: "";
   transition: transform var(--peppy-duration-fast) var(--peppy-ease-out), background-color var(--peppy-duration-fast) var(--peppy-ease-out);
 }
-#notification-settings .settings-switch > input[role="switch"]:checked + span {
+:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span {
   border-color: var(--peppy-accent);
   background: var(--peppy-accent);
 }
-#notification-settings .settings-switch > input[role="switch"]:checked + span::before {
+:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span::before {
   background: var(--peppy-accent-text);
   transform: translateX(14px);
 }
-#notification-settings .settings-switch > input[role="switch"]:focus-visible + span {
+:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:focus-visible + span {
   outline: 2px solid var(--peppy-focus);
   outline-offset: 2px;
 }
-#notification-settings .settings-switch > input[role="switch"]:disabled {
+:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:disabled {
   cursor: not-allowed;
 }
-#notification-settings .settings-switch > input[role="switch"]:disabled + span {
+:is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:disabled + span {
   opacity: .55;
 }
 @media (forced-colors: active) {
-  #notification-settings .settings-switch > span {
+  :is(#notification-settings, #settings-messages) .settings-switch > span {
     border-color: ButtonText;
     background: ButtonFace;
   }
-  #notification-settings .settings-switch > span::before {
+  :is(#notification-settings, #settings-messages) .settings-switch > span::before {
     background: ButtonText;
   }
-  #notification-settings .settings-switch > input[role="switch"]:checked + span {
+  :is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span {
     border-color: Highlight;
     background: Highlight;
   }
-  #notification-settings .settings-switch > input[role="switch"]:checked + span::before {
+  :is(#notification-settings, #settings-messages) .settings-switch > input[role="switch"]:checked + span::before {
     background: HighlightText;
   }
 }

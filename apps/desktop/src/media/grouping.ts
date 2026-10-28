@@ -18,12 +18,16 @@ export type MessageGroup = {
 
 const GROUP_WINDOW_MS = 3 * 60 * 1000;
 
-function timestampMilliseconds(message: GalleryMessage): number | undefined {
-  const timestamp = message.timestamp.trim();
-  if (!timestamp) return undefined;
-  const numericValue = Number(timestamp);
-  const value = Number.isFinite(numericValue) ? numericValue : Date.parse(timestamp);
+export function parseTimestampMs(timestamp: string): number | undefined {
+  const trimmedTimestamp = timestamp.trim();
+  if (!trimmedTimestamp) return undefined;
+  const numericValue = Number(trimmedTimestamp);
+  const value = Number.isFinite(numericValue) ? numericValue : Date.parse(trimmedTimestamp);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function timestampMilliseconds(message: GalleryMessage): number | undefined {
+  return parseTimestampMs(message.timestamp);
 }
 
 function isImageOnly(message: GalleryMessage): boolean {
