@@ -316,6 +316,9 @@ fn snapshot_and_history_emit_v3_thumbnail_metadata_without_promoting_the_origina
         .client
         .mark_attachment_uploaded(thumbnail_id, &uuid::Uuid::new_v4().to_string())
         .unwrap();
+    // A receiving device has local ciphertext but has never populated this process's preview
+    // cache. Eligibility is keyed by the original attachment, not this thumbnail ID.
+    session.invalidate_cached_attachment(&thumbnail_id);
     let conversation = session
         .client
         .complete_mms_acquisition(&acquisition.acquisition_id)
@@ -346,6 +349,7 @@ fn snapshot_and_history_emit_v3_thumbnail_metadata_without_promoting_the_origina
         .find_map(|message| message.attachments.first())
         .unwrap();
     assert_ne!(attachment.state, "ready");
+    assert!(attachment.preview_url.is_none());
     let thumbnail = attachment
         .media_meta
         .as_ref()
@@ -356,6 +360,53 @@ fn snapshot_and_history_emit_v3_thumbnail_metadata_without_promoting_the_origina
         .preview_url
         .as_deref()
         .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+
+    session.invalidate_cached_attachment(&thumbnail_id);
+    let message_id = session
+        .client
+        .messages(conversation)
+        .unwrap()
+        .into_iter()
+        .find(|message| {
+            message
+                .payload
+                .record
+                .attachments
+                .iter()
+                .any(|attachment| attachment.attachment_id == original_id)
+        })
+        .unwrap()
+        .payload
+        .record
+        .message_id
+        .to_string();
+    let hydrated = session
+        .hydrate_media_preview(&message_id, &original.id)
+        .unwrap();
+    assert_eq!(hydrated.id, original.id);
+    assert!(hydrated
+        .media_meta
+        .as_ref()
+        .and_then(|metadata| metadata.thumbnail.as_ref())
+        .and_then(|thumbnail| thumbnail.preview_url.as_deref())
+        .is_some_and(|url| url.starts_with("data:image/png;base64,")));
+    assert!(hydrated.preview_url.is_none());
+    assert_eq!(
+        session
+            .hydrate_media_preview(&later.message_id.to_string(), &original.id)
+            .err()
+            .unwrap()
+            .code,
+        "not-found"
+    );
+    assert_eq!(
+        session
+            .hydrate_media_preview(&uuid::Uuid::new_v4().to_string(), &original.id)
+            .err()
+            .unwrap()
+            .code,
+        "not-found"
+    );
 
     let history = session
         .history_page(&conversation.to_string(), &later.message_id.to_string())

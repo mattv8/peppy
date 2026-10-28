@@ -293,3 +293,104 @@ describe("App media wiring", () => {
   });
 
 });
+
+describe("inline preview retention across refreshes", () => {
+  const withPreview = (attachment: AttachmentView, previewUrl: string | undefined): AttachmentView => ({ ...attachment, previewUrl });
+  const thumbnailOf = (id: string, previewUrl?: string): AttachmentView => withPreview(image(id), previewUrl);
+  const pendingOriginal = (id: string, thumbnail: AttachmentView): AttachmentView => ({
+    ...image(id),
+    state: "pending",
+    previewUrl: undefined,
+    transfer: "download",
+    mediaMeta: { thumbnail },
+  });
+  const refreshed = (messages: MessageView[]): DesktopSnapshot => {
+    const marked = messages.map((item) => ({ ...item, body: "refreshed" }));
+    return snapshot(marked);
+  };
+  const refresh = async (messages: MessageView[]) => {
+    currentSnapshot = refreshed(messages);
+    await act(async () => stateHint?.());
+    await screen.findAllByText("refreshed");
+  };
+  const imageSource = (attachmentId: string) => document.querySelector(`[data-attachment-id="${attachmentId}"] img`)?.getAttribute("src") ?? null;
+
+  it("keeps a ready nested thumbnail preview when a refresh omits its URL", async () => {
+    const original = pendingOriginal("orig-1", thumbnailOf("thumb-1", "blob:thumb-1"));
+    currentSnapshot = snapshot([message("m1", original)]);
+    render(<App />);
+    await waitFor(() => expect(imageSource("orig-1")).toBe("blob:thumb-1"));
+
+    await refresh([message("m1", pendingOriginal("orig-1", thumbnailOf("thumb-1")))]);
+
+    expect(imageSource("orig-1")).toBe("blob:thumb-1");
+  });
+
+  it("drops a nested thumbnail preview when the refresh replaces the thumbnail", async () => {
+    currentSnapshot = snapshot([message("m1", pendingOriginal("orig-1", thumbnailOf("thumb-1", "blob:thumb-1")))]);
+    render(<App />);
+    await waitFor(() => expect(imageSource("orig-1")).toBe("blob:thumb-1"));
+
+    await refresh([message("m1", pendingOriginal("orig-1", thumbnailOf("thumb-2")))]);
+
+    expect(imageSource("orig-1")).toBeNull();
+  });
+
+  it("prefers a newer refreshed nested URL over the retained one", async () => {
+    currentSnapshot = snapshot([message("m1", pendingOriginal("orig-1", thumbnailOf("thumb-1", "blob:thumb-old")))]);
+    render(<App />);
+    await waitFor(() => expect(imageSource("orig-1")).toBe("blob:thumb-old"));
+
+    await refresh([message("m1", pendingOriginal("orig-1", thumbnailOf("thumb-1", "blob:thumb-new")))]);
+
+    expect(imageSource("orig-1")).toBe("blob:thumb-new");
+  });
+
+  it("does not keep a top-level preview once the attachment is no longer ready", async () => {
+    const ready = image("ready-1");
+    currentSnapshot = snapshot([message("m1", ready)]);
+    render(<App />);
+    await waitFor(() => expect(imageSource("ready-1")).toBe(preview));
+
+    await refresh([message("m1", { ...ready, state: "pending", previewUrl: undefined, transfer: "download" })]);
+
+    expect(imageSource("ready-1")).toBeNull();
+  });
+
+  it("renders a ready top-level original as the fallback when the thumbnail is pending, and keeps it across refresh", async () => {
+    const pendingThumbnail: AttachmentView = { ...thumbnailOf("thumb-2"), state: "pending" };
+    const original = { ...withPreview(image("orig-2"), "blob:original"), mediaMeta: { thumbnail: pendingThumbnail } };
+    currentSnapshot = snapshot([message("m1", original)]);
+    render(<App />);
+    await waitFor(() => expect(imageSource("orig-2")).toBe("blob:original"));
+
+    await refresh([message("m1", { ...original, previewUrl: undefined })]);
+
+    expect(imageSource("orig-2")).toBe("blob:original");
+  });
+
+  it("keeps an uploading attachment's immutable preview when it becomes ready", async () => {
+    const uploading = { ...withPreview(image("upload-1"), "blob:upload"), state: "uploading" as const };
+    currentSnapshot = snapshot([{ ...message("m1", uploading), transport: "sms" as const }]);
+    render(<App />);
+    await waitFor(() => expect(imageSource("upload-1")).toBe("blob:upload"));
+
+    await refresh([{ ...message("m1", withPreview(image("upload-1"), undefined)), transport: "sms" as const }]);
+
+    expect(imageSource("upload-1")).toBe("blob:upload");
+  });
+
+  it("scopes a retained preview to the message that held it when attachment ids repeat", async () => {
+    const first = message("m1", withPreview(image("shared"), "blob:first"));
+    const second = message("m2", withPreview(image("shared"), "blob:second"));
+    currentSnapshot = snapshot([first, second]);
+    render(<App />);
+    await waitFor(() => expect(document.querySelector('img[src="blob:first"]')).toBeInTheDocument());
+    expect(document.querySelector('img[src="blob:second"]')).toBeInTheDocument();
+
+    await refresh([message("m1", withPreview(image("shared"), undefined)), message("m2", withPreview(image("shared"), undefined))]);
+
+    expect(document.querySelectorAll('img[src="blob:first"]')).toHaveLength(1);
+    expect(document.querySelectorAll('img[src="blob:second"]')).toHaveLength(1);
+  });
+});

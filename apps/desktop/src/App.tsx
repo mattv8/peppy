@@ -263,15 +263,31 @@ function mergeMessages(existing: MessageView[], refreshed: MessageView[]): Messa
 }
 
 function retainAttachmentPreviews(previous: MessageView, refreshed: MessageView): MessageView {
-  const previews = new Map(previous.attachments.map((attachment) => [attachment.id, attachment.previewUrl]));
+  const previousById = new Map(previous.attachments.map((attachment) => [attachment.id, attachment]));
   return {
     ...refreshed,
-    attachments: refreshed.attachments.map((attachment) =>
-      attachment.previewUrl || attachment.state !== "ready" || !attachment.mediaType.startsWith("image/") || !previews.get(attachment.id)
-        ? attachment
-        : { ...attachment, previewUrl: previews.get(attachment.id) },
-    ),
+    attachments: refreshed.attachments.map((attachment) => {
+      const prior = previousById.get(attachment.id);
+      return prior ? retainThumbnailPreview(prior, retainOriginalPreview(prior, attachment)) : attachment;
+    }),
   };
+}
+
+function isRetainableImagePreview(refreshed: AttachmentView): boolean {
+  return refreshed.state === "ready" && refreshed.mediaType.startsWith("image/");
+}
+
+function retainOriginalPreview(previous: AttachmentView, refreshed: AttachmentView): AttachmentView {
+  if (refreshed.previewUrl || !previous.previewUrl || !isRetainableImagePreview(refreshed)) return refreshed;
+  return { ...refreshed, previewUrl: previous.previewUrl };
+}
+
+function retainThumbnailPreview(previous: AttachmentView, refreshed: AttachmentView): AttachmentView {
+  const priorThumbnail = previous.mediaMeta?.thumbnail;
+  const thumbnail = refreshed.mediaMeta?.thumbnail;
+  if (!priorThumbnail?.previewUrl || !thumbnail || thumbnail.previewUrl) return refreshed;
+  if (priorThumbnail.id !== thumbnail.id || !isRetainableImagePreview(thumbnail)) return refreshed;
+  return { ...refreshed, mediaMeta: { ...refreshed.mediaMeta, thumbnail: { ...thumbnail, previewUrl: priorThumbnail.previewUrl } } };
 }
 
 function mergeAnchoredMessages(existing: MessageView[], refreshed: MessageView[]): MessageView[] {
@@ -1259,6 +1275,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const galleryConversationRef = useRef<string | undefined>(undefined);
   const galleryCacheRef = useRef<{ conversationId?: string; items: GalleryMediaPageItem[]; newerCursor?: Parameters<typeof bridge.media_page>[1]; olderCursor?: Parameters<typeof bridge.media_page>[1] }>({ items: [] });
   const requestOriginal = useCallback((id: string) => bridge.load_media(id), []);
+  // Memoized: the provider keys its hydration queue (dedupe and concurrency) on these identities.
+  const hydrateMediaPreview = useMemo(() => bridge.hydrate_media_preview ? (messageId: string, id: string) => bridge.hydrate_media_preview!(messageId, id) : undefined, []);
+  const copyNativeImage = useMemo(() => bridge.copy_attachment_image ? (id: string) => bridge.copy_attachment_image!(id) : undefined, []);
   const checkOriginal = useCallback((id: string) => bridge.open_media(id), []);
   const releaseMedia = useCallback((id: string, url: string) => { void bridge.close_media(id, url); }, []);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
@@ -3435,7 +3454,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     }
   };
   const messages = (
-    <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()}>
+    <MediaActionsProvider publicCopies={publicCopies} onSave={saveGalleryAttachment} onPublish={publishGalleryAttachment} onRetry={(id) => bridge.retry_attachment(id)} requestDownload={(id) => bridge.request_attachment_download(id)} requestMediaSync={bridge.media_sync_request ? attachmentIds => bridge.media_sync_request!(attachmentIds) : undefined} loadOriginal={requestOriginal} releaseMedia={releaseMedia} canCopyImage={browserHost && clipboardImageSupported()} copyNativeImage={copyNativeImage} hydrateMediaPreview={hydrateMediaPreview}>
       <div id="conversation-tabs" role="tablist" aria-label="Conversation views" onKeyDown={(event) => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         const next = conversationTab === "messages" ? "media" : "messages";

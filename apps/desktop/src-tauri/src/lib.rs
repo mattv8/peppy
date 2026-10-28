@@ -18,6 +18,7 @@ use tauri_plugin_opener::OpenerExt;
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 mod app_lock;
+mod clipboard_image;
 mod composer_scope;
 mod contacts;
 mod credentials;
@@ -81,6 +82,10 @@ use secure_store::BundledStore;
 use secure_store::{KeyringStore, SecretStore};
 use session::{open_session, DeferredHydration, DraftInput, Notifier, Session, VaultSummary};
 use sync::{blocking, fetch_vault, vault_header};
+
+#[cfg(target_os = "linux")]
+static IMAGE_CLIPBOARD: std::sync::OnceLock<Mutex<Option<arboard::Clipboard>>> =
+    std::sync::OnceLock::new();
 
 pub const STATE_EVENT: &str = "peppy://state";
 pub const DRAFT_EVENT: &str = "peppy://draft";
@@ -186,6 +191,8 @@ pub const COMPOSER_COMMANDS: &[&str] = &[
     "media_page_newer",
     "open_media",
     "load_media",
+    "copy_attachment_image",
+    "hydrate_media_preview",
     "close_media",
     "search_contact_recipients",
     "close_composer",
@@ -1983,6 +1990,27 @@ async fn check_attachment_window_scope(
     belongs.then_some(()).ok_or_else(window_error)
 }
 
+async fn check_media_preview_window_scope(
+    state: &AppState,
+    session: &Arc<Session>,
+    window: &tauri::WebviewWindow,
+    message_id: &str,
+) -> BridgeResult<()> {
+    if window.label() == tray::MAIN {
+        return Ok(());
+    }
+    let source = tray::composer_conversation(window.label()).ok_or_else(window_error)?;
+    let conversation =
+        effective_composer_conversation(state, window.label(), session, Some(&source.to_string()))?
+            .ok_or_else(window_error)?;
+    let (session, message_id) = (session.clone(), message_id.to_owned());
+    let message_conversation =
+        blocking(move || session.media_preview_message_conversation(&message_id)).await?;
+    (message_conversation == conversation.to_string())
+        .then_some(())
+        .ok_or_else(window_error)
+}
+
 async fn demand_attachment_if_needed(
     session: &Arc<Session>,
     attachment: AttachmentId,
@@ -2006,6 +2034,84 @@ async fn demand_attachment_if_needed(
         session.notify();
     }
     Ok(demanded)
+}
+
+struct NativeImageClipboard;
+
+impl clipboard_image::ClipboardImageWriter for NativeImageClipboard {
+    type Error = ();
+
+    fn write_rgba(
+        &mut self,
+        image: clipboard_image::ClipboardRgbaImage,
+    ) -> Result<(), Self::Error> {
+        let image = arboard::ImageData {
+            width: usize::try_from(image.width).map_err(|_| ())?,
+            height: usize::try_from(image.height).map_err(|_| ())?,
+            bytes: image.bytes.into(),
+        };
+        set_native_clipboard_image(image)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_native_clipboard_image(image: arboard::ImageData<'static>) -> Result<(), ()> {
+    let mut owner = IMAGE_CLIPBOARD
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| ())?;
+    if owner.is_none() {
+        *owner = Some(arboard::Clipboard::new().map_err(|_| ())?);
+    }
+    owner.as_mut().ok_or(())?.set_image(image).map_err(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_native_clipboard_image(image: arboard::ImageData<'static>) -> Result<(), ()> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_image(image))
+        .map_err(|_| ())
+}
+
+fn clipboard_image_error(error: clipboard_image::ClipboardImageError) -> BridgeError {
+    match error {
+        clipboard_image::ClipboardImageError::Unsupported => BridgeError::new(
+            "unsupported",
+            "Only PNG, JPEG, WebP, and GIF images can be copied.",
+        ),
+        clipboard_image::ClipboardImageError::SourceTooLarge
+        | clipboard_image::ClipboardImageError::DecodedTooLarge => {
+            BridgeError::new("media-too-large", "This image is too large to copy safely.")
+        }
+        clipboard_image::ClipboardImageError::Invalid => BridgeError::new(
+            "attachment-invalid",
+            "The image could not be decoded for copying.",
+        ),
+        clipboard_image::ClipboardImageError::ClipboardUnavailable => BridgeError::new(
+            "clipboard-unavailable",
+            "The system clipboard is unavailable. Try again.",
+        ),
+    }
+}
+
+struct PreparedClipboardImage {
+    _lease: RetainedAttachment,
+    plaintext: NativePlaintextFile,
+    image: clipboard_image::ClipboardRgbaImage,
+}
+
+struct RetainedAttachment {
+    session: Arc<Session>,
+    attachment: AttachmentId,
+}
+
+impl Drop for RetainedAttachment {
+    fn drop(&mut self) {
+        let _ = self
+            .session
+            .client
+            .release_attachment_ciphertext(self.attachment);
+    }
 }
 
 #[tauri::command]
@@ -2213,6 +2319,125 @@ async fn request_attachment_download(
         .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
     demand_attachment_if_needed(&session, attachment).await?;
     Ok(())
+}
+
+#[tauri::command]
+async fn hydrate_media_preview(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    message_id: String,
+    id: String,
+) -> BridgeResult<dto::AttachmentView> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    let _media_read = state
+        .media_read_budget
+        .try_acquire()
+        .ok_or_else(|| BridgeError::new("media-busy", "Media is busy. Try again shortly."))?;
+    check_media_preview_window_scope(&state, &session, &window, &message_id).await?;
+    AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let requested_message_id = message_id;
+    let requested_id = id;
+    let preview_session = session.clone();
+    let preview = blocking(move || {
+        preview_session.hydrate_media_preview(&requested_message_id, &requested_id)
+    })
+    .await?;
+    if state.app_locked.load(Ordering::Acquire) || !session_is_current(&state, &session).await {
+        return Err(BridgeError::new("locked", "Peppy is locked."));
+    }
+    Ok(preview)
+}
+
+#[tauri::command]
+async fn copy_attachment_image(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> BridgeResult<()> {
+    let operation = admit_update_operation(&state)?;
+    let session = state.require_session_admitted(&operation).await?;
+    check_attachment_window_scope(&state, &session, &window, &id).await?;
+    let attachment = AttachmentId::from_str(&id)
+        .map_err(|_| BridgeError::new("invalid-attachment", "The attachment ID is invalid."))?;
+    let _media_read = state
+        .media_read_budget
+        .try_acquire()
+        .ok_or_else(|| BridgeError::new("media-busy", "Media is busy. Try Copy again shortly."))?;
+    let info_session = session.clone();
+    let info = blocking(move || {
+        let info = info_session
+            .client
+            .attachment_info(attachment)
+            .map_err(core_error)?;
+        if !clipboard_image::is_supported_media_type(&info.media_type) {
+            return Err(clipboard_image_error(
+                clipboard_image::ClipboardImageError::Unsupported,
+            ));
+        }
+        if info.plaintext_bytes > media::MAX_IMAGE_SOURCE_BYTES {
+            return Err(clipboard_image_error(
+                clipboard_image::ClipboardImageError::SourceTooLarge,
+            ));
+        }
+        Ok(info)
+    })
+    .await?;
+    if !info.state.is_local() {
+        demand_attachment_if_needed(&session, attachment).await?;
+        return Err(BridgeError::new(
+            "media-pending",
+            "The attachment is downloading. Try Copy again when it is ready.",
+        ));
+    }
+    let prepared_session = session.clone();
+    let prepared = blocking(move || {
+        prepared_session
+            .client
+            .retain_attachment_ciphertext(attachment)
+            .map_err(core_error)?;
+        let lease = RetainedAttachment {
+            session: prepared_session.clone(),
+            attachment,
+        };
+        let plaintext = prepared_session
+            .client
+            .open_native_plaintext(attachment)
+            .map_err(core_error)?;
+        let image =
+            clipboard_image::decode_authorized_image_file(plaintext.path(), &info.media_type)
+                .map_err(clipboard_image_error)?;
+        Ok(PreparedClipboardImage {
+            _lease: lease,
+            plaintext,
+            image,
+        })
+    })
+    .await?;
+    let active = state.session.lock().await;
+    if state.app_locked.load(Ordering::Acquire)
+        || !active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+    {
+        drop(active);
+        drop(prepared);
+        return Err(BridgeError::new("locked", "Peppy is locked."));
+    }
+    let PreparedClipboardImage {
+        _lease,
+        plaintext,
+        image,
+    } = prepared;
+    let result = blocking(move || {
+        let _lease = _lease;
+        let _plaintext = plaintext;
+        clipboard_image::write_rgba(&mut NativeImageClipboard, image).map_err(clipboard_image_error)
+    })
+    .await;
+    drop(active);
+    result
 }
 
 #[tauri::command]
@@ -4496,6 +4721,8 @@ pub fn run() {
         retry_attachment,
         save_attachment,
         request_attachment_download,
+        hydrate_media_preview,
+        copy_attachment_image,
         media_sync_request,
         media_page,
         media_page_around,

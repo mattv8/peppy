@@ -40,6 +40,8 @@
     "allow-media-page-newer",
     "allow-open-media",
     "allow-load-media",
+    "allow-hydrate-media-preview",
+    "allow-copy-attachment-image",
     "allow-close-media",
     "allow-publish-attachment",
     "allow-open-composer",

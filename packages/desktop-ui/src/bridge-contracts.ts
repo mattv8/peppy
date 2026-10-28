@@ -164,6 +164,10 @@ export interface DesktopBridge {
   open_media(id: string): Promise<MediaOpen>;
   close_media(id: string, url?: string): Promise<void>;
   load_media(id: string): Promise<MediaOpen>;
+  /** Native-only: `id` is the original attachment of `messageId`; the host resolves that exact message's metadata and returns its best local preview, attributed by the returned `id`. Never scans the vault or downloads originals. */
+  hydrate_media_preview?(messageId: string, id: string): Promise<AttachmentView>;
+  /** Native-only: copies one original image to the OS clipboard; rejects with `media-pending` while the original is still downloading. */
+  copy_attachment_image?(id: string): Promise<void>;
   /** Resolves null when the person cancels the native confirmation. */
   publish_attachment(id: string): Promise<PublicCopy | null>;
   /** Explicit user action only; omitting the ID starts a new-conversation draft. */

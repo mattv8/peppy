@@ -32,11 +32,13 @@ export function previewUrl(attachment: GalleryAttachment): string | undefined {
   return usablePreview(attachment)?.previewUrl;
 }
 
-export function tileState(attachment: GalleryAttachment): TileState {
+/** `hydrationExhausted`: native was asked for a preview and gave none, so waiting longer will not help. */
+export function tileState(attachment: GalleryAttachment, hydrationExhausted = false): TileState {
   if (usablePreview(attachment)) return "ready";
   if (attachment.mediaMeta?.previewUnavailable === "thumbnail_unavailable") return "unavailable";
   const thumbnail = attachment.mediaMeta?.thumbnail;
   if (thumbnail?.state === "failed" || attachment.state === "failed") return "failed";
+  if (hydrationExhausted) return "unavailable";
   if (originalPending(attachment)) return "held";
   return "loading";
 }
@@ -69,7 +71,7 @@ export function tileLabel(attachment: GalleryAttachment, state: TileState): stri
   return attachment.name || "Image";
 }
 
-export function canOpen(attachment: GalleryAttachment): boolean {
-  const state = tileState(attachment);
+export function canOpen(attachment: GalleryAttachment, hydrationExhausted = false): boolean {
+  const state = tileState(attachment, hydrationExhausted);
   return !originalPending(attachment) && (state === "ready" || state === "unavailable");
 }

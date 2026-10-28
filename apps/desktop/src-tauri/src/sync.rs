@@ -17,7 +17,7 @@ use peppy_client_core::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::time::{sleep, timeout, Instant};
 use tokio_tungstenite::tungstenite::{
     self, client::IntoClientRequest, protocol::WebSocketConfig, Message,
@@ -36,10 +36,93 @@ const MAX_REPLAY_PAGES_PER_ROUND: usize = 20;
 const MAX_OUTBOX_BATCHES: usize = 8;
 const OUTBOX_BATCH: usize = 32;
 const MEDIA_PER_ROUND: usize = 4;
+const DEMANDED_DOWNLOAD_SLOTS: usize = 3;
+pub(crate) const MAX_DOWNLOAD_UNAVAILABLE_ATTEMPTS: u8 = 6;
+const DOWNLOAD_UNAVAILABLE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const DOWNLOAD_UNAVAILABLE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Apply steps per normal pass; snapshot drains continue until `snapshot_remaining == 0`.
 const APPLY_STEPS: usize = 8;
 const WS_CLOSE_REVOKED: u16 = 4401;
 const WS_CLOSE_RESYNC: u16 = 4409;
+
+pub(crate) struct DownloadRetryState {
+    attempts: u8,
+    retry_at: Instant,
+}
+
+fn is_recoverable_download_unavailable(failure: &Failure) -> bool {
+    matches!(
+        failure,
+        Failure::Net(error) if error.is_status(409, "attachment_unavailable")
+    )
+}
+
+fn schedule_download_retry(session: &Arc<Session>, id: peppy_client_core::AttachmentId) -> bool {
+    let mut retries = session
+        .download_retries
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    advance_download_retry(&mut retries, id)
+}
+
+fn advance_download_retry(
+    retries: &mut HashMap<peppy_client_core::AttachmentId, DownloadRetryState>,
+    id: peppy_client_core::AttachmentId,
+) -> bool {
+    let attempts = {
+        let retry = retries.entry(id).or_insert(DownloadRetryState {
+            attempts: 0,
+            retry_at: Instant::now(),
+        });
+        retry.attempts = retry.attempts.saturating_add(1);
+        retry.attempts
+    };
+    if attempts >= MAX_DOWNLOAD_UNAVAILABLE_ATTEMPTS {
+        retries.remove(&id);
+        return false;
+    }
+    let delay = DOWNLOAD_UNAVAILABLE_INITIAL_BACKOFF
+        .saturating_mul(1u32 << (attempts - 1))
+        .min(DOWNLOAD_UNAVAILABLE_MAX_BACKOFF);
+    retries.get_mut(&id).expect("entry was inserted").retry_at = Instant::now() + delay;
+    true
+}
+
+fn download_retry_ready(session: &Arc<Session>, id: &peppy_client_core::AttachmentId) -> bool {
+    session
+        .download_retries
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(id)
+        .is_none_or(|retry| retry.retry_at <= Instant::now())
+}
+
+pub(crate) fn clear_download_retry(session: &Session, id: &peppy_client_core::AttachmentId) {
+    session
+        .download_retries
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(id);
+}
+
+/// Allocates the media batch after the host filters permanent and delayed failures.
+fn select_downloads<T>(candidates: Vec<(T, bool)>) -> Vec<T> {
+    let (mut demanded, mut eager): (Vec<_>, Vec<_>) =
+        candidates.into_iter().partition(|(_, demanded)| *demanded);
+    let mut selected = Vec::with_capacity(MEDIA_PER_ROUND);
+    let demanded_slots = DEMANDED_DOWNLOAD_SLOTS.min(demanded.len());
+    selected.extend(demanded.drain(..demanded_slots).map(|(object, _)| object));
+    let eager_slots = (MEDIA_PER_ROUND - DEMANDED_DOWNLOAD_SLOTS).min(eager.len());
+    selected.extend(eager.drain(..eager_slots).map(|(object, _)| object));
+    selected.extend(
+        demanded
+            .into_iter()
+            .chain(eager)
+            .take(MEDIA_PER_ROUND - selected.len())
+            .map(|(object, _)| object),
+    );
+    selected
+}
 
 /// Sync records gateway HTTP outages as reachability failures without changing other API clients.
 fn sync_net_error(error: NetError) -> BridgeError {
@@ -691,6 +774,18 @@ fn handle_media_failure(
     }
 }
 
+fn handle_download_failure(
+    session: &Arc<Session>,
+    id: peppy_client_core::AttachmentId,
+    failure: Failure,
+) -> BridgeResult<()> {
+    if is_recoverable_download_unavailable(&failure) && schedule_download_retry(session, id) {
+        record_work_error(session, "media-retry");
+        return Ok(());
+    }
+    handle_media_failure(session, id, failure)
+}
+
 #[derive(Deserialize)]
 struct Reserved {
     attachment_id: String,
@@ -932,23 +1027,30 @@ pub async fn work_round(session: &Arc<Session>) -> BridgeResult<()> {
         reclaim_contact_photos(session, &tracked.reclaims).await?;
     }
     let c = client(session);
-    let downloads = blocking(move || c.pending_downloads().map_err(core_error)).await?;
-    for object in downloads
-        .into_iter()
-        .filter(|o| !failed.contains(&o.attachment_id))
-        .take(MEDIA_PER_ROUND)
-    {
+    let downloads = blocking(move || c.pending_download_candidates().map_err(core_error)).await?;
+    let downloads = select_downloads(
+        downloads
+            .into_iter()
+            .filter(|candidate| {
+                !failed.contains(&candidate.object.attachment_id)
+                    && download_retry_ready(session, &candidate.object.attachment_id)
+            })
+            .map(|candidate| (candidate.object, candidate.demanded))
+            .collect(),
+    );
+    for object in downloads {
         if session.cancel.is_cancelled() {
             return Ok(());
         }
         let id = object.attachment_id;
         match download_one(session, object).await {
             Ok(()) => {
+                clear_download_retry(session, &id);
                 session.invalidate_cached_attachment(&id);
                 changed = true;
             }
             Err(failure) => {
-                handle_media_failure(session, id, failure)?;
+                handle_download_failure(session, id, failure)?;
                 changed = true;
             }
         }
@@ -1656,6 +1758,109 @@ mod contact_photo_tests {
         }];
         reclaim_contact_photos(&session, &reclaims).await.unwrap();
         assert!(seen.lock().unwrap().iter().all(|s| s.method != "DELETE"));
+    }
+}
+
+#[cfg(test)]
+mod download_scheduling_tests {
+    use super::*;
+
+    #[test]
+    fn only_structured_attachment_unavailable_is_recoverable() {
+        let unavailable = Failure::Net(NetError::Status {
+            status: 409,
+            code: Some("attachment_unavailable".into()),
+        });
+        let missing = Failure::Net(NetError::Status {
+            status: 404,
+            code: Some("attachment_not_found".into()),
+        });
+
+        assert!(is_recoverable_download_unavailable(&unavailable));
+        assert!(!is_recoverable_download_unavailable(&missing));
+        assert_eq!(classify(&missing), MediaOutcome::Permanent);
+    }
+
+    #[test]
+    fn unavailable_backoff_is_bounded_and_success_clears_session_state() {
+        let id: peppy_client_core::AttachmentId = uuid::Uuid::new_v4().to_string().parse().unwrap();
+        let mut retries = HashMap::new();
+
+        for _ in 1..MAX_DOWNLOAD_UNAVAILABLE_ATTEMPTS {
+            assert!(advance_download_retry(&mut retries, id));
+        }
+        assert!(
+            retries.get(&id).unwrap().retry_at > Instant::now(),
+            "a recoverable unavailable response delays the next work round"
+        );
+        assert!(
+            !advance_download_retry(&mut retries, id),
+            "the maximum unavailable failure falls through to permanent handling"
+        );
+        assert!(retries.is_empty());
+
+        assert!(advance_download_retry(&mut retries, id));
+        retries.remove(&id);
+        assert!(
+            retries.is_empty(),
+            "a successful download clears its retry state"
+        );
+    }
+
+    #[test]
+    fn download_selection_reserves_eager_capacity_and_reuses_empty_slots() {
+        let selected = select_downloads(vec![
+            ("demand-1", true),
+            ("demand-2", true),
+            ("demand-3", true),
+            ("demand-4", true),
+            ("eager-1", false),
+            ("eager-2", false),
+        ]);
+        assert_eq!(
+            selected,
+            vec!["demand-1", "demand-2", "demand-3", "eager-1"]
+        );
+        assert_eq!(
+            select_downloads(vec![
+                ("demand-1", true),
+                ("eager-1", false),
+                ("eager-2", false),
+                ("eager-3", false),
+                ("eager-4", false),
+            ]),
+            vec!["demand-1", "eager-1", "eager-2", "eager-3"],
+            "unused demand capacity is available to eager work"
+        );
+    }
+
+    #[test]
+    fn filtered_failures_and_backoff_do_not_consume_download_slots() {
+        let retrying: peppy_client_core::AttachmentId =
+            uuid::Uuid::new_v4().to_string().parse().unwrap();
+        let mut retries = HashMap::new();
+        assert!(advance_download_retry(&mut retries, retrying));
+        assert!(retries.get(&retrying).unwrap().retry_at > Instant::now());
+
+        let selected = select_downloads(
+            vec![
+                ("permanent", true, false),
+                ("backing-off", true, false),
+                ("last-row-demand", true, true),
+                ("eager-1", false, true),
+                ("eager-2", false, true),
+                ("eager-3", false, true),
+            ]
+            .into_iter()
+            .filter(|(_, _, eligible)| *eligible)
+            .map(|(id, demanded, _)| (id, demanded))
+            .collect(),
+        );
+
+        assert_eq!(
+            selected,
+            vec!["last-row-demand", "eager-1", "eager-2", "eager-3"]
+        );
     }
 }
 
