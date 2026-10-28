@@ -1875,6 +1875,104 @@ describe("lazy conversation history", () => {
   });
 });
 
+describe("conversation pinning", () => {
+  it("renders remotely pinned conversations first without changing the recency-selected conversation", async () => {
+    host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
+
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    expect([...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row"))).toEqual(["river", "aurora"]);
+    expect(document.querySelector("[data-header-title]")).toHaveTextContent("Aurora");
+  });
+
+  it("waits for durable pinning before refreshing and prevents duplicate requests", async () => {
+    const pending = deferred<void>();
+    const setPinned = vi.spyOn(bridge, "set_conversation_pinned").mockReturnValue(pending.promise);
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    const pin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")!;
+    pin.focus();
+    fireEvent.click(pin);
+    fireEvent.click(pin);
+    expect(setPinned).toHaveBeenCalledOnce();
+    expect(setPinned).toHaveBeenCalledWith("aurora", true);
+    expect(pin).toBeDisabled();
+    document.body.tabIndex = -1;
+    document.body.focus();
+    expect(document.activeElement).toBe(document.body);
+
+    host.conversations[0] = { ...host.conversations[0], pinned: true } as ConversationView;
+    await act(async () => pending.resolve());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Unpin conversation" })).toHaveFocus());
+    document.body.removeAttribute("tabindex");
+  });
+
+  it("reports a rejected pin mutation without reordering and re-enables the action", async () => {
+    vi.spyOn(bridge, "set_conversation_pinned").mockRejectedValue(new Error("denied"));
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    fireEvent.click(document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")!);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Conversation pin not changed: denied");
+    expect([...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row"))).toEqual(["aurora", "river"]);
+    expect(document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")).toBeEnabled();
+  });
+
+  it("reports a saved pin when the post-save refresh fails", async () => {
+    vi.spyOn(bridge, "set_conversation_pinned").mockResolvedValue();
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    vi.mocked(bridge.load_state).mockRejectedValueOnce(new Error("offline"));
+    fireEvent.click(document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='aurora']")!);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pinned, but the list could not refresh: offline");
+  });
+
+  it("hides pin controls while encryption is locked", async () => {
+    host.encryption = { state: "locked" } as DesktopSnapshot["encryption"];
+    render(<App />);
+
+    await waitFor(() => expect(document.getElementById("desktop-shell")).toBeInTheDocument());
+    expect(document.querySelector("[data-pin-conversation-id]")).not.toBeInTheDocument();
+  });
+
+  it("keeps local drafts ordered below pinned established conversations", async () => {
+    host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
+    host.drafts.set("draft-one", { id: "draft-one", conversationId: "draft-one", text: "", recipientIds: ["one"], attachmentIds: [], revision: "1" });
+    host.drafts.set("draft-two", { id: "draft-two", conversationId: "draft-two", text: "", recipientIds: ["two"], attachmentIds: [], revision: "1" });
+    const saving = deferred<Draft>();
+    vi.mocked(bridge.save_draft).mockReturnValue(saving.promise);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New message" }));
+    await screen.findByLabelText("Recipients");
+
+    const rows = [...document.querySelectorAll("[data-conversation-row]")].map((row) => row.getAttribute("data-conversation-row")!);
+    const localDraft = rows.find((id) => id.startsWith("new:"))!;
+    expect(rows[0]).toBe("river");
+    expect(rows.indexOf("river")).toBeLessThan(rows.indexOf(localDraft));
+    expect(rows.indexOf(localDraft)).toBeLessThan(rows.indexOf("aurora"));
+    expect(rows.indexOf("draft-one")).toBeLessThan(rows.indexOf("draft-two"));
+  });
+
+  it("keeps the selected conversation and its local draft when a remote pin refreshes another row", async () => {
+    render(<App />);
+
+    await screen.findByText("Hello from Aurora");
+    fireEvent.change(message(), { target: { value: "Keep this draft" } });
+    host.conversations[1] = { ...host.conversations[1], pinned: true } as ConversationView;
+    await act(async () => hint?.());
+
+    await waitFor(() => expect(document.querySelector("[data-conversation-row]")?.getAttribute("data-conversation-row")).toBe("river"));
+    expect(document.querySelector("[data-header-title]")).toHaveTextContent("Aurora");
+    expect(message()).toHaveValue("Keep this draft");
+  });
+});
+
 describe("new-recipient drafts", () => {
   it("hides the composer and exposes a draft CTA when no conversation is selected", async () => {
     host.conversations = [];

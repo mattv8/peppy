@@ -195,6 +195,7 @@ pub struct ConversationView {
     /// This row exists only for local compose state and has no established history.
     #[serde(default)]
     pub draft_only: bool,
+    pub pinned: bool,
 }
 
 #[derive(Serialize)]
@@ -695,6 +696,24 @@ mod tests {
         assert!(value.get("conversation_id").is_none());
         assert!(value.get("gatewayId").is_none());
         assert!(value.get("simId").is_none());
+    }
+
+    #[test]
+    fn conversation_view_serializes_its_durable_pin_state() {
+        let view = ConversationView {
+            id: "conversation".into(),
+            name: "Conversation".into(),
+            preview: "Preview".into(),
+            unread: 0,
+            messages: vec![],
+            has_older_messages: None,
+            participants: None,
+            recipientless_draft: false,
+            draft_only: false,
+            pinned: true,
+        };
+
+        assert_eq!(serde_json::to_value(view).unwrap()["pinned"], true);
     }
 
     #[test]

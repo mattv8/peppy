@@ -282,6 +282,45 @@ describe("ConversationList interactions", () => {
     expect(screen.getByRole("button", { name: "Confirm delete draft for Draft two" })).toHaveAccessibleDescription(warning);
   });
 
+  it("requests the desired pin state without selecting the conversation", () => {
+    const onSelect = vi.fn();
+    const onTogglePin = vi.fn();
+    render(<ConversationList conversations={[{ ...threads[0], pinned: true }]} selectedId="" onSelect={onSelect} onTogglePin={onTogglePin} />);
+
+    const unpin = screen.getByRole("button", { name: "Unpin conversation" });
+    fireEvent.click(unpin);
+
+    expect(onTogglePin).toHaveBeenCalledWith("conv-a", false);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByRole("img", { name: "Pinned" })).toBeInTheDocument();
+    expect(unpin.querySelector(".lucide-pin-off")).toBeInTheDocument();
+  });
+
+  it("uses a Pin action for unpinned conversations and keeps a pending action visible", () => {
+    const { rerender } = render(<ConversationList conversations={threads} selectedId="" onSelect={() => {}} onTogglePin={() => {}} />);
+
+    expect(document.querySelector("[data-pin-conversation-id='conv-a'] .lucide-pin")).toBeInTheDocument();
+
+    rerender(<ConversationList conversations={threads} selectedId="" onSelect={() => {}} onTogglePin={() => {}} pendingPinId="conv-a" />);
+
+    const pin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='conv-a']")!;
+    expect(pin).toBeDisabled();
+    expect(pin).toHaveClass("pending");
+    expect(pin.querySelector(".busy-indicator-icon")).toBeInTheDocument();
+    expect(pin.closest("[data-conversation-actions]")).toHaveAttribute("data-pending-pin", "true");
+    const otherPin = document.querySelector<HTMLButtonElement>("[data-pin-conversation-id='conv-b']")!;
+    expect(otherPin).toBeDisabled();
+    expect(otherPin).not.toHaveClass("pending");
+    expect(otherPin.closest("[data-conversation-actions]")).not.toHaveAttribute("data-pending-pin");
+  });
+
+  it("does not offer pinning for draft-only conversations", () => {
+    render(<ConversationList conversations={[{ ...drafts[0], pinned: true }]} selectedId="draft-a" onSelect={() => {}} onTogglePin={() => {}} />);
+
+    expect(screen.queryByRole("button", { name: /Pin / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Pinned" })).not.toBeInTheDocument();
+  });
+
 });
 
 describe("desktop UI controls", () => {

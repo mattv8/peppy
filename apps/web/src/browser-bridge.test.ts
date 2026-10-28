@@ -55,6 +55,17 @@ describe("BrowserBridge", () => {
     await expect(state).resolves.toEqual({ mode: "browser" });
   });
 
+  it("forwards conversation pin mutations with the canonical arguments", async () => {
+    const port = new TestPort();
+    const bridge = new BrowserBridge(port as unknown as MessagePort);
+    const pinned = bridge.set_conversation_pinned("conversation-1", true);
+
+    expect(port.sent).toEqual([{ id: 1, command: "set_conversation_pinned", args: { conversationId: "conversation-1", pinned: true } }]);
+    port.reply({ id: 1, ok: true, value: {} });
+    await expect(pinned).resolves.toEqual({});
+    bridge.dispose();
+  });
+
   it("sums frozen unread batches after each checkpointed batch acknowledgement", async () => {
     const port = new TestPort();
     const bridge = new BrowserBridge(port as unknown as MessagePort);

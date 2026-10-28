@@ -1066,6 +1066,7 @@ impl Session {
                     .map(|context| context.recipients.clone()),
                 recipientless_draft: false,
                 draft_only,
+                pinned: conversation.pinned,
             });
         }
         let listed: HashSet<ConversationId> =
@@ -1092,6 +1093,7 @@ impl Session {
                 participants: None,
                 recipientless_draft: draft.recipients.is_empty(),
                 draft_only: true,
+                pinned: false,
             });
         }
         let draft = active

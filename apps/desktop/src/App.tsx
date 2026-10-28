@@ -132,6 +132,12 @@ type RefreshRequest = {
 
 type ActionNotice = Omit<AppNotice, "source">;
 type ComposerFeedback = Pick<AppNotice, "message" | "severity"> & { key: string };
+type PinFocusRestoreIntent = {
+  conversationId: string;
+  origin: HTMLElement;
+  userMovedFocus: boolean;
+  dispose(): void;
+};
 
 export { errorText } from "./bridgeErrors";
 export {
@@ -1256,6 +1262,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const [newComposeKey, setNewComposeKey] = useState<string | null>(null);
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [pendingPinId, setPendingPinId] = useState<string | null>(null);
   const [storedConflict, setStoredConflict] = useState<{ key: string; draft?: Draft; generation: number; revision: string } | null>(null);
   const [resolutionPendingKey, setResolutionPendingKey] = useState<string | null>(null);
   const [conflictFeedback, setConflictFeedback] = useState<string>();
@@ -1295,6 +1302,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const historyFocusPendingRef = useRef(false);
   const mountedRef = useRef(true);
   const focusRestorePendingRef = useRef(false);
+  const pinFocusRestoreRef = useRef<PinFocusRestoreIntent | undefined>(undefined);
   const refreshInFlightRef = useRef(false);
   const pendingRefreshRef = useRef<RefreshRequest | undefined>(undefined);
   const retryPendingSavesInFlightRef = useRef(false);
@@ -1313,6 +1321,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const previousSearchSessionKeyRef = useRef("");
   const activateSearchHitHandlerRef = useRef<(hit: LocalSearchHit) => void>(() => undefined);
   const messageRows = useRef(new Map<string, HTMLElement>());
+  useEffect(() => {
+    const intent = pinFocusRestoreRef.current;
+    if (!intent || pendingPinId) return;
+    pinFocusRestoreRef.current = undefined;
+    intent.dispose();
+    if (intent.userMovedFocus || document.activeElement !== document.body) return;
+    [...document.querySelectorAll<HTMLButtonElement>("[data-pin-conversation-id]")]
+      .find((button) => button.dataset.pinConversationId === intent.conversationId && !button.disabled)?.focus();
+  }, [pendingPinId]);
+  useEffect(() => () => pinFocusRestoreRef.current?.dispose(), []);
   const handlers = useRef({
     rekeyed: (_from: string, _to: string) => {},
     unavailable: (_from: string, _to?: string, _message?: string) => {},
@@ -2812,6 +2830,48 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (result.warning) setNotice(result.warning);
     } catch (error) { setNotice(`Floating conversation: ${errorText(error)}`); }
   };
+  const toggleConversationPin = async (conversationId: string, pinned: boolean) => {
+    if (pendingPinId || snapshotRef.current?.encryption.state !== "unlocked" || appLockRef.current?.locked) return;
+    const origin = document.activeElement;
+    if (origin instanceof HTMLElement && origin.dataset.pinConversationId === conversationId) {
+      pinFocusRestoreRef.current?.dispose();
+      function watchFocus(event: FocusEvent) {
+        if (event.target instanceof HTMLElement && event.target !== document.body && event.target !== intent.origin)
+          intent.userMovedFocus = true;
+      }
+      function watchPointer(event: PointerEvent) {
+        if (!(event.target instanceof Node) || !intent.origin.contains(event.target)) intent.userMovedFocus = true;
+      }
+      const intent: PinFocusRestoreIntent = {
+        conversationId,
+        origin,
+        userMovedFocus: false,
+        dispose: () => {
+          document.removeEventListener("focusin", watchFocus);
+          document.removeEventListener("pointerdown", watchPointer);
+        },
+      };
+      document.addEventListener("focusin", watchFocus);
+      document.addEventListener("pointerdown", watchPointer);
+      pinFocusRestoreRef.current = intent;
+    }
+    setPendingPinId(conversationId);
+    try {
+      try {
+        await bridge.set_conversation_pinned(conversationId, pinned);
+      } catch (error) {
+        setNotice(`Conversation pin not changed: ${errorText(error)}`);
+        return;
+      }
+      try {
+        await refresh();
+      } catch (error) {
+        setNotice(`${pinned ? "Pinned" : "Unpinned"}, but the list could not refresh: ${errorText(error)}`);
+      }
+    } finally {
+      if (mountedRef.current) setPendingPinId(null);
+    }
+  };
 
   const runSetupAction = async (
     action: "origin" | "unlock",
@@ -2858,8 +2918,9 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   }, []);
 
   const resolution = useMemo<ContactResolutionMap>(() => ({ ...(snapshot?.contactResolution ?? {}), ...chosenContacts }), [snapshot?.contactResolution, chosenContacts]);
-  const conversations = useMemo<Conversation[]>(() => [
-    ...store.localDrafts().map((local) => {
+  const conversations = useMemo<Conversation[]>(() => {
+    const combined = [
+      ...store.localDrafts().map((local) => {
       const recipientIds = local.content.recipientIds;
       return {
         id: local.key,
@@ -2872,18 +2933,22 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         preview: "Not saved yet",
         unread: 0,
         draftOnly: true,
+        pinned: false,
         recipientlessDraft: recipientIds.length === 0,
       };
     }),
-    ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly }) => ({
+    ...(snapshot?.conversations ?? []).map(({ id, name, preview, unread, participants, recipientlessDraft, draftOnly, pinned }) => ({
       id,
       ...displayConversation(name, participants, resolution, id, recipientlessDraft),
       preview,
       unread,
       recipientlessDraft,
       draftOnly,
+      pinned,
     })),
-  ], [draftsVersion, resolution, snapshot?.conversations, store]);
+    ];
+    return [...combined.filter((conversation) => conversation.pinned && !conversation.draftOnly), ...combined.filter((conversation) => !conversation.pinned || conversation.draftOnly)];
+  }, [draftsVersion, resolution, snapshot?.conversations, store]);
   const searchLocal = useCallback(async (request: LocalSearchRequest) => {
     const page = await bridge.search_local(request);
     return {
@@ -3434,11 +3499,13 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             selectedId={slotKey}
             onSelect={select}
               onPopout={id => void popoutConversation(id)}
+              onTogglePin={snapshot?.encryption.state === "unlocked" && !appLock?.locked ? (id, pinned) => void toggleConversationPin(id, pinned) : undefined}
               onDelete={id => void deleteDraft(id)}
               onCancelDelete={cancelDeleteDraft}
               deleteConfirmationId={deleteConfirmationId ?? undefined}
               deletingId={deletingId ?? undefined}
               deleteWarningId={listCollapsed ? undefined : "conversation-delete-draft-warning"}
+              pendingPinId={pendingPinId ?? undefined}
           />
         </aside>
         {!settingsOpen && !notificationsOpen && !contactsOpen && <ResizeHandle

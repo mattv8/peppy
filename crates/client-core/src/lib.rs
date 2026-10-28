@@ -30,6 +30,7 @@ mod contact_state;
 mod contact_sync_requests;
 mod contacts;
 mod conversation_match;
+mod conversation_pinning;
 mod deferred_media;
 mod gateway_settings;
 mod history_import;
@@ -97,7 +98,7 @@ use std::{
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 36;
+const SCHEMA_VERSION: i64 = 37;
 /// Shared encrypted MMS content format understood by upgraded gateways.
 pub const MMS_CONTENT_VERSION: u32 = 3;
 /// Records per `append_snapshot_page` call.
@@ -342,6 +343,12 @@ pub enum PrivatePayload {
     },
     ReadState {
         message_id: MessageId,
+    },
+    ConversationPin {
+        conversation_id: ConversationId,
+        pinned: bool,
+        logical_revision: u64,
+        writer_device_id: String,
     },
     NotificationPosted {
         notification: NotificationWire,
@@ -600,6 +607,7 @@ pub struct MediaPage {
 pub struct Conversation {
     pub conversation_id: ConversationId,
     pub unread_count: u64,
+    pub pinned: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Draft {
@@ -2593,16 +2601,23 @@ impl Client {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, Error> {
         let s = self.lock()?;
         let mut query = s.conn.prepare(
-            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread FROM newest c ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
+            "WITH newest AS (SELECT conversation_id,SUM(seen=0) AS unread,MAX(sort_at_ms) AS sort_at_ms FROM messages GROUP BY conversation_id) SELECT c.conversation_id,c.unread,COALESCE(p.pinned,0) FROM newest c LEFT JOIN conversation_pins p ON p.conversation_id=c.conversation_id ORDER BY c.sort_at_ms DESC,(SELECT MAX(n.local_order) FROM messages n WHERE n.conversation_id=c.conversation_id AND n.sort_at_ms=c.sort_at_ms) DESC",
         )?;
         let rows = query
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(id, unread)| {
+            .map(|(id, unread, pinned)| {
                 Ok(Conversation {
                     conversation_id: parse(&id)?,
                     unread_count: u64::try_from(unread).map_err(|_| Error::Database)?,
+                    pinned,
                 })
             })
             .collect()
@@ -4572,6 +4587,11 @@ DROP INDEX IF EXISTS outbox_queued_order;
 CREATE INDEX IF NOT EXISTS outbox_unsealed_priority ON outbox(priority,seq) WHERE state='unsealed';
 CREATE INDEX IF NOT EXISTS outbox_queued_priority ON outbox(priority,seq) WHERE state='queued';
 ";
+const MIGRATION_37: &str = "
+CREATE TABLE IF NOT EXISTS conversation_pins(conversation_id TEXT PRIMARY KEY, pinned INTEGER NOT NULL,
+  logical_revision INTEGER NOT NULL, writer_device_id TEXT NOT NULL,
+  producer_device_id TEXT NOT NULL, source_sequence INTEGER NOT NULL);
+";
 
 fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Result<(), Error> {
     let column = definition
@@ -4588,9 +4608,9 @@ fn add_column_if_missing(conn: &Connection, table: &str, definition: &str) -> Re
     }
     Ok(())
 }
-/// Decoder revision three adds per-epoch event recovery and bounded hydration of applied MMS
-/// identity/context. Only retained, authenticated event rows are reconsidered.
-const DECODER_REVISION: &str = "4";
+/// Decoder revision five replays applied conversation-pin events per epoch, restoring LWW state
+/// and compaction frontiers after older clients recorded them as unknown.
+const DECODER_REVISION: &str = "5";
 
 fn apply_database_key(conn: &Connection, key: &DatabaseKey) -> Result<(), Error> {
     let mut hex = Zeroizing::new(String::with_capacity(64));
@@ -4676,6 +4696,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.execute_batch(MIGRATION_34)?;
             tx.execute_batch(MIGRATION_35)?;
             apply_migration_36(&tx)?;
+            tx.execute_batch(MIGRATION_37)?;
             gateway_settings::seed(&tx, false)?;
             tx.execute(
                 "INSERT INTO schema_meta(version) VALUES(?)",
@@ -4684,7 +4705,7 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             tx.commit()?;
         }
         // Additive, non-destructive upgrade of the SMS checkpoint schema.
-        Some(version @ (4..=35)) => {
+        Some(version @ (4..=36)) => {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if version <= 4 {
                 tx.execute_batch(MIGRATION_5)?;
@@ -4780,6 +4801,9 @@ fn initialize(store: &mut Store) -> Result<(), Error> {
             }
             if version <= 35 {
                 apply_migration_36(&tx)?;
+            }
+            if version <= 36 {
+                tx.execute_batch(MIGRATION_37)?;
             }
             tx.execute("UPDATE schema_meta SET version=?", params![SCHEMA_VERSION])?;
             tx.commit()?;
@@ -4885,8 +4909,23 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
             let Ok(plain) = decrypt(&keys.event, &aad, &sealed) else {
                 continue;
             };
-            let Ok(payload) = serde_json::from_slice::<PrivatePayload>(&plain) else {
-                continue;
+            let payload = match serde_json::from_slice::<PrivatePayload>(&plain) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    let is_malformed_pin = serde_json::from_slice::<serde_json::Value>(&plain)
+                        .ok()
+                        .is_some_and(|value| {
+                            value.get("kind").and_then(|kind| kind.as_str())
+                                == Some("conversation_pin")
+                        });
+                    if status == "applied" && is_malformed_pin {
+                        conn.execute(
+                            "UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?",
+                            params![cursor],
+                        )?;
+                    }
+                    continue;
+                }
             };
             match (status.as_str(), payload) {
                 ("quarantined", PrivatePayload::MmsMessage { message, media, .. })
@@ -4933,6 +4972,42 @@ fn recover_decoder_revision(conn: &Connection, ctx: &Ctx, epoch: u32) -> Result<
                         && media_matches(&message, &media) =>
                 {
                     hydrate_mms_context(conn, &message)?;
+                }
+                (
+                    "applied",
+                    PrivatePayload::ConversationPin {
+                        conversation_id,
+                        pinned,
+                        logical_revision,
+                        writer_device_id,
+                    },
+                ) => {
+                    let producer = envelope.producer_device_id.to_string();
+                    if !conversation_pinning::valid_event(
+                        conversation_id,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                    ) {
+                        conn.execute("UPDATE journal SET status='quarantined',reason='invalid_payload' WHERE cursor=?", params![cursor])?;
+                        continue;
+                    }
+                    conversation_pinning::apply(
+                        conn,
+                        conversation_id,
+                        pinned,
+                        logical_revision,
+                        &writer_device_id,
+                        &producer,
+                        envelope.producer_sequence.0,
+                    )?;
+                    learn_compaction(
+                        conn,
+                        Some(&format!("conversation-pin:{conversation_id}")),
+                        &producer,
+                        to_i64(envelope.producer_sequence.0)?,
+                        envelope.compaction.as_ref(),
+                    )?;
                 }
                 // Commands, notification effects, unknown/malformed records, and foreign identities
                 // are deliberately unchanged by decoder recovery.
@@ -5110,6 +5185,7 @@ fn is_known_private_payload_kind(kind: &str) -> bool {
             | "notification_removed"
             | "notification_dismiss"
             | "app_filter"
+            | "conversation_pin"
             | "mms_own_address"
             | "contact_book_state"
             | "contact_upserted"
@@ -5338,6 +5414,34 @@ fn apply_record(
         }
         (EnvelopePurpose::Event, PrivatePayload::ReadState { message_id }) => {
             record_seen(conn, message_id)?;
+        }
+        (
+            EnvelopePurpose::Event,
+            PrivatePayload::ConversationPin {
+                conversation_id,
+                pinned,
+                logical_revision,
+                writer_device_id,
+            },
+        ) => {
+            let producer = producer.to_string();
+            if !conversation_pinning::valid_event(
+                conversation_id,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+            ) {
+                return Ok(Some(Q::InvalidPayload));
+            }
+            conversation_pinning::apply(
+                conn,
+                conversation_id,
+                pinned,
+                logical_revision,
+                &writer_device_id,
+                &producer,
+                envelope.producer_sequence.0,
+            )?;
         }
         (
             EnvelopePurpose::Event,
@@ -6227,6 +6331,13 @@ fn compaction_group(
             ],
             false,
         ),
+        PrivatePayload::ConversationPin {
+            conversation_id, ..
+        } => (
+            b"conversation-pin",
+            vec![conversation_id.to_string().into_bytes()],
+            false,
+        ),
         PrivatePayload::ContactBookState { book } => {
             (b"contact-book", vec![text(book, "id")?], false)
         }
@@ -6301,6 +6412,9 @@ fn compaction_identity(payload: &PrivatePayload) -> Option<String> {
             "app-filter:{}:{}",
             filter.source_device_id, filter.package_name
         )),
+        PrivatePayload::ConversationPin {
+            conversation_id, ..
+        } => Some(format!("conversation-pin:{conversation_id}")),
         PrivatePayload::ContactBookState { book } => book
             .get("id")
             .and_then(serde_json::Value::as_str)

@@ -29,6 +29,7 @@ mod origin;
 
 mod contacts;
 mod context;
+mod conversation;
 mod media;
 mod notifications;
 mod sync;
@@ -297,6 +298,9 @@ impl BrowserCore {
             "mark_seen" => self.mark_seen(args_value(raw_args)?),
             "unread_message_batches" => self.unread_message_batches(args_value(raw_args)?),
             "mark_read_batch" => self.mark_read_batch(args_value(raw_args)?),
+            _ if conversation::handles(command) => {
+                self.conversation_command(command, args_value(raw_args)?)
+            }
             _ if media::handles(command) => self.media_command(command, args_value(raw_args)?),
             _ if contacts::handles(command) => {
                 self.contacts_command(command, args_value(raw_args)?)
@@ -507,6 +511,7 @@ impl BrowserCore {
                     .map(|context| context.recipients.clone()),
                 recipientless_draft: false,
                 draft_only,
+                pinned: conversation.pinned,
             });
         }
         for draft in drafts.iter().filter(|draft| {
@@ -534,6 +539,7 @@ impl BrowserCore {
                 // has no history is still a draft-only row for presentation purposes.
                 recipientless_draft: draft.recipients.is_empty(),
                 draft_only: true,
+                pinned: false,
             });
         }
         let keys = client.key_status().map_err(core)?;

@@ -957,6 +957,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_contact_scan_request_capability(
     ): Int
+    external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_conversation_pinned(
+    ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings(
     ): Int
     external fun uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_mms_acquisition_part(
@@ -1359,6 +1361,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_contact_scan_request_capability(`ptr`: Long,`inputJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_conversation_pinned(`ptr`: Long,`conversationId`: RustBuffer.ByValue,`pinned`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_gateway_settings(`ptr`: Long,`settings`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_mms_acquisition_part(`ptr`: Long,`id`: RustBuffer.ByValue,`providerPartId`: RustBuffer.ByValue,`attachmentId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -2099,6 +2103,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_contact_scan_request_capability() and 0xFFFF) != 62690) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_conversation_pinned() and 0xFFFF) != 5079) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_peppy_mobile_bindings_checksum_method_nativeclient_set_gateway_settings() and 0xFFFF) != 40564) {
@@ -3068,6 +3075,8 @@ public interface NativeClientInterface {
     fun `setAppMuted`(`sourceDeviceId`: kotlin.String, `packageName`: kotlin.String, `appName`: kotlin.String, `muted`: kotlin.Boolean)
     
     fun `setContactScanRequestCapability`(`inputJson`: kotlin.String): kotlin.String
+    
+    fun `setConversationPinned`(`conversationId`: kotlin.String, `pinned`: kotlin.Boolean)
     
     fun `setGatewaySettings`(`settings`: NativeGatewaySettings)
     
@@ -5151,6 +5160,21 @@ open class NativeClient: Disposable, AutoCloseable, NativeClientInterface
     }
     )
     }
+    
+
+    
+    @Throws(MobileBindingsException::class)override fun `setConversationPinned`(`conversationId`: kotlin.String, `pinned`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(MobileBindingsException) { _status ->
+    UniffiLib.uniffi_peppy_mobile_bindings_fn_method_nativeclient_set_conversation_pinned(
+        it,
+        
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterBoolean.lower(`pinned`),_status)
+}
+    }
+    
     
 
     
@@ -8287,6 +8311,8 @@ data class NativeConversation (
     var `conversationId`: kotlin.String
     , 
     var `unreadCount`: kotlin.ULong
+    , 
+    var `pinned`: kotlin.Boolean
     
 ){
     
@@ -8305,17 +8331,20 @@ public object FfiConverterTypeNativeConversation: FfiConverterRustBuffer<NativeC
         return NativeConversation(
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: NativeConversation) = (
             FfiConverterString.allocationSize(value.`conversationId`) +
-            FfiConverterULong.allocationSize(value.`unreadCount`)
+            FfiConverterULong.allocationSize(value.`unreadCount`) +
+            FfiConverterBoolean.allocationSize(value.`pinned`)
     )
 
     override fun write(value: NativeConversation, buf: ByteBuffer) {
             FfiConverterString.write(value.`conversationId`, buf)
             FfiConverterULong.write(value.`unreadCount`, buf)
+            FfiConverterBoolean.write(value.`pinned`, buf)
     }
 }
 
