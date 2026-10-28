@@ -9,6 +9,7 @@ import {
   type CSSProperties,
   type ReactNode,
   type RefCallback,
+  type WheelEvent,
 } from "react";
 import { flushSync } from "react-dom";
 import type { GatewayAvailability, LocalSearchHit, LocalSearchRequest } from "@peppy/desktop-ui/bridge-contracts";
@@ -35,7 +36,6 @@ import {
   NavButtons,
   type NavigationPosition,
   Panel,
-  RecipientPicker,
   RecipientPanel,
   ResizeHandle,
   ShieldAlert,
@@ -54,6 +54,7 @@ import {
   isRecipientPosition,
   isNavigationPosition,
   formatPhoneNumber,
+  normalizePhoneNumber,
   formatDateTime,
   isoDateTime,
   seedKey,
@@ -82,6 +83,7 @@ import {
 import { dismissibleNotifications, notificationMuteKey, NotificationsView } from "./Notifications";
 import { NotificationSettings } from "./NotificationSettings";
 import { ContactsView, type ContactNavigationGuard, type ContactTarget } from "./Contacts";
+import { findContactTarget } from "./contact-target";
 import { DevicesSettings } from "./DevicesSettings";
 import { HostedAccountSettings } from "./HostedAccountSettings";
 import { PrivacySettings } from "./PrivacySettings";
@@ -557,6 +559,7 @@ function MessageList({
   onSaveAttachment,
   listRef,
   onScroll,
+  onWheel,
   hasOlderMessages,
   historyLoading,
   historyError,
@@ -585,10 +588,11 @@ function MessageList({
   onSaveAttachment(attachment: AttachmentView): void;
   listRef: RefCallback<HTMLDivElement>;
   onScroll(): void;
+  onWheel(event: WheelEvent<HTMLDivElement>): void;
   hasOlderMessages: boolean;
   historyLoading: boolean;
   historyError: string | null;
-  onLoadOlder(): void;
+  onLoadOlder(control: HTMLElement): void;
   suppressHistoryAnnouncements: boolean;
   historyExhausted: boolean;
   onStartConversation?: () => void;
@@ -612,7 +616,9 @@ function MessageList({
         role="log"
         aria-label="Messages"
         aria-busy="true"
+        tabIndex={-1}
         onScroll={onScroll}
+        onWheel={onWheel}
       >
         <p>Loading conversation…</p>
       </div>
@@ -624,7 +630,9 @@ function MessageList({
         id="message-list"
         role="log"
         aria-label="Messages"
+        tabIndex={-1}
         onScroll={onScroll}
+        onWheel={onWheel}
       >
         <div id="no-selection-state">
           <div id="no-selection-primary">
@@ -657,7 +665,9 @@ function MessageList({
       id="message-list"
       role="log"
       aria-label="Messages"
+      tabIndex={-1}
       onScroll={onScroll}
+      onWheel={onWheel}
     >
       {searchTargetId && <span id="search-result-message-hint" className="sr-only">Search result message</span>}
       {detachedHistory && <section id="detached-history-status" aria-label="Search history position">
@@ -665,14 +675,13 @@ function MessageList({
         {detachedHistory.hasNewer && <button id="history-load-newer-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={onLoadNewer}>Load newer messages</button>}
         <button id="history-go-latest-button" className="secondary-button" type="button" disabled={Boolean(detachedHistory.pendingLoad)} onClick={onGoToLatest}>Go to latest</button>
       </section>}
-      {hasOlderMessages && <div id="history-page-sentinel" aria-hidden="true" />}
-      {(historyLoading || historyError || hasOlderMessages) && <div id="history-load-band" aria-busy={historyLoading || undefined} data-history-state={historyLoading ? "loading" : historyError ? "error" : "idle"}>
-        {historyLoading && !historyError && <span id="history-load-indicator" role="status">Loading older messages…</span>}
-        {historyError && <div id="history-load-error" role="alert">Couldn&apos;t load older messages. <button id="history-retry-button" className="secondary-button" type="button" aria-label="Retry loading older messages" disabled={historyLoading} onClick={onLoadOlder}>Retry</button></div>}
-        {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="secondary-button" type="button" onClick={onLoadOlder}>Load older messages</button>}
+      {(historyLoading || historyError || hasOlderMessages) && <div id="history-load-band" className="history-load-band" tabIndex={-1} data-history-state={historyLoading ? "loading" : historyError ? "error" : "idle"}>
+        {historyLoading && !historyError && <span id="history-load-indicator" className="history-load-indicator" role="status">Loading older messages…</span>}
+        {historyError && <div id="history-load-error" className="history-load-error" role="alert">Couldn&apos;t load older messages. <button id="history-retry-button" className="history-divider-action" type="button" aria-label="Retry loading older messages" disabled={historyLoading} onClick={(event) => onLoadOlder(event.currentTarget)}>Retry</button></div>}
+        {!historyLoading && !historyError && hasOlderMessages && <button id="history-load-button" className="history-divider-action" type="button" onClick={(event) => onLoadOlder(event.currentTarget)}>Load older messages</button>}
       </div>}
       <div id="message-list-content" aria-live={suppressHistoryAnnouncements ? "off" : undefined}>
-        {historyExhausted && <p id="history-beginning-marker">Beginning of conversation</p>}
+        {historyExhausted && <p id="history-beginning-marker" className="history-load-band" data-history-state="beginning">Beginning of conversation</p>}
         {!conversation.messages.length && <p>Start the conversation.</p>}
         {groupMessages(conversation.messages).map((group) => {
           const message = group.messages[0];
@@ -1189,6 +1198,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     "conversations",
   );
   const [contactTarget, setContactTarget] = useState<(ContactTarget & { requestId: number })>();
+  const [contactsHeaderHost, setContactsHeaderHost] = useState<HTMLDivElement | null>(null);
   const contactTargetRequestId = useRef(0);
   const contactNavigation = useRef<ContactNavigationGuard | null>(null);
   const registerContactNavigation = useCallback((guard: ContactNavigationGuard | null) => {
@@ -1279,9 +1289,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const loadSequence = useRef(0);
   const historySequence = useRef(0);
   const historyLoadingRef = useRef(false);
-  const historySentinelArmed = useRef(true);
-  const historyUserScrolled = useRef(false);
+  const historyErrorRef = useRef<string | null>(null);
   const hasOlderMessagesRef = useRef(false);
+  const messageListScrollTopRef = useRef(0);
+  const historyFocusPendingRef = useRef(false);
   const mountedRef = useRef(true);
   const focusRestorePendingRef = useRef(false);
   const refreshInFlightRef = useRef(false);
@@ -1321,6 +1332,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     detachedHistoryRef.current = next;
     setDetachedHistory(next);
   };
+  const setHistoryLoadError = (next: string | null) => {
+    historyErrorRef.current = next;
+    setHistoryError(next);
+  };
   const clearDetached = () => {
     const detachedConversationId = detachedHistoryRef.current?.conversationId;
     if (detachedConversationId) latestRequiredConversationRef.current = detachedConversationId;
@@ -1351,6 +1366,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!list || !anchor) return;
     list.setAttribute("data-scroll-programmatic", "");
     list.scrollTop += anchor.row.getBoundingClientRect().top - anchor.top;
+    messageListScrollTopRef.current = list.scrollTop;
     if (typeof requestAnimationFrame === "undefined") list.removeAttribute("data-scroll-programmatic");
     else requestAnimationFrame(() => list.removeAttribute("data-scroll-programmatic"));
   };
@@ -1535,12 +1551,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     historySequence.current += 1;
     historyLoadingRef.current = false;
     setHistoryLoading(false);
-    setHistoryError(null);
+    setHistoryLoadError(null);
     setHasOlderMessages(false);
     setHistoryExhausted(false);
     hasOlderMessagesRef.current = false;
-    historySentinelArmed.current = true;
-    historyUserScrolled.current = false;
+    messageListScrollTopRef.current = 0;
     historyAnchorRef.current = null;
     selectedRef.current = key;
     setSelected(key);
@@ -1917,7 +1932,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     historyAnchorRef.current = null;
     hasOlderMessagesRef.current = false;
     setHistoryLoading(false);
-    setHistoryError(null);
+    setHistoryLoadError(null);
     setHasOlderMessages(false);
     setHistoryExhausted(false);
     clearDetached();
@@ -1984,6 +1999,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (!element) return;
     element.setAttribute("data-scroll-programmatic", "");
     element.scrollTop = element.scrollHeight;
+    messageListScrollTopRef.current = element.scrollTop;
     if (typeof requestAnimationFrame === "undefined") {
       element.removeAttribute("data-scroll-programmatic");
       return;
@@ -1994,17 +2010,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   };
   const isNearMessageListBottom = (element: HTMLDivElement) =>
     element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
-  const onMessageScroll = () => {
-    const element = messageListRef.current;
-    if (!element || element.clientHeight === 0) return;
-    if (!element.hasAttribute("data-scroll-programmatic")) historyUserScrolled.current = true;
-    nearBottom.current = isNearMessageListBottom(element);
-  };
   const adjustMessageScrollForGeometry = (element = messageListRef.current) => {
     if (!element) return;
     if (element.clientHeight === 0) {
       lastUnobscuredHeight.current = null;
-      historyUserScrolled.current = false;
+      messageListScrollTopRef.current = element.scrollTop;
       return;
     }
     if (overlayHeightRef.current === null) return;
@@ -2023,6 +2033,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     if (adjustment === 0) return;
     element.setAttribute("data-scroll-programmatic", "");
     element.scrollTop += adjustment;
+    messageListScrollTopRef.current = element.scrollTop;
     nearBottom.current = isNearMessageListBottom(element);
     if (typeof requestAnimationFrame === "undefined") element.removeAttribute("data-scroll-programmatic");
     else requestAnimationFrame(() => element.removeAttribute("data-scroll-programmatic"));
@@ -2031,19 +2042,27 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     const conversationId = selectedRef.current;
     const current = snapshotRef.current?.conversations.find((item) => item.id === conversationId);
     const beforeMessageId = current?.messages[0]?.id;
-    if (!conversationId || isLocalDraftKey(conversationId) || !beforeMessageId || !hasOlderMessagesRef.current || historyLoadingRef.current) return;
+    if (!conversationId || isLocalDraftKey(conversationId) || !beforeMessageId || !hasOlderMessagesRef.current || historyLoadingRef.current) {
+      historyFocusPendingRef.current = false;
+      return;
+    }
     const sequence = ++historySequence.current;
-    historySentinelArmed.current = false;
     historyLoadingRef.current = true;
     setHistoryLoading(true);
-    setHistoryError(null);
+    setHistoryLoadError(null);
     try {
       const detached = detachedHistoryRef.current?.conversationId === conversationId ? detachedHistoryRef.current : undefined;
       if (detached) {
         loadSequence.current += 1;
         setDetached({ ...detached, pendingLoad: "older" });
         const window = await bridge.load_message_window({ direction: "older", conversationId, messageId: beforeMessageId });
-        if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId || window.conversationId !== conversationId || detached.generation !== detachedHistoryRef.current?.generation || detached.sessionKey !== currentSearchSessionKey()) return;
+        if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId || detached.generation !== detachedHistoryRef.current?.generation || detached.sessionKey !== currentSearchSessionKey()) return;
+        if (window.conversationId !== conversationId) {
+          const currentDetached = detachedHistoryRef.current;
+          if (currentDetached?.pendingLoad === "older") setDetached({ ...currentDetached, pendingLoad: undefined });
+          setHistoryLoadError("Conversation changed while loading older messages. Reload and try again.");
+          return;
+        }
         const existing = snapshotRef.current?.conversations.find(item => item.id === conversationId)?.messages ?? [];
         const merged = mergeDetachedMessages(existing, window.messages, "older");
         const next = { ...detached, messageIds: merged.messages.map(message => message.id), hasOlder: window.hasOlder, hasNewer: detached.hasNewer || window.hasNewer || merged.droppedNewer, pendingLoad: undefined };
@@ -2068,7 +2087,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       const page: HistoryPage = await bridge.load_history(conversationId, beforeMessageId);
       if (!mountedRef.current || sequence !== historySequence.current || selectedRef.current !== conversationId) return;
       if (page.conversationId !== conversationId) {
-        setHistoryError("Conversation changed while loading older messages. Reload and try again.");
+        setHistoryLoadError("Conversation changed while loading older messages. Reload and try again.");
         return;
       }
       historyAnchorRef.current = captureHistoryAnchor(beforeMessageId);
@@ -2085,7 +2104,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       correctHistoryAnchorScroll(historyAnchorRef.current);
       hasOlderMessagesRef.current = page.hasMore;
       setHasOlderMessages(page.hasMore);
-      historyUserScrolled.current = false;
       if (!page.hasMore) setHistoryExhausted(true);
       if (typeof requestAnimationFrame === "undefined") setSuppressHistoryAnnouncements(false);
       else requestAnimationFrame(() => mountedRef.current && setSuppressHistoryAnnouncements(false));
@@ -2093,7 +2111,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       if (sequence === historySequence.current) {
         const currentDetached = detachedHistoryRef.current;
         if (currentDetached?.pendingLoad === "older") setDetached({ ...currentDetached, pendingLoad: undefined });
-        setHistoryError(errorText(error));
+        setHistoryLoadError(errorText(error));
       }
     } finally {
       if (sequence === historySequence.current) {
@@ -2124,24 +2142,55 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     } catch (error) {
       if (sequence === historySequence.current) {
         setDetached(detached);
-        setHistoryError(errorText(error));
+        setHistoryLoadError(errorText(error));
       }
     }
   }, []);
-  useEffect(() => {
+  const canAutoLoadOlderMessages = (element: HTMLDivElement) =>
+    element.clientHeight > 0 &&
+    element.scrollTop <= element.clientHeight &&
+    !element.hasAttribute("data-scroll-programmatic") &&
+    !historyLoadingRef.current &&
+    !historyErrorRef.current &&
+    hasOlderMessagesRef.current &&
+    !detachedHistoryRef.current?.pendingLoad;
+  const autoLoadOlderMessages = (element: HTMLDivElement) => {
+    if (canAutoLoadOlderMessages(element)) void loadOlderMessages();
+  };
+  const onMessageScroll = () => {
+    const element = messageListRef.current;
+    if (!element) return;
+    const previousScrollTop = messageListScrollTopRef.current;
+    const currentScrollTop = element.scrollTop;
+    messageListScrollTopRef.current = currentScrollTop;
+    if (element.clientHeight === 0) return;
+    nearBottom.current = isNearMessageListBottom(element);
+    if (currentScrollTop < previousScrollTop) autoLoadOlderMessages(element);
+  };
+  const onMessageWheel = (event: WheelEvent<HTMLDivElement>) => {
+    const element = messageListRef.current;
+    if (!element) return;
+    messageListScrollTopRef.current = element.scrollTop;
+    if (event.deltaY < 0) autoLoadOlderMessages(element);
+  };
+  const loadOlderFromManualControl = (control: HTMLElement) => {
+    historyFocusPendingRef.current = document.activeElement === control;
+    void loadOlderMessages();
+  };
+  useLayoutEffect(() => {
+    if (!historyFocusPendingRef.current) return;
+    const band = document.getElementById("history-load-band");
     const list = messageListRef.current;
-    const sentinel = document.getElementById("history-page-sentinel");
-    if (!list || !sentinel || !hasOlderMessages || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (!entry.isIntersecting) {
-        historySentinelArmed.current = true;
-        return;
-      }
-      if (historyUserScrolled.current && historySentinelArmed.current) void loadOlderMessages();
-    }, { root: list, rootMargin: "200px 0px 0px 0px" });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasOlderMessages, loadOlderMessages, messageIds]);
+    const active = document.activeElement;
+    const canRestoreFocus = active === document.body || active === band || active === list;
+    if (!canRestoreFocus) {
+      historyFocusPendingRef.current = false;
+      return;
+    }
+    if (historyLoading || historyError || hasOlderMessages) band?.focus();
+    else list?.focus();
+    if (!historyLoading) historyFocusPendingRef.current = false;
+  }, [historyLoading, historyError, hasOlderMessages]);
   useLayoutEffect(() => {
     lastUnobscuredHeight.current = null;
     if (!conversationLoaded || detachedHistoryRef.current?.conversationId === slotKey || searchReadGate.current) return;
@@ -2167,10 +2216,12 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     row.setAttribute("aria-describedby", "search-result-message-hint");
     list.setAttribute("data-scroll-programmatic", "");
     row.scrollIntoView?.({ block: "center", behavior: "instant" });
+    messageListScrollTopRef.current = list.scrollTop;
     row.focus({ preventScroll: true });
     const current = detachedHistoryRef.current;
     if (current?.pendingTarget === searchTargetId) setDetached({ ...current, pendingTarget: undefined });
     const release = () => {
+      messageListScrollTopRef.current = list.scrollTop;
       list.removeAttribute("data-scroll-programmatic");
       searchReadGate.current = false;
     };
@@ -2202,6 +2253,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
   const setMessageListNode = useCallback((node: HTMLDivElement | null) => {
     if (node !== messageListRef.current) lastUnobscuredHeight.current = null;
     messageListRef.current = node;
+    messageListScrollTopRef.current = node?.scrollTop ?? 0;
   }, []);
   const overlayMargin =
     overlayHeight === null ? null : Math.ceil(overlayHeight / 8) * 8;
@@ -2300,6 +2352,97 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
     setNewComposeKey(draftKey);
     choose(draftKey);
     setNotice("");
+  };
+  const focusComposer = () => {
+    requestAnimationFrame(() => document.getElementById("composer-textarea")?.focus());
+  };
+  const startOmniConversation = async (address: string, signal: AbortSignal): Promise<boolean | "deferred"> => {
+    if (signal.aborted) return false;
+    const generation = ++navigationGeneration.current;
+    const sessionKey = currentSearchSessionKey();
+    let deferred = false;
+    const isCurrent = () => (deferred || !signal.aborted)
+      && mountedRef.current
+      && generation === navigationGeneration.current
+      && sessionKey === currentSearchSessionKey();
+    const begin = async (): Promise<boolean> => {
+      if (!isCurrent()) return false;
+      const previous = selectedRef.current;
+      const comparisonAddress = normalizePhoneNumber(address) ?? address.trim();
+      const existing = snapshotRef.current?.conversations.find((conversation) =>
+        conversation.participants?.length === 1
+        && (normalizePhoneNumber(conversation.participants[0]) ?? conversation.participants[0].trim()) === comparisonAddress,
+      );
+      const localDraft = store.localDrafts().find((draft) =>
+        draft.content.recipientIds.length === 1
+        && (normalizePhoneNumber(draft.content.recipientIds[0]) ?? draft.content.recipientIds[0].trim()) === comparisonAddress,
+      );
+      if (localDraft && previous === localDraft.key) {
+        setActiveViewNow("conversations");
+        select(localDraft.key);
+        focusComposer();
+        return true;
+      }
+      if (previous) {
+        const flushed = await store.flush(previous);
+        if (!isCurrent()) return false;
+        if (!flushed.ok) throw new Error(flushed.error);
+      }
+      if (!isCurrent()) return false;
+      if (existing || localDraft) {
+        setActiveViewNow("conversations");
+        select(existing?.id ?? localDraft!.key);
+        focusComposer();
+        return true;
+      }
+      if (!isCurrent()) return false;
+      const { key } = store.createNew(address);
+      const draftKey = store.resolve(key);
+      setActiveViewNow("conversations");
+      setNewComposeKey(draftKey);
+      choose(draftKey);
+      setNotice("");
+      focusComposer();
+      return true;
+    };
+    if (!contactNavigation.current) return begin();
+    let started: Promise<boolean> | undefined;
+    let guardReturned = false;
+    const deferredByGuard = contactNavigation.current(
+      () => {
+        if (!guardReturned) {
+          started = begin();
+          return;
+        }
+        deferred = true;
+        started = begin().catch((error: unknown) => {
+          if (isCurrent()) setNotice(`Could not start the conversation: ${errorText(error)}`);
+          return false;
+        });
+      },
+      () => { deferred = false; },
+    );
+    guardReturned = true;
+    return deferredByGuard ? "deferred" : started ?? false;
+  };
+  const resolveOmniContactNumbers = async (
+    hit: Extract<LocalSearchHit, { kind: "contact" }>,
+    signal: AbortSignal,
+  ) => {
+    const result = await findContactTarget(
+      { bookId: hit.bookId, contactId: hit.contactId },
+      bridge.list_contacts,
+      signal,
+    );
+    if (signal.aborted) return [];
+    if (result.state === "unavailable") throw { code: "contact-unavailable" };
+    if (result.state === "oversized") throw { code: "contact-oversized" };
+    if (result.state !== "found") return [];
+    return result.contact.phones.filter((phone) => phone.number.trim()).map((phone) => ({
+      address: phone.number,
+      display: formatPhoneNumber(phone.number),
+      label: phone.label,
+    }));
   };
   const showConversationList = () => {
     if (activeView !== "conversations") setActiveView("conversations");
@@ -2692,9 +2835,10 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       historySequence.current += 1;
       historyLoadingRef.current = false;
       historyAnchorRef.current = null;
+      messageListScrollTopRef.current = 0;
       hasOlderMessagesRef.current = false;
       setHistoryLoading(false);
-      setHistoryError(null);
+      setHistoryLoadError(null);
       setHasOlderMessages(false);
       await lock();
       await refresh();
@@ -3054,10 +3198,11 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
       onSaveAttachment={(file) => void saveAttachment(file)}
       listRef={setMessageListNode}
       onScroll={onMessageScroll}
+      onWheel={onMessageWheel}
       hasOlderMessages={hasOlderMessages}
       historyLoading={historyLoading}
       historyError={historyError}
-      onLoadOlder={() => void loadOlderMessages()}
+      onLoadOlder={loadOlderFromManualControl}
       suppressHistoryAnnouncements={suppressHistoryAnnouncements}
       historyExhausted={historyExhausted}
       onStartConversation={!composerConversation && !slotKey ? () => void startNewMessage() : undefined}
@@ -3198,7 +3343,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         onMaximize={browserHost ? undefined : () => void bridge.window("maximize")}
         onClose={browserHost ? undefined : () => void closeAfterSave(() => bridge.window("close"))}
         platform={platform}
-        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} />}
+        search={<OmniSearch onSearch={searchLocal} onActivate={activateSearchHit} resolveContactNumbers={resolveOmniContactNumbers} onStartConversation={startOmniConversation} sessionKey={searchSessionKey} disabled={searchDisabled} refreshKey={mediaStateHint} />}
         onToggleSidebar={toggleConversationList}
         sidebarExpanded={activeView === "conversations" && !listCollapsed}
         sidebarControls="thread-list"
@@ -3243,6 +3388,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
         <aside
           id="thread-list"
           aria-label="Thread list"
+          tabIndex={-1}
           data-collapsed={listCollapsed || undefined}
           hidden={settingsOpen || notificationsOpen || contactsOpen}
           style={
@@ -3256,14 +3402,6 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
             role="toolbar"
             aria-label="Thread list toolbar"
           >
-            <RecipientPicker
-              recipients={conversations.filter(
-                (item) => !isLocalDraftKey(item.id),
-              )}
-              onChange={(ids) => ids[0] && select(ids[0])}
-              onNewRecipient={startNewMessage}
-              searchContacts={snapshot ? (query) => searchRecipientSuggestions(query) : undefined}
-            />
             {navigationPosition === "side-rail" && <button
               id="new-message"
               aria-label="New message"
@@ -3279,7 +3417,16 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               enabled={snapshot?.encryption.state === "unlocked" && !appLock?.locked}
               markAllRead={() => bridge.mark_all_read()}
               refresh={() => refresh()}
-              onFocusFallback={() => (document.getElementById("new-message") ?? document.querySelector<HTMLElement>("#thread-list-toolbar input"))?.focus()}
+              onFocusFallback={() => {
+                const newMessage = document.getElementById("new-message") as HTMLButtonElement | null;
+                const titlebarNewMessage = document.querySelector<HTMLButtonElement>("[data-action='new-message']");
+                const omniInput = document.querySelector<HTMLInputElement>("#titlebar-search input");
+                const fallback = document.getElementById("thread-list") ?? document.getElementById("conversation-pane");
+                if (newMessage && !newMessage.disabled) newMessage.focus();
+                else if (titlebarNewMessage && !titlebarNewMessage.disabled) titlebarNewMessage.focus();
+                else if (omniInput && !omniInput.disabled) omniInput.focus();
+                else fallback?.focus();
+              }}
             />
           </div>
             <ConversationList
@@ -3342,6 +3489,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
                 </div>
               )}
             </div>
+            {contactsOpen && <div id="contacts-header-slot" className="header-actions" ref={setContactsHeaderHost} />}
             <div className="header-actions" hidden={settingsOpen || notificationsOpen || contactsOpen}>
               {!browserHost && <button
                 id="new-composer-window"
@@ -3467,7 +3615,7 @@ export function App({ hostKind = "native", fixedOrigin, accountUrl }: { hostKind
               onSettings={() => { notificationSettingsRequested.current = true; setActiveView("settings"); }}
             />
           ) : contactsOpen ? (
-            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} />
+            <ContactsView books={snapshot?.contactBooks ?? []} sync={snapshot?.contactSync} target={contactTarget} onTargetConsumed={(requestId) => setContactTarget(current => current?.requestId === requestId ? undefined : current)} onNavigationGuard={registerContactNavigation} headerHost={contactsHeaderHost} />
           ) : (
             <>
               {showSetup && snapshot ? (

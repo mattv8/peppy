@@ -654,4 +654,205 @@ describe("OmniSearch", () => {
     await act(async () => { vi.advanceTimersByTime(100); });
     expect(onSearch).toHaveBeenCalledWith({ query: "new", kind: "all", limit: 6 });
   });
+
+  it("starts a conversation with a valid typed phone number", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn(async () => true);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "(415) 555-2671" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    const candidate = screen.getByRole("option", { name: /Start conversation with/ });
+    expect(candidate).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(candidate);
+    expect(onStartConversation).toHaveBeenCalledWith("+14155552671", expect.any(AbortSignal));
+  });
+
+  it("dismisses search after transferring a start to an external guard", async () => {
+    vi.useFakeTimers();
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={async () => "deferred"} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "4155552671" } });
+    fireEvent.click(screen.getByRole("option", { name: /Start conversation with/ }));
+    await act(async () => { await Promise.resolve(); });
+    expect(input).toHaveValue("");
+    expect(input).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("resolves a contact number only after its conversation action is activated", async () => {
+    vi.useFakeTimers();
+    const resolveContactNumbers = vi.fn(async () => [{ address: "stored-address", display: "(415) 555-2671" }]);
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={resolveContactNumbers} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(resolveContactNumbers).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => {});
+    expect(resolveContactNumbers).toHaveBeenCalledWith(expect.objectContaining({ contactId: "contact" }), expect.any(AbortSignal));
+    expect(onStartConversation).toHaveBeenCalledWith("stored-address", expect.any(AbortSignal));
+  });
+
+  it("shows a chooser for contacts with multiple phone numbers and returns to search on Escape", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => [{ address: "+14155552671", display: "Mobile" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("option", { name: "Mobile" })).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.getByRole("option", { name: "Ada Friend" })).toBeInTheDocument();
+  });
+
+  it("keeps stored contact addresses unchanged and reports contacts without phone numbers", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => []} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("This contact has no phone numbers.")).toBeInTheDocument();
+    expect(onStartConversation).not.toHaveBeenCalled();
+  });
+
+  it("aborts a pending recipient action when the query changes", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const pending = new Promise<boolean>(() => {});
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={(_address, nextSignal) => { signal = nextSignal; return pending; }} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "4155552671" } });
+    fireEvent.click(screen.getByRole("option", { name: /Start conversation with/ }));
+    fireEvent.change(input, { target: { value: "4155552672" } });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("aborts a pending recipient action when search closes", () => {
+    let signal: AbortSignal | undefined;
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={(_address, nextSignal) => { signal = nextSignal; return new Promise<boolean>(() => {}); }} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "4155552671" } });
+    fireEvent.click(screen.getByRole("option", { name: /Start conversation with/ }));
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("prevents duplicate activation while a conversation start is pending", () => {
+    const onStartConversation = vi.fn(() => new Promise<boolean>(() => {}));
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "4155552671" } });
+    const candidate = screen.getByRole("option", { name: /Start conversation with/ });
+    fireEvent.click(candidate);
+    fireEvent.click(candidate);
+    expect(onStartConversation).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["session changes", { sessionKey: "two" }],
+    ["is disabled", { sessionKey: "one", disabled: true }],
+  ])("aborts a pending recipient action when %s", (_name, nextProps) => {
+    let signal: AbortSignal | undefined;
+    const { rerender } = render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={(_address, nextSignal) => { signal = nextSignal; return new Promise<boolean>(() => {}); }} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search Peppy" }), { target: { value: "4155552671" } });
+    fireEvent.click(screen.getByRole("option", { name: /Start conversation with/ }));
+    rerender(<OmniSearch {...nextProps} onActivate={() => {}} onSearch={async (request) => page(request.query, [])} onStartConversation={(_address, nextSignal) => { signal = nextSignal; return new Promise<boolean>(() => {}); }} />);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("retries a rejected chooser selection with the keyboard", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => [{ address: "12345", display: "Short code" }, { address: "+14155552672", display: "Work" }]} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.keyDown(input, { key: "End" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onStartConversation).toHaveBeenNthCalledWith(1, "12345", expect.any(AbortSignal));
+    expect(onStartConversation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not render an orphan typed-number candidate in a category drill-in", async () => {
+    vi.useFakeTimers();
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => request.kind === "all" ? { ...page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }]), hasMore: { conversation: false, message: false, contact: true } } : page(request.query, [])} onStartConversation={async () => false} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "4155552671" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByText("Show all contacts"));
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(screen.queryByRole("option", { name: /Start conversation with/ })).not.toBeInTheDocument();
+  });
+
+  it("preserves a selected contact action through an indexing refresh", async () => {
+    vi.useFakeTimers();
+    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" };
+    const { rerender } = render(<OmniSearch sessionKey="one" refreshKey={0} onActivate={() => {}} onSearch={async (request) => indexingPage(request.query, [contact])} resolveContactNumbers={async () => []} onStartConversation={async () => false} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    rerender(<OmniSearch sessionKey="one" refreshKey={1} onActivate={() => {}} onSearch={async (request) => indexingPage(request.query, [contact])} resolveContactNumbers={async () => []} onStartConversation={async () => false} />);
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+    expect(input).toHaveAttribute("aria-activedescendant", expect.stringContaining("start-contact-book-contact"));
+  });
+
+  it("shows distinct inline contact lookup errors with a retry action", async () => {
+    vi.useFakeTimers();
+    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" };
+    const resolveContactNumbers = vi.fn().mockRejectedValueOnce({ code: "contact-unavailable" }).mockRejectedValueOnce({ code: "contact-oversized" });
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [contact])} resolveContactNumbers={resolveContactNumbers} onStartConversation={async () => false} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("This contact is no longer available.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "Retry contact phone lookup" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("This contact book is too large to search.")).toBeInTheDocument();
+  });
+
+  it("filters blank phones and encodes stored raw addresses in chooser IDs", async () => {
+    vi.useFakeTimers();
+    const onStartConversation = vi.fn(async () => false);
+    render(<OmniSearch sessionKey="one" onActivate={() => {}} onSearch={async (request) => page(request.query, [{ kind: "contact", bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" }])} resolveContactNumbers={async () => [{ address: " ", display: "Blank" }, { address: "short code / one", display: "Short code" }, { address: "work two", display: "Work" }]} onStartConversation={onStartConversation} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => { await Promise.resolve(); });
+    const choice = screen.getByRole("option", { name: "Short code" });
+    expect(choice.id).toContain(encodeURIComponent("short code / one"));
+    expect(choice).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(choice);
+    expect(onStartConversation).toHaveBeenCalledWith("short code / one", expect.any(AbortSignal));
+  });
+
+  it("keeps the selected chooser number through a background indexing refresh", async () => {
+    vi.useFakeTimers();
+    const contact = { kind: "contact" as const, bookId: "book", contactId: "contact", title: "Ada", subtitle: "Friend" };
+    const { rerender } = render(<OmniSearch sessionKey="one" refreshKey={0} onActivate={() => {}} onSearch={async (request) => indexingPage(request.query, [contact])} resolveContactNumbers={async () => [{ address: "one", display: "One" }, { address: "two", display: "Two" }]} onStartConversation={async () => false} />);
+    const input = screen.getByRole("combobox", { name: "Search Peppy" });
+    fireEvent.change(input, { target: { value: "ada" } });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    fireEvent.click(screen.getByRole("option", { name: "Start conversation with Ada" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("option", { name: "One" })).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    rerender(<OmniSearch sessionKey="one" refreshKey={1} onActivate={() => {}} onSearch={async (request) => indexingPage(request.query, [contact])} resolveContactNumbers={async () => [{ address: "one", display: "One" }, { address: "two", display: "Two" }]} onStartConversation={async () => false} />);
+    await act(async () => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getByRole("option", { name: "Two" })).toHaveAttribute("aria-selected", "true");
+  });
+
 });

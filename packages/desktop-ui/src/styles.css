@@ -161,6 +161,16 @@ select:focus-visible {
 .omni-search-results [role="option"] span { color: var(--peppy-text-secondary); font-size: 12px; }
 .omni-search-results [role="option"] b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omni-search-results [role="option"] span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.omni-search-hit-row { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: stretch; }
+.omni-search-hit-row > [role="option"] { min-width: 0; }
+.omni-search-hit-row > [data-omni-contact-action] { display: grid; padding: 0; place-items: center; color: var(--peppy-text-secondary); }
+.omni-search-hit-row > [data-omni-contact-action]:hover { color: var(--peppy-text-primary); }
+[data-omni-number-candidate], [data-omni-number-choice] { margin-bottom: 4px; }
+[data-omni-number-candidate] { grid-template-columns: minmax(0, 1fr) 28px; align-items: center; }
+.omni-search-results [data-omni-number-candidate] > span { display: grid; min-width: 0; gap: 2px; }
+.omni-search-results [data-omni-number-candidate] > span { color: var(--peppy-text-primary); }
+[data-omni-number-candidate] small { color: var(--peppy-text-secondary); font-size: 12px; }
+[data-omni-number-candidate] > svg { justify-self: center; color: var(--peppy-text-secondary); }
 @media (width > 640px) {
   .titlebar:has(> #titlebar-search) { position: relative; }
   .titlebar > #titlebar-search {
